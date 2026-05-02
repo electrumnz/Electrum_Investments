@@ -1,0 +1,58 @@
+# Trading rules — the bot CANNOT violate these. Claude proposes, this gates.
+# Edit numbers to taste; structure should stay the same so the risk module can parse it.
+
+account:
+  # Hard ceiling on capital at risk. If true equity < this, bot halts.
+  min_equity_floor_usd: 4500
+
+  # Max single-trade risk as % of equity (loss if SL hit).
+  max_risk_per_trade_pct: 1.0
+
+  # Max simultaneous open positions across all instruments.
+  max_concurrent_positions: 3
+
+  # Max total exposure (sum of position notionals) as multiple of equity.
+  max_gross_leverage: 10.0
+
+  # Daily loss kill-switch. If realised + unrealised P&L < -X% of equity at start of day, stop trading until next day.
+  daily_loss_kill_pct: 3.0
+
+# Allowed trading sessions in UTC. List of [start_hour, end_hour). 24h = [0, 24].
+# London: 07-16 UTC; New York: 12-21 UTC; Tokyo: 23-08 UTC.
+sessions_utc:
+  - [7, 21]   # London + NY overlap window only by default
+
+# Don't open new positions in the N minutes around high-impact news for affected currencies.
+news_blackout_minutes_before: 15
+news_blackout_minutes_after: 15
+
+# Symbol allowlist. Bot will refuse to trade anything not in this list.
+allowed_symbols:
+  # Phase B starter universe — low volatility
+  - EURUSD
+  - GBPUSD
+  - USDJPY
+  - AUDUSD
+  - XAUUSD     # gold
+  - US500      # S&P 500 CFD (BlackBull symbol may differ — verify on demo)
+
+# Crypto sleeve — disabled until Phase E. Set enabled: true and capital_cap_pct > 0 to enable.
+crypto_sleeve:
+  enabled: false
+  capital_cap_pct: 0.0
+  allowed_symbols: []
+  # When enabled, set e.g.:
+  #   capital_cap_pct: 15.0
+  #   allowed_symbols: [BTCUSD, ETHUSD]
+
+# Minimum hold time once a trade is opened (anti-flapping, helps with spread costs).
+min_hold_seconds: 300
+
+# Per-trade required parameters — Claude proposals missing these are rejected.
+required_order_fields:
+  - symbol
+  - direction        # buy | sell
+  - stop_loss_price
+  - take_profit_price
+  - size_lots
+  - rationale        # short text, logged
