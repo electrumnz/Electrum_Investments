@@ -1,8 +1,16 @@
-# Buzz + Hermes chat interface
+# Hermes agent runtime (and Buzz, later)
 
-**Decided: run both.** A Buzz channel where the trading agent is a participant
-you talk to in plain English, with Hermes underneath carrying memory, scheduled
-digests and approval gates. Phone or desktop, no terminal.
+**Hermes now, Buzz deferred.** Hermes is the runtime: memory across sessions, a
+cron scheduler, approval gates, and MCP client support. It is worth having on
+its own — everything except the phone surface works from the CLI, and adding a
+chat platform afterwards is one command.
+
+**Buzz is deferred, not dropped.** The chat surface can come later. Telegram,
+WhatsApp and Signal all require a phone number, which for a handover means
+Josh's, which means it cannot be set up in advance. Buzz needs no phone and no
+account at all — identity is a Nostr keypair — so it remains the intended
+surface. Discord is the fallback if Buzz's rough edges bite: email signup, no
+phone, and v0.19.0 added an admin-only gate on approval buttons.
 
 **Read the security section before installing.** There is a real caveat that
 specifically affects agents with trading tools attached, and it rules out the
@@ -114,68 +122,123 @@ the ratchet this setup should not have.
 
 ---
 
-## Install
+## Install, on the droplet
 
-### 1. Buzz
+Hermes goes on the same box as the bot. It is already always-on, already has the
+MCP server, and already holds the credentials.
 
-Desktop builds for macOS, Windows and Linux are on the
-[releases page](https://github.com/block/buzz/releases). Install, create your
-Nostr identity, and make a channel for the bot.
+### 1. The user question, which is the whole security design
 
-> Buzz is young. **Mobile has since shipped** on both
-> [iOS](https://apps.apple.com/us/app/buzz-chat-with-your-hive/id6779728271) and
-> [Android](https://play.google.com/store/apps/details?id=xyz.block.buzz.mobile),
-> and they are full clients rather than remote controls needing a laptop open.
-> Still rough, with reported message-visibility and notification issues, and
-> there was documented onboarding friction at launch. Treat it as promising
-> rather than dependable, and keep Claude Code working as the fallback —
-> everything the bot does is reachable there without Buzz in the picture at all.
+**Hermes cannot drop its `terminal` toolset.** Whatever else is configured, the
+agent can run shell commands. So the question is not "can it be trusted with a
+shell" but "what does a shell on that box actually get it".
 
-### 2. Hermes
+Run it as `root` and the answer is everything. Run it as `mudhorn` — the bot's
+own service account — and the answer is the broker credentials in `.env` and
+write access to `data/journal.db`. That second one matters more than it looks:
+the journal is where the consecutive-loss stand-down persists, and
+`journal.py` keeps it in SQLite specifically so that *restarting the process
+does not clear it*. An agent that can edit that file can clear its own
+stand-down, which defeats the rule entirely.
+
+So Hermes gets **its own unprivileged user with no access to either**:
 
 ```sh
-# Linux, macOS, WSL2
+sudo useradd --system --create-home --shell /bin/bash hermes
+```
+
+It reads no `.env`, and cannot touch `data/` or `audit/`.
+
+### 2. Reaching the bot without holding its keys
+
+That leaves a problem: `electrum-bot-mcp` needs the credentials and the journal,
+and Hermes spawns it as a subprocess, which would normally inherit Hermes' user.
+
+Solve it with one sudoers rule so the MCP server — and only the MCP server —
+runs as the account that does have access:
+
+```sh
+sudo tee /etc/sudoers.d/hermes-mcp >/dev/null <<'EOF'
+hermes ALL=(mudhorn) NOPASSWD: /opt/mudhorn/.venv/bin/electrum-bot-mcp
+EOF
+sudo chmod 440 /etc/sudoers.d/hermes-mcp
+sudo visudo -c
+```
+
+No wildcards, one exact binary path, and `/opt/mudhorn/.venv` is root-owned so
+`hermes` cannot swap the binary out from under the rule. Run `visudo -c` before
+trusting it; a malformed sudoers file can lock you out of `sudo` entirely.
+
+**This is the property worth having.** The agent reaches the broker *only*
+through the MCP tool surface, and every order-placing tool there runs
+`RiskGate.evaluate` first. Its shell is not an order path, because the shell
+user has no credentials to place one with. `CLAUDE.md` says never add an order
+path that skips the gate; this arranges things so the obvious one never existed.
+
+### 3. Hermes itself
+
+```sh
+sudo -u hermes -i
 curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash
 ```
 
-```powershell
-# Windows, native
-iex (irm https://hermes-agent.nousresearch.com/install.ps1)
-```
-
 The installer brings its own uv, Python 3.11, Node.js, ripgrep and ffmpeg, so it
-does not disturb an existing toolchain.
+does not disturb the bot's virtualenv.
 
-### 3. Point Hermes at Claude
-
-```sh
-hermes model
-```
-
-Pick Anthropic. It supports either a Claude Max subscription via OAuth or a plain
-API key — the same key already in your `.env` works.
-
-### 4. Give Hermes the bot's tools
-
-Add both MCP servers to `~/.hermes/config.yaml`, exactly as in
-[SETUP.md §5](../SETUP.md): Alpaca's official server restricted to read-only
-toolsets, and this repo's `electrum-bot-mcp` as the only order-placing path.
-
-### 5. Connect to Buzz
+### 4. Point it at Claude
 
 ```sh
-hermes gateway setup    # choose Buzz
+hermes model      # choose Anthropic
 ```
 
-Use a **dedicated Nostr keypair** for this, not the one from your Buzz Desktop
-identity. Hermes takes a scoped lock on the relay+pubkey pair, so a separate key
-also prevents two Hermes profiles fighting over one Buzz identity.
+**Use a separate Anthropic API key from the bot's.** Same console, second key.
+The bot's spend is a known ~$8/month and its cost per cycle is recorded in
+`audit/`; mixing an interactive agent's usage into that makes both
+unattributable, and it means revoking one does not revoke the other.
+
+### 5. Give it the bot's tools
+
+In Hermes' MCP configuration, both servers — note the `sudo -u mudhorn`:
+
+```yaml
+mcp_servers:
+  electrum-bot:
+    command: sudo
+    args: ["-u", "mudhorn", "/opt/mudhorn/.venv/bin/electrum-bot-mcp"]
+  alpaca:
+    # Alpaca's official server, restricted to read-only toolsets.
+    # See SETUP.md section 5 for the ALPACA_TOOLSETS value.
+```
+
+Since v0.20.0, MCP servers start lazily from a fingerprint-keyed schema cache
+rather than all booting at session start, so a server that is slow or down no
+longer delays every session.
+
+### 6. Approvals — do not skip this
+
+Covered in the security section above and it is the part most likely to be
+waved through. Smart approvals are **on by default** and hand the decision to an
+LLM reviewer. Turn them off, and add deny rules for anything touching
+credentials or the broker.
+
+> Config key names were not verifiable when this was written. Take them from the
+> live configuration docs rather than guessing — a deny rule with a wrong key
+> silently matches nothing, which is worse than no rule because it looks
+> configured.
+
+### 7. Run it as a service
+
+Once it works interactively, the gateway wants the same treatment as the other
+two units, so it survives a reboot. Model it on
+`deploy/systemd/mudhorn-bot.service`: `User=hermes`, `Restart=on-failure`,
+`NoNewPrivileges` **left off** — the sudoers rule above needs it — and the rest
+of the hardening kept.
 
 ---
 
 ## Check it works
 
-From the Buzz channel:
+From the Hermes CLI (`hermes` as the `hermes` user), or later from a chat channel:
 
 - *"What's my risk status?"* → equity, cash, open risk, limits
 - *"What are the current rules?"* → contents of `config/rules.yaml`
@@ -190,11 +253,9 @@ something is wired wrong — stop and fix it before going further.
 
 ## Scheduled runs
 
-Hermes has a built-in cron scheduler that can deliver into Buzz:
-
-```
-deliver=buzz
-```
+Hermes has a built-in cron scheduler. Without a chat surface it can still write
+a digest to a file or the journal log; once Buzz is connected, `deliver=buzz`
+sends it to the channel.
 
 Useful patterns: a pre-market summary, an end-of-day P&L and audit digest, a
 weekly review of which rejected proposals would have worked.
@@ -209,13 +270,14 @@ gateway process.
 ## Hosting: what has to be running, and where
 
 The short answer to "do I need Vercel": **no.** Nothing here is a public
-website. The dashboard, when it exists, binds to `127.0.0.1`.
+website. The dashboard binds to `127.0.0.1`.
 
 | Component | Always on? | Where | Cost |
 |---|---|---|---|
 | Claude Code + MCP servers | No | Your machine | Free |
+| **Bot loop + dashboard** | **Yes** | The droplet | included above |
 | Claude Code Routines (scheduled) | No, runs in Anthropic's cloud | Anthropic | Claude Pro, $20/mo |
-| **Hermes gateway** | **Yes** | Small VPS, or a PC that stays on | ~$5/mo |
+| **Hermes gateway** | **Yes** | The droplet that already runs the bot | $12/mo, already paid |
 | Buzz relay | Only if self-hosting | Block's hosted relay works | Free |
 | Local dashboard | No | Your machine | Free |
 

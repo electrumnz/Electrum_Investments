@@ -110,7 +110,7 @@ A rejected proposal comes back with **every** rule it broke, not just the first.
 | **[docs/COSTS.md](docs/COSTS.md)** | Running costs — about $17–27/month |
 | **[deploy/README.md](deploy/README.md)** | Running it on a server, as a service that survives a reboot |
 | **[docs/TRANSFER.md](docs/TRANSFER.md)** | Moving accounts and credentials to a new owner |
-| **[docs/BUZZ_SETUP.md](docs/BUZZ_SETUP.md)** | Optional chat interface (has a real security caveat) |
+| **[docs/HERMES_SETUP.md](docs/HERMES_SETUP.md)** | Hermes agent runtime, and the chat surface later (has a real security caveat) |
 | **[reference/STATUS.md](reference/STATUS.md)** | Tracked third-party projects and their versions |
 
 ---

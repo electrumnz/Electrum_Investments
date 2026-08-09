@@ -214,7 +214,7 @@ Still paper money. Still every order through the gate.
 
 ## 7. Buzz + Hermes chat interface — optional
 
-See **[docs/BUZZ_SETUP.md](docs/BUZZ_SETUP.md)**. It has a security caveat that
+See **[docs/HERMES_SETUP.md](docs/HERMES_SETUP.md)**. It has a security caveat that
 matters for anything holding trading tools — read it before installing, not after.
 
 ---

@@ -216,7 +216,7 @@ order paths that do not pass through `src/bot/risk.py`.
 ## Hermes gateway
 
 Optional, and the only reason this box has to be always on. Install it under the
-`mudhorn` account per `docs/BUZZ_SETUP.md`, which covers why the **native
+`mudhorn` account per `docs/HERMES_SETUP.md`, which covers why the **native
 gateway path** is mandatory rather than the Desktop or ACP relay modes: those let
 the client auto-approve tool permissions, which is acceptable for a general
 assistant and not for something holding broker credentials.

@@ -28,7 +28,7 @@ runs on demand and costs nothing while idle.
 
 That box then also carries the bot loop, the dashboard and the SQLite journal,
 so it is one provider rather than two. A DigitalOcean 2 GB droplet at $12/mo is
-the pick; `docs/BUZZ_SETUP.md` has the comparison and the sizing reasoning.
+the pick; `docs/HERMES_SETUP.md` has the comparison and the sizing reasoning.
 Briefly: the 1 GB tier at $6 runs five processes plus an OS and wants a swap
 file, and CPU is irrelevant at a 15-minute cadence, so the money buys RAM.
 
