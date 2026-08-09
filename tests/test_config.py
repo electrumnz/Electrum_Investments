@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -11,6 +12,7 @@ from bot.config import (
     AccountRules,
     ClaudeTier,
     Env,
+    InstrumentRules,
     LiveTradingRefused,
     Rules,
 )
@@ -192,6 +194,119 @@ def test_the_open_window_is_derived_from_the_instruments_not_copied():
 
     assert rules.any_class_in_session(saturday)
     assert rules.classes_in_session(saturday) == ["crypto"]
+
+
+# ------------------------------------------------- per-day session windows
+
+
+def _utc(year: int, month: int, day: int, hour: int, minute: int = 0) -> datetime:
+    return datetime(year, month, day, hour, minute, tzinfo=UTC)
+
+
+# CME Globex under US daylight time: Sunday evening open, a daily maintenance
+# break, an early Friday close, and Saturday dark. This is the schedule the flat
+# form cannot express, and the reason the mapping form exists.
+GLOBEX = {
+    0: [(0, 21), (22, 24)],
+    1: [(0, 21), (22, 24)],
+    2: [(0, 21), (22, 24)],
+    3: [(0, 21), (22, 24)],
+    4: [(0, 21)],
+    6: [(22, 24)],
+}
+
+
+def _globex() -> InstrumentRules:
+    return InstrumentRules(enabled=True, allowed_symbols=["CL"], sessions_utc=GLOBEX)
+
+
+@pytest.mark.parametrize(
+    ("moment", "open_", "why"),
+    [
+        (_utc(2026, 5, 10, 21), False, "Sunday afternoon, before the evening open"),
+        (_utc(2026, 5, 10, 22, 30), True, "Sunday evening, after the open"),
+        (_utc(2026, 5, 4, 10), True, "Monday mid-session"),
+        (_utc(2026, 5, 4, 21, 30), False, "inside the daily maintenance break"),
+        (_utc(2026, 5, 4, 22, 30), True, "after the break reopens"),
+        (_utc(2026, 5, 8, 20), True, "Friday, before the 16:00 CT close"),
+        (_utc(2026, 5, 8, 22, 30), False, "Friday night, no reopen"),
+        (_utc(2026, 5, 9, 12), False, "Saturday, dark all day"),
+    ],
+)
+def test_a_globex_schedule_is_expressible_and_correct(moment, open_, why):
+    """The whole point of the mapping form.
+
+    Sunday is the case that proves it: under the flat form Sunday would inherit
+    Monday's hours, and 12:00 on a Sunday would read as open. The gate would
+    approve, and the broker would queue the fill into the next session.
+    """
+    assert _globex().is_in_session(moment) is open_, why
+
+
+def test_the_trading_days_are_derived_from_the_mapping_keys():
+    """Two places naming the trading days is two places to disagree."""
+    assert _globex().session_days_utc == [0, 1, 2, 3, 4, 6]
+
+
+def test_a_day_list_that_contradicts_the_mapping_is_refused():
+    """A trading day with no window trades nothing; a window on a shut day never fires.
+
+    Either reads as a bug in the bot rather than a typo in the config.
+    """
+    from bot.config import InstrumentRules
+
+    with pytest.raises(ValueError, match="does not match"):
+        InstrumentRules(
+            enabled=True,
+            allowed_symbols=["CL"],
+            sessions_utc=GLOBEX,
+            session_days_utc=[0, 1, 2, 3, 4, 5, 6],  # claims Saturday
+        )
+
+
+def test_a_weekday_listed_with_no_windows_is_refused():
+    from bot.config import InstrumentRules
+
+    with pytest.raises(ValueError, match="no windows"):
+        InstrumentRules(
+            enabled=True,
+            allowed_symbols=["CL"],
+            sessions_utc={0: [(0, 24)], 5: []},
+        )
+
+
+@pytest.mark.parametrize("window", [(21, 21), (22, 21), (0, 25), (-1, 4)])
+def test_an_impossible_window_is_refused(window):
+    from bot.config import InstrumentRules
+
+    with pytest.raises(ValueError):
+        InstrumentRules(
+            enabled=True,
+            allowed_symbols=["CL"],
+            sessions_utc={0: [window]},
+        )
+
+
+def test_the_flat_form_still_works_and_is_what_the_shipped_config_uses():
+    """The mapping must not have made the simple case harder to write."""
+    from bot.config import Rules
+
+    from .conftest import RULES_PATH
+
+    equities = Rules.load(RULES_PATH).instruments["us_equity"]
+
+    assert equities.windows_by_day[0] == [(14, 21)]
+    assert set(equities.windows_by_day) == {0, 1, 2, 3, 4}
+    assert equities.render_sessions() == "14:00-21:00"
+
+
+def test_a_per_day_schedule_renders_per_day():
+    """Settings and the system prompt both show this, so it must read sensibly."""
+    rendered = _globex().render_sessions()
+
+    assert "Sun 22:00-24:00" in rendered
+    assert "Fri 00:00-21:00" in rendered
+    assert "Sat" not in rendered
 
 
 def test_the_skip_defaults_to_on_and_is_not_a_risk_rule():

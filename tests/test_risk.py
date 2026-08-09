@@ -23,7 +23,7 @@ from bot.models import (
 )
 from bot.risk import NewsWindow, RiskGate
 
-from .conftest import INSIDE_SESSION, PAPER_EQUITY
+from .conftest import INSIDE_SESSION, PAPER_EQUITY, RULES_PATH
 
 
 def _gate(
@@ -151,6 +151,66 @@ def test_crypto_still_trades_at_the_weekend(rules):
     )
 
     assert verdict.approved, verdict.reasons
+
+
+def _with_globex(rules: Rules) -> Rules:
+    """A CME-shaped class: Sunday evening only, a daily break, Saturday dark."""
+    from bot.config import InstrumentRules
+
+    enabled = rules.model_copy(deep=True)
+    enabled.instruments["futures"] = InstrumentRules(
+        enabled=True,
+        strategy="trend_break",
+        allowed_symbols=["CL"],
+        sessions_utc={
+            0: [(0, 21), (22, 24)],
+            4: [(0, 21)],
+            6: [(22, 24)],
+        },
+    )
+    return enabled
+
+
+@pytest.mark.parametrize(
+    ("moment", "approved", "why"),
+    [
+        (datetime(2026, 5, 4, 10, 0, tzinfo=UTC), True, "Monday mid-session"),
+        (datetime(2026, 5, 4, 21, 30, tzinfo=UTC), False, "the daily maintenance break"),
+        (datetime(2026, 5, 10, 12, 0, tzinfo=UTC), False, "Sunday midday, market shut"),
+        (datetime(2026, 5, 10, 22, 30, tzinfo=UTC), True, "Sunday evening open"),
+        (datetime(2026, 5, 9, 12, 0, tzinfo=UTC), False, "Saturday, dark"),
+    ],
+)
+def test_the_gate_honours_a_per_day_session_map(moment, approved, why):
+    """The gate must read per-day windows, not just the day list.
+
+    Sunday midday is the case that matters: under one flat window Sunday would
+    inherit Monday's hours and the gate would approve into a shut market, for
+    the broker to queue into the next open. That is the weekend bug again with
+    an extra step.
+    """
+    enabled = _with_globex(Rules.load(RULES_PATH))
+    now = moment
+    proposal = OrderProposal(
+        symbol="CL",
+        direction=Direction.BUY,
+        qty=1,
+        limit_price=70.00,
+        stop_loss_price=69.30,
+        take_profit_price=71.50,
+        rationale="Session-window probe for the per-day mapping.",
+    )
+    tick = Tick(symbol="CL", bid=69.99, ask=70.01, timestamp=now)
+    account = AccountSnapshot(
+        equity_usd=PAPER_EQUITY,
+        cash_usd=PAPER_EQUITY,
+        buying_power_usd=PAPER_EQUITY,
+        open_positions=[],
+    )
+
+    verdict = _gate(enabled, now=now).evaluate(proposal, account=account, tick=tick)
+
+    assert verdict.approved is approved, f"{why}: {verdict.reasons}"
 
 
 def test_rejects_during_news_blackout(rules, account, spy_tick, buy_proposal):

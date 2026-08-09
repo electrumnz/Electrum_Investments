@@ -13,6 +13,11 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from .models import ExecutionMode
 
+# Indexed by Python weekday, so Monday is 0. Written out rather than taken from
+# `calendar.day_abbr`, which is locale-dependent and would render the operator's
+# limits in whatever language the droplet happens to be configured for.
+DAY_NAMES = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
+
 
 class LiveTradingRefused(RuntimeError):
     """Raised when something tries to start the bot against a live-money account.
@@ -242,26 +247,48 @@ class InstrumentRules(BaseModel):
         description="Label recorded on every trade so metrics can separate them",
     )
     allowed_symbols: list[str] = Field(default_factory=list)
-    sessions_utc: list[tuple[int, int]] = Field(default_factory=list)
+
+    # Two accepted shapes, and the second exists so a second broker is an
+    # adapter rather than a redesign.
+    #
+    #   sessions_utc: [[14, 21]]            same window on every trading day
+    #   sessions_utc: {0: [[0, 21], [22, 24]], 6: [[22, 24]]}   per weekday
+    #
+    # The flat form covers a fixed-window market and a 24/7 one, which is
+    # everything Alpaca offers. The mapping form covers CME Globex — futures,
+    # crude, gold — which runs Sunday 17:00 CT to Friday 16:00 CT with a
+    # 60-minute maintenance break each day. That schedule cannot be written in
+    # the flat form at all: Sunday opens only in the evening, so giving Sunday
+    # Monday's hours would declare the market open all Sunday morning, and the
+    # gate would approve into a shut market for the broker to queue.
+    #
+    # Multiple windows per day are what express the daily break. Hours only, no
+    # minutes: every Globex boundary is a whole hour in Central Time, and the US
+    # equity window already rounds 13:30 up to 14:00 on purpose to skip the
+    # noisiest half-hour of the open.
+    #
+    # **A Globex config is wrong for half the year unless it is revisited.**
+    # These are UTC and Globex is defined in Central Time, so every boundary
+    # moves an hour when US daylight saving starts and ends. Nothing here can
+    # detect that; it is a diary entry, not a code problem.
+    sessions_utc: list[tuple[int, int]] | dict[int, list[tuple[int, int]]] = Field(
+        default_factory=list
+    )
 
     # Which days those hours apply to, as Python weekdays: Monday 0, Sunday 6.
     #
-    # Required rather than defaulted, because both plausible defaults are wrong
-    # for one of the two classes already configured. Mon-Fri would silently
-    # forbid crypto at weekends, which is the exact failure the per-instrument
-    # split was introduced to fix. All seven would leave equities tradeable on
-    # a Saturday, and Alpaca queues an out-of-hours equity order to the next
-    # session rather than refusing it, so the fill lands at Monday's open — the
-    # half-hour `sessions_utc` deliberately skips. A missing value fails loudly
-    # at startup instead.
+    # Required with the flat form rather than defaulted, because both plausible
+    # defaults are wrong for one of the two classes already configured. Mon-Fri
+    # would silently forbid crypto at weekends, which is the exact failure the
+    # per-instrument split was introduced to fix. All seven would leave equities
+    # tradeable on a Saturday, and Alpaca queues an out-of-hours equity order to
+    # the next session rather than refusing it, so the fill lands at Monday's
+    # open — the half-hour `sessions_utc` deliberately skips. A missing value
+    # fails loudly at startup instead.
     #
-    # KNOWN GAP: `sessions_utc` applies uniformly to every day listed here, so a
-    # CME Globex schedule cannot be written down. Futures, crude and gold run
-    # Sunday 17:00 CT to Friday 16:00 CT with a daily 60-minute break — Sunday
-    # opens only in the evening and Saturday is dark. `[0,1,2,3,4,6]` would give
-    # Sunday Monday's hours and declare the market open all Sunday morning.
-    # Supporting one needs per-day windows, not a longer day list. Not urgent:
-    # Alpaca offers equities, options and crypto, and nothing on Globex.
+    # With the mapping form it is DERIVED from the keys, because two places
+    # naming the trading days is two places to disagree. Supplying both is
+    # allowed only when they match exactly.
     session_days_utc: list[int] = Field(default_factory=list)
 
     # Optional ceiling on this class's share of equity, as a fraction of the
@@ -270,6 +297,17 @@ class InstrumentRules(BaseModel):
 
     @model_validator(mode="after")
     def _enabled_classes_must_be_usable(self) -> Self:
+        if isinstance(self.sessions_utc, dict):
+            self._reconcile_days_with_the_mapping()
+
+        for day, windows in self.windows_by_day.items():
+            for start, end in windows:
+                if not 0 <= start < end <= 24:
+                    raise ValueError(
+                        f"session window [{start}, {end}] on weekday {day} is not a "
+                        "valid range; needs 0 <= start < end <= 24"
+                    )
+
         if not self.enabled:
             return self
         if not self.allowed_symbols:
@@ -291,6 +329,39 @@ class InstrumentRules(BaseModel):
             )
         return self
 
+    def _reconcile_days_with_the_mapping(self) -> None:
+        """Derive the trading days from the mapping, or prove they agree.
+
+        A day listed in `session_days_utc` with no window in the mapping would
+        be a trading day on which nothing can trade, and the reverse would be a
+        window on a day the gate calls shut. Both read as a bug in the bot
+        rather than a typo in the config, so neither is allowed to exist.
+        """
+        assert isinstance(self.sessions_utc, dict)
+        keys = sorted(self.sessions_utc)
+        if any(day < 0 or day > 6 for day in keys):
+            raise ValueError(f"sessions_utc keys must be weekdays 0-6, got {keys}")
+        if any(not windows for windows in self.sessions_utc.values()):
+            raise ValueError(
+                "a weekday in sessions_utc has no windows. Leave the day out "
+                "entirely rather than listing it as closed."
+            )
+        if not self.session_days_utc:
+            self.session_days_utc = keys
+        elif sorted(self.session_days_utc) != keys:
+            raise ValueError(
+                f"session_days_utc {sorted(self.session_days_utc)} does not match "
+                f"the days in sessions_utc {keys}. With per-day windows the "
+                "mapping is the authority; omit session_days_utc."
+            )
+
+    @property
+    def windows_by_day(self) -> dict[int, list[tuple[int, int]]]:
+        """Both shapes, normalised to one. Everything downstream reads this."""
+        if isinstance(self.sessions_utc, dict):
+            return {day: list(w) for day, w in sorted(self.sessions_utc.items())}
+        return {day: list(self.sessions_utc) for day in sorted(self.session_days_utc)}
+
     # These three live here rather than in `risk.py` so that the gate and the
     # loop cannot drift apart on what "open" means. The gate uses the two halves
     # separately, because a rejection has to say whether it was the day or the
@@ -299,13 +370,30 @@ class InstrumentRules(BaseModel):
     # a session the gate would have allowed, and nothing to say why.
 
     def is_trading_day(self, moment: datetime) -> bool:
-        return moment.weekday() in self.session_days_utc
+        return moment.weekday() in self.windows_by_day
 
     def is_within_hours(self, moment: datetime) -> bool:
-        return any(start <= moment.hour < end for start, end in self.sessions_utc)
+        """Within today's windows, which differ by day under the mapping form."""
+        windows = self.windows_by_day.get(moment.weekday(), [])
+        return any(start <= moment.hour < end for start, end in windows)
 
     def is_in_session(self, moment: datetime) -> bool:
         return self.is_trading_day(moment) and self.is_within_hours(moment)
+
+    def render_sessions(self) -> str:
+        """One human-readable line. Collapses the flat form back to a summary."""
+        by_day = self.windows_by_day
+        if not by_day:
+            return "none"
+        hours = {tuple(w) for w in by_day.values()}
+        if len(hours) == 1:
+            windows = next(iter(by_day.values()))
+            return ", ".join(f"{s:02d}:00-{e:02d}:00" for s, e in windows)
+        return "; ".join(
+            f"{DAY_NAMES[day]} "
+            + ", ".join(f"{s:02d}:00-{e:02d}:00" for s, e in windows)
+            for day, windows in by_day.items()
+        )
 
 
 class SocialRules(BaseModel):

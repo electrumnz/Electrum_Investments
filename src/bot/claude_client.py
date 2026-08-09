@@ -20,7 +20,7 @@ from typing import Any
 import anthropic
 from pydantic import BaseModel, Field
 
-from .config import CLAUDE_MODEL_IDS, CLAUDE_PRICING_USD_PER_MTOK, ClaudeTier, Env, Rules
+from .config import CLAUDE_MODEL_IDS, CLAUDE_PRICING_USD_PER_MTOK, DAY_NAMES, ClaudeTier, Env, Rules
 from .models import OrderProposal, PositionPlan, SymbolAssessment
 
 
@@ -174,7 +174,14 @@ def build_system_prompt(rules: Rules) -> str:
         instrument_lines.append(
             f"- {name} — strategy '{instrument.strategy}'{cap}\n"
             f"    symbols: {', '.join(sorted(instrument.allowed_symbols))}\n"
-            f"    sessions (UTC): {instrument.sessions_utc}\n"
+            # Rendered rather than repr'd. The raw field is a list on a
+            # fixed-window class and a weekday-keyed mapping on a Globex one, so
+            # dumping it would put two different shapes in the prompt for the
+            # same idea and change the cached system prompt's bytes for no
+            # reason.
+            f"    sessions (UTC): {instrument.render_sessions()}\n"
+            f"    trading days: "
+            f"{', '.join(DAY_NAMES[d] for d in instrument.session_days_utc)}\n"
             f"    approach:\n{_strategy_block(instrument.strategy)}"
         )
 

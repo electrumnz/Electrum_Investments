@@ -234,3 +234,45 @@ instruments:
     # Ceiling on crypto's share of equity. It trades continuously and moves
     # harder than the equity book, so it gets a cap the equity side does not.
     capital_cap_pct: 15.0
+
+  # ---------------------------------------------------------------------------
+  # A worked CME Globex template — futures, crude, gold. NOT ENABLED, and it
+  # cannot be: Alpaca offers equities, options and crypto, and nothing on
+  # Globex. Trading any of this needs a second broker behind the same `Broker`
+  # protocol in src/bot/broker.py. It is written out because the session shape
+  # is the part that is easy to get wrong, and getting it wrong means the gate
+  # approving into a shut market for the broker to queue into the next open.
+  #
+  # Globex runs Sunday 17:00 CT to Friday 16:00 CT with a 60-minute maintenance
+  # break each day at 16:00-17:00 CT. In UTC during US daylight time (CDT,
+  # UTC-5) that is:
+  #
+  #   Sunday     22:00 -> 24:00        opens in the evening only
+  #   Mon-Thu    00:00 -> 21:00 and 22:00 -> 24:00   with the daily break
+  #   Friday     00:00 -> 21:00        closes at 16:00 CT, no reopen
+  #   Saturday   closed, so it is simply absent below
+  #
+  # The per-day mapping is what makes this expressible. The flat list form used
+  # above applies one window to every trading day, which would give Sunday
+  # Monday's hours and declare the market open all Sunday morning.
+  #
+  # **WARNING: these are UTC and Globex is defined in Central Time, so every
+  # boundary here moves by an hour when US daylight saving starts and ends.**
+  # Under CST (UTC-6) Sunday opens at 23:00 UTC and the break is 22:00-23:00.
+  # Nothing in the code can detect that. It is a diary entry, twice a year.
+  #
+  # session_days_utc is deliberately omitted: with a mapping the keys are the
+  # authority, and two places naming the trading days is two places to disagree.
+  #
+  # futures:
+  #   enabled: false
+  #   strategy: trend_break
+  #   allowed_symbols: []          # e.g. [ES, CL, GC]
+  #   sessions_utc:
+  #     0: [[0, 21], [22, 24]]     # Monday
+  #     1: [[0, 21], [22, 24]]     # Tuesday
+  #     2: [[0, 21], [22, 24]]     # Wednesday
+  #     3: [[0, 21], [22, 24]]     # Thursday
+  #     4: [[0, 21]]               # Friday, closes 16:00 CT
+  #     6: [[22, 24]]              # Sunday, evening open
+  #   capital_cap_pct: 10.0

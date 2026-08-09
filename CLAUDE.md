@@ -139,23 +139,41 @@ which is the per-instrument bug above wearing a new costume; all seven days
 leaves the equity hole open. So an enabled class must declare it and the
 config validator refuses one that does not.
 
-**The schema cannot express a CME session, and that is a known gap.** One
-`sessions_utc` applies uniformly to every day in `session_days_utc`, which is
-fine for equities and for a 24/7 class and wrong for anything on CME Globex —
-futures, crude, gold. Those run Sunday 17:00 CT to Friday 16:00 CT with a
-60-minute maintenance break each day: Sunday is open only in the evening, and
-Saturday is dark. Writing `session_days_utc: [0,1,2,3,4,6]` would hand Sunday
-the same hours as Monday and declare the market open all Sunday morning.
+**`sessions_utc` takes two shapes, and the second one is for Globex.**
 
-Adding one needs **per-day windows** (`sessions_utc` keyed by weekday), not
-another day list. Do not approximate it with a wider window: the gate would
-approve into a closed market and the broker would queue the fill, which is the
-weekend bug again with more steps.
+```yaml
+sessions_utc: [[14, 21]]                              # every trading day
+sessions_utc: {0: [[0, 21], [22, 24]], 6: [[22, 24]]} # per weekday
+```
 
-It is not urgent, because **Alpaca does not offer futures or commodities at
-all** — equities, options and crypto only. Anything on Globex is a second
-broker, which is the case `max_total_risk_pct` was already made
-leverage-neutral for.
+The flat form covers a fixed-window market and a 24/7 one, which is everything
+Alpaca offers. The mapping form exists because CME Globex — futures, crude,
+gold — runs Sunday 17:00 CT to Friday 16:00 CT with a 60-minute maintenance
+break each day, and **that cannot be written in the flat form at all**: Sunday
+opens only in the evening, so `session_days_utc: [0,1,2,3,4,6]` would hand
+Sunday Monday's hours and call the market open all Sunday morning. Multiple
+windows in a day are what express the daily break.
+
+Do not approximate a Globex session with a wider flat window. The gate would
+approve into a shut market and the broker would queue the fill into the next
+open, which is the weekend bug again with more steps.
+
+With the mapping, `session_days_utc` is **derived from the keys** — two places
+naming the trading days is two places to disagree — and supplying both is
+allowed only when they match exactly. Everything downstream reads
+`windows_by_day`, which normalises the two shapes into one.
+
+**A Globex config is wrong for half the year unless someone revisits it.** The
+windows are UTC and Globex is defined in Central Time, so every boundary moves
+an hour when US daylight saving starts and ends. Nothing in the code can detect
+that. It is a diary entry, twice a year, and it is called out in
+`config/rules.yaml` beside the worked template.
+
+None of it is reachable yet: **Alpaca offers equities, options and crypto, and
+nothing on Globex.** A second broker behind the same `Broker` protocol is the
+prerequisite, which is the case `max_total_risk_pct` was already made
+leverage-neutral for. The session shape is ready so that adding one is an
+adapter rather than a redesign.
 
 **Market holidays are still not covered, and the rejection message says so.**
 Thanksgiving is a Thursday and passes this gate. Closing that needs Alpaca's
@@ -607,7 +625,7 @@ reference/              Third-party projects we borrow from. See reference/STATU
 ## Running it
 
 ```sh
-.venv/bin/python -m pytest              # full suite (367 tests)
+.venv/bin/python -m pytest              # full suite (389 tests)
 electrum-bot smoketest --mock           # no credentials needed
 electrum-bot smoketest                  # needs Alpaca paper keys
 electrum-bot loop                       # proposes and vets; places nothing

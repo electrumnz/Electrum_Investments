@@ -28,7 +28,7 @@ import json
 from datetime import UTC, datetime
 
 from ..audit import AuditView, DecisionEntry
-from ..config import Env, Rules
+from ..config import DAY_NAMES, Env, Rules
 from ..metrics import JournalReport, render_excursions, render_summary
 from ..models import AccountSnapshot, StandDownState, Trade, WorkingOrder
 from ..options import ExpiryAlert
@@ -272,11 +272,6 @@ footer{padding:2rem 0 3rem;color:var(--pewter);font-size:.75rem;
 }
 @media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
 """
-
-# Indexed by Python weekday, so Monday is 0. Written out rather than taken from
-# `calendar.day_abbr`, which is locale-dependent and would render the operator's
-# limits in whatever language the droplet happens to be configured for.
-DAY_NAMES = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
 
 MARK = (
     '<svg viewBox="0 0 64 64" width="22" height="22" aria-hidden="true">'
@@ -1268,7 +1263,7 @@ def settings_page(rules: Rules, env: Env, *, chat_enabled: bool) -> str:
 
     instrument_cards = ""
     for name, inst in rules.instruments.items():
-        sessions = ", ".join(f"{s:02d}:00-{e:02d}:00" for s, e in inst.sessions_utc)
+        sessions = inst.render_sessions()
         # Shown beside the hours rather than folded into them. The hours alone
         # read as "this is when it trades", and for three quarters of a year
         # that is wrong by two days a week.
