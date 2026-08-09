@@ -199,12 +199,29 @@ processes, execution time limits, and no persistent local filesystem. The
 gateway is long-running and the journal is a file on disk. Both are precisely
 what Vercel does not do.
 
+**Decided: a VPS, not a home machine.** Running it on Josh's own PC was the
+cheapest correct answer and is no longer on the table, so the free option below
+is recorded only as the road not taken.
+
 | Option | Cost | Why |
 |---|---|---|
-| **DigitalOcean droplet** | $6/mo | Friendliest console and documentation. The pick if this is your first VPS |
-| Hetzner CX22 | ~€4/mo | Better value, plainer console |
+| **DigitalOcean, 2 GB** | $12/mo | The pick. Friendliest console and documentation of any provider, US regions, and the headroom question stops being a question |
+| DigitalOcean, 1 GB | $6/mo | Workable, but see the sizing note below. Add swap if you take it |
+| Hetzner | ~€4/mo | Roughly half the price and the plainer console is no real obstacle, but its cost-optimised line is listed in Frankfurt, Nuremberg and Helsinki, so a US operator is reaching across the Atlantic |
 | Fly.io | ~$5/mo | Works (persistent volumes, always-on machines) but is container-oriented, so you learn deploys to save nothing |
-| **Josh's own PC** | Free | Genuinely fine if it stays on. Cheapest correct answer |
+| ~~Josh's own PC~~ | Free | Ruled out. Fine in principle, but only if the machine is reliable and actually stays on |
+
+**Sizing, because $6 is tempting and 1 GB is tighter than it looks.** The box
+does not run one process, it runs five: the bot loop, the dashboard, the Hermes
+gateway (Node plus its own bundled Python), and one child process per MCP server
+(Alpaca's and this repo's). On a 1 GB droplet, minus the OS, that is close enough
+to the ceiling to need a swap file. CPU genuinely does not matter here, because
+a 15-minute cadence leaves the machine idle almost all of the time. Buy RAM, not
+cores.
+
+Prices checked on 9 August 2026; DigitalOcean's were read from its pricing page,
+Hetzner's were not (the figures are rendered client-side) so treat that row as
+approximate.
 
 ### Reaching the dashboard when away from the desk
 

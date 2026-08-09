@@ -14,14 +14,25 @@ on **9 August 2026**. Re-check before relying on the arithmetic; these move.
 | **Buzz** | Chat interface, self-hosted or Block's relay | **$0** |
 | **Hermes Agent** | Agent runtime | **$0** (MIT; you pay only for inference) |
 | **Claude Pro** | Only if you want cloud-scheduled Routines | $20/mo, optional |
-| **Hosting** | Not needed — see below | **$0** |
-| **Total to start** | | **~$5–15/mo** |
-| **With scheduled runs** | | **~$25–35/mo** |
+| **VPS** | Always-on host for the Hermes gateway | **$12/mo** |
+| **Total to start** | | **~$17–27/mo** |
+| **With scheduled runs** | | **~$37–47/mo** |
 
-There is no VPS line. An earlier plan for this project assumed a Windows VPS,
-because MetaTrader 5's Python package is Windows-only. Alpaca is a REST API, so
-that constraint is gone: run it on any machine, or on Claude Code Routines with
-nothing of your own running at all.
+### Why there is a VPS line
+
+Only one component forces an always-on machine: the **Hermes gateway**. A chat
+bot that is offline when you message it is not a chat bot. Everything else here
+runs on demand and costs nothing while idle.
+
+That box then also carries the bot loop, the dashboard and the SQLite journal,
+so it is one provider rather than two. A DigitalOcean 2 GB droplet at $12/mo is
+the pick; `docs/BUZZ_SETUP.md` has the comparison and the sizing reasoning.
+Briefly: the 1 GB tier at $6 runs five processes plus an OS and wants a swap
+file, and CPU is irrelevant at a 15-minute cadence, so the money buys RAM.
+
+Note what this is **not**. An earlier plan assumed a *Windows* VPS, because
+MetaTrader 5's Python package is Windows-only, and Windows licensing roughly
+doubles the price. Alpaca is a plain REST API, so any cheap Linux box does.
 
 ## Claude API arithmetic
 
@@ -99,19 +110,25 @@ This is a paper account, so nothing needs to break even yet. The number worth
 tracking is **whether the bot's paper P&L would have covered its own running
 cost** at the size you would actually trade.
 
-At ~$10/month:
+At ~$22/month, API plus the VPS:
 
 | Account size | Monthly return needed |
 |---|---|
-| $5,000 | 0.20% |
-| $10,000 | 0.10% |
-| $25,000 | 0.04% |
-| $100,000 | 0.01% |
+| $5,000 | 0.44% |
+| $10,000 | 0.22% |
+| $25,000 | 0.09% |
+| $100,000 | 0.02% |
 
 These look trivially achievable, and that is the trap: the hard part is not
-covering $10 of API cost, it is not losing the capital. Judge the bot on
+covering $22 of running cost, it is not losing the capital. Judge the bot on
 drawdown and consistency, not on whether it beat its own hosting bill.
 
+Note the shape of the two costs, because it changes as the account grows. The
+API bill scales with how often you think; the VPS is flat whatever you do. On a
+small account the VPS dominates and the percentages above are mostly rent. Get
+much past $25,000 and both become rounding errors, which is the point at which
+this page stops being worth reading.
+
 Every Claude call's cost is recorded in `audit/<date>.jsonl` as
-`estimated_cost_usd`, so you can check the real figure rather than trusting this
-page.
+`estimated_cost_usd`, so the API side can be checked rather than trusted. The
+VPS is not in there — it is a fixed monthly line on someone's card.
