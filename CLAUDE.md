@@ -167,6 +167,7 @@ src/bot/
   context.py            Renders market state for Claude.
   audit.py              Append-only JSONL decision log.
   metrics.py            Win rate, profit factor, expectancy, R, MAE/MFE. Pure functions.
+  web/                  Local read-only dashboard. Binds 127.0.0.1; no auth by design.
   main.py               CLI: `electrum-bot smoketest`, `electrum-bot loop`.
 audit/                  Append-only JSONL. Gitignored.
 data/journal.db         SQLite journal. Gitignored.
@@ -190,12 +191,13 @@ reference/              Third-party projects we borrow from. See reference/STATU
 ## Running it
 
 ```sh
-.venv/bin/python -m pytest              # full suite (185 tests)
+.venv/bin/python -m pytest              # full suite (195 tests)
 electrum-bot smoketest --mock           # no credentials needed
 electrum-bot smoketest                  # needs Alpaca paper keys
 electrum-bot loop                       # proposes and vets; places nothing
 electrum-bot loop --execute             # places approved orders on PAPER
 electrum-bot-mcp                        # MCP server, usually launched by Claude Code
+electrum-bot-web                        # dashboard on http://127.0.0.1:8787
 ```
 
 `--execute` is off by default. Leave it off until you have watched the proposals

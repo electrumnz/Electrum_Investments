@@ -12,6 +12,8 @@ dependencies = [
     "python-dotenv>=1.0",
     "pyyaml>=6.0",
     "structlog>=24.1",
+    "fastapi>=0.115",
+    "uvicorn>=0.30",
 ]
 
 [project.optional-dependencies]
@@ -21,11 +23,13 @@ dev = [
     "ruff>=0.6",
     "mypy>=1.10",
     "types-PyYAML",
+    "httpx",
 ]
 
 [project.scripts]
 electrum-bot = "bot.main:main"
 electrum-bot-mcp = "bot.mcp_server:main"
+electrum-bot-web = "bot.web.app:main"
 
 [build-system]
 requires = ["hatchling"]
@@ -49,7 +53,7 @@ strict = true
 files = ["src", "tests"]
 
 [[tool.mypy.overrides]]
-module = ["alpaca.*", "mcp.*"]
+module = ["alpaca.*", "mcp.*", "uvicorn.*"]
 ignore_missing_imports = true
 
 # Tests stay readable without `-> None` on every function. The production code

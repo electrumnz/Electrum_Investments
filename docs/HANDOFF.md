@@ -90,7 +90,7 @@ execution, and the token cost of every Claude call.
 **A reference library** (`reference/`) tracking fourteen agent, backtesting and LLM-trading projects with pinned
 commits and detected licences, so upstream drift shows up as a git diff.
 
-**185 tests**, `ruff` clean, `mypy --strict` clean.
+**195 tests**, `ruff` clean, `mypy --strict` clean.
 
 ---
 
