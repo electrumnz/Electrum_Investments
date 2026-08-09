@@ -1,17 +1,17 @@
 [project]
 name = "electrum-bot"
-version = "0.0.1"
-description = "AI-powered trading bot for BlackBull Markets via MetaTrader 5"
+version = "0.1.0"
+description = "AI trading bot for Alpaca paper trading, with a deterministic risk gate"
 requires-python = ">=3.11"
 dependencies = [
     "anthropic>=0.40.0",
+    "alpaca-py>=0.33",
+    "mcp>=1.2",
     "pydantic>=2.7",
     "pydantic-settings>=2.4",
     "python-dotenv>=1.0",
     "pyyaml>=6.0",
-    "pandas>=2.2",
     "structlog>=24.1",
-    "MetaTrader5>=5.0.45 ; sys_platform == 'win32'",
 ]
 
 [project.optional-dependencies]
@@ -21,11 +21,11 @@ dev = [
     "ruff>=0.6",
     "mypy>=1.10",
     "types-PyYAML",
-    "pandas-stubs",
 ]
 
 [project.scripts]
 electrum-bot = "bot.main:main"
+electrum-bot-mcp = "bot.mcp_server:main"
 
 [build-system]
 requires = ["hatchling"]
@@ -49,8 +49,15 @@ strict = true
 files = ["src", "tests"]
 
 [[tool.mypy.overrides]]
-module = "MetaTrader5"
+module = ["alpaca.*", "mcp.*"]
 ignore_missing_imports = true
+
+# Tests stay readable without `-> None` on every function. The production code
+# under src/ remains fully strict.
+[[tool.mypy.overrides]]
+module = "tests.*"
+disallow_untyped_defs = false
+disallow_incomplete_defs = false
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

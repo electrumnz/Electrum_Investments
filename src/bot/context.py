@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 from .broker import Broker
-from .models import AccountSnapshot, Tick
+from .models import AccountSnapshot, Tick, TradingActivity
 from .risk import NewsWindow
 
 
@@ -15,6 +15,7 @@ def build_market_context(
     ticks: dict[str, Tick],
     headlines: list[str],
     news_windows: list[NewsWindow],
+    activity: TradingActivity | None = None,
 ) -> str:
     """Render a stable, parseable text blob. Goes AFTER the cached system prompt."""
     now = datetime.now(UTC).isoformat(timespec="seconds")
@@ -22,29 +23,40 @@ def build_market_context(
 
     lines.append("## Account")
     lines.append(f"- Equity: ${account.equity_usd:,.2f}")
-    lines.append(f"- Balance: ${account.balance_usd:,.2f}")
-    lines.append(f"- Margin used: ${account.margin_used_usd:,.2f}")
-    lines.append(f"- Free margin: ${account.free_margin_usd:,.2f}")
+    lines.append(f"- Cash: ${account.cash_usd:,.2f} ({account.cash_pct:.1f}% of equity)")
+    lines.append(f"- Buying power: ${account.buying_power_usd:,.2f}")
+    lines.append(f"- Gross exposure: ${account.gross_exposure_usd:,.2f}")
     lines.append(f"- Realised P&L today: ${account.realised_pnl_today_usd:,.2f}")
+    lines.append(f"- Day trades in last 5 business days: {account.daytrade_count}")
     lines.append("")
+
+    if activity is not None:
+        lines.append("## Recent trading activity")
+        lines.append(f"- Trades today: {activity.trades_today}")
+        lines.append(f"- Trades this week: {activity.trades_this_week}")
+        lines.append("")
 
     lines.append("## Open positions")
     if not account.open_positions:
         lines.append("- (none)")
     else:
         for p in account.open_positions:
+            current = f"{p.current_price:,.4f}" if p.current_price else "n/a"
             lines.append(
-                f"- #{p.ticket} {p.direction.value} {p.size_lots} {p.symbol} "
-                f"@ {p.open_price} (SL {p.stop_loss}, TP {p.take_profit}, "
-                f"P&L ${p.current_pnl_usd:,.2f})"
+                f"- {p.direction.value} {p.qty:g} {p.symbol} @ {p.entry_price:,.4f} "
+                f"(now {current}, P&L ${p.unrealised_pnl_usd:,.2f})"
             )
     lines.append("")
 
     lines.append("## Market snapshot")
-    for symbol, tick in sorted(ticks.items()):
-        lines.append(
-            f"- {symbol}: bid {tick.bid} / ask {tick.ask} (spread {tick.spread:.5f})"
-        )
+    if not ticks:
+        lines.append("- (none)")
+    else:
+        for symbol, tick in sorted(ticks.items()):
+            lines.append(
+                f"- {symbol}: bid {tick.bid:,.4f} / ask {tick.ask:,.4f} "
+                f"(spread {tick.spread:,.4f})"
+            )
     lines.append("")
 
     lines.append("## Recent headlines")
@@ -55,7 +67,7 @@ def build_market_context(
             lines.append(f"- {h}")
     lines.append("")
 
-    lines.append("## Upcoming news windows (≤ 60 min)")
+    lines.append("## Upcoming news windows (<= 60 min)")
     if not news_windows:
         lines.append("- (none)")
     else:

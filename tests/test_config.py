@@ -1,11 +1,19 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import pytest
 
-from bot.config import CLAUDE_MODEL_IDS, BotMode, ClaudeTier, Rules
-
+from bot.config import (
+    CLAUDE_MODEL_IDS,
+    CLAUDE_PRICING_USD_PER_MTOK,
+    AccountRules,
+    ClaudeTier,
+    Env,
+    LiveTradingRefused,
+    Rules,
+)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -15,27 +23,70 @@ def test_rules_load_from_yaml():
     assert rules.account.max_concurrent_positions > 0
     assert rules.allowed_symbols, "allowed_symbols must not be empty"
     assert rules.crypto_sleeve.enabled is False, "crypto must default OFF for staged rollout"
+    assert rules.frequency.max_trades_per_day > 0
+    assert rules.pdt.enforce is True, "PDT guard must ship enabled"
 
 
-def test_claude_model_ids_complete():
+def test_claude_model_ids_and_pricing_complete():
     for tier in ClaudeTier:
         assert tier in CLAUDE_MODEL_IDS
         assert CLAUDE_MODEL_IDS[tier].startswith("claude-")
-
-
-def test_bot_mode_enum_values():
-    assert BotMode.DEMO.value == "demo"
-    assert BotMode.LIVE.value == "live"
+        assert tier in CLAUDE_PRICING_USD_PER_MTOK
+        base_in, out, cache_read = CLAUDE_PRICING_USD_PER_MTOK[tier]
+        assert 0 < base_in < out
+        # Cache reads bill at 10% of base input.
+        assert cache_read == pytest.approx(base_in * 0.1)
 
 
 def test_invalid_max_risk_pct_rejected():
-    from bot.config import AccountRules
-
     with pytest.raises(ValueError):
         AccountRules(
-            min_equity_floor_usd=4500,
+            min_equity_floor_usd=90_000,
             max_risk_per_trade_pct=0,
+            max_position_pct=10,
+            min_cash_reserve_pct=20,
             max_concurrent_positions=1,
-            max_gross_leverage=1,
+            max_gross_exposure_pct=80,
             daily_loss_kill_pct=1,
         )
+
+
+# --------------------------------------------------------- paper-only guard
+
+
+def _env(**overrides: Any) -> Env:
+    """Build an Env ignoring any developer .env file, so these tests are hermetic."""
+    return Env(_env_file=None, **overrides)  # type: ignore[call-arg]
+
+
+def test_paper_mode_is_the_default():
+    env = _env()
+    assert env.alpaca_paper_trade is True
+    env.assert_paper_only()  # must not raise
+
+
+def test_live_mode_is_refused():
+    with pytest.raises(LiveTradingRefused, match="paper-only"):
+        _env(ALPACA_PAPER_TRADE=False).assert_paper_only()
+
+
+def test_base_url_follows_paper_flag():
+    assert "paper-api" in _env().alpaca_base_url
+    assert "paper-api" not in _env(ALPACA_PAPER_TRADE=False).alpaca_base_url
+
+
+def test_alpaca_broker_refuses_live_env():
+    """Second line of defence: the broker re-checks rather than trusting startup."""
+    from bot.broker import AlpacaBroker
+
+    env = _env(ALPACA_PAPER_TRADE=False, ALPACA_API_KEY="k", ALPACA_SECRET_KEY="s")
+    with pytest.raises(LiveTradingRefused):
+        AlpacaBroker(env)
+
+
+def test_is_crypto_uses_sleeve_symbols():
+    rules = Rules.load(REPO_ROOT / "config" / "rules.yaml")
+    enabled = rules.model_copy(deep=True)
+    enabled.crypto_sleeve.allowed_symbols = ["BTC/USD"]
+    assert enabled.is_crypto("BTC/USD")
+    assert not enabled.is_crypto("SPY")

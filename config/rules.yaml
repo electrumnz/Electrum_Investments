@@ -1,58 +1,85 @@
-# Trading rules — the bot CANNOT violate these. Claude proposes, this gates.
-# Edit numbers to taste; structure should stay the same so the risk module can parse it.
+# Trading rules — the bot CANNOT violate these. Claude proposes, risk.py gates.
+#
+# Every number here is enforced in deterministic Python, not by asking the model
+# nicely. If you want different behaviour, change it here — do not try to talk
+# the agent into it, because it cannot comply.
+#
+# Structure must stay the same so src/bot/config.py can parse it; the numbers
+# are yours to tune.
 
 account:
-  # Hard ceiling on capital at risk. If true equity < this, bot halts.
-  min_equity_floor_usd: 4500
+  # If equity drops below this, the bot halts entirely.
+  # Set for Alpaca's default $100,000 paper balance — a 10% drawdown floor.
+  # If you reset the paper account to a different balance, change this to match.
+  min_equity_floor_usd: 90000
 
-  # Max single-trade risk as % of equity (loss if SL hit).
+  # Max loss on a single trade, as % of equity, assuming the stop-loss fills.
   max_risk_per_trade_pct: 1.0
 
-  # Max simultaneous open positions across all instruments.
+  # Max size of any one position, as % of equity. Caps concentration even when
+  # a tight stop would technically satisfy max_risk_per_trade_pct.
+  max_position_pct: 10.0
+
+  # Keep at least this much of equity in cash. Stops the bot going all-in.
+  min_cash_reserve_pct: 20.0
+
+  # Max simultaneous open positions across all symbols.
   max_concurrent_positions: 3
 
-  # Max total exposure (sum of position notionals) as multiple of equity.
-  max_gross_leverage: 10.0
+  # Max total exposure (sum of position values) as % of equity. 100 = no margin.
+  max_gross_exposure_pct: 80.0
 
-  # Daily loss kill-switch. If realised + unrealised P&L < -X% of equity at start of day, stop trading until next day.
+  # Daily loss kill-switch: once the day is down this much from starting equity,
+  # no new positions open until the next session. Sticky — a recovery within the
+  # same day does not re-enable trading.
   daily_loss_kill_pct: 3.0
 
-# Allowed trading sessions in UTC. List of [start_hour, end_hour). 24h = [0, 24].
-# London: 07-16 UTC; New York: 12-21 UTC; Tokyo: 23-08 UTC.
-sessions_utc:
-  - [7, 21]   # London + NY overlap window only by default
+# Anti-churn limits. Fees, not stock picking, were the dominant loss driver in
+# the Alpha Arena LLM trading competition — the model that made 238 trades lost
+# 57% of its stake. Treat these as risk controls.
+frequency:
+  max_trades_per_day: 5
+  max_trades_per_week: 15
+  # Cooldown before re-trading the same symbol. Prevents flip-flopping.
+  min_seconds_between_trades_per_symbol: 1800   # 30 minutes
 
-# Don't open new positions in the N minutes around high-impact news for affected currencies.
+# US Pattern Day Trader rule. Below the equity threshold, a margin account may
+# make only 3 day trades per rolling 5 business days; a 4th triggers a 90-day
+# restriction. Day-trade counts come from Alpaca, which is the authority.
+# Crypto is exempt — it is not a security.
+pdt:
+  enforce: true
+  equity_threshold_usd: 25000
+  max_day_trades_per_5_days: 3
+
+# Allowed trading windows in UTC, as [start_hour, end_hour) pairs.
+# US equities regular session is 09:30–16:00 ET = 13:30–20:00 UTC (14:30–21:00 during EDT).
+# Deliberately excludes the first 30 minutes of the US open, which is the noisiest period.
+sessions_utc:
+  - [14, 21]
+
+# Don't open new positions in the N minutes around high-impact news.
 news_blackout_minutes_before: 15
 news_blackout_minutes_after: 15
 
-# Symbol allowlist. Bot will refuse to trade anything not in this list.
+# Symbol allowlist. The bot refuses anything not listed here.
+# Starter universe: liquid, low-volatility, heavily-covered US large caps + index ETFs.
 allowed_symbols:
-  # Phase B starter universe — low volatility
-  - EURUSD
-  - GBPUSD
-  - USDJPY
-  - AUDUSD
-  - XAUUSD     # gold
-  - US500      # S&P 500 CFD (BlackBull symbol may differ — verify on demo)
+  - SPY      # S&P 500 ETF
+  - QQQ      # Nasdaq 100 ETF
+  - AAPL
+  - MSFT
+  - JNJ      # defensive, low beta
+  - KO       # defensive, low beta
 
-# Crypto sleeve — disabled until Phase E. Set enabled: true and capital_cap_pct > 0 to enable.
+# Crypto sleeve — disabled until the equity core is proven on paper.
+# Crypto is PDT-exempt and trades 24/7, which is exactly why it needs its own
+# capital cap rather than sharing the equity budget.
 crypto_sleeve:
   enabled: false
   capital_cap_pct: 0.0
   allowed_symbols: []
-  # When enabled, set e.g.:
+  # When enabling, set e.g.:
+  #   enabled: true
   #   capital_cap_pct: 15.0
-  #   allowed_symbols: [BTCUSD, ETHUSD]
-
-# Minimum hold time once a trade is opened (anti-flapping, helps with spread costs).
-min_hold_seconds: 300
-
-# Per-trade required parameters — Claude proposals missing these are rejected.
-required_order_fields:
-  - symbol
-  - direction        # buy | sell
-  - stop_loss_price
-  - take_profit_price
-  - size_lots
-  - rationale        # short text, logged
+  #   allowed_symbols: [BTC/USD, ETH/USD]
