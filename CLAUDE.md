@@ -159,6 +159,28 @@ tier allows 100 requests a day against a loop that wakes 96 times, so the
 30-minute TTL is what keeps the quota intact. Lowering it exhausts the day's
 allowance before the session ends.
 
+### A bare `.gitignore` directory pattern matches at every depth
+
+`.gitignore` once carried a bare `data/`, meant for the SQLite journal at the
+repository root. It also silently excluded **`src/bot/data/`**, so three modules
+were never committed while `main.py` imported them regardless.
+
+Nothing local caught it. The files were on disk, so the suite passed, `mypy`
+passed, and `git status` was clean, because ignored files are not reported. It
+surfaced only on the deployed box as `No module named bot.data.finnhub` — and
+the damage was not the crash. The agent could still read `config/rules.yaml`, so
+it answered a question about account risk with the limits and no live state: a
+confident partial answer, which is the exact failure this project exists to
+prevent, arriving through the plumbing rather than the model.
+
+Every runtime-artefact pattern is now anchored (`/data/`, not `data/`), and
+`tests/test_packaging.py` fails the build if any file under `src/` is untracked,
+matches an ignore rule, or is imported without being committed. **Keep those
+patterns anchored, and do not delete that test.**
+
+The general form is worth carrying: a green local suite says nothing about what
+is actually in the repository.
+
 ### One directory is published. The rest must never be
 
 `brand/` is deployed publicly at **https://mudhorn-capital.vercel.app** (Vercel,
@@ -174,6 +196,12 @@ Remote access is Tailscale, never a public URL.
 If asked to "host the dashboard too because the brand page worked", the answer
 is no, and building real authentication first is the prerequisite, not a
 follow-up.
+
+This got stronger, not weaker, when the chat panel landed. The dashboard used to
+only *display* an account; `POST /chat` means it can now *drive an agent* that
+reaches the broker. Exposure used to risk disclosure and now risks action. The
+panel is off unless `DASHBOARD_CHAT_TOKEN` is set, which is deliberate: enabling
+it should be a decision, never a side effect of deploying.
 
 ---
 
@@ -215,7 +243,9 @@ src/bot/
                         finnhub.py = earnings calendar (feeds the blackout gate).
   audit.py              Append-only JSONL decision log.
   metrics.py            Win rate, profit factor, expectancy, R, MAE/MFE. Pure functions.
-  web/                  Local read-only dashboard. Binds 127.0.0.1; no auth by design.
+  web/                  Local dashboard + a Hermes chat panel. Binds 127.0.0.1.
+                        Read-only apart from POST /chat, which is off unless
+                        DASHBOARD_CHAT_TOKEN is set.
   main.py               CLI: `electrum-bot smoketest`, `electrum-bot loop`.
 deploy/                 VPS provisioning: bootstrap.sh + systemd units. Runs the
                         loop WITHOUT --execute; src/ and config/ stay root-owned
@@ -242,7 +272,7 @@ reference/              Third-party projects we borrow from. See reference/STATU
 ## Running it
 
 ```sh
-.venv/bin/python -m pytest              # full suite (195 tests)
+.venv/bin/python -m pytest              # full suite (225 tests)
 electrum-bot smoketest --mock           # no credentials needed
 electrum-bot smoketest                  # needs Alpaca paper keys
 electrum-bot loop                       # proposes and vets; places nothing
