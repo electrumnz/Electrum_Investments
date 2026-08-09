@@ -241,11 +241,23 @@ order paths that do not pass through `src/bot/risk.py`.
 
 ## Hermes gateway
 
-Optional, and the only reason this box has to be always on. Install it under the
-`mudhorn` account per `docs/HERMES_SETUP.md`, which covers why the **native
-gateway path** is mandatory rather than the Desktop or ACP relay modes: those let
-the client auto-approve tool permissions, which is acceptable for a general
-assistant and not for something holding broker credentials.
+Optional, and the only reason this box has to be always on. Install it under its
+own `hermes` account per `docs/HERMES_SETUP.md`, **never under `mudhorn`**.
+`mudhorn` owns `.env` and therefore the Alpaca credentials; the split is the
+entire point, and it leaves the agent reaching the broker only by sudo'ing to
+one wrapper script under a single rule in `/etc/sudoers.d/hermes-mcp`. Running
+it as `mudhorn` would hand it the credentials directly and make every other
+control here decorative.
+
+That doc also covers why the **native gateway path** is mandatory rather than
+the Desktop or ACP relay modes: those let the client auto-approve tool
+permissions, which is acceptable for a general assistant and not for something
+holding broker credentials.
+
+Apply this repo's config with `deploy/merge-hermes-config.py`, not by appending
+the YAML. Hermes writes `agent:`, `skills:`, `approvals:` and `mcp_servers:`
+itself on first run, so an append duplicates all four and PyYAML silently keeps
+only the last of each.
 
 If you skip Hermes, nothing here needs to stay running between sessions and the
 VPS becomes optional.
