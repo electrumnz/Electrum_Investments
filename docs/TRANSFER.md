@@ -31,25 +31,29 @@ running cost.
 
 ## Where each account sits
 
+Account handles are deliberately left out below. This repository may be public,
+and a published list of which account holds what is free targeting material for
+a plausible-looking "support" email. The live mapping belongs in the password
+manager, next to the credentials.
+
 | Service | Held under | At handover |
 |---|---|---|
-| GitHub `mudhorncapital` | brand account | Hand over credentials |
-| GitHub repo | **`electrumnz` (personal)** | Move first — see below |
-| Vercel project | **personal team** | Move first — see below |
-| Tailscale `mudhorncapital.github` | brand account | Hand over credentials |
+| GitHub, brand account | brand identity | Hand over credentials |
+| GitHub repo | **a personal account** | Move first — see below |
+| Vercel project | **a personal team** | Move first — see below |
+| Tailscale tailnet | brand identity | Hand over credentials |
 | Alpaca (paper) | project Gmail | Hand over credentials, then rotate keys |
 | Anthropic Console | project Gmail | Hand over credentials, swap card, rotate key |
 | DigitalOcean | builder's account | Hand over credentials, swap card |
 
 Two rows are the odd ones out.
 
-### Move the repo to `mudhorncapital`
+### Move the repo to the brand account
 
-The repo is `electrumnz/Electrum_Investments`, on a personal account, under a
-working title chosen before the name existed. Both are worth fixing in one go:
-rename to `mudhorn-capital`, then transfer to the `mudhorncapital` account
-(Settings → General → Danger Zone → Transfer ownership). Commits, branches and
-issues travel; old URLs redirect.
+The repo sits on a personal account, under a working title chosen before the
+name existed. Both are worth fixing in one go: rename to `mudhorn-capital`, then
+transfer to the brand account (Settings → General → Danger Zone → Transfer
+ownership). Commits, branches and issues travel; old URLs redirect.
 
 Three files hardcode the repository URL and should be updated in the same commit:
 
@@ -65,7 +69,7 @@ repository).
 
 The site is a single static file with no database, environment variables or
 build step, so there is nothing worth preserving. Import the repo again from the
-`mudhorncapital` side:
+brand account's side:
 
 - Project Name: `mudhorn-capital`
 - Root Directory: **`brand`**
