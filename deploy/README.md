@@ -25,10 +25,37 @@ comfortable, 1 GB wants a swap file. `docs/COSTS.md` has the arithmetic.
 
 ## 1. Provision
 
+**The repository is private, so the box needs its own read credential.** Use a
+**deploy key** rather than a personal access token: a deploy key is scoped to
+this one repository and read-only, where a PAT carries the whole account with it
+and would sit on a machine that also holds broker credentials.
+
+On the box:
+
 ```sh
-sudo git clone <repo-url> /opt/mudhorn
+sudo ssh-keygen -t ed25519 -N "" -f /root/.ssh/mudhorn_deploy
+sudo cat /root/.ssh/mudhorn_deploy.pub
+```
+
+Paste that public key into **GitHub → the repo → Settings → Deploy keys → Add
+deploy key**, and leave "Allow write access" unticked. Then:
+
+```sh
+sudo git -c core.sshCommand="ssh -i /root/.ssh/mudhorn_deploy" \
+  clone git@github.com:<owner>/<repo>.git /opt/mudhorn
+sudo git -C /opt/mudhorn config core.sshCommand "ssh -i /root/.ssh/mudhorn_deploy"
 sudo /opt/mudhorn/deploy/bootstrap.sh
 ```
+
+The second line makes later `git pull`s use the same key without repeating the
+flag.
+
+> If you use a personal access token instead, **do not leave it in the remote
+> URL** — `git clone https://<token>@github.com/...` writes it into
+> `.git/config` in plaintext, where it outlives whatever you were doing. Scrub
+> it immediately with
+> `sudo git -C /opt/mudhorn remote set-url origin https://github.com/<owner>/<repo>.git`
+> and re-supply the token on each pull.
 
 The script installs Python and build tools, creates a `mudhorn` system account
 with no login shell, builds the virtualenv, copies `.env.example` to `.env` at
