@@ -49,9 +49,14 @@ def test_missing_data_is_declared_in_the_prompt(name):
     assert "propose nothing" in rendered.lower()
 
 
-@pytest.mark.parametrize("name", ["mean_reversion", "momentum"])
-def test_the_strategies_daily_bars_made_evaluable_carry_no_warning(name):
-    """`get_daily_bars` plus `indicators.py` supply everything these two name.
+@pytest.mark.parametrize("name", ["mean_reversion", "momentum", "trend_break"])
+def test_the_strategies_now_evaluable_carry_no_warning(name):
+    """Everything these name is now measured and handed over.
+
+    `get_daily_bars` plus `indicators.py` cover mean reversion and momentum.
+    `get_intraday_bars` plus `intraday.py` cover trend break: the counts of
+    bars that closed beyond a level, the ones that only wicked through, the
+    break volume ratio and the reclaimed flag are all computed.
 
     The warning has to keep meaning something. A strategy whose data is now
     present must stop claiming otherwise, or the sentence becomes decoration and
@@ -63,18 +68,34 @@ def test_the_strategies_daily_bars_made_evaluable_carry_no_warning(name):
     assert "DATA YOU DO NOT HAVE" not in strategy.render()
 
 
-@pytest.mark.parametrize("name", ["trend_break", "news_reaction"])
-def test_the_strategies_still_missing_intraday_data_keep_theirs(name):
-    """Neither is evaluable on daily bars, and both must keep saying so.
+def test_news_reaction_keeps_the_gap_intraday_bars_did_not_close():
+    """Bars do not carry a spread, so "normalised" still cannot be checked.
 
-    Trimming these to nothing because the repo now has *some* history would be
-    the worst outcome available: the warning would go and the gap would stay.
+    This is the test that stops the warning from being trimmed out of
+    enthusiasm. Intraday bars closed one of this strategy's two gaps and left
+    the other exactly where it was, and the surviving `requires` must name the
+    survivor rather than being deleted alongside the one that was fixed.
     """
-    strategy = REGISTRY[name]
+    strategy = REGISTRY["news_reaction"]
 
     assert strategy.requires != []
-    assert any("intraday" in item for item in strategy.requires)
+    assert any("spread" in item for item in strategy.requires)
+    # The half that IS now supplied must stop being claimed as missing.
+    assert not any("intraday bars" in item for item in strategy.requires)
     assert "DATA YOU DO NOT HAVE" in strategy.render()
+
+
+def test_trend_break_names_the_computed_intraday_figures():
+    """Evaluable is not enough; it has to point at the figures it may use.
+
+    Without this the model reads "a break" as something to judge from the quote,
+    which is the estimating-it-anyway failure the requires list existed to stop.
+    """
+    rendered = guidance_for("trend_break")
+
+    assert "CLOSED beyond" in rendered
+    assert "RECLAIMED" in rendered
+    assert "unavailable" in rendered
 
 
 def test_an_unknown_strategy_name_fails_loudly():

@@ -9,7 +9,10 @@ import structlog
 from .broker import Broker
 from .indicators import Indicators, compute
 from .indicators import render as render_indicators
-from .models import AccountSnapshot, Tick, TradingActivity
+from .intraday import IntradayView
+from .intraday import compute as compute_intraday
+from .intraday import render as render_intraday
+from .models import AccountSnapshot, SymbolAssessment, Tick, TradingActivity
 from .options import ExpiryAlert, render_alerts
 from .risk import NewsWindow
 
@@ -26,6 +29,10 @@ def build_market_context(
     expiry_alerts: list[ExpiryAlert] | None = None,
     indicators: dict[str, Indicators] | None = None,
     symbols_without_history: list[str] | None = None,
+    intraday: dict[str, IntradayView] | None = None,
+    symbols_without_intraday: list[str] | None = None,
+    previous_assessments: list[SymbolAssessment] | None = None,
+    previous_at: datetime | None = None,
     social_posts: list[str] | None = None,
     social_degraded: bool = False,
 ) -> str:
@@ -105,6 +112,73 @@ def build_market_context(
             + ". Treat these as having no indicators at all. Do not estimate a "
             "moving average, an ATR or a level for them from the single quote "
             "above, and propose nothing on them."
+        )
+    lines.append("")
+
+    # Separate from the daily block above, because they answer different
+    # questions and conflating them would hide which one is missing. The daily
+    # figures say where price sits relative to its own history; these say what
+    # it just did at a level, which is the only thing that tells a break from a
+    # wick. Computed in `src/bot/intraday.py`, never handed over as bars.
+    lines.append("## Intraday (computed from 5-minute bars, not estimated)")
+    if not intraday:
+        lines.append("- (none)")
+    else:
+        for symbol in sorted(intraday):
+            lines.extend(render_intraday(intraday[symbol]))
+    if symbols_without_intraday:
+        lines.append(
+            "- NO INTRADAY BARS AVAILABLE for: "
+            + ", ".join(sorted(symbols_without_intraday))
+            + ". For these symbols you cannot tell a close through a level from "
+            "a wick through it. Do not claim a break on them, and propose "
+            "nothing that depends on one."
+        )
+    lines.append("")
+
+    # Placed AFTER the figures, deliberately. The point of this section is that
+    # the model checks a trigger it wrote earlier against numbers it has just
+    # read, so the numbers have to come first. Placed before the headlines
+    # because a trigger is a specific, checkable claim and a headline is not.
+    #
+    # Only the previous cycle, never a history. Two reasons: a running
+    # transcript costs output tokens on every cycle for diminishing value, and
+    # a model handed its own narrative starts defending it. One cycle back is
+    # enough to answer "did the thing I said I was waiting for happen".
+    lines.append("## What you said last cycle")
+    if not previous_assessments:
+        lines.append(
+            "- (nothing on record — this is the first cycle since a restart, or "
+            "the last one produced no assessments)"
+        )
+    else:
+        # The age is stated rather than implied. Cycles are skipped when the
+        # market is shut, so "last cycle" on a Monday morning is Friday
+        # afternoon, and a trigger written three days ago should not be read as
+        # one written fifteen minutes ago.
+        if previous_at is not None:
+            age = datetime.now(UTC) - previous_at
+            hours = age.total_seconds() / 3600
+            when = (
+                f"{age.total_seconds() / 60:.0f} minutes ago"
+                if hours < 1
+                else f"{hours:.1f} hours ago"
+            )
+            lines.append(f"- Recorded {when}, at {previous_at.isoformat(timespec='minutes')}.")
+        for assessment in previous_assessments:
+            waiting = (
+                f" — you said you were waiting for: {assessment.waiting_for}"
+                if assessment.waiting_for
+                else ""
+            )
+            lines.append(f"- {assessment.symbol}: {assessment.stance.value}{waiting}")
+        lines.append(
+            "For each of these, check the trigger against the figures ABOVE and "
+            "say in this cycle's assessment whether it has now fired. If it has, "
+            "that is the setup you named and you should act on it or say why not. "
+            "If the reading that produced it no longer holds, drop it and say so "
+            "— a trigger you wrote is not evidence, and restating one you can no "
+            "longer justify is worse than passing."
         )
     lines.append("")
 
@@ -204,6 +278,42 @@ def fetch_indicators(
             continue
 
         result = compute(symbol, bars)
+        if result is None:
+            missing.append(symbol)
+        else:
+            found[symbol] = result
+
+    return found, missing
+
+
+def fetch_intraday(
+    broker: Broker, symbols: list[str], minutes: int = 5
+) -> tuple[dict[str, IntradayView], list[str]]:
+    """Intraday views per symbol, and the symbols that produced none.
+
+    Same contract as `fetch_indicators`, and for the same reasons: catches
+    broadly so a bad minute at the bars endpoint degrades the cycle instead of
+    ending the loop, and returns the failures by name so a symbol that silently
+    vanished from the block cannot be mistaken for one nobody asked about.
+
+    The distinction matters more here than for the daily figures. A symbol with
+    no intraday history is one where a break and a wick are indistinguishable,
+    which is the exact condition `trend_break` must not be applied under.
+    """
+    found: dict[str, IntradayView] = {}
+    missing: list[str] = []
+
+    for symbol in symbols:
+        try:
+            bars = broker.get_intraday_bars(symbol, minutes)
+        except Exception as exc:
+            log.warning(
+                "intraday_fetch_failed", symbol=symbol, error=f"{type(exc).__name__}: {exc}"
+            )
+            missing.append(symbol)
+            continue
+
+        result = compute_intraday(symbol, bars, minutes)
         if result is None:
             missing.append(symbol)
         else:

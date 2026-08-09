@@ -46,6 +46,15 @@ def is_crypto_symbol(symbol: str) -> bool:
 # for this data and the request is one call per symbol per cycle.
 DEFAULT_BAR_LOOKBACK = 260
 
+# Five-minute bars. Fine enough to tell a close through a level from a wick
+# through it, which is the entire question `trend_break` turns on, and coarse
+# enough that a session is 78 rows rather than 390.
+DEFAULT_INTRADAY_MINUTES = 5
+
+# Roughly two sessions of five-minute bars. Enough for the prior session's high
+# and low, which is one of the levels the strategy names, plus today's action.
+DEFAULT_INTRADAY_LOOKBACK = 160
+
 
 @runtime_checkable
 class Broker(Protocol):
@@ -54,6 +63,9 @@ class Broker(Protocol):
     def get_account(self) -> AccountSnapshot: ...
     def get_tick(self, symbol: str) -> Tick: ...
     def get_daily_bars(self, symbol: str, lookback: int = ...) -> list[Bar]: ...
+    def get_intraday_bars(
+        self, symbol: str, minutes: int = ..., lookback: int = ...
+    ) -> list[Bar]: ...
     def get_open_orders(self) -> list[WorkingOrder]: ...
     def get_activity(self) -> TradingActivity: ...
     def place_order(self, proposal: OrderProposal) -> OrderResult: ...
@@ -77,6 +89,7 @@ class MockBroker:
         self._order_seq = 0
         self._fills: list[tuple[datetime, str]] = []
         self._bars: dict[str, list[Bar]] = {}
+        self._intraday: dict[str, list[Bar]] = {}
         self._open_orders: list[WorkingOrder] = []
 
     def connect(self) -> None:
@@ -110,6 +123,27 @@ class MockBroker:
         if symbol not in self._bars:
             raise KeyError(f"No bars seeded for {symbol}; call set_bars first")
         return self._bars[symbol][-lookback:]
+
+    def set_intraday_bars(self, symbol: str, bars: list[Bar]) -> None:
+        self._intraday[symbol] = list(bars)
+
+    def get_intraday_bars(
+        self,
+        symbol: str,
+        minutes: int = DEFAULT_INTRADAY_MINUTES,
+        lookback: int = DEFAULT_INTRADAY_LOOKBACK,
+    ) -> list[Bar]:
+        """Seeded intraday history, or nothing. Raises for the same reason.
+
+        `minutes` is accepted and ignored: a fixture is whatever the test seeded,
+        and silently resampling it would let a test pass against a bar size it
+        never actually provided.
+        """
+        if symbol not in self._intraday:
+            raise KeyError(
+                f"No intraday bars seeded for {symbol}; call set_intraday_bars first"
+            )
+        return self._intraday[symbol][-lookback:]
 
     def set_open_orders(self, orders: list[WorkingOrder]) -> None:
         """Seed resting orders. The mock fills instantly, so it has none of its own."""
@@ -329,6 +363,64 @@ class AlpacaBroker:
             raw = self._stock_data.get_stock_bars(
                 StockBarsRequest(
                     symbol_or_symbols=symbol, timeframe=TimeFrame.Day, start=start
+                )
+            )
+
+        rows = raw.data.get(symbol, []) if hasattr(raw, "data") else raw.get(symbol, [])
+        bars = [
+            Bar(
+                symbol=symbol,
+                timestamp=row.timestamp,
+                open=float(row.open),
+                high=float(row.high),
+                low=float(row.low),
+                close=float(row.close),
+                volume=float(row.volume),
+            )
+            for row in rows
+        ]
+        return bars[-lookback:]
+
+    def get_intraday_bars(
+        self,
+        symbol: str,
+        minutes: int = DEFAULT_INTRADAY_MINUTES,
+        lookback: int = DEFAULT_INTRADAY_LOOKBACK,
+    ) -> list[Bar]:
+        """Intraday bars, oldest first, so a close through a level beats a wick.
+
+        On a daily bar a close through a level and a wick that closed back
+        inside are the same row, and telling those apart is the whole of
+        `trend_break`. This is what makes that strategy evaluable.
+
+        Free on Alpaca's IEX feed, same as the daily bars, with the same caveat:
+        IEX is a fraction of consolidated volume, so the *shape* of a bar is
+        reliable and its volume is a sample rather than the market's. That is
+        why `indicators` compares break volume against this feed's own recent
+        average rather than against an absolute figure.
+
+        The calendar window is padded past `lookback` the same way
+        `get_daily_bars` pads: a session is 78 five-minute bars, so two sessions
+        of history spans a weekend more often than not.
+        """
+        from alpaca.data.requests import CryptoBarsRequest, StockBarsRequest
+        from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
+
+        bars_per_session = max(1, (60 // max(1, minutes)) * 7)
+        sessions = lookback / bars_per_session
+        start = datetime.now(UTC) - timedelta(days=int(sessions * 1.6) + 4)
+        timeframe = TimeFrame(amount=minutes, unit=TimeFrameUnit.Minute)
+
+        if is_crypto_symbol(symbol):
+            raw: Any = self._crypto_data.get_crypto_bars(
+                CryptoBarsRequest(
+                    symbol_or_symbols=symbol, timeframe=timeframe, start=start
+                )
+            )
+        else:
+            raw = self._stock_data.get_stock_bars(
+                StockBarsRequest(
+                    symbol_or_symbols=symbol, timeframe=timeframe, start=start
                 )
             )
 

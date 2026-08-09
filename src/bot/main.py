@@ -19,15 +19,21 @@ from .audit import AuditLog
 from .broker import AlpacaBroker, Broker, MockBroker
 from .claude_client import ClaudeClient, build_system_prompt
 from .config import Env, LiveTradingRefused, Rules
-from .context import build_market_context, fetch_indicators, fetch_market_ticks
+from .context import (
+    build_market_context,
+    fetch_indicators,
+    fetch_intraday,
+    fetch_market_ticks,
+)
 from .data.calendar import CalendarFeed, EmptyCalendar
 from .data.finnhub import FinnhubCalendar
 from .data.marketaux import MarketauxNews
 from .data.news import EmptyNews, NewsFeed
 from .data.xfeed import XFeed
 from .indicators import summarise as summarise_indicators
+from .intraday import summarise as summarise_intraday
 from .journal import Journal
-from .models import Decision, MarketInputs
+from .models import Decision, MarketInputs, SymbolAssessment
 from .options import alerts_for_positions
 from .reconcile import apply_journal_state, reconcile, record_fill
 from .risk import RiskGate
@@ -194,12 +200,37 @@ def cmd_loop(
     if not execute:
         log.info("dry_run_no_orders_will_be_placed")
 
+    # What the model said last cycle, carried into the next prompt so a
+    # `waiting_for` trigger is something it can check rather than something it
+    # writes and never sees again.
+    #
+    # Seeded from the audit log rather than starting empty, because a restart is
+    # the moment this is most valuable: a deploy in the middle of a session
+    # would otherwise throw away every open watch. The log is the record of
+    # what was actually said, so reading it back is not a second source of
+    # truth. A failure here costs the recall and nothing else.
+    previous_assessments: list[SymbolAssessment] = []
+    previous_at: datetime | None = None
+    try:
+        recent = audit.read(limit=1, days=4).decisions
+        if recent:
+            previous_assessments = list(recent[0].decision.assessments)
+            previous_at = recent[0].timestamp
+            log.info(
+                "recalled_previous_assessments",
+                count=len(previous_assessments),
+                recorded_at=previous_at.isoformat(timespec="minutes"),
+            )
+    except Exception as exc:
+        log.warning("previous_assessment_recall_failed", error=f"{type(exc).__name__}: {exc}")
+
     try:
         while True:
             account = broker.get_account()
             activity = broker.get_activity()
             ticks = fetch_market_ticks(broker, rules.allowed_symbols)
             indicators, no_history = fetch_indicators(broker, rules.allowed_symbols)
+            intraday, no_intraday = fetch_intraday(broker, rules.allowed_symbols)
             news_windows = calendar.upcoming_windows(lookahead_minutes=60)
 
             # Bring the journal in step before anything is evaluated: this is
@@ -275,6 +306,10 @@ def cmd_loop(
                 expiry_alerts=expiry_alerts,
                 indicators=indicators,
                 symbols_without_history=no_history,
+                intraday=intraday,
+                symbols_without_intraday=no_intraday,
+                previous_assessments=previous_assessments,
+                previous_at=previous_at,
                 social_posts=posts,
                 social_degraded=social_degraded,
             )
@@ -321,6 +356,11 @@ def cmd_loop(
                     for symbol, ind in sorted(indicators.items())
                 },
                 symbols_without_history=no_history,
+                intraday={
+                    symbol: summarise_intraday(view)
+                    for symbol, view in sorted(intraday.items())
+                },
+                symbols_without_intraday=no_intraday,
                 calendar_degraded=bool(getattr(calendar, "is_degraded", False)),
             )
 
@@ -393,6 +433,14 @@ def cmd_loop(
                     notes=decision.market_assessment,
                 )
             )
+            # Carried forward only on a cycle that produced a decision. A cycle
+            # skipped because the market was shut, or one whose model call
+            # failed, leaves the last real assessment in place rather than
+            # blanking it — otherwise a weekend would erase every open watch and
+            # Monday would start from nothing.
+            previous_assessments = list(decision.assessments)
+            previous_at = datetime.now(UTC)
+
             audit.record_event(
                 "reconcile",
                 {
@@ -437,6 +485,10 @@ def cmd_loop(
                 # history at all, and that has to be visible from the log line
                 # rather than only inside the prompt.
                 symbols_without_history=no_history,
+                # Same reason as symbols_without_history. A symbol with no
+                # intraday bars is one where a break and a wick cannot be told
+                # apart, which is the condition trend_break must not run under.
+                symbols_without_intraday=no_intraday,
                 cost_usd=round(usage.estimated_cost_usd, 6),
                 next_cycle_seconds=env.decision_interval_seconds,
             )

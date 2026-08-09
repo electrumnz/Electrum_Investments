@@ -285,6 +285,37 @@ context on the Decisions page, where a rejected response costs the whole cycle.
 a different number, and a plausible wrong figure that passes validation is the
 exact failure this repository exists to prevent.
 
+### The model has no memory, so the watch list is handed back to it
+
+Every cycle is a fresh API call. The 1-hour prompt cache is a cost optimisation
+on a static system prompt, not memory, and weights never change. So the model
+was writing `waiting_for` triggers — "SPY closing below 641.20, roughly 1 ATR
+under the 20-day" — and never seeing them again. A watch was a sentence written
+to nobody, and the stance meant nothing.
+
+`build_market_context` now carries **the previous cycle's assessments only**,
+under "What you said last cycle", and the prompt tells the model to report on
+each: fired, not yet, or stale.
+
+- **One cycle back, never a history.** A running transcript costs output tokens
+  every cycle for diminishing value, and a model handed its own narrative starts
+  defending it. One cycle answers "did the thing I said I was waiting for
+  happen", which is the whole point.
+- **The section sits AFTER the indicators and intraday blocks**, so a trigger is
+  checked against figures just read rather than from memory of the last cycle.
+- **The age is stated, not implied.** Cycles are skipped while the market is
+  shut, so "last cycle" on a Monday morning is Friday afternoon. Without the age
+  a three-day-old trigger reads like a fifteen-minute-old one.
+- **Seeded from the audit log at loop start**, because a restart is exactly when
+  this is worth most: a mid-session deploy would otherwise discard every open
+  watch. A failure there costs the recall and nothing else.
+- **A skipped or failed cycle does not blank it.** The carry-forward happens
+  only after a real decision, so a weekend leaves Friday's watches standing.
+
+The prompt is explicit that a trigger the model wrote is **not evidence**.
+Restating one it can no longer justify is worse than passing, because it reads
+as conviction.
+
 ### A feed failure must degrade the cycle, never end the loop
 
 `fetch_market_ticks` and `fetch_indicators` in `context.py` both catch
@@ -434,16 +465,38 @@ second value for the same reason, and the loop logs them as
 `calendar_degraded`. A symbol dropped silently is one the model sees a live quote
 for with no history and no warning.
 
-**Two strategies are still not evaluable, and must keep saying so.** Trend break
-needs intraday bars, because on a daily bar a close through a level and a wick
-that closed back inside are the same row, and telling those apart is the whole
-strategy. News reaction needs the same, plus a spread history. Both keep a
-`requires` naming exactly what is absent. Trimming those to nothing because the
-repo now has *some* history would remove the warning and leave the gap, which is
-worse than never having added bars at all.
+**Intraday bars now exist, and `src/bot/intraday.py` answers the one question
+they were needed for.** `Broker.get_intraday_bars` fetches five-minute bars and
+that module counts, against the prior session's high and low, how many bars
+**closed** beyond the level and how many only **wicked** through it — plus the
+break bar's volume as a multiple of its own recent average, and whether the
+level has been **reclaimed**. Trend break is evaluable on that and carries no
+`requires` any more.
 
-The remaining work is `get_intraday_bars` on the `Broker` protocol, which Alpaca
-also supplies free, and a spread history.
+Three things there are load-bearing:
+
+- **The wick/close counts are computed, never inferred.** Handing over bars and
+  asking which was a break is the same failure as asking for a 200-day average:
+  a confident answer nobody can check. Same rule as `indicators.py`.
+- **`reclaimed` is its own field because the failed break is the way this
+  strategy loses money.** A level gives way, everyone piles in, price closes
+  back inside within the hour. `is_clean_break` deliberately returns False for
+  it: broke-and-failed is not a weaker version of broke.
+- **Volume is only ever a ratio.** Alpaca's free feed is an IEX sample rather
+  than consolidated tape, so an absolute figure would mislead. Both sides of the
+  ratio come from the same partial sample, which makes the comparison fair.
+
+**News reaction is still not fully evaluable and must keep saying so.** Intraday
+bars closed one of its two gaps; the other is a **spread history**, and bars do
+not carry a spread. The context shows the current spread with nothing to compare
+it against, so "the spread has normalised" cannot be checked. Its `requires` now
+names only that. Deleting it alongside the gap that *was* fixed would remove the
+warning and leave the hole — `tests/test_strategy.py` fails the build if it goes.
+
+A session is grouped by **UTC date**, which is exactly right for US equities
+(14:00-21:00 UTC, never crossing midnight) and conventional for crypto. It would
+be wrong for a market whose session spans midnight UTC, which is CME Globex if a
+second broker ever arrives.
 
 ### Hermes ships a large surface, and both ways of trimming it fail quietly
 
@@ -575,7 +628,10 @@ src/bot/
   broker.py             Broker Protocol + AlpacaBroker + MockBroker. Daily bars and
                         resting orders live here.
   indicators.py         Averages, ATR, volume ratio, swing levels. Pure functions over
-                        bars. Computed in Python so the model never derives them.
+                        daily bars. Computed in Python so the model never derives them.
+  intraday.py           Five-minute bars: did price CLOSE beyond a level or only wick
+                        through it, on what volume, and was it reclaimed. The
+                        distinction trend_break turns on.
   mcp_server.py         MCP tools: check_order, place_order, get_risk_status, ...
   models.py             Domain models. Quantities are shares/coin units, never "lots".
   config.py             Typed env + rules loader. Validators reject incoherent limits.
@@ -625,7 +681,7 @@ reference/              Third-party projects we borrow from. See reference/STATU
 ## Running it
 
 ```sh
-.venv/bin/python -m pytest              # full suite (389 tests)
+.venv/bin/python -m pytest              # full suite (412 tests)
 electrum-bot smoketest --mock           # no credentials needed
 electrum-bot smoketest                  # needs Alpaca paper keys
 electrum-bot loop                       # proposes and vets; places nothing

@@ -118,6 +118,28 @@ Each assessment needs `symbol`, `stance`, `reasoning`, and — when the stance i
 Ground every `reasoning` in the figures supplied in the Indicators section. Do
 not restate a number that is reported as unavailable, and do not compute one.
 
+### the watch list is checked, so write triggers that can be
+
+The market context carries a "What you said last cycle" section holding your
+own previous stances and the `waiting_for` you attached to each. You have no
+memory between cycles; that section is the only thing you know about what you
+said before, and it exists so a watch is a commitment rather than a note to
+nobody.
+
+For every symbol carried over, say in this cycle's `reasoning` whether the
+trigger has fired, judged against the figures in front of you now:
+
+- **Fired** — say so, and either propose it or state plainly what stopped you.
+- **Not yet** — say which part is still missing, and repeat the trigger only if
+  you would write it again today.
+- **Stale** — the reading that produced it no longer holds. Drop it and say so.
+  A trigger you wrote is not evidence. Restating one you can no longer justify
+  is worse than passing, because it looks like conviction.
+
+The section states how long ago it was recorded. Cycles are skipped while the
+market is shut, so "last cycle" on a Monday can be Friday afternoon. Treat an
+old trigger as a note to re-check, never as a standing order.
+
 ### position_plans — why you are still in, and what gets you out
 
 For each open position: `symbol`, `action` (`hold`, `close` or `tighten_stop`),

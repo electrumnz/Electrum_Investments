@@ -131,20 +131,26 @@ TREND_BREAK = Strategy(
         "the next structural level, or a measured move equal to the height of the "
         "range that broke"
     ),
-    requires=[
-        "intraday bars, so a break can be told from a wick",
-    ],
     notes=(
-        "Daily bars, volume against its average, the most recent confirmed swing high "
-        "and low, and the 60-session close range ARE supplied, in the Indicators "
-        "section. What is missing is the intraday detail: on a daily bar a close "
-        "through a level and a wick through it that closed back inside are the same "
-        "row, and telling those apart is the entire strategy. "
-        "SPY is the vehicle for an S&P 500 view here. Alpaca does not offer futures, "
-        "so ES and MES are unavailable without a second broker — see docs/HANDOFF.md. "
-        "The failed break is the most common way to lose money on this: a level gives "
-        "way, everyone piles in, and price closes back inside within the hour. The "
-        "invalidation above is deliberately tight for that reason."
+        "This is now evaluable, and the figures are supplied rather than left to "
+        "you. The Indicators section carries daily bars, volume against its "
+        "average, the most recent confirmed swing high and low, and the 60-session "
+        "close range. The Intraday section carries the part that used to be "
+        "missing: for the prior session's high and low it states how many "
+        "five-minute bars CLOSED beyond the level, how many only wicked through, "
+        "the volume on the breaking bar as a multiple of its recent average, and "
+        "whether the level has been RECLAIMED. "
+        "Use those counts. Do not read 'wicked through' as a break, and do not "
+        "call a break on a symbol whose intraday bars are reported as "
+        "unavailable — for that symbol the distinction genuinely cannot be made. "
+        "The failed break is the most common way to lose money on this: a level "
+        "gives way, everyone piles in, and price closes back inside within the "
+        "hour. That case is computed for you and labelled RECLAIMED, and it is a "
+        "reason to stand aside rather than a cheaper entry. The invalidation "
+        "above is deliberately tight for the same reason. "
+        "SPY is the vehicle for an S&P 500 view here. Alpaca does not offer "
+        "futures, so ES and MES are unavailable without a second broker — see "
+        "docs/HANDOFF.md."
     ),
 )
 
@@ -163,14 +169,19 @@ NEWS_REACTION = Strategy(
     invalidation="a return through the level established after the announcement",
     exit="a measured move, or the close of the session in which the news landed",
     requires=[
-        "intraday bars covering the announcement and the half hour after it",
-        "a spread history to judge 'normalised' against",
+        "a spread history to judge 'normalised' against — the market context "
+        "carries the current spread and nothing to compare it to",
     ],
     notes=(
-        "The earnings calendar IS available, through Finnhub, and it is what the "
-        "news blackout gate reads. The two missing pieces are both intraday: on a "
-        "daily bar the initial spike and the direction that survived it are one "
-        "number, and there is no spread history to say what normal looks like. "
+        "PARTLY evaluable, and the missing piece is named above rather than "
+        "waved at. The earnings calendar IS available, through Finnhub, and it "
+        "is what the news blackout gate reads. Intraday bars ARE now supplied, "
+        "so the initial spike and the direction that survived it are no longer "
+        "the same number. What is still absent is a spread history: the context "
+        "gives the current spread on one line and nothing to say whether that is "
+        "wide or ordinary for this symbol, so the entry condition 'the spread "
+        "has normalised' cannot be checked. Do not substitute a guess at what "
+        "normal looks like. "
         "This works WITH the news blackout in config/rules.yaml, not against it. "
         "The blackout refuses new positions for 15 minutes either side of a "
         "scheduled announcement, which forbids trading INTO the release — the part "

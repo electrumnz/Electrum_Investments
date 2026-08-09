@@ -385,6 +385,13 @@ class MarketInputs(BaseModel):
     news_windows: list[str] = Field(default_factory=list)
     indicators: dict[str, str] = Field(default_factory=dict)
     symbols_without_history: list[str] = Field(default_factory=list)
+
+    # Both optional with a default, like everything else here: the audit log is
+    # append-only and never migrated, so a reader that rejected a line written
+    # before these existed would throw away the history it exists to preserve.
+    intraday: dict[str, str] = Field(default_factory=dict)
+    symbols_without_intraday: list[str] = Field(default_factory=list)
+
     calendar_degraded: bool = False
     social_degraded: bool = False
 
