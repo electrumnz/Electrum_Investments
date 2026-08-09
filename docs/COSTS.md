@@ -49,23 +49,29 @@ after that — a 50% rise. If you are on Sonnet, note the date.
 
 ### Default configuration
 
-15-minute cadence, US equities session only (14:00–21:00 UTC), weekdays:
+15-minute cadence, **running continuously** — not only during the equities
+session. `cmd_loop` calls Claude every cycle and the session window is enforced
+afterwards, by `RiskGate.evaluate`, on whatever gets proposed.
 
-- 7 hours/day ÷ 15 min = **28 calls/day** → ~**600 calls/month**
-- Each call: ~2,000 tokens of system prompt (cached) + ~1,500 of market context + ~400 out
+That is deliberate rather than an oversight. `config/rules.yaml` gives crypto
+`sessions_utc: [[0, 24]]`, so the moment that sleeve is enabled the overnight
+cycles stop being idle and start being the point. Gating the model call on the
+equities window would be work to undo later.
 
-On Haiku with the 1-hour cache:
+- 24 hours ÷ 15 min = **96 calls/day** → ~**2,900 calls/month**
+- Measured on a real cycle: 2,072 input tokens, 129 output, **$0.0027 per call**
 
-| Component | Monthly tokens | Cost |
+| | Calls/month | Cost |
 |---|---|---|
-| Cached system prompt (reads) | 1.2M | $0.12 |
-| Cache writes (~7/day) | 0.3M | $0.60 |
-| Uncached input | 0.9M | $0.90 |
-| Output | 0.24M | $1.20 |
-| **Total** | | **~$3/month** |
+| **Continuous (what it does)** | ~2,900 | **~$8/month** |
+| Equities session only, for comparison | ~590 | ~$1.60 |
 
-Round up to **$5–15** for retries, longer contexts as you add news and sentiment,
-and days when you experiment.
+Round up to **$8–15** for retries, longer contexts as news and sentiment are
+added, and days when you experiment.
+
+Roughly four in five of those calls happen when no equity trade could be
+approved anyway. That is the price of leaving the door open for crypto, and at
+this scale it is a rounding error — but it is worth knowing it is a choice.
 
 ### Why the cache TTL matters
 

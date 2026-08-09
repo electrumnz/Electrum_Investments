@@ -138,6 +138,19 @@ journalctl -u mudhorn-bot -f
 
 Both restart on failure and come back after a reboot.
 
+**If you rebooted before filling in `.env`, expect a wall of old tracebacks.**
+The units are enabled at provisioning time, so a reboot starts them whether or
+not credentials exist yet. With a blank `.env` the bot exits with
+`Could not resolve authentication method`, systemd retries five times, hits its
+rate limit, and stops. That is correct behaviour, and `systemctl start` clears
+it once the keys are in — but `journalctl -n 30` will show you the dead run
+rather than the live one, because the failed run is longer. Scope the log to the
+run you care about:
+
+```sh
+journalctl -u mudhorn-bot --since "$(systemctl show -p ActiveEnterTimestamp --value mudhorn-bot)" --no-pager
+```
+
 ## 5. Reach the dashboard at all
 
 On a laptop the dashboard was on the same machine as the browser, so
