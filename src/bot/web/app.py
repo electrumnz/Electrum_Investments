@@ -23,7 +23,7 @@ from ..audit import AuditLog
 from ..config import Env, Rules, load_rules
 from ..journal import Journal
 from ..metrics import build_report
-from ..models import AccountSnapshot
+from ..models import AccountSnapshot, WorkingOrder
 from ..options import alerts_for_positions
 from . import render
 from .chat import HermesBridge
@@ -51,11 +51,18 @@ def build_app(
     resolved_journal = journal or Journal()
     audit = audit_log or AuditLog()
 
-    def _account() -> AccountSnapshot:
-        """Broker state with open risk filled in from the journal.
+    def _account_orders_prices() -> tuple[AccountSnapshot, list[WorkingOrder], dict[str, float]]:
+        """One broker session for everything the Board needs.
 
-        Same rule as everywhere else: the broker cannot report open risk, so a
-        snapshot that skipped this would understate it silently.
+        Open risk is filled in from the journal, as on every other path that
+        hands out a snapshot: the broker holds stop-losses as separate orders
+        and cannot report it, so a snapshot that skipped this would understate
+        it silently.
+
+        Opening a second connection per widget would triple the round trips on
+        a page refreshed by hand. Orders and quotes degrade to empty rather than
+        failing the page: a broker hiccup should cost the pending list, not the
+        equity figure next to it.
         """
         from ..main import build_broker
 
@@ -64,7 +71,17 @@ def build_app(
         try:
             snapshot = broker.get_account()
             snapshot.open_risk_usd = resolved_journal.open_risk_usd()
-            return snapshot
+            try:
+                orders = broker.get_open_orders()
+            except Exception:
+                orders = []
+            prices: dict[str, float] = {}
+            for symbol in {o.symbol for o in orders}:
+                try:
+                    prices[symbol] = broker.get_tick(symbol).mid
+                except Exception:
+                    continue
+            return snapshot, orders, prices
         finally:
             broker.disconnect()
 
@@ -73,7 +90,7 @@ def build_app(
 
     @app.get("/", response_class=HTMLResponse)
     def board() -> str:
-        account = _account()
+        account, orders, prices = _account_orders_prices()
         open_trades = resolved_journal.open_trades()
 
         journalled = {t.symbol for t in open_trades}
@@ -99,6 +116,8 @@ def build_app(
             resolved_journal.consecutive_losses(
                 resolved_rules.stand_down.loss_threshold_r
             ),
+            orders,
+            prices,
         )
         return _page("Board", "/", body)
 

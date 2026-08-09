@@ -151,6 +151,25 @@ published.
 
 `brand/` is public and **every figure on it is invented**. It is a shop window.
 
+**A cycle records what it considered, not only what it proposed.** `Decision`
+carries `assessments` (one per symbol, with a stance of take/watch/pass/blocked
+and, for a watch, the observable condition that would trigger it),
+`position_plans` (why each open position is still on and what would close it)
+and `inputs` (the headlines, blackout windows and indicator readings the model
+was actually shown). Every one is optional with a default, because the audit log
+is append-only and never migrated: a reader that rejected yesterday's format
+would throw away the history it exists to preserve.
+
+Those fields cost output tokens on a quiet cycle, which is most cycles, and that
+is the point. Without them a quiet cycle records "no proposals" and nothing
+else, so "nothing met the conditions" reads identically to "the loop never
+looked at QQQ".
+
+`position_plans` are **advisory and never executed**. Closing a position and
+moving a stop sit outside the proposal path deliberately, so the page says so
+plainly rather than leaving an operator to assume a "close" recommendation was
+acted on.
+
 **The Decisions page is the only surface on which a rejected proposal exists.**
 A proposal the gate refuses never becomes a trade, so it reaches neither the
 journal nor the broker: the reasoning lives in `audit/*.jsonl` and nowhere else.
@@ -168,6 +187,16 @@ Three properties there are load-bearing:
   money did not move gets labelled as the cycle where it did.
 - **"Held" is a normal outcome, styled as one.** Doing nothing is frequently
   correct and the page must not read it as a failure.
+- **A watch with no named trigger is called out as empty.** "Waiting for more
+  confirmation" is not a plan, and rendering it as one would let the model look
+  like it has a view when it does not.
+
+**Never put a backslash in `render.STYLES`.** It is an ordinary Python string,
+so a CSS hex escape is read by *Python* first, as an octal escape: the
+stylesheet receives a control character and the browser draws a tofu box beside
+the leftover digits. Nothing warns, `ruff` does not care, and it is invisible
+unless somebody looks at the rendered page. Use the literal character.
+`tests/test_web.py` fails the build if a control character appears in there.
 
 **Settings shows the limits and offers no way to change them.** A settings
 screen that could widen a cap would be used to widen one during a losing run,
@@ -427,7 +456,8 @@ src/bot/
   journal.py            SQLite trade store + persistent stand-down state.
   stand_down.py         Consecutive-loss breaker: when to trigger, when to escalate.
   options.py            OCC parsing and expiry safety. Protective only.
-  broker.py             Broker Protocol + AlpacaBroker + MockBroker. Daily bars live here.
+  broker.py             Broker Protocol + AlpacaBroker + MockBroker. Daily bars and
+                        resting orders live here.
   indicators.py         Averages, ATR, volume ratio, swing levels. Pure functions over
                         bars. Computed in Python so the model never derives them.
   mcp_server.py         MCP tools: check_order, place_order, get_risk_status, ...
@@ -475,7 +505,7 @@ reference/              Third-party projects we borrow from. See reference/STATU
 ## Running it
 
 ```sh
-.venv/bin/python -m pytest              # full suite (302 tests)
+.venv/bin/python -m pytest              # full suite (310 tests)
 electrum-bot smoketest --mock           # no credentials needed
 electrum-bot smoketest                  # needs Alpaca paper keys
 electrum-bot loop                       # proposes and vets; places nothing

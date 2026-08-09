@@ -24,8 +24,9 @@ from .data.calendar import CalendarFeed, EmptyCalendar
 from .data.finnhub import FinnhubCalendar
 from .data.marketaux import MarketauxNews
 from .data.news import EmptyNews, NewsFeed
+from .indicators import summarise as summarise_indicators
 from .journal import Journal
-from .models import Decision
+from .models import Decision, MarketInputs
 from .options import alerts_for_positions
 from .reconcile import apply_journal_state, reconcile, record_fill
 from .risk import RiskGate
@@ -200,10 +201,11 @@ def cmd_loop(
                         detail=alert.message,
                     )
 
+            headlines = news.recent_headlines(rules.allowed_symbols)
             context = build_market_context(
                 account=account,
                 ticks=ticks,
-                headlines=news.recent_headlines(rules.allowed_symbols),
+                headlines=headlines,
                 news_windows=news_windows,
                 activity=activity,
                 expiry_alerts=expiry_alerts,
@@ -211,6 +213,26 @@ def cmd_loop(
                 symbols_without_history=no_history,
             )
             decision, usage = claude.propose(context)
+
+            # Recorded alongside the decision, not merely rendered into the
+            # prompt and discarded. "Why did it pass on SPY on Tuesday" cannot
+            # be answered from a snapshot taken later: it needs the headlines,
+            # the calendar and the indicators that were actually in front of the
+            # model at the time.
+            inputs = MarketInputs(
+                headlines=headlines,
+                news_windows=[
+                    f"{w.timestamp.isoformat(timespec='minutes')} affects "
+                    f"{', '.join(sorted(w.affected_symbols))}"
+                    for w in news_windows
+                ],
+                indicators={
+                    symbol: summarise_indicators(ind)
+                    for symbol, ind in sorted(indicators.items())
+                },
+                symbols_without_history=no_history,
+                calendar_degraded=bool(getattr(calendar, "is_degraded", False)),
+            )
 
             verdicts = []
             executed = []
@@ -271,6 +293,9 @@ def cmd_loop(
                     proposals=decision.proposals,
                     verdicts=verdicts,
                     executed=executed,
+                    assessments=decision.assessments,
+                    position_plans=decision.position_plans,
+                    inputs=inputs,
                     claude_input_tokens=usage.input_tokens,
                     claude_output_tokens=usage.output_tokens,
                     claude_cached_tokens=usage.cache_read_tokens,

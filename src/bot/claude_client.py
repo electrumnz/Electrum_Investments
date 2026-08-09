@@ -21,11 +21,18 @@ import anthropic
 from pydantic import BaseModel, Field
 
 from .config import CLAUDE_MODEL_IDS, CLAUDE_PRICING_USD_PER_MTOK, ClaudeTier, Env, Rules
-from .models import OrderProposal
+from .models import OrderProposal, PositionPlan, SymbolAssessment
 
 
 class ClaudeDecision(BaseModel):
-    """Top-level output Claude must produce on every call."""
+    """Top-level output Claude must produce on every call.
+
+    `assessments` and `position_plans` cost output tokens on a cycle that
+    proposes nothing, which is most cycles. That is the point. Without them a
+    quiet cycle records only "no proposals", and "nothing met the conditions"
+    is indistinguishable from "the loop never looked", which are very different
+    states to be in and only one of them is fine.
+    """
 
     market_assessment: str = Field(description="One-paragraph read of the current market.")
     proposals: list[OrderProposal] = Field(
@@ -33,6 +40,21 @@ class ClaudeDecision(BaseModel):
         description=(
             "Zero or more order proposals. An empty list means stand pat, "
             "which is a valid and often correct answer."
+        ),
+    )
+    assessments: list[SymbolAssessment] = Field(
+        default_factory=list,
+        description=(
+            "One entry for EVERY tradeable symbol you were given indicators for, "
+            "including the ones you are not proposing. This is how the operator "
+            "sees what you considered."
+        ),
+    )
+    position_plans: list[PositionPlan] = Field(
+        default_factory=list,
+        description=(
+            "One entry per position currently open, saying why it is still held "
+            "and what would close it. Advisory only: nothing here is executed."
         ),
     )
 
@@ -66,10 +88,45 @@ Return JSON with:
 - `market_assessment`: one paragraph on the current market read.
 - `proposals`: a list of order proposals. An empty list is a valid answer and is
   the right one whenever no high-quality setup exists.
+- `assessments`: **one entry for every symbol you were given indicators for**,
+  including the ones you are passing on.
+- `position_plans`: one entry for every position currently open.
 
 Each proposal needs `symbol`, `direction` (buy or sell), `qty` (shares or coin
 units, not lots), `limit_price`, `stop_loss_price`, `take_profit_price`, and a
 `rationale` of at least one full sentence.
+
+### assessments — say what you looked at, not only what you took
+
+A cycle that proposes nothing must still record what you examined. Otherwise
+"nothing met the conditions" and "the loop never looked at QQQ" are the same
+entry afterwards, and only one of them is a working bot.
+
+Each assessment needs `symbol`, `stance`, `reasoning`, and — when the stance is
+`watch` — `waiting_for`.
+
+- `take` — you are proposing it this cycle.
+- `watch` — the setup is forming but a condition is not met yet. `waiting_for`
+  must name **the observable thing that would trigger it**: a price level, a
+  figure, a session. "SPY closing below 641.20, roughly 1 ATR under the 20-day"
+  is useful. "More confirmation" is not, and will be shown to the operator as
+  the empty statement it is.
+- `pass` — you examined it and there is nothing there. Say briefly why.
+- `blocked` — you would take it, but a rule forbids it or the data is missing.
+  Name which.
+
+Ground every `reasoning` in the figures supplied in the Indicators section. Do
+not restate a number that is reported as unavailable, and do not compute one.
+
+### position_plans — why you are still in, and what gets you out
+
+For each open position: `symbol`, `action` (`hold`, `close` or `tighten_stop`),
+`thesis_intact`, `reasoning`, `waiting_for`, `invalidation`.
+
+**These are advisory and are not executed.** Closing a position and moving a
+stop sit outside the proposal path deliberately. Write them for a person who
+wants to know why the position is still on and what would end it — name the
+level or the target, not a mood.
 
 ## How to behave
 

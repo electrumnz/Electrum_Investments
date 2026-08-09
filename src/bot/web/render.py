@@ -30,7 +30,7 @@ from datetime import UTC, datetime
 from ..audit import AuditView, DecisionEntry
 from ..config import Env, Rules
 from ..metrics import JournalReport, render_excursions, render_summary
-from ..models import AccountSnapshot, StandDownState, Trade
+from ..models import AccountSnapshot, StandDownState, Trade, WorkingOrder
 from ..options import ExpiryAlert
 
 STYLES = """
@@ -191,6 +191,22 @@ tr.why .quote{border-left:2px solid var(--patina);padding-left:.875rem;
 .chain .rung.gate.ok{color:var(--gain)}
 .reasons{margin:.35rem 0 0;padding-left:1.1rem;color:var(--loss);font-size:.8125rem}
 .reasons li{margin:.15rem 0}
+.pill.watch{color:var(--amber)}
+.considered{padding:.5rem 0;border-bottom:1px dashed var(--slate)}
+.considered:last-child{border-bottom:0}
+.considered .chain{margin-top:.4rem;border-left-color:var(--slate)}
+.feed{margin:.3rem 0 0;padding-left:1.1rem;font-size:.8125rem;color:var(--pewter)}
+.feed li{margin:.15rem 0}
+details.step summary{cursor:pointer;list-style:none}
+details.step summary::-webkit-details-marker{display:none}
+/* Literal characters, never CSS hex escapes. STYLES is an ordinary Python
+   string, so a CSS escape like backslash-2-5-B-8 is read by PYTHON first,
+   as an OCTAL escape, and the stylesheet receives a control character. The
+   browser then draws a tofu box beside the leftover digits. Nothing warns.
+   Keep backslashes out of this string altogether. */
+details.step summary::before{content:"▸ ";color:var(--pewter)}
+details.step[open] summary::before{content:"▾ "}
+details.step summary:hover{color:var(--bone)}
 
 /* ------------------------------------------------------------------ chat */
 .chat{display:flex;flex-direction:column;gap:1rem}
@@ -461,6 +477,8 @@ def board(
     open_trades: list[Trade],
     stand_down: StandDownState,
     consecutive_losses: int,
+    orders: list[WorkingOrder] | None = None,
+    prices: dict[str, float] | None = None,
 ) -> str:
     equity = account.equity_usd
     open_risk_pct = (account.open_risk_usd / equity * 100) if equity else 0.0
@@ -537,6 +555,72 @@ def board(
         + '<section class="block"><h2>Open positions</h2>'
         + _positions(account, open_trades, equity)
         + "</section>"
+        + _working_orders(orders or [], prices or {})
+    )
+
+
+def _working_orders(orders: list[WorkingOrder], prices: dict[str, float]) -> str:
+    """Orders resting at the broker, and how far the market is from filling them.
+
+    The bot submits limit orders only, deliberately, so one that does not reach
+    its price simply waits. Without this the Board shows no position and no
+    explanation, when the truth is that an order is sitting there needing a move
+    that may never come.
+    """
+    if not orders:
+        return (
+            '<section class="block"><h2>Pending orders</h2>'
+            '<div class="scroll"><p class="empty">Nothing resting at the broker. '
+            "Every order either filled or was never sent.</p></div></section>"
+        )
+
+    rows = ""
+    for o in orders:
+        price = prices.get(o.symbol)
+        gap = o.distance_to_fill(price) if price else None
+        gap_text = (
+            "n/a"
+            if gap is None
+            else (f"{gap:+.2f}% away" if abs(gap) > 0.005 else "at the limit")
+        )
+        # A positive gap means the price still has to travel; that is the
+        # difference between waiting and never filling.
+        gap_cls = "muted" if gap is None or gap <= 0 else ""
+
+        # Each cell is built before the row, never with a trailing conditional
+        # on a multi-part f-string: the ternary binds to the whole expression,
+        # not the last fragment, and silently eats the rest of the row.
+        limit_cell = (
+            f"{o.limit_price:,.4f}" if o.limit_price is not None else "market"
+        )
+        market_cell = f"{price:,.4f}" if price else "unknown"
+        filled_note = (
+            f' <span class="muted">({o.filled_qty:g} filled)</span>'
+            if o.filled_qty
+            else ""
+        )
+        submitted = _when(o.submitted_at) if o.submitted_at else "unknown"
+        status = o.status.value.replace("_", " ")
+
+        rows += (
+            f'<tr class="data"><td data-l="Symbol"><b>{_e(o.symbol)}</b></td>'
+            f'<td data-l="Side">{_e(o.direction.value)}</td>'
+            f'<td data-l="Status"><span class="pill hold">{_e(status)}</span></td>'
+            f'<td data-l="Qty" class="r num">{o.qty:g}{filled_note}</td>'
+            f'<td data-l="Limit" class="r num">{limit_cell}</td>'
+            f'<td data-l="Market" class="r num">{market_cell}</td>'
+            f'<td data-l="Needs" class="r num {gap_cls}">{gap_text}</td>'
+            f'<td data-l="Submitted">{_e(submitted)}</td></tr>'
+        )
+
+    return (
+        '<section class="block"><h2>Pending orders</h2>'
+        '<div class="scroll"><table><caption>"Needs" is how far the market still '
+        "has to move for the limit to fill. A large positive number is an order "
+        "that is not going to fill today.</caption>"
+        "<thead><tr><th>Symbol</th><th>Side</th><th>Status</th><th class=r>Qty</th>"
+        "<th class=r>Limit</th><th class=r>Market</th><th class=r>Needs</th>"
+        f"<th>Submitted</th></tr></thead><tbody>{rows}</tbody></table></div></section>"
     )
 
 
@@ -674,6 +758,165 @@ def decisions(view: AuditView, *, shown: int = 40) -> str:
     return body
 
 
+STANCE_PILL = {
+    "take": "ok",
+    "watch": "watch",
+    "pass": "hold",
+    "blocked": "no",
+}
+
+
+def _considered(entry: DecisionEntry) -> str:
+    """Every symbol the model looked at, not only the ones it proposed.
+
+    Without this a quiet cycle records "no proposals" and nothing else, and
+    "nothing met the conditions" reads identically to "the loop never looked at
+    QQQ". Only one of those is a working bot.
+    """
+    assessments = entry.decision.assessments
+    if not assessments:
+        return ""
+
+    rows = ""
+    for a in sorted(assessments, key=lambda x: (x.stance != "watch", x.symbol)):
+        waiting = ""
+        if a.stance == "watch":
+            waiting = (
+                f'<div class="rung"><span class="lbl">Trigger</span>{_e(a.waiting_for)}</div>'
+                if a.waiting_for.strip()
+                else '<div class="rung"><span class="lbl">Trigger</span>'
+                '<span class="muted">no condition named, so this is a feeling '
+                "rather than a plan</span></div>"
+            )
+        rows += (
+            '<div class="considered">'
+            f'<div class="what"><b>{_e(a.symbol)}</b>'
+            f'<span class="pill {STANCE_PILL.get(a.stance, "hold")}">{_e(a.stance)}</span>'
+            "</div>"
+            f'<div class="chain"><div class="rung">{_e(a.reasoning)}</div>{waiting}</div>'
+            "</div>"
+        )
+
+    watching = sum(1 for a in assessments if a.stance == "watch")
+    return (
+        f'<div class="step"><p class="eyebrow">Considered '
+        f"({len(assessments)} symbol(s)"
+        + (f", {watching} on watch" if watching else "")
+        + f")</p>{rows}</div>"
+    )
+
+
+def _held(entry: DecisionEntry) -> str:
+    """Why each open position is still open, and what would end it."""
+    plans = entry.decision.position_plans
+    if not plans:
+        return ""
+
+    rows = ""
+    for p in plans:
+        pill = {"hold": "ok", "close": "no", "tighten_stop": "watch"}.get(p.action, "hold")
+        rows += (
+            '<div class="considered">'
+            f'<div class="what"><b>{_e(p.symbol)}</b>'
+            f'<span class="pill {pill}">{_e(p.action.replace("_", " "))}</span>'
+            + (
+                ""
+                if p.thesis_intact
+                else '<span class="pill no">thesis broken</span>'
+            )
+            + "</div><div class=\"chain\">"
+            f'<div class="rung"><span class="lbl">Still in</span>{_e(p.reasoning)}</div>'
+            + (
+                f'<div class="rung"><span class="lbl">Closes on</span>'
+                f"{_e(p.waiting_for)}</div>"
+                if p.waiting_for.strip()
+                else ""
+            )
+            + (
+                f'<div class="rung"><span class="lbl">Wrong if</span>'
+                f"{_e(p.invalidation)}</div>"
+                if p.invalidation.strip()
+                else ""
+            )
+            + "</div></div>"
+        )
+
+    return (
+        '<div class="step"><p class="eyebrow">Open positions reviewed</p>'
+        f"{rows}"
+        '<p class="note" style="margin-top:.6rem">Advisory only. The loop does '
+        "not act on these: closing a position and moving a stop sit outside the "
+        "proposal path, so nothing here reached the broker.</p></div>"
+    )
+
+
+def _read(entry: DecisionEntry) -> str:
+    """What the model was actually shown when it decided.
+
+    Recorded with the decision rather than reconstructed later. A snapshot taken
+    now answers a different question from the one an old cycle raises.
+    """
+    inputs = entry.decision.inputs
+    if inputs is None:
+        return ""
+
+    parts = ""
+    if inputs.headlines:
+        items = "".join(f"<li>{_e(h)}</li>" for h in inputs.headlines[:8])
+        more = (
+            f'<li class="muted">and {len(inputs.headlines) - 8} more</li>'
+            if len(inputs.headlines) > 8
+            else ""
+        )
+        parts += f'<div class="rung"><span class="lbl">Headlines</span><ul class="feed">{items}{more}</ul></div>'
+    else:
+        parts += (
+            '<div class="rung"><span class="lbl">Headlines</span>'
+            '<span class="muted">none supplied. Marketaux gates nothing, so this '
+            "is context the model did without.</span></div>"
+        )
+
+    if inputs.news_windows:
+        items = "".join(f"<li>{_e(w)}</li>" for w in inputs.news_windows)
+        parts += f'<div class="rung"><span class="lbl">Blackouts</span><ul class="feed">{items}</ul></div>'
+    elif inputs.calendar_degraded:
+        parts += (
+            '<div class="rung gate no"><span class="lbl">Blackouts</span>'
+            "the earnings calendar was DEGRADED. Zero windows here means the feed "
+            "failed, not that there were no announcements, and the blackout rule "
+            "could not fire.</div>"
+        )
+    else:
+        parts += (
+            '<div class="rung"><span class="lbl">Blackouts</span>'
+            '<span class="muted">no announcements inside the window</span></div>'
+        )
+
+    if inputs.symbols_without_history:
+        parts += (
+            '<div class="rung gate no"><span class="lbl">No history</span>'
+            f"{_e(', '.join(inputs.symbols_without_history))} had no bars, so no "
+            "indicators were computed for them.</div>"
+        )
+
+    if inputs.indicators:
+        rows = "".join(
+            f'<tr class="data"><td data-l="Symbol"><b>{_e(s)}</b></td>'
+            f'<td data-l="Reading" class="num">{_e(v)}</td></tr>'
+            for s, v in sorted(inputs.indicators.items())
+        )
+        parts += (
+            '<div class="rung"><span class="lbl">Indicators</span>'
+            '<div class="scroll" style="margin-top:.4rem"><table><tbody>'
+            f"{rows}</tbody></table></div></div>"
+        )
+
+    return (
+        '<details class="step"><summary class="eyebrow">What it read</summary>'
+        f'<div class="chain" style="margin-top:.7rem">{parts}</div></details>'
+    )
+
+
 def _cycle(entry: DecisionEntry) -> str:
     d = entry.decision
     pill = {
@@ -704,6 +947,10 @@ def _cycle(entry: DecisionEntry) -> str:
 
     if d.notes:
         out += f'<div class="assessment"><q>{_e(d.notes)}</q></div>'
+
+    out += _considered(entry)
+    out += _held(entry)
+    out += _read(entry)
 
     if not d.proposals:
         out += (

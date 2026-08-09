@@ -22,10 +22,15 @@ from bot.journal import Journal
 from bot.models import (
     Decision,
     Direction,
+    MarketInputs,
     OrderProposal,
     OrderResult,
+    PositionAction,
+    PositionPlan,
     RiskVerdict,
+    Stance,
     StandDownState,
+    SymbolAssessment,
     Trade,
 )
 from bot.web.app import build_app
@@ -428,3 +433,193 @@ def test_a_journal_trade_the_broker_does_not_hold_is_flagged(client, journal):
     assert "Open risk may be overstated" in body
     assert "SPY" in body
     assert "the real figure is lower" in body
+
+
+# ------------------------------------------------ what it considered and holds
+
+
+def test_symbols_considered_but_not_proposed_still_reach_the_page(audited):
+    """A quiet cycle must record what was examined.
+
+    Otherwise "nothing met the conditions" and "the loop never looked at QQQ"
+    are the same entry afterwards, and only one of them is a working bot.
+    """
+    log, client = audited
+    log.record(
+        _decision(
+            notes="Nothing stretched far enough.",
+            assessments=[
+                SymbolAssessment(
+                    symbol="QQQ",
+                    stance=Stance.WATCH,
+                    reasoning="0.4 ATR under the 20-day, not the 1.0 the entry needs.",
+                    waiting_for="QQQ closing below 771.20, about 1 ATR under the 20-day",
+                ),
+                SymbolAssessment(
+                    symbol="KO",
+                    stance=Stance.PASS,
+                    reasoning="Below its 200-day average, so the trend filter fails.",
+                ),
+            ],
+        )
+    )
+
+    body = client.get("/decisions").text
+
+    assert "Considered" in body
+    assert "QQQ" in body and "KO" in body
+    assert "watch" in body and "pass" in body
+    assert "closing below 771.20" in body
+    assert "trend filter fails" in body
+
+
+def test_a_watch_with_no_trigger_is_called_out_as_empty(audited):
+    """"Waiting for more confirmation" is not a plan and must not read as one."""
+    log, client = audited
+    log.record(
+        _decision(
+            assessments=[
+                SymbolAssessment(
+                    symbol="SPY",
+                    stance=Stance.WATCH,
+                    reasoning="Setup forming but not there yet.",
+                    waiting_for="   ",
+                )
+            ]
+        )
+    )
+
+    assert "no condition named" in client.get("/decisions").text
+
+
+def test_the_reasoning_for_staying_in_a_position_reaches_the_page(audited):
+    log, client = audited
+    log.record(
+        _decision(
+            position_plans=[
+                PositionPlan(
+                    symbol="SPY",
+                    action=PositionAction.HOLD,
+                    thesis_intact=True,
+                    reasoning="Reverted half the distance to the 20-day; thesis working.",
+                    waiting_for="the 20-day average at 651.40, or the stop at 631.40",
+                    invalidation="a daily close below 631.40",
+                )
+            ]
+        )
+    )
+
+    body = client.get("/decisions").text
+
+    assert "Open positions reviewed" in body
+    assert "thesis working" in body
+    assert "20-day average at 651.40" in body
+    assert "close below 631.40" in body
+    # It must be unmistakable that nothing here was acted on.
+    assert "Advisory only" in body
+
+
+def test_the_news_the_model_read_is_recorded_with_the_decision(audited):
+    """A snapshot taken later answers a different question from the one an old
+    cycle raises."""
+    log, client = audited
+    log.record(
+        _decision(
+            inputs=MarketInputs(
+                headlines=["Fed holds rates steady", "Chip orders soften"],
+                news_windows=["2026-05-04T15:30 affects KO"],
+                indicators={"SPY": "close 648.20, sma20 651.40, trend above"},
+                symbols_without_history=["JNJ"],
+            )
+        )
+    )
+
+    body = client.get("/decisions").text
+
+    assert "What it read" in body
+    assert "Fed holds rates steady" in body
+    assert "affects KO" in body
+    assert "close 648.20" in body
+    assert "JNJ" in body
+
+
+def test_a_degraded_calendar_is_not_shown_as_no_announcements(audited):
+    """Zero windows from a broken feed is indistinguishable from a quiet week
+    unless the page says which it was."""
+    log, client = audited
+    log.record(_decision(inputs=MarketInputs(news_windows=[], calendar_degraded=True)))
+
+    body = client.get("/decisions").text
+
+    assert "DEGRADED" in body
+    assert "not that there were no announcements" in body
+
+
+# ------------------------------------------------------------ pending orders
+
+
+def test_a_resting_order_is_shown_with_the_distance_to_its_limit(journal):
+    """A limit order that has not filled leaves no position and no explanation.
+
+    The gap is what separates "waiting patiently" from "never going to fill".
+    """
+    from bot.broker import MockBroker
+    from bot.models import OrderStatus, WorkingOrder
+
+    broker = MockBroker(starting_equity=100_000.0)
+    broker.connect()
+    broker.set_price("SPY", bid=648.00, ask=648.04)
+    broker.set_open_orders(
+        [
+            WorkingOrder(
+                order_id="o-1",
+                symbol="SPY",
+                direction=Direction.BUY,
+                qty=12,
+                limit_price=641.20,
+                status=OrderStatus.NEW,
+                submitted_at=ENTRY,
+            )
+        ]
+    )
+
+    import bot.main as main_mod
+
+    app = build_app(journal=journal, rules=load_rules(), env=_env(), force_mock=True)
+    def _fixed(env: object, force_mock: bool = False) -> MockBroker:
+        return broker
+
+    original = main_mod.build_broker
+    main_mod.build_broker = _fixed
+    try:
+        body = TestClient(app).get("/").text
+    finally:
+        main_mod.build_broker = original
+
+    assert "Pending orders" in body
+    assert "641.2000" in body          # the limit
+    assert "648.0200" in body          # the market
+    assert "% away" in body            # and how far it has to travel
+
+
+def test_no_resting_orders_says_so(client):
+    assert "Nothing resting at the broker" in client.get("/").text
+
+
+def test_the_stylesheet_carries_no_control_characters():
+    """STYLES is an ordinary Python string, so CSS escapes are read by Python first.
+
+    A CSS hex escape such as backslash-2-5-B-8 is a valid OCTAL escape to
+    Python, which silently turns it into a control character and leaves the
+    remaining digits as text. The browser then draws a tofu box beside them.
+    Nothing warns, ruff does not care, and it is invisible unless somebody looks
+    at the rendered page. This caught exactly that, twice.
+    """
+    from bot.web.render import STYLES
+
+    offenders = [
+        (i, line)
+        for i, line in enumerate(STYLES.splitlines(), 1)
+        if any(ord(c) < 32 and c != "\t" for c in line)
+    ]
+    assert not offenders, f"control characters in STYLES: {offenders}"

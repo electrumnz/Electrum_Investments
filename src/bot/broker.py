@@ -13,6 +13,8 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
+import structlog
+
 from .config import Env
 from .models import (
     AccountSnapshot,
@@ -21,13 +23,17 @@ from .models import (
     Direction,
     OrderProposal,
     OrderResult,
+    OrderStatus,
     Position,
     Tick,
     TradingActivity,
+    WorkingOrder,
 )
 
 if TYPE_CHECKING:
     pass
+
+log = structlog.get_logger()
 
 
 def is_crypto_symbol(symbol: str) -> bool:
@@ -48,6 +54,7 @@ class Broker(Protocol):
     def get_account(self) -> AccountSnapshot: ...
     def get_tick(self, symbol: str) -> Tick: ...
     def get_daily_bars(self, symbol: str, lookback: int = ...) -> list[Bar]: ...
+    def get_open_orders(self) -> list[WorkingOrder]: ...
     def get_activity(self) -> TradingActivity: ...
     def place_order(self, proposal: OrderProposal) -> OrderResult: ...
     def close_position(self, symbol: str) -> OrderResult: ...
@@ -70,6 +77,7 @@ class MockBroker:
         self._order_seq = 0
         self._fills: list[tuple[datetime, str]] = []
         self._bars: dict[str, list[Bar]] = {}
+        self._open_orders: list[WorkingOrder] = []
 
     def connect(self) -> None:
         self._connected = True
@@ -102,6 +110,13 @@ class MockBroker:
         if symbol not in self._bars:
             raise KeyError(f"No bars seeded for {symbol}; call set_bars first")
         return self._bars[symbol][-lookback:]
+
+    def set_open_orders(self, orders: list[WorkingOrder]) -> None:
+        """Seed resting orders. The mock fills instantly, so it has none of its own."""
+        self._open_orders = list(orders)
+
+    def get_open_orders(self) -> list[WorkingOrder]:
+        return list(self._open_orders)
 
     def get_account(self) -> AccountSnapshot:
         return AccountSnapshot(
@@ -332,6 +347,49 @@ class AlpacaBroker:
         ]
         return bars[-lookback:]
 
+    def get_open_orders(self) -> list[WorkingOrder]:
+        """Orders resting at the broker, not yet filled or cancelled.
+
+        The bot submits limit orders only, deliberately, so an order that does
+        not reach its price simply sits there. Without this the dashboard shows
+        no position and no explanation, when the truth is that an order is
+        waiting on a price that has not come.
+        """
+        from alpaca.trading.enums import QueryOrderStatus
+        from alpaca.trading.requests import GetOrdersRequest
+
+        try:
+            raw: Any = self._trading.get_orders(
+                GetOrdersRequest(status=QueryOrderStatus.OPEN, limit=100)
+            )
+        except Exception as exc:
+            # Same reasoning as the feed fetches: this feeds a display, and an
+            # SDK error here must not take down a caller that also renders
+            # positions and risk.
+            log.warning("open_orders_fetch_failed", error=f"{type(exc).__name__}: {exc}")
+            return []
+
+        orders: list[WorkingOrder] = []
+        for o in raw:
+            qty = float(getattr(o, "qty", 0) or 0)
+            if qty <= 0:
+                continue
+            side = str(getattr(o, "side", "buy")).lower()
+            limit_price = getattr(o, "limit_price", None)
+            orders.append(
+                WorkingOrder(
+                    order_id=str(o.id),
+                    symbol=str(o.symbol),
+                    direction=Direction.BUY if "buy" in side else Direction.SELL,
+                    qty=qty,
+                    limit_price=float(limit_price) if limit_price else None,
+                    status=_order_status(str(getattr(o, "status", ""))),
+                    submitted_at=getattr(o, "submitted_at", None),
+                    filled_qty=float(getattr(o, "filled_qty", 0) or 0),
+                )
+            )
+        return orders
+
     def get_activity(self) -> TradingActivity:
         """Derive recent trade counts from Alpaca's filled-order history."""
         from alpaca.trading.enums import QueryOrderStatus
@@ -418,3 +476,26 @@ class AlpacaBroker:
             filled_price=float(filled_price) if filled_price else None,
             filled_qty=float(filled_qty) if filled_qty else None,
         )
+
+
+def _order_status(raw: str) -> OrderStatus:
+    """Map Alpaca's order status onto ours.
+
+    Alpaca has more statuses than this bot cares about (`pending_new`,
+    `accepted`, `done_for_day`, and several stop-related ones). Anything not
+    recognised becomes OTHER rather than being guessed at, so a status this
+    build has never seen renders as unknown instead of as "new".
+    """
+    value = raw.lower().strip()
+    known = {
+        "new": OrderStatus.NEW,
+        "accepted": OrderStatus.NEW,
+        "pending_new": OrderStatus.NEW,
+        "partially_filled": OrderStatus.PARTIALLY_FILLED,
+        "filled": OrderStatus.FILLED,
+        "canceled": OrderStatus.CANCELED,
+        "cancelled": OrderStatus.CANCELED,
+        "expired": OrderStatus.EXPIRED,
+        "rejected": OrderStatus.REJECTED,
+    }
+    return known.get(value, OrderStatus.OTHER)

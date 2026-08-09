@@ -218,6 +218,139 @@ class OrderResult(BaseModel):
     filled_qty: float | None = None
 
 
+class OrderStatus(StrEnum):
+    """Where a submitted order has got to.
+
+    Distinct from `OrderResult`, which records what happened when the order was
+    *submitted*. An order can be accepted and then sit unfilled for the rest of
+    the session, which is invisible from the result alone and is exactly the
+    state an operator needs to see.
+    """
+
+    NEW = "new"
+    PARTIALLY_FILLED = "partially_filled"
+    FILLED = "filled"
+    CANCELED = "canceled"
+    EXPIRED = "expired"
+    REJECTED = "rejected"
+    OTHER = "other"
+
+
+class WorkingOrder(BaseModel):
+    """An order sitting at the broker, not yet resolved.
+
+    The bot submits limit orders only, so an order that does not fill simply
+    rests. Without this the dashboard shows a position that does not exist yet
+    and nothing to say an order is waiting on a price.
+    """
+
+    order_id: str
+    symbol: str
+    direction: Direction
+    qty: float = Field(gt=0)
+    limit_price: float | None = None
+    status: OrderStatus = OrderStatus.NEW
+    submitted_at: datetime | None = None
+    filled_qty: float = 0.0
+
+    @property
+    def remaining_qty(self) -> float:
+        return max(self.qty - self.filled_qty, 0.0)
+
+    def distance_to_fill(self, current_price: float) -> float | None:
+        """How far the market is from the limit, as a percentage.
+
+        Positive means the price still has to move in the order's favour. This
+        is the difference between "waiting patiently" and "never going to fill",
+        and neither is visible from the order alone.
+        """
+        if self.limit_price is None or current_price <= 0:
+            return None
+        if self.direction == Direction.BUY:
+            return (current_price - self.limit_price) / current_price * 100
+        return (self.limit_price - current_price) / current_price * 100
+
+
+class Stance(StrEnum):
+    """What the model made of a symbol this cycle.
+
+    The point of recording anything other than TAKE: a cycle that proposes
+    nothing currently leaves no trace of what was looked at. "Nothing worth
+    taking" and "I never examined QQQ" are indistinguishable afterwards, and
+    only one of them is a working bot.
+    """
+
+    TAKE = "take"        # proposed this cycle
+    WATCH = "watch"      # setup forming; `waiting_for` says what would trigger it
+    PASS = "pass"        # examined and declined
+    BLOCKED = "blocked"  # would take it, but a rule or missing data forbids
+
+
+class SymbolAssessment(BaseModel):
+    """One symbol the model considered, whether or not it proposed anything."""
+
+    symbol: str
+    stance: Stance
+    reasoning: str = Field(
+        min_length=10,
+        description="Why this stance, referring to the computed indicators supplied.",
+    )
+    waiting_for: str = Field(
+        default="",
+        description=(
+            "For WATCH: the specific, observable condition that would turn this "
+            "into a proposal. Name a level or a figure, not a feeling."
+        ),
+    )
+
+
+class PositionAction(StrEnum):
+    HOLD = "hold"
+    CLOSE = "close"
+    TIGHTEN_STOP = "tighten_stop"
+
+
+class PositionPlan(BaseModel):
+    """The model's read on a position already held.
+
+    **Advisory only.** The loop does not act on these: closing a position and
+    moving a stop are deliberately outside the proposal path, so nothing here
+    reaches the broker. It exists because "why am I still in this, and what
+    would get me out" is the question an open position raises and nothing else
+    here answers.
+    """
+
+    symbol: str
+    action: PositionAction = PositionAction.HOLD
+    thesis_intact: bool = True
+    reasoning: str = Field(
+        min_length=10, description="Why the position is still held, or why it should not be."
+    )
+    waiting_for: str = Field(
+        default="",
+        description="The observable event that would close this: a level, a target, a date.",
+    )
+    invalidation: str = Field(
+        default="", description="What would prove the original thesis wrong."
+    )
+
+
+class MarketInputs(BaseModel):
+    """What the model was actually shown, recorded alongside what it decided.
+
+    Without this a past decision cannot be re-read. "Why did it pass on SPY on
+    Tuesday" is unanswerable if the headlines, the calendar and the indicators
+    it saw are gone, and reconstructing them from a later snapshot answers a
+    different question.
+    """
+
+    headlines: list[str] = Field(default_factory=list)
+    news_windows: list[str] = Field(default_factory=list)
+    indicators: dict[str, str] = Field(default_factory=dict)
+    symbols_without_history: list[str] = Field(default_factory=list)
+    calendar_degraded: bool = False
+
+
 class RiskVerdict(BaseModel):
     approved: bool
     reasons: list[str] = Field(default_factory=list)
@@ -332,12 +465,24 @@ class StandDownState(BaseModel):
 
 
 class Decision(BaseModel):
-    """One full pass of the loop — what we asked, what Claude said, what we did."""
+    """One full pass of the loop — what we asked, what Claude said, what we did.
+
+    Every field added after `notes` is optional with a default, so a record
+    written by an older build still parses. The audit log is append-only and
+    never migrated; a reader that rejected yesterday's format would throw away
+    the history it exists to preserve.
+    """
 
     timestamp: datetime
     proposals: list[OrderProposal] = Field(default_factory=list)
     verdicts: list[RiskVerdict] = Field(default_factory=list)
     executed: list[OrderResult] = Field(default_factory=list)
+
+    # What was considered, not merely what was proposed.
+    assessments: list[SymbolAssessment] = Field(default_factory=list)
+    position_plans: list[PositionPlan] = Field(default_factory=list)
+    # What the model was shown when it decided.
+    inputs: MarketInputs | None = None
     claude_input_tokens: int = 0
     claude_output_tokens: int = 0
     claude_cached_tokens: int = 0

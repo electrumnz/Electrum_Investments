@@ -298,3 +298,33 @@ def render(indicators: Indicators) -> list[str]:
         )
 
     return lines
+
+
+def summarise(indicators: Indicators) -> str:
+    """One line per symbol, for the audit record.
+
+    The full `render` output is what the model reads; this is what gets stored
+    next to the decision so a past cycle can be re-read months later. It keeps
+    the figures that decide a mean-reversion entry and drops the rest, because
+    an audit log that stores everything is one nobody opens.
+
+    Unavailable stays unavailable here too. A stored "sma_200=0" would be read
+    back as a real reading by whoever looks at this next.
+    """
+
+    def figure(value: float | None, fmt: str = ",.2f") -> str:
+        return "unavailable" if value is None else f"{value:{fmt}}"
+
+    distance = indicators.distance_from_sma_20_atr
+    ratio = indicators.volume_ratio
+    trend = indicators.above_sma_200
+
+    return (
+        f"close {indicators.last_close:,.2f}, "
+        f"sma{SMA_FAST} {figure(indicators.sma_20)}, "
+        f"sma{SMA_SLOW} {figure(indicators.sma_200)}, "
+        f"atr {figure(indicators.atr_14)}, "
+        f"{'unavailable' if distance is None else f'{distance:+.2f} ATR from sma{SMA_FAST}'}, "
+        f"volume {'unavailable' if ratio is None else f'{ratio:.2f}x'}, "
+        f"trend {'unavailable' if trend is None else ('above' if trend else 'BELOW')}"
+    )
