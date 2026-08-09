@@ -1,0 +1,524 @@
+<!doctype html>
+<html lang="en-GB">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>About &middot; Mudhorn Capital</title>
+<meta name="description" content="What Mudhorn Capital is, what this site is, and the identity reference the interface is built from.">
+<meta name="robots" content="noindex">
+<link rel="icon" href="assets/mark.svg" type="image/svg+xml">
+<link rel="stylesheet" href="assets/app.css">
+<style>
+  /* Identity-reference styles. Everything shared with the app lives in
+     app.css; only the pieces that exist nowhere else are here. */
+
+  html { scroll-behavior: smooth; }
+
+  .identity-hero {
+    padding: clamp(3rem, 8vw, 5.5rem) 0;
+    display: grid; place-items: center; text-align: center;
+    border-bottom: 1px solid var(--slate);
+  }
+  .hero-mark { width: clamp(96px, 13vw, 128px); height: auto; overflow: visible; }
+  .hero-mark path { fill: var(--bone); }
+  /* The strike circle is stroke-only. Setting fill here would override the
+     presentation attribute and turn the mark into a solid disc. */
+  .hero-mark .strike { fill: none; }
+
+  .wordmark {
+    font-family: var(--serif);
+    font-size: clamp(1.75rem, 5vw, 2.75rem);
+    letter-spacing: 0.02em; margin: 1.5rem 0 0; line-height: 1.1;
+  }
+  .wordmark .thin { color: var(--pewter); }
+
+  .hero-tagline {
+    font-family: var(--mono); font-size: 0.75rem; letter-spacing: 0.24em;
+    text-transform: uppercase; color: var(--pewter); margin: 1rem 0 0;
+  }
+
+  /* One sequence, five beats. Everything keys off .playing so the replay
+     button can re-run it by removing and re-adding the class.
+     Beat 1: the patina line is drawn, anticlockwise from the top.
+     Beat 2: the solid mark lands and the line is discarded.
+     Beat 3: the horn is struck into it.
+     Beats 4 and 5: wordmark tightens, tagline arrives. */
+  .seq > * { opacity: 0; }
+  .playing .hero-mark { animation: rise 700ms var(--ease) 80ms both; }
+  .playing .hero-mark .strike {
+    stroke-dasharray: 164; transform-origin: 50% 50%; rotate: -90deg;
+    animation: strike 1500ms var(--ease) 200ms both;
+  }
+  .playing .hero-mark .ring { animation: land 600ms var(--ease) 1100ms both; }
+  .playing .hero-mark .horn {
+    transform-origin: 50% 70%; animation: horn 620ms var(--ease) 1420ms both;
+  }
+  .playing .wordmark { animation: settle 900ms var(--ease) 1620ms both; }
+  .playing .hero-tagline { animation: rise 700ms var(--ease) 2000ms both; }
+  .playing .replay { animation: rise 500ms var(--ease) 2260ms both; }
+
+  @keyframes strike {
+    from { stroke-dashoffset: 164; opacity: 1; }
+    55%  { stroke-dashoffset: 0;   opacity: 1; }
+    to   { stroke-dashoffset: 0;   opacity: 0; }
+  }
+  @keyframes land { from { opacity: 0; scale: 1.06; } to { opacity: 1; scale: 1; } }
+  @keyframes horn {
+    from { opacity: 0; translate: 0 8px; scale: 1 0.7; }
+    to   { opacity: 1; translate: 0 0;   scale: 1 1; }
+  }
+  @keyframes settle {
+    /* Letter-spacing tightening reads as a mark being struck rather than typed. */
+    from { opacity: 0; letter-spacing: 0.34em; }
+    to   { opacity: 1; letter-spacing: 0.02em; }
+  }
+  @keyframes rise {
+    from { opacity: 0; transform: translateY(12px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+
+  .replay {
+    margin-top: 2rem; background: transparent; color: var(--pewter);
+    border: 1px solid var(--slate); border-radius: var(--radius);
+    padding: 0.5rem 1.125rem; font-family: var(--mono); font-size: 0.6875rem;
+    letter-spacing: 0.16em; text-transform: uppercase; cursor: pointer;
+    transition: color 200ms, border-color 200ms, background 200ms;
+  }
+  .replay:hover { color: var(--bone); border-color: var(--patina); background: var(--graphite); }
+
+  /* Scroll reveal via IntersectionObserver. No build step, no library. */
+  .reveal { opacity: 0; transform: translateY(18px);
+            transition: opacity 700ms var(--ease), transform 700ms var(--ease); }
+  .reveal.in { opacity: 1; transform: none; }
+
+  .card svg { display: block; margin: 0 auto 1.25rem; }
+  .card svg path { fill: var(--bone); }
+  .card .pick { color: var(--patina); font-family: var(--mono); font-size: 0.625rem;
+                letter-spacing: 0.16em; text-transform: uppercase; }
+  .card:hover { border-color: var(--patina); }
+
+  .sizes { display: flex; align-items: flex-end; gap: 2.5rem; flex-wrap: wrap; margin-top: 1.5rem; }
+  .size { text-align: center; }
+  .size svg path { fill: var(--bone); }
+  .size span { display: block; margin-top: 0.75rem; font-family: var(--mono);
+               font-size: 0.625rem; color: var(--pewter); letter-spacing: 0.1em; }
+
+  .knockouts { display: flex; gap: 1rem; flex-wrap: wrap; margin-top: 1.5rem; }
+  .tile { width: 104px; height: 104px; display: grid; place-items: center; border-radius: var(--radius); }
+  .tile.on-patina { background: var(--patina); }
+  .tile.on-bone   { background: var(--bone); }
+  .tile.on-ink    { background: var(--ink); border: 1px solid var(--slate); }
+  .tile.on-patina svg path, .tile.on-ink svg path { fill: var(--bone); }
+  .tile.on-bone svg path { fill: var(--ink); }
+
+  .swatches { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 1px;
+              background: var(--slate); border: 1px solid var(--slate); margin-top: 1.5rem; }
+  .sw { background: var(--graphite); padding: 0; }
+  .sw i { display: block; height: 84px; }
+  .sw div { padding: 0.875rem 1rem 1.125rem; }
+  .sw b { display: block; font-weight: 500; font-size: 0.9375rem; }
+  .sw code { font-family: var(--mono); font-size: 0.75rem; color: var(--pewter); }
+  .sw p { margin: 0.5rem 0 0; font-size: 0.8125rem; color: var(--pewter); line-height: 1.5; }
+
+  .spec { border-top: 1px solid var(--slate); padding-top: 1.25rem; margin-top: 1.25rem; }
+  .spec:first-of-type { border-top: 0; }
+  .sample-serif { font-family: var(--serif); font-size: clamp(1.75rem, 4vw, 2.5rem); margin: 0; }
+  .sample-sans  { font-family: var(--sans); font-size: 1.0625rem; margin: 0; }
+  .sample-mono  { font-family: var(--mono); font-size: 0.9375rem; margin: 0; letter-spacing: 0.02em; }
+
+  .stack { font-family: var(--mono); font-size: 0.75rem; color: var(--pewter);
+           background: var(--ink); border: 1px solid var(--slate); border-radius: var(--radius);
+           padding: 0.75rem 0.875rem; margin-top: 0.875rem; overflow-x: auto; white-space: pre; }
+
+  .story { max-width: var(--measure); font-size: 1.0625rem; }
+  .story p + p { margin-top: 1.25rem; }
+
+  .voice { list-style: none; padding: 0; margin: 1.5rem 0 0; }
+  .voice li { border-left: 2px solid var(--patina); padding: 0.25rem 0 0.25rem 1.25rem; margin-bottom: 1.25rem; }
+  .voice q { font-family: var(--serif); font-size: 1.125rem; display: block; }
+  .voice small { color: var(--pewter); }
+
+  @media (prefers-reduced-motion: reduce) {
+    html { scroll-behavior: auto; }
+    .seq > *, .reveal { opacity: 1 !important; transform: none !important; }
+    .hero-mark .strike { display: none; }
+    .replay { display: none; }
+  }
+</style>
+</head>
+<body>
+
+<div class="demo-banner">
+  <div class="wrap">
+    <b>Demonstration</b>
+    <span>Every figure on this site is invented. It reads no broker, no journal and no account, and it makes no network request.</span>
+  </div>
+</div>
+
+<header class="masthead">
+  <div class="wrap">
+    <a class="lockup" href="overview.html">
+      <svg viewBox="0 0 64 64" width="30" height="30" aria-hidden="true">
+        <path fill-rule="evenodd" d="M32 2a30 30 0 1 0 0 60 30 30 0 0 0 0-60Zm0 8a22 22 0 1 1 0 44 22 22 0 0 1 0-44Z"/>
+        <path d="M32 17 47 45h-9.4L32 34.2 26.4 45H17L32 17Z"/>
+      </svg>
+      <span class="word">MUDHORN <span>CAPITAL</span></span>
+    </a>
+    <nav class="primary" aria-label="Primary">
+      <ul>
+        <li><a href="overview.html">Overview</a></li>
+        <li><a href="trades.html">Trades</a></li>
+        <li><a href="analytics.html">Analytics</a></li>
+        <li><a href="rules.html">Rules</a></li>
+        <li><a href="about.html" aria-current="page">About</a></li>
+      </ul>
+    </nav>
+    <p class="whoami"><span data-whoami>Operator</span> &middot; <a href="index.html">Sign out</a></p>
+  </div>
+</header>
+
+<div class="identity-hero">
+  <div class="wrap seq playing" id="seq">
+    <svg class="hero-mark" viewBox="0 0 64 64" role="img" aria-label="Mudhorn Capital signet mark">
+      <!-- The strike: a patina line drawn once, then handed off to the solid
+           mark. Reads as a seal being pressed rather than a logo appearing. -->
+      <circle class="strike" cx="32" cy="32" r="26" fill="none"
+              stroke="#4E8C7D" stroke-width="3"/>
+      <!-- The canonical mark, identical to direction A everywhere else. -->
+      <path class="ring" fill-rule="evenodd"
+            d="M32 2a30 30 0 1 0 0 60 30 30 0 0 0 0-60Zm0 8a22 22 0 1 1 0 44 22 22 0 0 1 0-44Z"/>
+      <path class="horn" d="M32 17 47 45h-9.4L32 34.2 26.4 45H17L32 17Z"/>
+    </svg>
+    <h1 class="wordmark">MUDHORN <span class="thin">CAPITAL</span></h1>
+    <p class="hero-tagline">Earned, not handed over</p>
+    <button class="replay" id="replay" type="button">Replay</button>
+  </div>
+</div>
+
+<main>
+
+<!-- ============================================================ WHAT THIS IS -->
+<section class="wrap block reveal" id="demo" style="margin-top:clamp(2.5rem,5vw,3.5rem)">
+  <p class="eyebrow">What this site is</p>
+  <h2>A demonstration, not an account</h2>
+  <div class="story">
+    <p>Every equity figure, position, trade, rationale and chart on the other
+      pages here is invented. They come from a fixture committed to the
+      repository and generated by a script, and the site makes no network
+      request of any kind. There is no API behind it, because there is nothing
+      for an API to reach.</p>
+    <p>That is a deliberate line rather than an unfinished feature. The real
+      dashboard renders live brokerage state, and it has no login precisely
+      because it binds to the loopback address and is reachable from nowhere
+      else. Publishing that would put a live view of a brokerage account on the
+      open internet, so it stays where it is. Real authentication would be the
+      prerequisite for changing that, not a follow-up to it.</p>
+    <p>The limits on the <a href="rules.html">Rules</a> page are the exception:
+      those are copied verbatim from the repository, because they are limits
+      rather than secrets and they are already public.</p>
+  </div>
+</section>
+
+<!-- =================================================================== STORY -->
+<section class="wrap block reveal">
+  <p class="eyebrow">Story</p>
+  <h2>Written straight</h2>
+  <div class="story">
+    <p>Mudhorn Capital is a private vehicle. It manages one account, for one
+      person, and takes no money from anyone else.</p>
+    <p>It exists because inherited capital is easy to hold and hard to deserve.
+      The name comes from the practice of granting a signet for a deed: a mark
+      is not chosen, and it is not passed down. It is awarded once something has
+      actually been done. That felt like the right standard to hold a portfolio
+      to.</p>
+    <p>The method is unglamorous and deliberately so. Position size is decided
+      before conviction. Every trade carries a stop written down in advance. No
+      more than one per cent of the account is at risk on any single position,
+      and no more than two per cent across all of them at once. A run of losses
+      suspends real money automatically, because the worst decisions arrive
+      after the third one.</p>
+    <p>Most days the correct action is none. The discipline is the product.</p>
+  </div>
+</section>
+
+<!-- =================================================================== VOICE -->
+<section class="wrap block reveal">
+  <p class="eyebrow">Tone of voice</p>
+  <h2>Plain, exact, unhurried</h2>
+  <p class="lede">Say the number. Never claim an outcome that has not happened.
+    Nothing that implies managing anyone else's money, because it does not and
+    that phrasing carries a regulatory meaning. Confidence comes from precision,
+    not from adjectives.</p>
+
+  <ul class="voice">
+    <li><q>Risking 0.4% on this one. Invalidated below 575.</q>
+      <small>States the size and the exit before the idea.</small></li>
+    <li><q>Three losses in a row, so live trading is off for the rest of the week. Paper carries on.</q>
+      <small>Reports a rule firing without defending or apologising for it.</small></li>
+    <li><q>Nothing worth taking today.</q>
+      <small>Doing nothing is a result, and it is reported like one.</small></li>
+  </ul>
+</section>
+
+<!-- ============================================================== DIRECTIONS -->
+<section class="wrap block reveal">
+  <p class="eyebrow">Mark directions</p>
+  <h2>Three approaches, not three variations</h2>
+  <p class="lede">Each solves the brief differently. The one constant is that
+    none of them draws a creature: a literal beast reads as a mascot, and it
+    disappears entirely at 16 pixels.</p>
+
+  <div class="grid g3" style="margin-top:1.5rem">
+    <article class="card">
+      <svg viewBox="0 0 64 64" width="88" height="88" role="img" aria-label="Direction A, the signet">
+        <path fill-rule="evenodd" d="M32 2a30 30 0 1 0 0 60 30 30 0 0 0 0-60Zm0 8a22 22 0 1 1 0 44 22 22 0 0 1 0-44Z"/>
+        <path d="M32 17 47 45h-9.4L32 34.2 26.4 45H17L32 17Z"/>
+      </svg>
+      <span class="pick">Recommended</span>
+      <h3>A. The signet</h3>
+      <p class="note">A ring enclosing a struck peak. Reads as heraldry or a
+        seal to anyone who does not know, which is exactly the register a
+        boutique firm wants. Symmetrical, solid, and the enclosing ring keeps it
+        legible when it shrinks.</p>
+    </article>
+
+    <article class="card">
+      <svg viewBox="0 0 64 64" width="88" height="88" role="img" aria-label="Direction B, the brand">
+        <path fill-rule="evenodd" d="M8 8h48v48H8V8Zm24 11L18 44h9.2L32 34.6 36.8 44H46L32 19Z"/>
+      </svg>
+      <h3>B. The brand</h3>
+      <p class="note">A stamped block with the horn cut out as negative space,
+        like a maker's mark burned into a crate. The most industrial of the
+        three and the strongest at very small sizes, because it is almost
+        entirely solid.</p>
+    </article>
+
+    <article class="card">
+      <svg viewBox="0 0 64 64" width="88" height="88" role="img" aria-label="Direction C, the monogram">
+        <path d="M6 52V12h9.5L32 36.5 48.5 12H58v40h-8.5V26.5L34.8 48h-5.6L14.5 26.5V52H6Z"/>
+      </svg>
+      <h3>C. The monogram</h3>
+      <p class="note">Purely typographic. An M whose central vertex is driven
+        into a point rather than dipping, so the horn is in the letterform
+        itself. No pictorial element at all, which makes it the safest and the
+        least distinctive.</p>
+    </article>
+  </div>
+</section>
+
+<!-- =================================================================== SIZES -->
+<section class="wrap block reveal">
+  <p class="eyebrow">The mark at size</p>
+  <h2>It has to survive a favicon</h2>
+  <p class="lede">Everything here is a solid silhouette with no stroke thinner
+    than two pixels at the smallest size. That constraint is why the horn is a
+    struck wedge rather than a curve.</p>
+
+  <div class="sizes">
+    <div class="size">
+      <svg viewBox="0 0 64 64" width="120" height="120" role="img" aria-label="Mark at 120 pixels">
+        <path fill-rule="evenodd" d="M32 2a30 30 0 1 0 0 60 30 30 0 0 0 0-60Zm0 8a22 22 0 1 1 0 44 22 22 0 0 1 0-44Z"/>
+        <path d="M32 17 47 45h-9.4L32 34.2 26.4 45H17L32 17Z"/>
+      </svg><span>120 px</span>
+    </div>
+    <div class="size">
+      <svg viewBox="0 0 64 64" width="48" height="48" aria-hidden="true">
+        <path fill-rule="evenodd" d="M32 2a30 30 0 1 0 0 60 30 30 0 0 0 0-60Zm0 8a22 22 0 1 1 0 44 22 22 0 0 1 0-44Z"/>
+        <path d="M32 17 47 45h-9.4L32 34.2 26.4 45H17L32 17Z"/>
+      </svg><span>48 px</span>
+    </div>
+    <div class="size">
+      <svg viewBox="0 0 64 64" width="24" height="24" aria-hidden="true">
+        <path fill-rule="evenodd" d="M32 2a30 30 0 1 0 0 60 30 30 0 0 0 0-60Zm0 8a22 22 0 1 1 0 44 22 22 0 0 1 0-44Z"/>
+        <path d="M32 17 47 45h-9.4L32 34.2 26.4 45H17L32 17Z"/>
+      </svg><span>24 px</span>
+    </div>
+    <div class="size">
+      <svg viewBox="0 0 64 64" width="16" height="16" aria-hidden="true">
+        <path fill-rule="evenodd" d="M32 2a30 30 0 1 0 0 60 30 30 0 0 0 0-60Zm0 8a22 22 0 1 1 0 44 22 22 0 0 1 0-44Z"/>
+        <path d="M32 17 47 45h-9.4L32 34.2 26.4 45H17L32 17Z"/>
+      </svg><span>16 px</span>
+    </div>
+  </div>
+
+  <div class="knockouts">
+    <div class="tile on-ink">
+      <svg viewBox="0 0 64 64" width="52" height="52" aria-hidden="true">
+        <path fill-rule="evenodd" d="M32 2a30 30 0 1 0 0 60 30 30 0 0 0 0-60Zm0 8a22 22 0 1 1 0 44 22 22 0 0 1 0-44Z"/>
+        <path d="M32 17 47 45h-9.4L32 34.2 26.4 45H17L32 17Z"/>
+      </svg>
+    </div>
+    <div class="tile on-patina">
+      <svg viewBox="0 0 64 64" width="52" height="52" aria-hidden="true">
+        <path fill-rule="evenodd" d="M32 2a30 30 0 1 0 0 60 30 30 0 0 0 0-60Zm0 8a22 22 0 1 1 0 44 22 22 0 0 1 0-44Z"/>
+        <path d="M32 17 47 45h-9.4L32 34.2 26.4 45H17L32 17Z"/>
+      </svg>
+    </div>
+    <div class="tile on-bone">
+      <svg viewBox="0 0 64 64" width="52" height="52" aria-hidden="true">
+        <path fill-rule="evenodd" d="M32 2a30 30 0 1 0 0 60 30 30 0 0 0 0-60Zm0 8a22 22 0 1 1 0 44 22 22 0 0 1 0-44Z"/>
+        <path d="M32 17 47 45h-9.4L32 34.2 26.4 45H17L32 17Z"/>
+      </svg>
+    </div>
+  </div>
+  <p class="note" style="margin-top:1.25rem">Knocked out on ink, on patina, and
+    reversed on bone. The mark is a single two-path SVG in every case, so there
+    is no separate small-size artwork to keep in step.</p>
+</section>
+
+<!-- ================================================================== LOCKUP -->
+<section class="wrap block reveal">
+  <p class="eyebrow">Lockup</p>
+  <h2>Horizontal, for a site header</h2>
+  <div class="card" style="margin-top:1.5rem; display:flex; align-items:center; gap:1.125rem; padding:1.75rem">
+    <svg viewBox="0 0 64 64" width="38" height="38" aria-hidden="true">
+      <path fill-rule="evenodd" d="M32 2a30 30 0 1 0 0 60 30 30 0 0 0 0-60Zm0 8a22 22 0 1 1 0 44 22 22 0 0 1 0-44Z"/>
+      <path d="M32 17 47 45h-9.4L32 34.2 26.4 45H17L32 17Z"/>
+    </svg>
+    <span style="font-family:var(--serif); font-size:1.375rem; letter-spacing:0.04em">
+      MUDHORN <span style="color:var(--pewter)">CAPITAL</span>
+    </span>
+  </div>
+  <p class="note" style="margin-top:1rem">Clear space either side equals the
+    height of the mark. The word sits optically centred on the ring rather than
+    on the box, which is a quarter-pixel adjustment nobody notices until it is
+    missing. It is the lockup in the masthead at the top of every page here.</p>
+</section>
+
+<!-- ================================================================= PALETTE -->
+<section class="wrap block reveal">
+  <p class="eyebrow">Palette</p>
+  <h2>Cold and mineral</h2>
+  <p class="lede">The name begins with "mud", so every warm tone was ruled out
+    early. Brown or tan makes the whole thing read agricultural. This palette is
+    blue-shifted throughout, and the single accent is oxidised copper rather
+    than gold.</p>
+
+  <div class="swatches">
+    <div class="sw"><i style="background:#0B0E12"></i><div><b>Ink</b><br><code>#0B0E12</code>
+      <p>Page ground. Near-black with a blue cast, never a true neutral.</p></div></div>
+    <div class="sw"><i style="background:#161B22"></i><div><b>Graphite</b><br><code>#161B22</code>
+      <p>Cards and raised surfaces. One step up from the ground, no more.</p></div></div>
+    <div class="sw"><i style="background:#29313C"></i><div><b>Slate</b><br><code>#29313C</code>
+      <p>Hairlines and dividers. Structure should be felt, not seen.</p></div></div>
+    <div class="sw"><i style="background:#7D8896"></i><div><b>Pewter</b><br><code>#7D8896</code>
+      <p>Secondary text, captions, and anything deliberately quiet.</p></div></div>
+    <div class="sw"><i style="background:#E9ECEF"></i><div><b>Bone</b><br><code>#E9ECEF</code>
+      <p>Primary text and the mark. A cold white. Explicitly not cream.</p></div></div>
+    <div class="sw"><i style="background:#4E8C7D"></i><div><b>Patina</b><br><code>#4E8C7D</code>
+      <p>The only accent. Focus rings, one hover state, the ring on the mark.
+         Used sparingly enough to still mean something.</p></div></div>
+  </div>
+
+  <h3 style="margin-top:2rem">Two additions for the interface</h3>
+  <p class="lede">A brand page needs one accent. A book of forty trades needs to
+    be scannable for wins against losses without reading every figure, so
+    exactly two colours are added, and they are used only on numbers and on the
+    small state chips beside them. Chrome, links and focus rings still belong to
+    patina, so the accent keeps meaning something.</p>
+  <div class="swatches">
+    <div class="sw"><i style="background:#5FA795"></i><div><b>Gain</b><br><code>#5FA795</code>
+      <p>Patina, lifted until it clears the contrast threshold on graphite.
+         Figures only.</p></div></div>
+    <div class="sw"><i style="background:#C0707B"></i><div><b>Loss</b><br><code>#C0707B</code>
+      <p>A cold rose rather than a warm red. A warm red on this ground reads as
+         brick and drags the palette toward the agricultural register the
+         identity rules out.</p></div></div>
+  </div>
+</section>
+
+<!-- ==================================================================== TYPE -->
+<section class="wrap block reveal">
+  <p class="eyebrow">Type</p>
+  <h2>A serif that is not trying to be friendly</h2>
+
+  <div class="spec">
+    <p class="sample-serif">Mudhorn Capital</p>
+    <h3 style="margin-top:0.75rem">Display and wordmark</h3>
+    <p class="note">Set here in the system serif so this file works offline and
+      anywhere. To licence the real thing:
+      <a href="https://fonts.google.com/specimen/Instrument+Serif">Instrument Serif</a>
+      (free, SIL Open Font Licence) for something editorial and high contrast, or
+      <a href="https://klim.co.nz/retail-fonts/tiempos-headline/">Tiempos Headline</a>
+      (Klim, paid) if it is worth spending on one thing.</p>
+    <div class="stack">--serif: ui-serif, "Iowan Old Style", "Palatino Linotype", Palatino,
+        Georgia, "Times New Roman", serif;</div>
+  </div>
+
+  <div class="spec">
+    <p class="sample-sans">Capital is put at risk deliberately, in known amounts, against rules written down before the trade.</p>
+    <h3 style="margin-top:0.75rem">Body and interface</h3>
+    <p class="note">Neutral, tall x-height, good at small sizes.
+      <a href="https://rsms.me/inter/">Inter</a> (free, SIL OFL) or
+      <a href="https://fonts.google.com/specimen/IBM+Plex+Sans">IBM Plex Sans</a>
+      (free, SIL OFL) are both correct choices.</p>
+    <div class="stack">--sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
+       "Helvetica Neue", Arial, sans-serif;</div>
+  </div>
+
+  <div class="spec">
+    <p class="sample-mono">+2.4R&nbsp;&nbsp;&nbsp;0.98%&nbsp;&nbsp;&nbsp;$1,740.00&nbsp;&nbsp;&nbsp;14:00 UTC</p>
+    <h3 style="margin-top:0.75rem">Figures and data</h3>
+    <p class="note">Every number in a trading interface should be tabular, so
+      columns align and a changing digit does not shift the row.
+      <a href="https://fonts.google.com/specimen/IBM+Plex+Mono">IBM Plex Mono</a>
+      (free, SIL OFL) pairs with the body face by design. Every figure on this
+      site is set with <code>font-variant-numeric: tabular-nums</code> for the
+      same reason.</p>
+    <div class="stack">--mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
+       "Liberation Mono", monospace;</div>
+  </div>
+</section>
+
+<!-- ================================================================= TAGLINE -->
+<section class="wrap block reveal">
+  <p class="eyebrow">Tagline</p>
+  <h2 style="font-size:clamp(1.75rem,5vw,2.75rem)">Earned, not handed over.</h2>
+  <p class="lede">Quotes nothing. Works on both readings of the name, and is
+    literally true of an account funded by inheritance. Alternatives worth
+    holding in reserve: <em>The mark comes after the work</em>, and
+    <em>Size first, conviction second</em>.</p>
+</section>
+
+</main>
+
+<footer class="site">
+  <div class="wrap">
+    <p><b>This is a demonstration.</b> Every account figure, trade, rationale and
+      chart on this site is synthetic, generated by
+      <code>scripts/generate_demo_data.py</code> and committed as a fixture.
+      Nothing here reads a broker, a journal, an account or an API.</p>
+    <p>Mudhorn Capital is a private vehicle. It trades one paper account, for one
+      person, and takes no money from anyone else. Not an offer, not advice, and
+      not managing anyone else's money.</p>
+    <p><a href="https://github.com/electrumnz/Electrum_Investments">Source on GitHub</a></p>
+  </div>
+</footer>
+
+<script src="assets/demo-data.js"></script>
+<script src="assets/app.js"></script>
+<script>
+  // Replay: strip the class, force reflow, put it back. Restarts every
+  // animation in the sequence together rather than staggering on re-entry.
+  var seq = document.getElementById('seq');
+  document.getElementById('replay').addEventListener('click', function () {
+    seq.classList.remove('playing');
+    void seq.offsetWidth;
+    seq.classList.add('playing');
+  });
+
+  // Scroll reveal. IntersectionObserver keeps this build-step free, and the
+  // reduced-motion query above already neutralises it for anyone who asked.
+  var io = new IntersectionObserver(function (entries) {
+    entries.forEach(function (entry) {
+      if (entry.isIntersecting) {
+        entry.target.classList.add('in');
+        io.unobserve(entry.target);
+      }
+    });
+  }, { rootMargin: '0px 0px -12% 0px' });
+
+  document.querySelectorAll('.reveal').forEach(function (el) { io.observe(el); });
+</script>
+</body>
+</html>
