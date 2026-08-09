@@ -23,6 +23,12 @@ rejection is final. If a rejection looks wrong, the fix is to change
 - Never call Alpaca's order tools directly. Use `place_order` from this repo's
   MCP server, which runs the gate first.
 - Never add an order path that skips `RiskGate.evaluate`.
+- **Do not install [`alpacahq/cli`](https://github.com/alpacahq/cli)** on the box
+  that runs the bot, however useful `alpaca account` looks. It submits orders,
+  and Hermes cannot drop its `terminal` toolset, so a shell-reachable order
+  binary is a live bypass of all four of the operator's rules sitting one command
+  away from the agent. Everything it offers read-only is already covered by the
+  dashboard, `get_risk_status` and `electrum-bot smoketest`.
 - Never widen a limit in `config/rules.yaml` to make a specific trade fit. Limits
   change deliberately, in their own commit, with a reason.
 - Never set `ALPACA_PAPER_TRADE=false`. The code refuses to start, twice, on
