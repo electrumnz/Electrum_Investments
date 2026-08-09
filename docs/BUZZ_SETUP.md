@@ -1,10 +1,27 @@
 # Buzz + Hermes chat interface
 
-Optional. Gives you a chat channel where the trading agent is a participant you
-can talk to in plain English, from your phone or desktop, instead of a terminal.
+**Decided: run both.** A Buzz channel where the trading agent is a participant
+you talk to in plain English, with Hermes underneath carrying memory, scheduled
+digests and approval gates. Phone or desktop, no terminal.
 
 **Read the security section before installing.** There is a real caveat that
-specifically affects agents with trading tools attached.
+specifically affects agents with trading tools attached, and it rules out the
+two easiest setup paths.
+
+## They are two different layers, not two options
+
+- **Buzz** is the **chat surface**. Where you type.
+- **Hermes** is the **agent runtime**. Memory across sessions, a cron scheduler,
+  approval gates, MCP client support.
+
+Either works alone. Buzz can drive Claude Code directly with no Hermes; Hermes
+reaches a phone through Telegram with no Buzz. Running both is the most capable
+arrangement and also the one with the most moving parts, which is the trade being
+made here deliberately.
+
+If it ever feels like too much, **drop Buzz, keep Hermes on Telegram**. That
+loses the workspace but keeps everything that actually does work: memory,
+digests and approvals.
 
 ---
 
@@ -21,8 +38,9 @@ memory across sessions, a skill-learning loop, approval gates on tool calls, a
 cron scheduler, and MCP client support. It speaks Telegram, Discord, Slack,
 WhatsApp, Signal, CLI and Buzz from one gateway process.
 
-Together: your friend chats with the bot in a Buzz channel; Hermes carries the
-memory and the approval gates; the bot's MCP server still enforces the risk rules.
+Together: you chat with the bot in a Buzz channel, Hermes carries the memory and
+the approval gates, and the bot's MCP server still enforces the risk rules
+underneath. Nothing about this arrangement can talk `risk.py` into anything.
 
 ---
 
@@ -64,10 +82,14 @@ Desktop builds for macOS, Windows and Linux are on the
 [releases page](https://github.com/block/buzz/releases). Install, create your
 Nostr identity, and make a channel for the bot.
 
-> Buzz is at 0.4.x. Mobile apps have not shipped, and there was documented
-> onboarding friction at launch. Treat it as promising rather than dependable, and
-> keep Claude Code working as your fallback interface — everything the bot does is
-> reachable from there without Buzz in the picture at all.
+> Buzz is young. **Mobile has since shipped** on both
+> [iOS](https://apps.apple.com/us/app/buzz-chat-with-your-hive/id6779728271) and
+> [Android](https://play.google.com/store/apps/details?id=xyz.block.buzz.mobile),
+> and they are full clients rather than remote controls needing a laptop open.
+> Still rough, with reported message-visibility and notification issues, and
+> there was documented onboarding friction at launch. Treat it as promising
+> rather than dependable, and keep Claude Code working as the fallback —
+> everything the bot does is reachable there without Buzz in the picture at all.
 
 ### 2. Hermes
 
@@ -115,9 +137,10 @@ also prevents two Hermes profiles fighting over one Buzz identity.
 
 From the Buzz channel:
 
-- *"What's my risk status?"* → equity, cash, limits, day-trade count
+- *"What's my risk status?"* → equity, cash, open risk, limits
 - *"What are the current rules?"* → contents of `config/rules.yaml`
-- *"Check a buy of 10 SPY at 580, stop 575, target 590."* → an approved verdict
+- *"Check a buy of 3 SPY at 580, stop 575, target 590."* → an approved verdict
+- *"How are my stops and targets doing?"* → MAE/MFE read from the journal
 - *"Buy 1000 shares of GME at market."* → **refused**, with the rules it broke
 
 That last one is the test that matters. If a rule-breaking order goes through,
@@ -140,6 +163,29 @@ The alternative is [Claude Code Routines](https://www.mindstudio.ai/blog/claude-
 which run in Anthropic's cloud on a Claude Pro plan ($20/month) with your laptop
 off. Either works. Hermes keeps everything in one place; Routines avoid running a
 gateway process.
+
+---
+
+## Hosting: what has to be running, and where
+
+The short answer to "do I need Vercel": **no.** Nothing here is a public
+website. The dashboard, when it exists, binds to `127.0.0.1`.
+
+| Component | Always on? | Where | Cost |
+|---|---|---|---|
+| Claude Code + MCP servers | No | Your machine | Free |
+| Claude Code Routines (scheduled) | No, runs in Anthropic's cloud | Anthropic | Claude Pro, $20/mo |
+| **Hermes gateway** | **Yes** | Small VPS, or a PC that stays on | ~$5/mo |
+| Buzz relay | Only if self-hosting | Block's hosted relay works | Free |
+| Local dashboard | No | Your machine | Free |
+
+**Only the Hermes gateway forces an always-on machine**, and the reason is
+obvious once stated: a chat bot that is offline when you message it is not a chat
+bot. A $5 Hetzner box is plenty; this process does almost nothing between
+messages.
+
+Everything else runs on demand. If you drop the gateway and use Claude Code
+directly, the whole stack costs nothing beyond Anthropic API usage.
 
 ---
 
