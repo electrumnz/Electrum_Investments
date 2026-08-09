@@ -1,0 +1,88 @@
+# Hermes configuration for this deployment — append to ~/.hermes/config.yaml.
+#
+#     cat /opt/mudhorn/deploy/hermes-config.yaml >> ~/.hermes/config.yaml
+#
+# Run that as the `hermes` user, AFTER `hermes model` has written the file.
+# Check first that none of these top-level keys already exist, because a
+# duplicate key makes the whole file invalid YAML:
+#
+#     grep -n "^approvals:\|^mcp_servers:\|^agent:" ~/.hermes/config.yaml
+#
+# Then confirm it still parses:
+#
+#     python3 -c "import yaml;yaml.safe_load(open('/home/hermes/.hermes/config.yaml'));print('ok')"
+
+approvals:
+  # smart | manual | off. `smart` is the Hermes default and hands the decision
+  # to an auxiliary LLM: low risk auto-approved, dangerous auto-denied,
+  # uncertain escalated.
+  #
+  # This deployment uses `manual`. src/bot/risk.py is deterministic Python
+  # because it cannot be persuaded; a model deciding whether a command against a
+  # brokerage account is safe reintroduces exactly what the gate exists to
+  # remove, one directory across.
+  mode: manual
+
+  # A scheduled job has nobody to prompt. The alternative value approves.
+  cron_mode: deny
+
+  # The load-bearing part. fnmatch globs, matched case-insensitively, checked
+  # BEFORE --yolo and before `mode: off` — so this is the only layer in the
+  # approvals system that refuses unconditionally. Everything else is a prompt
+  # someone can wave through after a bad day.
+  deny:
+    # Credentials. The hermes user cannot read .env anyway; this is the second lock.
+    - "*/opt/mudhorn/.env*"
+    - "*ALPACA_*KEY*"
+    - "*ANTHROPIC_API_KEY*"
+
+    # The journal is where the consecutive-loss stand-down persists across
+    # restarts. Only the bot writes it, and only through the MCP tools. An agent
+    # that can edit this file can clear its own stand-down.
+    - "*journal.db*"
+    - "*/opt/mudhorn/data/*"
+
+    # The audit log is append-only by intent.
+    - "*/opt/mudhorn/audit/*"
+
+    # Limits change in a commit, by a person, with a reason. Never from a chat.
+    - "*rules.yaml*"
+
+    # Turning on live execution is a deliberate human act, not a tool call.
+    - "*--execute*"
+    - "*mudhorn-bot.service*"
+    - "*systemctl*mudhorn*"
+
+    # A shell-reachable order binary bypasses the risk gate entirely. CLAUDE.md
+    # names this one specifically.
+    - "*alpacahq/cli*"
+    - "*alpaca order*"
+
+    # Escalation past the single sudoers rule.
+    - "sudo -i*"
+    - "sudo su*"
+    - "sudo -u root*"
+
+mcp_servers:
+  # The only path to an order. Runs as `mudhorn` via /etc/sudoers.d/hermes-mcp,
+  # because the hermes user deliberately holds no credentials of its own. Every
+  # order-placing tool behind this re-runs RiskGate.evaluate.
+  electrum-bot:
+    command: sudo
+    args: ["-n", "-u", "mudhorn", "/opt/mudhorn/.venv/bin/electrum-bot-mcp"]
+
+# Optional, and stronger than any deny rule if it works: the agent's whole job
+# here is answering questions through the MCP tools above, so it plausibly needs
+# no shell at all.
+#
+# UNVERIFIED for `terminal` specifically. The documented examples are `memory`
+# and `web`, and the earlier "terminal cannot be dropped" finding was about
+# platform_toolsets.acp, which is a different key. Uncomment, restart, then ask
+# the agent to run `ls` and check it has no tool to do it with. If Hermes
+# misbehaves, comment it back out — the user split and the sudoers rule hold
+# either way.
+#
+# agent:
+#   disabled_toolsets:
+#     - terminal
+#     - web
