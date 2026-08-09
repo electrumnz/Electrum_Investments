@@ -225,6 +225,30 @@ which is exactly when the cap is doing its job. Each limit names the file that
 owns it. Credentials are reported as configured or not configured, never
 rendered: loopback-bound is not the same as private, and a screenshot travels.
 
+### The model call is a feed too, and prose truncates while numbers reject
+
+The same rule as the feeds below, learned the hard way. `claude.propose` was
+the one network call in the cycle with nothing around it, and a live cycle died
+because a rationale came back 34 characters over a 500-character cap. The
+`ValidationError` propagated out of the SDK, killed the process, and systemd
+restarted it straight into the same failure.
+
+That was survivable while the loop placed nothing. With `--execute` on it means
+real orders resting at the broker, the journal no longer reconciled and open
+positions no longer watched — with nothing on screen to say the bot has gone.
+The call is now wrapped, and a failed cycle logs `model_call_failed` and
+records an audit event rather than emitting `cycle_complete`: a cycle that
+could not get a decision must not be recorded as one that decided to do
+nothing.
+
+**Free-form prose truncates. Numbers reject.** `rationale`, `reasoning` and
+`waiting_for` trim to `RATIONALE_MAX_CHARS` with an ellipsis, because nothing
+downstream parses them — losing the tail of a sentence costs a reader some
+context on the Decisions page, where a rejected response costs the whole cycle.
+**Do not extend that leniency to a price or a quantity.** A truncated number is
+a different number, and a plausible wrong figure that passes validation is the
+exact failure this repository exists to prevent.
+
 ### A feed failure must degrade the cycle, never end the loop
 
 `fetch_market_ticks` and `fetch_indicators` in `context.py` both catch
@@ -565,7 +589,7 @@ reference/              Third-party projects we borrow from. See reference/STATU
 ## Running it
 
 ```sh
-.venv/bin/python -m pytest              # full suite (346 tests)
+.venv/bin/python -m pytest              # full suite (362 tests)
 electrum-bot smoketest --mock           # no credentials needed
 electrum-bot smoketest                  # needs Alpaca paper keys
 electrum-bot loop                       # proposes and vets; places nothing

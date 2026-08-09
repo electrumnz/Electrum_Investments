@@ -18,7 +18,9 @@ import time
 from collections.abc import MutableMapping
 from typing import Any
 
+import pytest
 import structlog
+from pydantic import ValidationError
 
 import bot.main as main_mod
 from bot.audit import AuditLog
@@ -73,6 +75,69 @@ def _heartbeat(logs: list[MutableMapping[str, Any]]) -> MutableMapping[str, Any]
     beats = [e for e in logs if e["event"] == "cycle_complete"]
     assert len(beats) == 1, f"expected exactly one heartbeat, got {len(beats)}"
     return beats[0]
+
+
+class _ExplodingClaude:
+    """Fails the way the real client failed on the droplet.
+
+    A `ValidationError` from the SDK's structured-output parsing is neither an
+    `APIError` nor a timeout, and it is raised after a successful HTTP call, so
+    no amount of network handling catches it.
+    """
+
+    def __init__(self, error: Exception) -> None:
+        self._error = error
+
+    def propose(self, market_context: str) -> tuple[ClaudeDecision, CallUsage]:
+        raise self._error
+
+
+def _run_one_cycle_with_client(monkeypatch, tmp_path, client: object) -> list[Any]:
+    def _stop(_seconds: float) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(time, "sleep", _stop)
+    monkeypatch.setattr(main_mod, "Journal", lambda: Journal(tmp_path / "journal.db"))
+    monkeypatch.setattr(main_mod, "AuditLog", lambda: AuditLog(tmp_path / "audit"))
+    monkeypatch.setattr(main_mod, "ClaudeClient", lambda *a, **k: client)
+
+    env = Env(_env_file=None)  # type: ignore[call-arg]
+    rules = load_rules()
+
+    with structlog.testing.capture_logs() as logs:
+        assert main_mod.cmd_loop(env, rules, execute=False, force_mock=True) == 0
+    return logs
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        ValidationError.from_exception_data("ClaudeDecision", []),
+        TimeoutError("read timed out"),
+        Exception("APIError: overloaded"),
+    ],
+    ids=["validation_error", "timeout", "api_error"],
+)
+def test_a_failed_model_call_degrades_the_cycle_rather_than_ending_the_loop(
+    monkeypatch, tmp_path, error
+):
+    """Observed live: one rationale came back over the cap and the loop died.
+
+    A `ValidationError` propagating out of `propose` killed the process, and
+    systemd restarted it straight into the same failure. That was survivable
+    while the loop placed no orders. With `--execute` on it means real orders
+    resting at the broker, the journal no longer reconciled and open positions
+    no longer watched, with nothing on screen to say the bot has gone.
+    """
+    logs = _run_one_cycle_with_client(
+        monkeypatch, tmp_path, _ExplodingClaude(error)
+    )
+
+    failures = [e for e in logs if e["event"] == "model_call_failed"]
+    assert len(failures) == 1
+    # Named, not swallowed. A cycle that produced no decision must not be
+    # recorded as a cycle that decided to do nothing.
+    assert not [e for e in logs if e["event"] == "cycle_complete"]
 
 
 def test_quiet_cycle_still_logs_a_heartbeat(monkeypatch, tmp_path):

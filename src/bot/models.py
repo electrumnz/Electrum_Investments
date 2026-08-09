@@ -12,7 +12,30 @@ from __future__ import annotations
 from datetime import datetime
 from enum import StrEnum
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+# Free text the model writes and nothing downstream parses. Generous, because
+# the prompt now asks for a stance on every symbol and a plan for every
+# position, so the answers are longer than they were when 500 was chosen.
+#
+# **Over-length truncates; it does not reject.** That split is deliberate and
+# should not be extended to anything else. A rationale is prose read by a human
+# on the Decisions page: losing its last clause costs a little context. A
+# rejected response costs the whole cycle, and — until this was caught — the
+# whole loop, because a `ValidationError` out of the SDK is not something the
+# decision loop was catching. Trading stopped because a sentence was too long.
+#
+# Numbers keep rejecting. A price or a quantity that fails validation must
+# never be quietly coerced into something plausible: that is the failure this
+# repository exists to prevent, and a truncated number is a different number.
+RATIONALE_MAX_CHARS = 2000
+
+
+def truncate_free_text(value: object) -> object:
+    """Trim over-long free text to the cap, marking that it was cut."""
+    if isinstance(value, str) and len(value) > RATIONALE_MAX_CHARS:
+        return value[: RATIONALE_MAX_CHARS - 1].rstrip() + "…"
+    return value
 
 
 class Direction(StrEnum):
@@ -193,7 +216,11 @@ class OrderProposal(BaseModel):
     )
     stop_loss_price: float = Field(gt=0)
     take_profit_price: float = Field(gt=0)
-    rationale: str = Field(min_length=10, max_length=500)
+    rationale: str = Field(min_length=10, max_length=RATIONALE_MAX_CHARS)
+
+    # Truncates rather than rejects, and only because nothing reads this field.
+    # See RATIONALE_MAX_CHARS.
+    _trim_rationale = field_validator("rationale", mode="before")(truncate_free_text)
 
     @property
     def notional_usd(self) -> float:
@@ -293,15 +320,19 @@ class SymbolAssessment(BaseModel):
     stance: Stance
     reasoning: str = Field(
         min_length=10,
+        max_length=RATIONALE_MAX_CHARS,
         description="Why this stance, referring to the computed indicators supplied.",
     )
     waiting_for: str = Field(
         default="",
+        max_length=RATIONALE_MAX_CHARS,
         description=(
             "For WATCH: the specific, observable condition that would turn this "
             "into a proposal. Name a level or a figure, not a feeling."
         ),
     )
+
+    _trim = field_validator("reasoning", "waiting_for", mode="before")(truncate_free_text)
 
 
 class PositionAction(StrEnum):
@@ -324,12 +355,17 @@ class PositionPlan(BaseModel):
     action: PositionAction = PositionAction.HOLD
     thesis_intact: bool = True
     reasoning: str = Field(
-        min_length=10, description="Why the position is still held, or why it should not be."
+        min_length=10,
+        max_length=RATIONALE_MAX_CHARS,
+        description="Why the position is still held, or why it should not be.",
     )
     waiting_for: str = Field(
         default="",
+        max_length=RATIONALE_MAX_CHARS,
         description="The observable event that would close this: a level, a target, a date.",
     )
+
+    _trim = field_validator("reasoning", "waiting_for", mode="before")(truncate_free_text)
     invalidation: str = Field(
         default="", description="What would prove the original thesis wrong."
     )

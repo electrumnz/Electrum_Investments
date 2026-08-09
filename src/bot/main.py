@@ -245,7 +245,29 @@ def cmd_loop(
                 social_posts=posts,
                 social_degraded=social_degraded,
             )
-            decision, usage = claude.propose(context)
+            # Catches broadly, and for the same reason `fetch_market_ticks`
+            # does. This is a network call to a model that returns free text,
+            # and the SDK validates the answer with Pydantic, so the failures
+            # are `APIError`, an httpx timeout, an overload, and — observed on
+            # the droplet — a `ValidationError` because one rationale came back
+            # over the character cap. Any of those propagating from here ends
+            # the loop, which is the worst available outcome and got worse when
+            # `--execute` went on: the journal stops being reconciled and open
+            # positions stop being watched, with real orders resting at the
+            # broker and nothing on screen to say the bot has gone.
+            #
+            # A cycle that cannot get a decision has nothing to propose, which
+            # is also the honest description of what happened. Everything
+            # safety-critical above this line — reconcile, the stand-down
+            # state, the expiry alerts — has already run.
+            try:
+                decision, usage = claude.propose(context)
+            except Exception as exc:
+                detail = f"{type(exc).__name__}: {exc}"
+                log.error("model_call_failed", error=detail)
+                audit.record_event("model_call_failed", {"error": detail})
+                time.sleep(env.decision_interval_seconds)
+                continue
 
             # Recorded alongside the decision, not merely rendered into the
             # prompt and discarded. "Why did it pass on SPY on Tuesday" cannot
