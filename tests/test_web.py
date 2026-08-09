@@ -204,13 +204,17 @@ def test_untracked_position_warning(client, journal, tmp_path):
 # ---------------------------------------------------------------- read-only
 
 
-def test_chat_is_the_only_write_route(client):
+def test_the_write_routes_are_exactly_the_two_that_were_decided_on(client):
     """The dashboard was wholly read-only and this test enforced it.
 
-    That changed deliberately when the chat panel was added, so the assertion
-    changed with it rather than being deleted: exactly one POST, and it is
-    `/chat`. Anything else appearing here means a write route arrived without
-    anyone deciding it should.
+    It has been widened twice, each time deliberately and each time by editing
+    this set rather than loosening the assertion: `POST /chat` when the agent
+    panel landed, and `POST /login` when the operator chose to expose the
+    dashboard publicly. Anything else appearing here means a write route
+    arrived without anyone deciding it should.
+
+    Neither of these writes to the journal or reaches an order path. `/login`
+    mints a session; `/chat` is gated by its own separate token on top.
     """
     app = client.app
     writes = {
@@ -219,7 +223,10 @@ def test_chat_is_the_only_write_route(client):
         for m in getattr(r, "methods", set())
         if m not in {"GET", "HEAD"}
     }
-    assert writes == {("/chat", "POST")}, f"unexpected write routes: {writes}"
+    assert writes == {
+        ("/chat", "POST"),
+        ("/login", "POST"),
+    }, f"unexpected write routes: {writes}"
 
 
 def test_chat_is_off_unless_a_token_is_set(client):

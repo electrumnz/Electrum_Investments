@@ -62,6 +62,16 @@ class Env(BaseSettings):
     # because they deployed a new version.
     dashboard_chat_token: str = Field(default="", alias="DASHBOARD_CHAT_TOKEN")
 
+    # Set this and every dashboard route requires a login. Unset, the dashboard
+    # behaves as it always did: no login, because it binds to 127.0.0.1 and
+    # nothing is published.
+    #
+    # It lives in the environment and NEVER in the repository. `brand/` is a
+    # public GitHub repo served as static files, so a password committed there
+    # would be readable in the page source by anyone who opened it — which is
+    # not a gate at all.
+    dashboard_password: str = Field(default="", alias="DASHBOARD_PASSWORD")
+
     finnhub_api_key: str = Field(default="", alias="FINNHUB_API_KEY")
     marketaux_api_key: str = Field(default="", alias="MARKETAUX_API_KEY")
     # Reading timelines needs a paid X tier. Absent, the social feed is simply

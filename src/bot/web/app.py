@@ -1,16 +1,29 @@
-"""Local dashboard for the trading journal.
+"""Operator dashboard for the trading journal.
 
-Binds to `127.0.0.1` by default and has no login, because on a private
-interface there is nobody to authenticate. To reach it from a phone, put the
-machine on a [Tailscale](https://tailscale.com/) network and browse to its
-private address: the page stays unpublished and no auth surface is created.
+Binds to `127.0.0.1`. Two supported ways to reach it:
 
-**Do not simply expose this on a public URL.** The reason there is no login is
-that nothing is published. Publishing it without building real authentication
-first would put a view of a brokerage account on the open internet.
+- **Loopback plus Tailscale**, the original arrangement. Nothing is published,
+  so there is nobody to authenticate and `DASHBOARD_PASSWORD` stays unset.
+- **Exposed on a public URL with `DASHBOARD_PASSWORD` set.** Every route then
+  requires a session; see `src/bot/web/auth.py` for what that gate is and is
+  not.
+
+The second is a deliberate operator decision, taken on the basis that the
+account behind it is Alpaca **paper** money and nothing here can lose funds.
+The earlier note in this file said publishing needed real authentication built
+first rather than bolted on after — that is `auth.py`, and it is the
+prerequisite being met, not waived.
+
+**Exposing it without `DASHBOARD_PASSWORD` set is the thing to avoid**, because
+the app cannot detect it: a reverse proxy or a Tailscale Funnel still arrives
+on loopback, so from in here a public request and a local one look identical.
+`electrum-bot-web` warns loudly at startup when no password is configured.
 
 Read-only by design. It reports what happened; the risk gate and
 `config/rules.yaml` decide what may happen, and neither is reachable from here.
+`POST /chat` keeps its own separate token on top of the password, because
+viewing an account and driving an agent that can reach the broker are different
+privileges and should not be granted by one secret.
 """
 
 from __future__ import annotations
@@ -19,6 +32,15 @@ import argparse
 from datetime import UTC, datetime
 from typing import Any
 
+# Module level, not inside `build_app`, and that matters rather than being
+# tidiness. `from __future__ import annotations` turns every annotation into a
+# string, and FastAPI resolves them against the MODULE globals. With `Request`
+# imported inside the function it is unresolvable, so FastAPI falls back to
+# treating `request: Request` as a query parameter and every such route answers
+# 422 "field required". Nothing warns; the route simply stops working.
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
+
 from ..audit import AuditLog
 from ..config import Env, Rules, load_rules
 from ..journal import Journal
@@ -26,6 +48,7 @@ from ..metrics import build_report
 from ..models import AccountSnapshot, WorkingOrder
 from ..options import alerts_for_positions
 from . import render
+from .auth import COOKIE_NAME, SESSION_TTL_SECONDS, SessionStore
 from .chat import HermesBridge
 
 
@@ -39,14 +62,32 @@ def build_app(
 ) -> Any:
     """Construct the FastAPI app. Dependencies are injectable so tests never
     touch a real journal or broker."""
-    from fastapi import FastAPI, HTTPException
-    from fastapi.responses import HTMLResponse, JSONResponse
-
     app = FastAPI(title="Mudhorn Capital", docs_url=None, redoc_url=None)
     bridge = HermesBridge()
 
     resolved_env = env or Env()
     resolved_env.assert_paper_only()
+    sessions = SessionStore(password=resolved_env.dashboard_password)
+
+    # A middleware rather than a per-route dependency, deliberately. A
+    # dependency is opt-in, so the failure mode is a route added later that
+    # nobody remembered to decorate — and that route serves the account to
+    # anyone. This way a new route is protected by default and exposing one
+    # takes a deliberate edit to the allowlist below.
+    OPEN_PATHS = frozenset({"/login", "/healthz"})
+
+    @app.middleware("http")
+    async def require_session(request: Request, call_next: Any) -> Any:
+        if not sessions.required or request.url.path in OPEN_PATHS:
+            return await call_next(request)
+        if sessions.is_valid(request.cookies.get(COOKIE_NAME)):
+            return await call_next(request)
+        # A browser gets the form; anything else gets a status code it can act
+        # on. Redirecting an API client to HTML would show up as a confusing
+        # 200 full of markup.
+        if request.method == "GET" and "text/html" in request.headers.get("accept", ""):
+            return RedirectResponse("/login", status_code=303)
+        return JSONResponse({"error": "authentication required"}, status_code=401)
     resolved_rules = rules or load_rules()
     resolved_journal = journal or Journal()
     audit = audit_log or AuditLog()
@@ -86,7 +127,64 @@ def build_app(
             broker.disconnect()
 
     def _page(title: str, active: str, body: str) -> str:
-        return render.shell(title, active, body, env=resolved_env)
+        return render.shell(
+            title, active, body, env=resolved_env, exposed=sessions.required
+        )
+
+    @app.get("/login", response_class=HTMLResponse)
+    def login_form(request: Request) -> Any:
+        if not sessions.required:
+            return RedirectResponse("/", status_code=303)
+        if sessions.is_valid(request.cookies.get(COOKIE_NAME)):
+            return RedirectResponse("/", status_code=303)
+        return HTMLResponse(render.login_page(env=resolved_env))
+
+    @app.post("/login", response_class=HTMLResponse)
+    async def login(request: Request) -> Any:
+        if not sessions.required:
+            return RedirectResponse("/", status_code=303)
+
+        client = request.client.host if request.client else "unknown"
+        if sessions.throttled(client):
+            # 429 rather than "wrong password", so a guesser cannot use the
+            # response to tell a locked-out attempt from a failed one.
+            return HTMLResponse(
+                render.login_page(
+                    env=resolved_env,
+                    error="Too many attempts. Wait five minutes and try again.",
+                ),
+                status_code=429,
+            )
+
+        form = await request.form()
+        if not sessions.check_password(str(form.get("password", ""))):
+            sessions.record_failure(client)
+            return HTMLResponse(
+                render.login_page(env=resolved_env, error="Incorrect password."),
+                status_code=401,
+            )
+
+        sessions.clear_attempts(client)
+        response = RedirectResponse("/", status_code=303)
+        response.set_cookie(
+            COOKIE_NAME,
+            sessions.issue(),
+            max_age=SESSION_TTL_SECONDS,
+            httponly=True,
+            samesite="lax",
+            # Set only when the request arrived over HTTPS, so the cookie still
+            # works for a loopback test over plain HTTP. A public deployment is
+            # behind TLS, so in the case that matters this is on.
+            secure=request.url.scheme == "https",
+        )
+        return response
+
+    @app.get("/logout")
+    def logout(request: Request) -> Response:
+        sessions.logout(request.cookies.get(COOKIE_NAME))
+        response = RedirectResponse("/login", status_code=303)
+        response.delete_cookie(COOKIE_NAME)
+        return response
 
     @app.get("/", response_class=HTMLResponse)
     def board() -> str:
@@ -230,10 +328,27 @@ def main() -> int:
 
     import uvicorn
 
+    # Said at startup because the app cannot work it out later. A reverse proxy
+    # or a Tailscale Funnel forwards to loopback, so from inside the process a
+    # request from the internet and one from the same machine are identical.
+    # The only moment anyone can be told is now.
+    if Env().dashboard_password:
+        print(
+            "Dashboard password is SET: every page requires a login, and "
+            "/chat needs DASHBOARD_CHAT_TOKEN on top of it."
+        )
+    else:
+        print(
+            "Dashboard password is NOT set: there is no login. That is correct "
+            "for 127.0.0.1 plus Tailscale, and wrong for anything reachable "
+            "from the internet. Set DASHBOARD_PASSWORD before exposing this."
+        )
+
     if args.host not in ("127.0.0.1", "localhost", "::1"):
         print(
             f"WARNING: binding to {args.host} exposes this dashboard beyond the "
-            f"local machine. There is no login. Prefer 127.0.0.1 plus Tailscale."
+            f"local machine. Prefer 127.0.0.1 plus Tailscale, or a Funnel with "
+            f"DASHBOARD_PASSWORD set."
         )
 
     uvicorn.run(build_app(force_mock=args.mock), host=args.host, port=args.port)

@@ -4,10 +4,13 @@ An AI trading bot running against an **Alpaca paper-trading account**. Read this
 before touching orders, risk, or config.
 
 **Scope:** single operator, personal trading, paper money. Not a product, not
-multi-user, not exposed to anyone over a network. That assumption is why there is
-no auth, why the dashboard binds to `127.0.0.1`, and why the non-permissive
-licences in `reference/` are not a constraint. If it ever stops being true,
-re-read `reference/STATUS.md` first.
+multi-user. That assumption is why the dashboard has one shared password rather
+than accounts, why it binds to `127.0.0.1` and is reached over Tailscale or a
+Funnel, and why the non-permissive licences in `reference/` are not a
+constraint. The dashboard **may** now be exposed publicly, behind
+`DASHBOARD_PASSWORD` — see `src/bot/web/auth.py` for exactly what that gate is
+and is not. If the paper-money assumption ever stops being true, that file is
+the first thing to replace, and re-read `reference/STATUS.md` too.
 
 ---
 
@@ -604,21 +607,49 @@ If asked to point the public site at the real journal: that is a separate and
 much larger project — real authentication, an API off the droplet, TLS, a threat
 model — and not a matter of swapping the data source. Say so.
 
-**That is not a precedent for `src/bot/web/`.** The dashboard renders account
-equity, open positions and realised P&L, and it has no login *because* it binds
-to `127.0.0.1`. The absence of auth is safe only while nothing is published, so
-deploying it would put a live view of a brokerage account on the open internet.
-Remote access is Tailscale, never a public URL.
+**`src/bot/web/` may now be exposed, and the prerequisite was met rather than
+waived.** It used to have no login *because* it bound to `127.0.0.1`, and the
+rule here was that publishing it needed real authentication built first. The
+operator has chosen to expose it, on the grounds that the account behind it is
+Alpaca **paper** money and no funds can be lost. `src/bot/web/auth.py` is the
+authentication that was named as the prerequisite.
 
-If asked to "host the dashboard too because the brand page worked", the answer
-is no, and building real authentication first is the prerequisite, not a
-follow-up.
+What that gate is: a shared password from `DASHBOARD_PASSWORD`, enforced by
+**middleware** rather than a per-route dependency — so a route added later is
+protected by default and opening one takes a deliberate edit to `OPEN_PATHS`.
+Constant-time comparison, session tokens stored hashed, `HttpOnly` cookies, and
+five attempts per five minutes so the password cannot be found by guessing.
 
-This got stronger, not weaker, when the chat panel landed. The dashboard used to
-only *display* an account; `POST /chat` means it can now *drive an agent* that
-reaches the broker. Exposure used to risk disclosure and now risks action. The
-panel is off unless `DASHBOARD_CHAT_TOKEN` is set, which is deliberate: enabling
-it should be a decision, never a side effect of deploying.
+What it is not: multi-user authentication. One password, no accounts, no
+rotation, no record of who signed in. That is proportionate to paper money and
+would **not** be proportionate to a live account. **If this ever fronts real
+money, `auth.py` is the file to replace, not to extend.**
+
+Four things about it are load-bearing:
+
+- **The password lives in the environment, never in the repository.** The
+  original request was to put it in `brand/`, which cannot work: that is static
+  files in a public GitHub repo, so the password would be readable in the repo
+  and in the page source, and there is no server there to check it against.
+- **`POST /chat` keeps its own separate token on top.** Viewing an account and
+  driving an agent that can reach the broker are different privileges, and one
+  secret must not grant both. Exposure used to risk disclosure; with chat it
+  risks action.
+- **No password set still means no gate**, which is correct for the loopback
+  deployment and is tested. What must not happen is exposing it *without* one,
+  and the app cannot detect that case — a Funnel or a reverse proxy still
+  arrives on loopback, so a public request and a local one are identical from
+  inside the process. `electrum-bot-web` therefore says which mode it is in at
+  startup, because that is the only moment anyone can be told.
+- **The sign-in page reveals nothing about the account** — no equity, no
+  positions, no symbols, not even whether a trade has ever been placed.
+  Everything it renders is already public in the repository.
+
+`bot/web/app.py` imports FastAPI **at module scope**, and that is not tidiness.
+`from __future__ import annotations` makes every annotation a string, and
+FastAPI resolves them against the module globals; with `Request` imported inside
+`build_app` it is unresolvable, so FastAPI treats `request: Request` as a query
+parameter and the route answers `422 field required`. Nothing warns.
 
 ---
 
@@ -706,7 +737,7 @@ reference/              Third-party projects we borrow from. See reference/STATU
 ## Running it
 
 ```sh
-.venv/bin/python -m pytest              # full suite (417 tests)
+.venv/bin/python -m pytest              # full suite (449 tests)
 electrum-bot smoketest --mock           # no credentials needed
 electrum-bot smoketest                  # needs Alpaca paper keys
 electrum-bot loop                       # proposes and vets; places nothing

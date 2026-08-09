@@ -360,11 +360,15 @@ def pips(lit: int, total: int) -> str:
     )
 
 
-def shell(title: str, active: str, body: str, *, env: Env) -> str:
+def shell(
+    title: str, active: str, body: str, *, env: Env, exposed: bool = False
+) -> str:
     nav = "".join(
         f'<a href="{path}"{" aria-current=page" if path == active else ""}>{label}</a>'
         for path, label in PAGES
     )
+    if exposed:
+        nav += '<a href="/logout">Sign out</a>'
     mode = "paper" if env.alpaca_paper_trade else "LIVE"
     return f"""<!doctype html>
 <html lang="en-GB"><head><meta charset="utf-8">
@@ -378,8 +382,9 @@ def shell(title: str, active: str, body: str, *, env: Env) -> str:
   <span class="live paper"><i></i>{_e(mode)}</span>
 </div></header>
 <main><div class="wrap">{body}</div></main>
-<footer class="wrap">Live operator view, bound to the loopback interface. Paper
-trading. Private vehicle, not managing anyone else's money. Rendered
+<footer class="wrap">Live operator view{
+    " behind a shared password" if exposed else ", bound to the loopback interface"
+}. Paper trading. Private vehicle, not managing anyone else's money. Rendered
 {datetime.now(UTC).strftime('%Y-%m-%d %H:%M')} UTC.</footer>
 </body></html>"""
 
@@ -1480,3 +1485,47 @@ the MCP tools, and every order path behind me runs the risk gate first.</div></d
   }});
 }})();
 </script>"""
+
+
+# -------------------------------------------------------------------- login
+
+
+def login_page(*, env: Env, error: str = "") -> str:
+    """The gate. Deliberately says nothing about the account behind it.
+
+    No equity, no positions, no symbol list, not even whether a trade has ever
+    been placed. Everything this page renders is already public in the GitHub
+    repository, so an unauthenticated visitor learns nothing they could not
+    read there. That is the whole job of a sign-in screen and it is easy to
+    lose by putting a friendly summary above the form.
+    """
+    mode = "paper" if env.alpaca_paper_trade else "LIVE"
+    message = (
+        f'<p class="note" style="color:var(--loss)">{_e(error)}</p>' if error else ""
+    )
+    return f"""<!doctype html>
+<html lang="en-GB"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex">
+<link rel="icon" href="{FAVICON}">
+<title>Sign in &middot; Mudhorn Capital</title><style>{STYLES}</style></head><body>
+<header class="bar"><div class="wrap">
+  <span class="brand">{MARK} MUDHORN <span class="thin">CAPITAL</span></span>
+  <span class="live paper"><i></i>{_e(mode)}</span>
+</div></header>
+<main><div class="wrap" style="max-width:26rem;margin-top:4rem">
+  <h1 style="font-size:1.5rem">Operator sign-in</h1>
+  <p class="note">Live command centre for a private paper-trading account.
+  Not a demo.</p>
+  {message}
+  <form method="post" action="/login" style="margin-top:1.5rem">
+    <label for="password" class="eyebrow">Password</label>
+    <input id="password" name="password" type="password"
+      autocomplete="current-password" required autofocus
+      style="width:100%;margin-top:.5rem">
+    <button type="submit" style="margin-top:1rem;width:100%">Sign in</button>
+  </form>
+</div></main>
+<footer class="wrap">Paper trading only. Rendered
+{datetime.now(UTC).strftime('%Y-%m-%d %H:%M')} UTC.</footer>
+</body></html>"""

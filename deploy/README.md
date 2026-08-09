@@ -195,13 +195,56 @@ but has to be re-run each time and is awkward from a phone:
 ssh -L 8787:127.0.0.1:8787 root@<vps-ip>    # then browse to 127.0.0.1:8787
 ```
 
-What you should **not** do is reach for a public hostname to avoid installing
-something. See below.
+## 5b. A public URL, if you want one
 
-**Do not put the dashboard on a public URL.** It renders account equity, open
-positions and realised P&L, and it has no login *because* it binds to
-`127.0.0.1`. Those two facts are load-bearing together. Publishing it means
-building real authentication first, and that is a project rather than a step.
+The dashboard used to be loopback-only, and the rule was that publishing it
+required building real authentication first rather than bolting one on after.
+That authentication now exists — `src/bot/web/auth.py` — so a public URL is
+supported. It is still a decision, not a default.
+
+**Set the password first.** The app cannot tell whether it is exposed: a
+Tailscale Funnel and a reverse proxy both arrive on loopback, so from inside
+the process a request from the internet is indistinguishable from a local one.
+Nothing will warn you afterwards.
+
+```sh
+printf '\nDASHBOARD_PASSWORD=%s\n' 'your-password-here' >> /opt/mudhorn/.env
+systemctl restart mudhorn-web
+```
+
+Confirm it took, before exposing anything:
+
+```sh
+journalctl -u mudhorn-web -n 5 --no-pager   # must say the password is SET
+curl -sS -o /dev/null -w '%{http_code}\n' -H 'accept: text/html' http://127.0.0.1:8787/
+```
+
+That must print `303` — a redirect to `/login`. A `200` means the password is
+not loaded and the dashboard is still open.
+
+Then publish it with a Funnel, which gives real TLS and a real hostname with no
+nginx, no certbot and no open port on the droplet:
+
+```sh
+tailscale funnel --bg 8787
+tailscale funnel status          # prints the public https:// URL
+```
+
+`tailscale funnel --https=443 off` takes it down again.
+
+Two things stay true regardless:
+
+- **`POST /chat` keeps its own separate token.** The password lets someone
+  *view* the account; `DASHBOARD_CHAT_TOKEN` lets them *drive an agent* that
+  reaches the broker. Do not enable the second just because the first is set.
+- **One shared password is proportionate to a paper account and not to a live
+  one.** It has no accounts, no rotation and no record of who signed in. If
+  this ever fronts real money, replace `auth.py` rather than extending it.
+
+`tailscale serve` instead of `funnel` is the same command without the public
+part: an HTTPS URL reachable only by your own devices. If the goal is "view it
+on my phone" rather than "show it to someone else", prefer that — it needs no
+password at all and there is no secret to leak.
 
 The identity page under `brand/` is public and that is fine, because it reads no
 journal, no broker and no credential. It is not a precedent for this.
