@@ -1,0 +1,93 @@
+{
+  "fetched_at": "2026-08-09T07:44:51+00:00",
+  "repos": [
+    {
+      "name": "alpaca-mcp-server",
+      "repo": "alpacahq/alpaca-mcp-server",
+      "url": "https://github.com/alpacahq/alpaca-mcp-server",
+      "ref": "main",
+      "commit": "1d51ba923da433151eb6e445f106c867ca8aacee",
+      "commit_date": "2026-08-07T14:04:10+02:00",
+      "commit_subject": "feat: add versioned User-Agent (#104)",
+      "license_detected": "MIT",
+      "expected_license": "MIT"
+    },
+    {
+      "name": "atomic-agents",
+      "repo": "BrainBlend-AI/atomic-agents",
+      "url": "https://github.com/BrainBlend-AI/atomic-agents",
+      "ref": "main",
+      "commit": "0d432e5737304edef8d877ac3c6bdab41e42a2be",
+      "commit_date": "2026-08-04T09:34:42+02:00",
+      "commit_subject": "Merge pull request #272 from Coooder-Crypto/feat/multi-assistant-support",
+      "license_detected": "MIT",
+      "expected_license": "MIT"
+    },
+    {
+      "name": "buzz",
+      "repo": "block/buzz",
+      "url": "https://github.com/block/buzz",
+      "ref": "main",
+      "commit": "5bf78671f45178f8de02ba18d3d321cbbf19cd1f",
+      "commit_date": "2026-08-08T17:29:06-04:00",
+      "commit_subject": "fix(agent): retry LLM completion on malformed 2xx JSON body (#5351)",
+      "license_detected": "Apache-2.0",
+      "expected_license": "Apache-2.0"
+    },
+    {
+      "name": "eliza",
+      "repo": "elizaOS/eliza",
+      "url": "https://github.com/elizaOS/eliza",
+      "ref": "main",
+      "commit": "ff751c2857fdc6ca02940e4eaf8cf542ca9ceb99",
+      "commit_date": "2026-08-08T14:36:59-07:00",
+      "commit_subject": "Merge pull request #18028 from elizaOS/develop",
+      "license_detected": "MIT",
+      "expected_license": "MIT"
+    },
+    {
+      "name": "goose",
+      "repo": "block/goose",
+      "url": "https://github.com/block/goose",
+      "ref": "main",
+      "commit": "064244e6bddf641876676f054a006b7da1da5182",
+      "commit_date": "2026-08-08T17:08:32+02:00",
+      "commit_subject": "chore(deps): bump pypa/gh-action-pypi-publish from 1.14.1 to 1.14.2 (#11037)",
+      "license_detected": "Apache-2.0",
+      "expected_license": "Apache-2.0"
+    },
+    {
+      "name": "hermes-agent",
+      "repo": "NousResearch/hermes-agent",
+      "url": "https://github.com/NousResearch/hermes-agent",
+      "ref": "main",
+      "commit": "934546fd5ab8032893f3665ce5f50ac36eeeba99",
+      "commit_date": "2026-08-09T02:38:52-05:00",
+      "commit_subject": "Merge pull request #82345 from NousResearch/bb/home-dupe",
+      "license_detected": "MIT",
+      "expected_license": "MIT"
+    },
+    {
+      "name": "hyperagent",
+      "repo": "hyperbrowserai/HyperAgent",
+      "url": "https://github.com/hyperbrowserai/HyperAgent",
+      "ref": "main",
+      "commit": "a7ec1f45e2f7b99ea505218b0516d156da7597b5",
+      "commit_date": "2026-05-11T14:41:07-07:00",
+      "commit_subject": "Add pull request templates",
+      "license_detected": "AGPL-3.0",
+      "expected_license": "AGPL-3.0"
+    },
+    {
+      "name": "letta",
+      "repo": "letta-ai/letta",
+      "url": "https://github.com/letta-ai/letta",
+      "ref": "main",
+      "commit": "ff19ffeafeb54bd2a7dc5d4a552f10191732a235",
+      "commit_date": "2026-08-01T11:24:28-07:00",
+      "commit_subject": "fix: require explicit AI tool disclosure in issues (#3421)",
+      "license_detected": "Apache-2.0",
+      "expected_license": "Apache-2.0"
+    }
+  ]
+}

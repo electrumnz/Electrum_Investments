@@ -22,6 +22,10 @@ data/runtime/
 audit/*.jsonl
 audit/*.db
 
+# Third-party reference clones. reference/registry.yaml, versions.json and
+# STATUS.md are committed; the checked-out source is not.
+reference/src/
+
 # IDE
 .idea/
 .vscode/
