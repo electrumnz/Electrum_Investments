@@ -214,17 +214,93 @@ Since v0.20.0, MCP servers start lazily from a fingerprint-keyed schema cache
 rather than all booting at session start, so a server that is slow or down no
 longer delays every session.
 
-### 6. Approvals — do not skip this
+### 6. Approvals — the section not to skim
 
-Covered in the security section above and it is the part most likely to be
-waved through. Smart approvals are **on by default** and hand the decision to an
-LLM reviewer. Turn them off, and add deny rules for anything touching
-credentials or the broker.
+Config lives in `~/.hermes/config.yaml`. Three modes:
 
-> Config key names were not verifiable when this was written. Take them from the
-> live configuration docs rather than guessing — a deny rule with a wrong key
-> silently matches nothing, which is worse than no rule because it looks
-> configured.
+| `approvals.mode` | Behaviour |
+|---|---|
+| `smart` | **The default.** An auxiliary LLM assesses each flagged command: low risk auto-approved, dangerous auto-denied, uncertain escalated to you |
+| `manual` | Always prompts you on a dangerous command |
+| `off` | No checks. Equivalent to `--yolo` |
+
+**Use `manual`.** `smart` puts a language model in the position of deciding
+whether a command against a brokerage account is safe. `src/bot/risk.py` is
+deterministic Python precisely because it cannot be persuaded, and that reasoning
+does not stop applying one directory across.
+
+```yaml
+approvals:
+  mode: manual
+  cron_mode: deny          # a headless cron job cannot answer a prompt
+  deny:
+    # Credentials. The hermes user cannot read .env anyway; this is the second lock.
+    - "*/opt/mudhorn/.env*"
+    - "*ALPACA_*KEY*"
+    - "*ANTHROPIC_API_KEY*"
+
+    # The journal is where the stand-down persists across restarts. Only the bot
+    # writes it. An agent that can edit it can clear its own stand-down.
+    - "*journal.db*"
+    - "*/opt/mudhorn/data/*"
+
+    # The audit log is append-only by intent.
+    - "*/opt/mudhorn/audit/*"
+
+    # Limits change in a commit, by a person, with a reason.
+    - "*rules.yaml*"
+
+    # Turning on live execution is a deliberate human act, not a tool call.
+    - "*--execute*"
+    - "*mudhorn-bot.service*"
+    - "*systemctl*mudhorn*"
+
+    # A shell-reachable order binary bypasses the gate entirely. See CLAUDE.md.
+    - "*alpacahq/cli*"
+    - "*alpaca order*"
+
+    # Escalation past the single sudoers rule.
+    - "sudo -i*"
+    - "sudo su*"
+    - "sudo -u root*"
+```
+
+**Why `deny` is the load-bearing part.** These are fnmatch globs, matched
+case-insensitively, and they are checked **before** `--yolo` or
+`approvals.mode: off`. They are the only layer in the approvals system that
+behaves like the risk gate: deterministic, and not talked round. Everything else
+is a prompt someone can wave through at 11pm.
+
+`cron_mode: deny` matters once digests are scheduled. A headless job has nobody
+to ask, and the alternative setting silently approves.
+
+Hermes also keeps a hardline blocklist that nothing overrides — `rm -rf /`, fork
+bombs, `mkfs` on mounted filesystems, `dd` to physical disks, piping untrusted
+URLs into a shell. Useful, but it protects the machine rather than the account,
+so it is not a substitute for the list above.
+
+### 6b. Better still, if it works: no terminal at all
+
+```yaml
+agent:
+  disabled_toolsets:
+    - web          # no web_search / web_extract
+    - terminal     # UNVERIFIED for terminal specifically — try it
+```
+
+For this use case the agent's whole job is answering questions about the bot
+through MCP tools. It plausibly needs no shell at all, and a dropped toolset
+beats any number of deny rules.
+
+The documented examples are `memory` and `web`; whether `terminal` can be
+dropped the same way was **not confirmed** when this was written — the earlier
+finding that it cannot be dropped was about `platform_toolsets.acp`, which is a
+different key. Try it, then verify by asking the agent to run something harmless
+and checking it has no tool to do it with.
+
+Keep the `hermes` user and the sudoers rule regardless. They hold whether or not
+the toolset can be dropped, and they are what makes the shell uninteresting
+rather than merely gated.
 
 ### 7. Run it as a service
 
