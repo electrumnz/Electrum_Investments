@@ -173,7 +173,11 @@ The alternative for desk use only is an SSH tunnel, which needs no extra account
 but has to be re-run each time and is awkward from a phone:
 
 ```sh
-ssh -L 8787:127.0.0.1:8787 mudhorn@<vps-ip>    # then browse to 127.0.0.1:8787
+# Log in as root or as your own sudo user, NOT as mudhorn: bootstrap.sh creates
+# that account with /usr/sbin/nologin, so it deliberately cannot be SSHed into.
+# That is the point of it — it holds the broker credentials and is not something
+# anyone signs in as.
+ssh -L 8787:127.0.0.1:8787 root@<vps-ip>    # then browse to 127.0.0.1:8787
 ```
 
 What you should **not** do is reach for a public hostname to avoid installing
