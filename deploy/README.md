@@ -169,8 +169,13 @@ Install Tailscale on the phone and laptop too, then browse to the box's private
 address on port 8787. Free for personal use, and it signs in with the project
 Google account rather than needing another password.
 
-**Turn off key expiry on the droplet, in the Tailscale admin console.**
+**Turn off key expiry on the droplet if your tailnet allows it.**
 Machines → the droplet → the ⋯ menu → *Disable key expiry*.
+
+Some tailnets cap the maximum node key lifetime (Settings → Device management →
+Key expiry) and then that menu item is greyed out. This one caps it at 90 days.
+When you cannot disable it, `mudhorn-tailnet.timer` is what stops the expiry
+being a surprise — see below.
 
 Tailscale node keys expire after about six months by default. On a laptop that
 is a mild annoyance; on this box it means the dashboard stops being reachable
@@ -194,6 +199,52 @@ but has to be re-run each time and is awkward from a phone:
 # anyone signs in as.
 ssh -L 8787:127.0.0.1:8787 root@<vps-ip>    # then browse to 127.0.0.1:8787
 ```
+
+### Watching the key expiry
+
+`mudhorn-tailnet.timer` runs `deploy/check-tailscale.sh` every six hours. It
+reads `tailscale status --json`, writes the answer to
+`data/tailnet-status.json`, and exits non-zero when a person should act.
+
+```sh
+systemctl list-timers mudhorn-tailnet          # when it last ran, when it runs next
+systemctl start mudhorn-tailnet.service        # check right now
+journalctl -u mudhorn-tailnet -n 5 --no-pager  # what it said
+```
+
+**The warning appears as a banner on the dashboard**, which looks backwards —
+a warning about losing the dashboard, shown on the dashboard. It is the right
+place precisely because the failure is ten days of notice followed by an
+outage: during the notice period the page is up and being looked at, and after
+the key lapses nothing on this box can reach anyone. The non-zero exit and
+`systemctl --failed` are the backstop for nobody having opened it.
+
+It fires at ten days remaining, so on a 90-day cap that is around day 80.
+Re-authenticating takes two minutes, so the notice only has to outlast a
+holiday, and a banner sitting there for a fortnight stops being read long
+before it stops being true.
+
+After you fix it, clear the banner by re-checking — the command is named in the
+banner itself so nobody has to remember it:
+
+```sh
+tailscale up                                # fix the link
+systemctl start mudhorn-tailnet.service     # re-check; the banner goes
+```
+
+To remove the reading entirely, for a handover or if you drop the timer:
+
+```sh
+sudo -u mudhorn /opt/mudhorn/.venv/bin/python -m bot.tailnet --clear \
+  --out /opt/mudhorn/data/tailnet-status.json
+```
+
+Three things it deliberately does not do. It does not treat a stale reading as
+healthy — a check that stopped running reports the link as *unknown*, because a
+file describing a healthy link is not evidence of one. It does not read a
+missing expiry date as zero days left; that means expiry is disabled, which is
+the good outcome. And it does not report anything when it has never run, so a
+box without the timer is not told its link is fine.
 
 ## 5b. A public URL, if you want one
 

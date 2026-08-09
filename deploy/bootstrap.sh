@@ -92,7 +92,9 @@ install -m 644 "$APP_DIR/deploy/systemd/mudhorn-bot.service" /etc/systemd/system
 install -m 644 "$APP_DIR/deploy/systemd/mudhorn-web.service" /etc/systemd/system/
 install -m 644 "$APP_DIR/deploy/systemd/mudhorn-backup.service" /etc/systemd/system/
 install -m 644 "$APP_DIR/deploy/systemd/mudhorn-backup.timer" /etc/systemd/system/
-chmod 755 "$APP_DIR/deploy/backup-journal.sh"
+install -m 644 "$APP_DIR/deploy/systemd/mudhorn-tailnet.service" /etc/systemd/system/
+install -m 644 "$APP_DIR/deploy/systemd/mudhorn-tailnet.timer" /etc/systemd/system/
+chmod 755 "$APP_DIR/deploy/backup-journal.sh" "$APP_DIR/deploy/check-tailscale.sh"
 systemctl daemon-reload
 systemctl enable --quiet mudhorn-bot.service mudhorn-web.service
 echo "    enabled at boot, not started"
@@ -103,6 +105,12 @@ echo "    enabled at boot, not started"
 # that turns out not to have been running.
 systemctl enable --now --quiet mudhorn-backup.timer
 echo "    mudhorn-backup.timer started (hourly)"
+
+# Started for the same reason. Before Tailscale is installed this reports "not
+# logged in", which is correct rather than noisy: on a box whose dashboard is
+# only reachable over Tailscale, not having it is a real finding on day one.
+systemctl enable --now --quiet mudhorn-tailnet.timer
+echo "    mudhorn-tailnet.timer started (every 6 hours)"
 
 cat <<EOF
 

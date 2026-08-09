@@ -392,6 +392,40 @@ A backup on the same droplet survives a bad restore, not a dead droplet. Copying
 `backups/daily` off the box is deliberately not automated, because it needs a
 destination and a credential that should not live on the trading box.
 
+### The warning about losing the dashboard is shown on the dashboard
+
+That reads backwards and is correct. Tailscale node keys expire — this tailnet
+caps the lifetime at 90 days and forbids disabling it — and when the key lapses
+the Funnel stops serving, the private address stops answering, **and the bot
+carries on trading perfectly normally**. Service green, journal filling, orders
+still going to the broker, and the only symptom is a URL that no longer
+responds.
+
+`src/bot/tailnet.py` plus `mudhorn-tailnet.timer` check it every six hours and
+raise a banner at ten days remaining, around day 80.
+
+The banner is on the surface that is about to disappear because **the failure is
+notice followed by an outage, not a sudden event**. During the notice period the
+dashboard is up and being looked at, which makes it the one channel guaranteed
+to reach the operator while it can still be acted on. Afterwards, nothing on
+this box can reach anyone — which is why the non-zero exit and
+`systemctl --failed` exist as a backstop rather than as the primary route.
+
+Three properties are load-bearing, and all three are the same principle:
+
+- **A stale reading is `unknown`, not healthy.** `checked_at` travels with the
+  status and `is_stale` is computed from it, so a check that quietly stopped
+  reports that it stopped. A file describing a healthy link is not evidence of
+  one.
+- **A missing expiry date means expiry is disabled**, not zero days left. The
+  good outcome must not read as the worst one.
+- **Never having run reports nothing at all.** A box without the timer installed
+  is not told its link is fine.
+
+**The banner names the command that clears it** (`RECHECK_COMMAND`), because a
+warning that outlives the fix by six hours teaches an operator to ignore the
+next one.
+
 ### The three data feeds are not equally important
 
 `src/bot/data/` holds three adapters and they fail in different ways.
@@ -702,6 +736,9 @@ src/bot/
                         Decisions page renders. The only record of a REJECTED
                         proposal.
   metrics.py            Win rate, profit factor, expectancy, R, MAE/MFE. Pure functions.
+  tailnet.py            Is the Tailscale link still going to be there next week.
+                        Warns at ten days, and says "unknown" rather than "fine"
+                        when the check itself has stopped.
   web/                  Operator command centre: Board, Decisions, Trades,
                         Analytics, Settings, Chat. Binds 127.0.0.1. Read-only
                         apart from POST /chat, which is off unless
@@ -715,6 +752,9 @@ deploy/                 VPS provisioning: bootstrap.sh + systemd units. The unit
                         edit its own limits.
                         backup-journal.sh + mudhorn-backup.timer snapshot the
                         journal hourly with sqlite3 .backup, never cp.
+                        check-tailscale.sh + mudhorn-tailnet.timer watch the key
+                        expiry that would otherwise take the dashboard away
+                        silently.
 audit/                  Append-only JSONL. Gitignored.
 data/journal.db         SQLite journal. Gitignored.
 reference/              Third-party projects we borrow from. See reference/STATUS.md.
@@ -737,7 +777,7 @@ reference/              Third-party projects we borrow from. See reference/STATU
 ## Running it
 
 ```sh
-.venv/bin/python -m pytest              # full suite (449 tests)
+.venv/bin/python -m pytest              # full suite (470 tests)
 electrum-bot smoketest --mock           # no credentials needed
 electrum-bot smoketest                  # needs Alpaca paper keys
 electrum-bot loop                       # proposes and vets; places nothing

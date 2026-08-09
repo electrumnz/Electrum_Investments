@@ -1,0 +1,23 @@
+[Unit]
+Description=Six-hourly check of the Tailscale link
+Documentation=https://github.com/electrumnz/Electrum_Investments/blob/main/deploy/README.md
+
+[Timer]
+# Six-hourly rather than daily, and the reason is the second thing this checks.
+# Key expiry is a 90-day countdown where a day's resolution would be plenty.
+# Being logged out is not: it happens at a moment, it takes the dashboard and
+# the public URL with it, and waiting up to 24 hours to notice is most of a
+# working day of not knowing.
+OnCalendar=*-*-* 00,06,12,18:00:00
+
+# Fire on boot if a run was missed while the box was down. Without it a droplet
+# rebooted through a scheduled run skips it silently, and `is_stale` in
+# src/bot/tailnet.py would then correctly report the reading as unknown — which
+# is honest but is a worse outcome than simply running the check.
+Persistent=true
+
+RandomizedDelaySec=10min
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

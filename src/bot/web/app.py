@@ -47,6 +47,7 @@ from ..journal import Journal
 from ..metrics import build_report
 from ..models import AccountSnapshot, WorkingOrder
 from ..options import alerts_for_positions
+from ..tailnet import read as read_tailnet_status
 from . import render
 from .auth import COOKIE_NAME, SESSION_TTL_SECONDS, SessionStore
 from .chat import HermesBridge
@@ -204,7 +205,14 @@ def build_app(
         )
 
         body = render.banners(
-            resolved_journal.get_stand_down(), alerts, untracked, stale=stale
+            resolved_journal.get_stand_down(),
+            alerts,
+            untracked,
+            stale=stale,
+            # `None` when the check has never run, which renders nothing rather
+            # than a false all-clear. A box without the timer installed should
+            # not be told its link is healthy.
+            tailnet=read_tailnet_status(),
         ) + render.board(
             account,
             resolved_rules,

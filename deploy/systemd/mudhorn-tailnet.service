@@ -1,0 +1,43 @@
+[Unit]
+Description=Check the Tailscale link before it expires
+Documentation=https://github.com/electrumnz/Electrum_Investments/blob/main/deploy/README.md
+
+# No ConditionPathExists here, unlike mudhorn-backup.service. That one is
+# skipped before the journal exists because failing on a fresh box would train
+# everyone to ignore it. This check is meaningful from the first boot: a
+# tailscale that is not installed, or installed and not logged in, is exactly
+# the state worth reporting.
+
+[Service]
+Type=oneshot
+
+# Root, and not the `mudhorn` service account. Reading the tailscaled local API
+# needs privileges the account deliberately does not have, and giving it those
+# to run a health check would widen the account that holds the broker
+# credentials. The script only reads.
+User=root
+
+WorkingDirectory=/opt/mudhorn
+ExecStart=/opt/mudhorn/deploy/check-tailscale.sh
+
+# Exits non-zero when a person should act, so `systemctl --failed` shows it.
+# That is the backstop channel: the primary one is the dashboard banner, which
+# is the surface guaranteed to be in front of the operator during the weeks
+# BEFORE the link dies. After it dies, no channel on this box can reach them.
+
+# Needs the network namespace, unlike the backup unit, because talking to
+# tailscaled is the entire job.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
+# Writes one file, into the directory the dashboard already reads from.
+ReadWritePaths=/opt/mudhorn/data
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=mudhorn-tailnet

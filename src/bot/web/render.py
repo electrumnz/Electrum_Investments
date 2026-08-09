@@ -32,6 +32,7 @@ from ..config import DAY_NAMES, Env, Rules
 from ..metrics import JournalReport, render_excursions, render_summary
 from ..models import AccountSnapshot, StandDownState, Trade, WorkingOrder
 from ..options import ExpiryAlert
+from ..tailnet import TailnetStatus
 
 STYLES = """
 :root {
@@ -409,6 +410,7 @@ def banners(
     *,
     stale: list[str] | None = None,
     audit: AuditView | None = None,
+    tailnet: TailnetStatus | None = None,
 ) -> str:
     """Anything needing attention, ahead of the numbers.
 
@@ -417,6 +419,17 @@ def banners(
     """
     out: list[str] = []
     now = datetime.now(UTC)
+
+    # Deliberately on the surface that is about to disappear. It reads backwards
+    # — a warning about losing the dashboard, shown on the dashboard — and it is
+    # the only channel that works: the failure is 80 days of notice followed by
+    # an outage, and during the notice period this page is up and being looked
+    # at. After the key lapses nothing on this box can reach anyone.
+    if tailnet is not None and tailnet.needs_attention(now=now):
+        out.append(
+            '<div class="banner warn"><b>Tailscale link</b>'
+            f"{_e(tailnet.headline(now=now))}</div>"
+        )
 
     for alert in (a for a in alerts if a.needs_action):
         out.append(
