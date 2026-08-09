@@ -139,6 +139,42 @@ Miss it and the cap silently has nothing to count. This was a real bug, fixed in
 `14b88c8`. A held position with no journal entry has an unknowable stop, so its
 risk is reported as **missing** rather than guessed at.
 
+### The command centre is the real product; brand/ is the shop window
+
+Two surfaces, and confusing them is the mistake to avoid.
+
+`src/bot/web/` renders **live** journal, broker and audit state, on six pages:
+Board, Decisions, Trades, Analytics, Settings, Chat. It has no login *because*
+it binds to `127.0.0.1` and is reached over Tailscale. That is where operator
+features belong, and building one there needs no auth because nothing is
+published.
+
+`brand/` is public and **every figure on it is invented**. It is a shop window.
+
+**The Decisions page is the only surface on which a rejected proposal exists.**
+A proposal the gate refuses never becomes a trade, so it reaches neither the
+journal nor the broker: the reasoning lives in `audit/*.jsonl` and nowhere else.
+That is why `audit.py` reads as well as writes, why the reader is tolerant of a
+torn final line rather than raising, and why it counts what it could not parse
+instead of silently dropping it.
+
+Three properties there are load-bearing:
+
+- **`RiskGate` collects every failure reason rather than short-circuiting.** The
+  page renders all of them. Showing only the first would quietly discard the
+  property the gate is built around.
+- **A broker refusal is not an execution.** `DecisionEntry.acted` checks
+  `accepted`, not merely that an `OrderResult` exists, or the one cycle where
+  money did not move gets labelled as the cycle where it did.
+- **"Held" is a normal outcome, styled as one.** Doing nothing is frequently
+  correct and the page must not read it as a failure.
+
+**Settings shows the limits and offers no way to change them.** A settings
+screen that could widen a cap would be used to widen one during a losing run,
+which is exactly when the cap is doing its job. Each limit names the file that
+owns it. Credentials are reported as configured or not configured, never
+rendered: loopback-bound is not the same as private, and a screenshot travels.
+
 ### A feed failure must degrade the cycle, never end the loop
 
 `fetch_market_ticks` and `fetch_indicators` in `context.py` both catch
@@ -403,10 +439,13 @@ src/bot/
                         `requires` names what each one still cannot see.
   data/                 External feeds. marketaux.py = headlines (context only);
                         finnhub.py = earnings calendar (feeds the blackout gate).
-  audit.py              Append-only JSONL decision log.
+  audit.py              Append-only JSONL decision log, and the reader the
+                        Decisions page renders. The only record of a REJECTED
+                        proposal.
   metrics.py            Win rate, profit factor, expectancy, R, MAE/MFE. Pure functions.
-  web/                  Local dashboard + a Hermes chat panel. Binds 127.0.0.1.
-                        Read-only apart from POST /chat, which is off unless
+  web/                  Operator command centre: Board, Decisions, Trades,
+                        Analytics, Settings, Chat. Binds 127.0.0.1. Read-only
+                        apart from POST /chat, which is off unless
                         DASHBOARD_CHAT_TOKEN is set.
   main.py               CLI: `electrum-bot smoketest`, `electrum-bot loop`.
 deploy/                 VPS provisioning: bootstrap.sh + systemd units. Runs the
@@ -436,13 +475,13 @@ reference/              Third-party projects we borrow from. See reference/STATU
 ## Running it
 
 ```sh
-.venv/bin/python -m pytest              # full suite (275 tests)
+.venv/bin/python -m pytest              # full suite (302 tests)
 electrum-bot smoketest --mock           # no credentials needed
 electrum-bot smoketest                  # needs Alpaca paper keys
 electrum-bot loop                       # proposes and vets; places nothing
 electrum-bot loop --execute             # places approved orders on PAPER
 electrum-bot-mcp                        # MCP server, usually launched by Claude Code
-electrum-bot-web                        # dashboard on http://127.0.0.1:8787
+electrum-bot-web                        # command centre on http://127.0.0.1:8787
 ```
 
 `--execute` is off by default. Leave it off until you have watched the proposals

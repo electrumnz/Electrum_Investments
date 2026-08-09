@@ -17,10 +17,10 @@ from __future__ import annotations
 
 import argparse
 from datetime import UTC, datetime
-from pathlib import Path
 from typing import Any
 
-from ..config import DEFAULT_RULES_PATH, Env, Rules, load_rules
+from ..audit import AuditLog
+from ..config import Env, Rules, load_rules
 from ..journal import Journal
 from ..metrics import build_report
 from ..models import AccountSnapshot
@@ -34,6 +34,7 @@ def build_app(
     journal: Journal | None = None,
     rules: Rules | None = None,
     env: Env | None = None,
+    audit_log: AuditLog | None = None,
     force_mock: bool = False,
 ) -> Any:
     """Construct the FastAPI app. Dependencies are injectable so tests never
@@ -48,6 +49,7 @@ def build_app(
     resolved_env.assert_paper_only()
     resolved_rules = rules or load_rules()
     resolved_journal = journal or Journal()
+    audit = audit_log or AuditLog()
 
     def _account() -> AccountSnapshot:
         """Broker state with open risk filled in from the journal.
@@ -66,16 +68,18 @@ def build_app(
         finally:
             broker.disconnect()
 
-    @app.get("/", response_class=HTMLResponse)
-    def dashboard() -> str:
-        account = _account()
-        closed = resolved_journal.closed_trades()
-        report = build_report(closed)
+    def _page(title: str, active: str, body: str) -> str:
+        return render.shell(title, active, body, env=resolved_env)
 
-        journalled = {t.symbol for t in resolved_journal.open_trades()}
-        untracked = sorted(
-            p.symbol for p in account.open_positions if p.symbol not in journalled
-        )
+    @app.get("/", response_class=HTMLResponse)
+    def board() -> str:
+        account = _account()
+        open_trades = resolved_journal.open_trades()
+
+        journalled = {t.symbol for t in open_trades}
+        held = {p.symbol for p in account.open_positions}
+        untracked = sorted(held - journalled)
+        stale = sorted(journalled - held)
 
         alerts = alerts_for_positions(
             [(p.symbol, p.qty) for p in account.open_positions],
@@ -84,28 +88,59 @@ def build_app(
             buying_power_usd=account.buying_power_usd,
         )
 
-        body = (
-            '<section class="wrap reveal in" style="padding-top:2rem;border-bottom:0">'
-            + render.banners(
-                resolved_journal.get_stand_down(), alerts, account, untracked
-            )
-            + "</section>"
-            + render.overview(
-                account,
-                report,
-                resolved_journal.equity_curve(),
-                resolved_rules.account.max_total_risk_pct,
-            )
-            + render.analytics(report)
-            + render.trades(closed[-50:])
-            + render.chat_panel(
+        body = render.banners(
+            resolved_journal.get_stand_down(), alerts, untracked, stale=stale
+        ) + render.board(
+            account,
+            resolved_rules,
+            resolved_journal.equity_curve(),
+            open_trades,
+            resolved_journal.get_stand_down(),
+            resolved_journal.consecutive_losses(
+                resolved_rules.stand_down.loss_threshold_r
+            ),
+        )
+        return _page("Board", "/", body)
+
+    @app.get("/decisions", response_class=HTMLResponse)
+    def decisions() -> str:
+        return _page("Decisions", "/decisions", render.decisions(audit.read(limit=60)))
+
+    @app.get("/trades", response_class=HTMLResponse)
+    def trades() -> str:
+        closed = resolved_journal.closed_trades()
+        return _page(
+            "Trades", "/trades", render.trades_page(closed[-100:], build_report(closed))
+        )
+
+    @app.get("/analytics", response_class=HTMLResponse)
+    def analytics() -> str:
+        report = build_report(resolved_journal.closed_trades())
+        return _page("Analytics", "/analytics", render.analytics_page(report))
+
+    @app.get("/settings", response_class=HTMLResponse)
+    def settings() -> str:
+        return _page(
+            "Settings",
+            "/settings",
+            render.settings_page(
+                resolved_rules,
+                resolved_env,
+                chat_enabled=bool(resolved_env.dashboard_chat_token),
+            ),
+        )
+
+    @app.get("/chat", response_class=HTMLResponse)
+    def chat_view() -> str:
+        return _page(
+            "Chat",
+            "/chat",
+            render.chat_page(
                 enabled=bool(resolved_env.dashboard_chat_token),
                 token=resolved_env.dashboard_chat_token,
                 hermes_available=bridge.available,
-            )
-            + render.rules_view(_rules_text())
+            ),
         )
-        return render.page("Dashboard", body)
 
     @app.post("/chat", response_class=JSONResponse)
     def chat(payload: dict[str, Any]) -> dict[str, Any]:
@@ -159,13 +194,6 @@ def build_app(
         return {"ok": True, "trades": len(resolved_journal.closed_trades())}
 
     return app
-
-
-def _rules_text(path: Path = DEFAULT_RULES_PATH) -> str:
-    try:
-        return path.read_text(encoding="utf-8")
-    except OSError as e:
-        return f"could not read {path}: {e}"
 
 
 def main() -> int:
