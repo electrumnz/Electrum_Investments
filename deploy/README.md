@@ -203,11 +203,17 @@ It stays paper either way. `ALPACA_PAPER_TRADE=false` is refused by the code.
 
 ## Do not install the Alpaca CLI here
 
-[`alpacahq/cli`](https://github.com/alpacahq/cli) submits orders from a shell.
-Hermes cannot drop its `terminal` toolset, so putting it on this box leaves a
-bypass of all four of the operator's rules one command from the agent. Its
-read-only value is already covered by the dashboard, `get_risk_status` and
-`smoketest`.
+[`alpacahq/cli`](https://github.com/alpacahq/cli) submits orders from a shell,
+so putting it on this box leaves a bypass of all four of the operator's rules
+one command away from anything with a prompt. Its read-only value is already
+covered by the dashboard, `get_risk_status` and `smoketest`.
+
+Hermes' `terminal` toolset **is** dropped now, in `deploy/hermes-config.yaml`,
+which weakens the original argument without retiring the rule. A dropped
+toolset is a line in a YAML file, and it fails silently: a duplicate `agent:`
+key, a bad merge or an upgrade that renames the setting all end with the agent
+holding a shell again and nothing on screen to say so. An order binary that is
+not installed cannot be reached by a mistake of that kind.
 
 Same reasoning applies to the OAuth apps in Alpaca's **Connect** tab, which are
 order paths that do not pass through `src/bot/risk.py`.

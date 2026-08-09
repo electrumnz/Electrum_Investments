@@ -24,11 +24,15 @@ rejection is final. If a rejection looks wrong, the fix is to change
   MCP server, which runs the gate first.
 - Never add an order path that skips `RiskGate.evaluate`.
 - **Do not install [`alpacahq/cli`](https://github.com/alpacahq/cli)** on the box
-  that runs the bot, however useful `alpaca account` looks. It submits orders,
-  and Hermes cannot drop its `terminal` toolset, so a shell-reachable order
-  binary is a live bypass of all four of the operator's rules sitting one command
-  away from the agent. Everything it offers read-only is already covered by the
-  dashboard, `get_risk_status` and `electrum-bot smoketest`.
+  that runs the bot, however useful `alpaca account` looks. It submits orders, so
+  a shell-reachable order binary is a live bypass of all four of the operator's
+  rules sitting one command away from anything with a prompt. Everything it
+  offers read-only is already covered by the dashboard, `get_risk_status` and
+  `electrum-bot smoketest`.
+  Hermes' `terminal` toolset **is** dropped now (see below), which weakens the
+  original argument for this rule without retiring it: a dropped toolset is a
+  line in a YAML file and it fails silently, whereas a binary that is not
+  installed cannot be reached by a bad merge.
 - Never widen a limit in `config/rules.yaml` to make a specific trade fit. Limits
   change deliberately, in their own commit, with a reason.
 - Never set `ALPACA_PAPER_TRADE=false`. The code refuses to start, twice, on
@@ -245,6 +249,46 @@ worse than never having added bars at all.
 
 The remaining work is `get_intraday_bars` on the `Broker` protocol, which Alpaca
 also supplies free, and a spread history.
+
+### Hermes ships a large surface, and both ways of trimming it fail quietly
+
+`deploy/hermes-config.yaml` disables 25 toolsets and all 77 bundled skills.
+Verified against hermes-agent `934546f` by reading the resolver and running it.
+
+**`terminal` CAN be dropped.** This reverses the earlier note. `terminal` is a
+plain toolset resolving to `["terminal", "process"]`, and
+`model_tools._compute_tool_definitions` applies `disabled_toolsets` as a final
+subtraction **regardless of what `enabled_toolsets` selected**, so the tools go
+even when a `hermes-*` bundle pulled them in. Measured: 24 tools with
+`hermes-cli` enabled, 22 with `terminal` also disabled. The old finding was
+about `platform_toolsets.acp`, a different key, which still stands for ACP mode.
+
+Three traps, all of which fail without an error message:
+
+- **`/tools` and the startup banner still list `terminal` after it is dropped.**
+  The four `get_tool_definitions` calls in `cli.py` pass `enabled_toolsets` and
+  omit `disabled_toolsets`. They are display only and never assign to
+  `agent.tools`; the real list comes from `agent/agent_init.py`, which does pass
+  it. Verify by **asking the agent to run `ls`**, never by reading `/tools`.
+- **`skills.disabled` takes skill NAMES, not categories or directories.** The
+  filter is `if name in disabled` against the `name:` in each `SKILL.md`. A
+  category name matches nothing and is discarded silently. Four of the shipped
+  skills are not named after their directory at all: `mlops/evaluation` and
+  `mlops/inference` are grouping folders, so the names are
+  `evaluating-llms-harness`, `weights-and-biases`, `llama-cpp` and
+  `serving-llms-vllm`. Writing `evaluation` there does nothing and says nothing.
+- **A duplicate `agent:` key is not a merge.** It is invalid YAML, and Hermes
+  comes up on defaults rather than complaining. Merge into the existing block.
+
+**None of this replaces the user split or the sudoers rule.** A dropped toolset
+is a line in a YAML file, and every failure mode above is silent: the agent
+comes back holding a shell and nothing says so. Unix permissions do not fail
+that way. Config trimming is the second lock, never the first.
+
+The denylist admits whatever the next Hermes release adds. `toolsets:` is an
+allowlist and would not, and MCP server names are valid entries there, but it is
+deliberately left commented out because it could not be verified end to end from
+outside the box, and getting it wrong yields an agent with almost no tools.
 
 ### One directory is published. The rest must never be
 
