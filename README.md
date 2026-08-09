@@ -1,88 +1,139 @@
 # Electrum Investments — AI Trading Bot
 
-Phase A scaffold: Python service that proposes orders via Claude and gates them
-against `config/rules.yaml` before they ever reach BlackBull Markets. **No live
-trading yet** — demo only until break-even is demonstrated (see `Plan` section
-below).
+An AI trading bot for **Alpaca paper trading**, where Claude proposes orders and
+a deterministic risk gate decides whether they happen.
 
-## Stack
+**Paper money only.** There is no live-trading path in this build, by design.
 
-- Python 3.11+
-- [`anthropic`](https://docs.claude.com/en/api/getting-started) — Claude API (Haiku 4.5 default for the lean profile)
-- [`MetaTrader5`](https://pypi.org/project/MetaTrader5/) — official Python package, **Windows-only**
-- `pydantic` for typed config and structured outputs
-- `structlog` for JSON logs
-- `pytest` for the risk-module test suite
+---
 
-A `MockBroker` ships alongside `MT5Broker` so unit tests and local development
-work on Linux/Mac without MT5 installed.
+## The idea in one picture
 
-## What you (the operator) need to do once
-
-1. **BlackBull Markets demo account** — sign up at https://blackbull.com, choose
-   ECN Prime, request demo credentials. You'll receive a login number, password,
-   and server name (e.g. `BlackBull-Demo`).
-2. **Windows VPS** — any cheap forex VPS in London (FxSVPS, Contabo, AWS EC2
-   `t3.small` Windows). The `MetaTrader5` package only runs on Windows.
-3. **Install MetaTrader 5** on the VPS — download from BlackBull's site so the
-   build matches their server.
-4. **Anthropic API key** — create one at https://console.anthropic.com.
-5. **Clone this repo** onto the VPS and `pip install -e .` (or use `uv`).
-6. **Copy `.env.example` → `.env`** and fill in the four required values:
-   - `ANTHROPIC_API_KEY`
-   - `MT5_LOGIN`, `MT5_PASSWORD`, `MT5_SERVER`
-
-## Run it
-
-Smoketest (connects to the broker, asks Claude one trivial question, no orders):
-
-```sh
-electrum-bot smoketest
+```
+        You, in plain English
+                 │
+   Claude Code  ·or·  a Buzz channel
+                 │
+         ┌───────┴────────┐
+         │                │
+   Alpaca MCP       electrum-bot MCP
+  (market data,      (the risk gate)
+   read-only)              │
+                    ┌──────┴──────┐
+                    │  risk.py    │  ← deterministic; the model cannot argue with it
+                    └──────┬──────┘
+                           │  only approved orders
+                    Alpaca paper account
 ```
 
-Decision loop (continuous; still proposes only — no orders placed in Phase A):
+Claude proposes. `src/bot/risk.py` disposes. Every proposal and verdict lands in
+an append-only audit log.
+
+---
+
+## Why it is built this way
+
+In [Alpha Arena](https://protos.com/llm-crypto-trading-contest-finds-llms-cant-trade-crypto/)
+(Nof1, Oct–Nov 2025), six frontier LLMs each traded $10,000 of real money for two
+weeks under identical prompts. Every US flagship finished underwater — Claude
+Sonnet −$3,081, ChatGPT −$6,267 — and all six ran 25–30% win rates. Fees dominated
+P&L: the model that made 238 trades lost 57% of its stake, while the one that made
+38 lost the least.
+
+So: the model is treated as a fallible proposer, the limits live in tested Python,
+and **trade frequency is a risk parameter**, not a performance one.
+
+---
+
+## Quick start
 
 ```sh
-electrum-bot loop
+python3 -m venv .venv
+.venv/bin/pip install -e '.[dev]'
+.venv/bin/python -m pytest            # 64 tests, no credentials needed
+
+cp .env.example .env                  # add Alpaca paper + Anthropic keys
+.venv/bin/electrum-bot smoketest      # connects, asks Claude one question, places nothing
 ```
 
-Stop with Ctrl-C. Decisions are written to `audit/<UTC-date>.jsonl`.
+Full walkthrough, including which steps need a human and which are scriptable:
+**[SETUP.md](SETUP.md)**.
 
-## Running the tests
+## Commands
 
 ```sh
-pip install -e '.[dev]'
-pytest
+electrum-bot smoketest --mock    # offline sanity check, no credentials
+electrum-bot smoketest           # connect to your paper account
+electrum-bot loop                # propose and vet continuously; place nothing
+electrum-bot loop --execute      # place approved orders on the PAPER account
+electrum-bot-mcp                 # run the MCP server (usually launched by Claude Code)
 ```
 
-The risk-gate suite is the load-bearing one — it proves Claude's proposals are
-properly vetted against `config/rules.yaml` before anything reaches the broker.
+`--execute` is off by default. Watch the proposals for a while first.
+
+---
+
+## What the risk gate enforces
+
+All of it from [`config/rules.yaml`](config/rules.yaml), all of it tested:
+
+| | |
+|---|---|
+| Symbol allowlist | Only listed symbols, ever |
+| Session windows | UTC hours; crypto exempt (24/7) |
+| News blackouts | No entries around high-impact events |
+| Per-trade risk | Max % of equity lost if the stop fills |
+| Position size | Max % of equity in any one position |
+| Cash reserve | Minimum % of equity kept in cash |
+| Gross exposure | Cap on total position value |
+| Concurrent positions | Hard count limit |
+| Trade frequency | Per day and per week |
+| Per-symbol cooldown | Stops flip-flopping |
+| Daily loss kill switch | Sticky for the session once tripped |
+| Pattern Day Trader | Blocks the 4th day trade below $25k equity |
+| Crypto sleeve | Disabled by default; capped when enabled |
+| Order sanity | Limit orders only; stops and targets on the correct side |
+
+A rejected proposal comes back with **every** rule it broke, not just the first.
+
+---
+
+## Documentation
+
+| | |
+|---|---|
+| **[SETUP.md](SETUP.md)** | Step-by-step, with `[human]` / `[auto]` markers |
+| **[CLAUDE.md](CLAUDE.md)** | Rules for Claude Code sessions in this repo |
+| **[docs/HANDOFF.md](docs/HANDOFF.md)** | What exists, what's missing, what will bite you |
+| **[docs/COSTS.md](docs/COSTS.md)** | Running costs — about $5–15/month |
+| **[docs/BUZZ_SETUP.md](docs/BUZZ_SETUP.md)** | Optional chat interface (has a real security caveat) |
+| **[reference/STATUS.md](reference/STATUS.md)** | Tracked third-party projects and their versions |
+
+---
 
 ## Layout
 
 ```
-config/rules.yaml          # Trading rules — bot may NOT violate these
+config/rules.yaml         Trading limits. The only place to change behaviour.
 src/bot/
-  config.py                # Typed env + rules loader
-  models.py                # OrderProposal, Position, Decision, etc.
-  broker.py                # Broker Protocol + MT5Broker + MockBroker
-  risk.py                  # The risk gate
-  claude_client.py         # Anthropic SDK wrapper (caching, structured outputs)
-  context.py               # Renders market state for Claude
-  data/                    # News + calendar adapters (stubs in Phase A)
-  audit.py                 # JSONL decision/trade log
-  main.py                  # CLI entry point
-tests/                     # pytest suite
+  risk.py                 The risk gate — the load-bearing file
+  broker.py               Broker Protocol + AlpacaBroker + MockBroker
+  mcp_server.py           MCP tools exposing the gate
+  models.py               Domain models (shares/coin units, never "lots")
+  claude_client.py        Anthropic SDK wrapper, 1h prompt cache
+  context.py              Renders market state for Claude
+  audit.py                Append-only JSONL log
+  main.py                 CLI entry point
+  data/                   News and calendar adapters (stubs for now)
+reference/                Tracked third-party projects (clones gitignored)
+scripts/                  fetch_reference.py, check_reference_updates.py
+tests/                    64 tests; the risk suite is the important one
 ```
 
-## Phase plan
+---
 
-- **A — foundation (now)**: scaffolding, mock broker, smoketest, risk-gate tests ✅
-- **B — data plumbing**: real prices via MT5 ticks; news + calendar feeds
-- **C — decision loop**: capture rules, wire Claude, vet on demo
-- **D — demo run**: 4+ weeks live on demo, track Claude $ vs. P&L
-- **E — go live**: smallest size on the same low-volatility universe; add the
-  capped crypto sleeve only after the core proves itself
+## Status
 
-See `/root/.claude/plans/i-am-currently-with-synchronous-hamster.md` for the
-full plan and break-even math.
+Working foundation. **No trading strategy** — that part is deliberately left to
+whoever runs it, and it is the genuinely hard part. Start with
+[docs/HANDOFF.md](docs/HANDOFF.md).

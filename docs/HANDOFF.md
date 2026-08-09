@@ -1,0 +1,184 @@
+# Handoff
+
+You are taking over a working foundation, not a finished product. This document
+says what exists, what is deliberately missing, and what to be careful about.
+
+---
+
+## Reality check — read this before you invest much time
+
+In October–November 2025, Nof1 ran [Alpha Arena](https://protos.com/llm-crypto-trading-contest-finds-llms-cant-trade-crypto/):
+six frontier LLMs, $10,000 of **real** money each, identical prompts, two weeks
+on Hyperliquid.
+
+| Model | Result |
+|---|---|
+| Qwen3 Max | +$2,232 |
+| DeepSeek | +$489 |
+| Claude Sonnet | −$3,081 |
+| Grok | −$4,531 |
+| Gemini | −$5,671 |
+| ChatGPT | −$6,267 |
+
+Every US flagship finished underwater. All six ran **25–30% win rates**. Fees
+dominated P&L — Gemini made 238 trades and lost 57%; Claude made 38 and lost
+least of the losers.
+
+Three things follow, and they shaped every design decision here:
+
+1. **An LLM is not a strategy.** It is a flexible reasoner that is confidently
+   wrong a lot of the time. Something deterministic has to sit between it and the
+   account. That is `src/bot/risk.py`.
+2. **Overtrading is the main way to lose.** Not bad picks — churn. Trade frequency
+   is treated here as a risk parameter with hard caps.
+3. **Paper first, for a long time.** Not as a formality. As the actual point.
+
+None of this means the project is pointless. It means the interesting work is in
+the strategy and the discipline, not in wiring an LLM to a broker — that part is
+already done and it was the easy part.
+
+---
+
+## What exists
+
+**A deterministic risk gate** (`src/bot/risk.py`). Claude proposes orders; this
+approves or rejects them against `config/rules.yaml`. It enforces: symbol
+allowlist, session windows, news blackouts, position concentration, cash reserve,
+gross exposure, per-trade risk, stop/target placement sanity, limit-price sanity,
+trades per day and per week, per-symbol cooldown, a sticky daily-loss kill switch,
+US Pattern Day Trader limits, and a capped crypto sleeve. Every rule has a test
+that proves it rejects.
+
+**An Alpaca paper broker** (`src/bot/broker.py`) behind a `Broker` Protocol, with
+a `MockBroker` for tests. Paper-only is enforced twice — at startup and again in
+the broker constructor.
+
+**An MCP server** (`src/bot/mcp_server.py`) exposing `check_order`, `place_order`,
+`close_position`, `get_risk_status`, `get_positions`, `get_rules`,
+`get_recent_decisions`, `reset_trading_session`. `place_order` re-runs the gate,
+so the tool surface cannot be talked past.
+
+**An audit log** (`audit/<date>.jsonl`) recording every proposal, verdict,
+execution, and the token cost of every Claude call.
+
+**A reference library** (`reference/`) tracking eight agent projects with pinned
+commits and detected licences, so upstream drift shows up as a git diff.
+
+**64 tests**, `ruff` clean, `mypy --strict` clean.
+
+---
+
+## What is deliberately missing
+
+**A trading strategy.** The bot will propose trades, and the gate will stop the
+dangerous ones, but nothing here has an edge. This is the hard part and it is
+yours. Start by watching `electrum-bot loop` without `--execute` and asking
+whether you would have taken those trades.
+
+**Live trading.** `ALPACA_PAPER_TRADE=false` is refused in two places. Going live
+needs your own KYC (SSN, ID documents, bank link — Alpaca's live flow, in your
+name), and it should need a track record you actually believe.
+
+**A backtesting harness.** Right now you can only evaluate forward, which is slow.
+This is probably the highest-value thing to build next.
+
+**A dashboard.** The audit log is JSONL. A Next.js + Supabase dashboard was
+scoped and deliberately deferred — build it when you know which numbers you
+actually look at, not before.
+
+**Paid data feeds.** No news, sentiment, whale-tracking or economic calendar is
+wired in. `src/bot/data/` has stub adapters with the interfaces already shaped.
+
+---
+
+## Suggested order of work
+
+1. **Watch it.** Run `loop` without `--execute` for a couple of weeks. Read the
+   audit log. Form an opinion about whether the proposals are any good.
+2. **Backtest.** Alpaca gives free historical bars. Being able to test an idea in
+   minutes instead of weeks changes everything about how fast you can learn.
+3. **Pick one thesis and make it explicit.** "Buy oversold large-caps in an uptrend"
+   is testable. "Trade well" is not. Put it in the system prompt in
+   `claude_client.py` and measure whether it helps.
+4. **Add one data source.** Economic calendar first (Finnhub free tier) — knowing
+   when not to trade is worth more than another signal.
+5. **Only then** consider the dashboard, sentiment feeds, or a faster loop.
+
+---
+
+## Growth paths, with the trade-offs
+
+**Event-driven instead of polling.** Watch the market with cheap rule-based
+triggers and wake Claude only when one fires. Same responsiveness, ~10× less API
+cost than calling every minute. See `docs/COSTS.md`.
+
+**Crypto sleeve.** `config/rules.yaml` has it wired and disabled. Crypto is PDT-
+exempt and trades 24/7, which makes it attractive below $25k — and the cap exists
+because 24/7 also means 24/7 opportunities to lose money. Enable with a real
+capital cap, never a shared budget.
+
+**Sentiment and whale tracking.** LunarCrush (~$30/mo) for aggregated crypto
+social sentiment is the highest-value paid feed. Whale Alert API (~$50/mo) after
+that. Both are noisy and both are gameable — pump-and-dump accounts exist
+precisely to be followed. Discount sources by their historical reversal rate.
+
+**Browser automation for sources without APIs.** `reference/src/hyperagent` is the
+tool. Two cautions: it is **AGPL-3.0** (the only copyleft project in the
+reference set — modifying it and exposing it over a network obliges you to publish
+your changes), and scraping breaches many sites' terms of service. Check before
+pointing it anywhere.
+
+**Scheduled unattended runs.** Claude Code Routines (needs Claude Pro, $20/mo) run
+in Anthropic's cloud with your machine off. Hermes' built-in cron is the
+alternative if you are already running the gateway.
+
+---
+
+## Things that will bite you
+
+- **`config/rules.yaml` is calibrated to a $100,000 paper balance.**
+  `min_equity_floor_usd: 90000` is a 10% drawdown floor on that. If you reset the
+  paper account to a different balance, change this or the bot will halt
+  immediately.
+- **Session windows are UTC** and assume US equities, 14:00–21:00, which skips the
+  noisy first 30 minutes of the open. During EST rather than EDT this shifts by an
+  hour. Crypto ignores the window entirely, by design.
+- **The kill switch is sticky.** Once the daily loss limit trips, recovery within
+  the same session does not re-enable trading. Use `reset_trading_session` — and
+  notice that you are doing it.
+- **PDT is conservative.** Below $25k equity the gate blocks new equity entries
+  once you are at three day trades in five business days, even though opening a
+  position is not itself a day trade. A 90-day restriction is worse than a missed
+  trade.
+- **Buzz's ACP mode bypasses approval gates.** Use the native gateway path. See
+  `docs/BUZZ_SETUP.md` — the security section is not boilerplate.
+- **Alpaca does not return a position open time.** `Position.opened_at` is
+  populated with fetch time; the audit log is the real source of truth for when a
+  position was entered.
+
+---
+
+## Handing over credentials
+
+Everything is in one Bitwarden vault (see `SETUP.md`). To transfer ownership:
+
+1. Share the Bitwarden collection, or export and hand over securely.
+2. **Rotate the Alpaca paper keys and the Anthropic API key** after transfer —
+   whoever set them up has seen them.
+3. Transfer or fork the GitHub repo.
+4. Anthropic billing is per-account; the new owner should use their own key on
+   their own card rather than inheriting one.
+
+The two regulated things — a live Alpaca account and a bank link — cannot be
+transferred and were never created. Whoever goes live does that themselves, in
+their own name.
+
+---
+
+## Tax note
+
+If you eventually trade real money in the US: Alpaca issues a 1099-B; crypto is
+treated as property so every trade is a taxable event; wash-sale rules apply to
+equities. The audit log records everything you would need, but it is not
+accounting software. Talk to an accountant before your first live year ends, not
+after.
