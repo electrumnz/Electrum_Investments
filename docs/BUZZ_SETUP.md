@@ -72,6 +72,46 @@ dedicated Nostr keypair, which is good hygiene regardless.
 Whichever path you pick, keep the agent **owner-only**. Hermes' docs recommend
 this and it is doubly true here.
 
+> **Re-checked against Hermes v0.20.0 (2026-08-03).** Buzz is now a *bundled*
+> platform plugin with native WebSocket transport and NIP-42 auth, so path ③ is
+> better supported than when this was written — but all three paths still exist
+> and the ACP auto-approval caveat still applies to ① and ②. The table above
+> stands.
+
+### The more important caveat, added in v0.19.0: approvals are now LLM-judged
+
+Hermes' **smart approvals are enabled by default**. Rather than asking you about
+every flagged command, *an LLM reviewer assesses it independently* and decides.
+
+Read that against the first line of `CLAUDE.md`. `src/bot/risk.py` is
+deterministic Python **because it cannot be persuaded** — that is the entire
+architectural bet of this project, taken directly from Alpha Arena, where the
+damage came from confident, fluent, wrong models with nothing between them and
+the account.
+
+An LLM deciding whether a shell command is safe, on the box holding the broker
+credentials, puts a persuadable thing back in the one position the design exists
+to keep it out of. It is the same mistake in a different place.
+
+**So on this deployment, smart approvals must not be the last line.** Two things
+to configure at install time:
+
+1. **Turn smart approvals off**, so a flagged command waits for a human.
+2. **Add deterministic deny rules** for anything that touches credentials or the
+   broker. Hermes' deny rules "block commands even under yolo mode", which makes
+   them the only layer in the approvals system that behaves like `risk.py` does:
+   it refuses, and nothing talks it round.
+
+Also worth knowing, same release: `hermes approvals suggest` mines your approval
+history into proposed allowlists. Useful on a general assistant. **Do not run it
+here** — an allowlist generated from what you happened to approve is precisely
+the ratchet this setup should not have.
+
+> The behaviour above is from the v0.19.0 and v0.20.0 release notes. The exact
+> config keys were not verifiable when this was written, so check them against
+> the live configuration docs when you install, rather than trusting a key name
+> reproduced here from memory.
+
 ---
 
 ## Install
