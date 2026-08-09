@@ -24,6 +24,7 @@ from .data.calendar import CalendarFeed, EmptyCalendar
 from .data.finnhub import FinnhubCalendar
 from .data.marketaux import MarketauxNews
 from .data.news import EmptyNews, NewsFeed
+from .data.xfeed import XFeed
 from .indicators import summarise as summarise_indicators
 from .journal import Journal
 from .models import Decision, MarketInputs
@@ -74,6 +75,33 @@ def build_calendar_feed(env: Env, rules: Rules) -> CalendarFeed:
         )
         return EmptyCalendar()
     return FinnhubCalendar(api_key=env.finnhub_api_key, symbols=list(rules.allowed_symbols))
+
+
+def build_social_feed(env: Env, rules: Rules) -> XFeed | None:
+    """The X feed, when both a token and an enabled account list exist.
+
+    Off is the normal state. Reading timelines needs a paid X tier, and this
+    gates nothing, so a deployment without it is fully functional with slightly
+    less context. Logged at info for that reason rather than at warning, the
+    same as Marketaux and unlike Finnhub, which does feed a risk rule.
+    """
+    if not rules.social.enabled:
+        return None
+    if not env.x_bearer_token:
+        log.info(
+            "no_x_bearer_token_social_feed_off",
+            detail=(
+                "config/rules.yaml enables the social feed but X_BEARER_TOKEN is "
+                "unset, so no posts will be read. This gates nothing."
+            ),
+        )
+        return None
+    return XFeed(
+        bearer_token=env.x_bearer_token,
+        accounts=list(rules.social.accounts),
+        lookback_minutes=rules.social.lookback_minutes,
+        max_posts=rules.social.max_posts,
+    )
 
 
 def cmd_smoketest(env: Env, rules: Rules, *, force_mock: bool = False) -> int:
@@ -149,6 +177,7 @@ def cmd_loop(
     claude = ClaudeClient(env, build_system_prompt(rules))
     news = build_news_feed(env)
     calendar = build_calendar_feed(env, rules)
+    social = build_social_feed(env, rules)
 
     journal = Journal()
     account = broker.get_account()
@@ -202,6 +231,8 @@ def cmd_loop(
                     )
 
             headlines = news.recent_headlines(rules.allowed_symbols)
+            posts = [p.render() for p in social.recent_posts()] if social else []
+            social_degraded = bool(social and social.is_degraded)
             context = build_market_context(
                 account=account,
                 ticks=ticks,
@@ -211,6 +242,8 @@ def cmd_loop(
                 expiry_alerts=expiry_alerts,
                 indicators=indicators,
                 symbols_without_history=no_history,
+                social_posts=posts,
+                social_degraded=social_degraded,
             )
             decision, usage = claude.propose(context)
 
@@ -221,6 +254,8 @@ def cmd_loop(
             # model at the time.
             inputs = MarketInputs(
                 headlines=headlines,
+                social_posts=posts,
+                social_degraded=social_degraded,
                 news_windows=[
                     f"{w.timestamp.isoformat(timespec='minutes')} affects "
                     f"{', '.join(sorted(w.affected_symbols))}"
@@ -338,6 +373,10 @@ def cmd_loop(
                 risk_understated=recon.risk_is_understated,
                 news_windows=len(news_windows),
                 calendar_degraded=getattr(calendar, "is_degraded", False),
+                # Same reasoning as calendar_degraded: an empty post list from a
+                # dead token looks exactly like a quiet morning, and the
+                # difference matters when this is being used to explain a move.
+                social_degraded=social_degraded,
                 # Same reason calendar_degraded is here. A symbol whose bars
                 # failed to fetch is one the model sees a live quote for and no
                 # history at all, and that has to be visible from the log line

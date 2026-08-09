@@ -623,3 +623,31 @@ def test_the_stylesheet_carries_no_control_characters():
         if any(ord(c) < 32 and c != "\t" for c in line)
     ]
     assert not offenders, f"control characters in STYLES: {offenders}"
+
+
+def test_posts_the_model_read_are_shown_with_the_decision(audited):
+    """Posts move a price before the wire story exists, so which ones were in
+    front of the model is part of reading the decision back."""
+    log, client = audited
+    log.record(
+        _decision(
+            inputs=MarketInputs(
+                social_posts=["[@realDonaldTrump 14:31] Announcing tariffs on steel imports"]
+            )
+        )
+    )
+
+    body = client.get("/decisions").text
+
+    assert "tariffs on steel imports" in body.lower()
+    assert "realDonaldTrump" in body
+
+
+def test_a_degraded_social_feed_is_not_shown_as_a_quiet_morning(audited):
+    log, client = audited
+    log.record(_decision(inputs=MarketInputs(social_posts=[], social_degraded=True)))
+
+    body = client.get("/decisions").text
+
+    assert "social feed was DEGRADED" in body
+    assert "not that nothing was posted" in body

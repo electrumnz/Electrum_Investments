@@ -345,10 +345,12 @@ class MarketInputs(BaseModel):
     """
 
     headlines: list[str] = Field(default_factory=list)
+    social_posts: list[str] = Field(default_factory=list)
     news_windows: list[str] = Field(default_factory=list)
     indicators: dict[str, str] = Field(default_factory=dict)
     symbols_without_history: list[str] = Field(default_factory=list)
     calendar_degraded: bool = False
+    social_degraded: bool = False
 
 
 class RiskVerdict(BaseModel):

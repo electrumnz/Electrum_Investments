@@ -55,13 +55,22 @@ class JsonGetter(Protocol):
     def __call__(self, url: str, params: dict[str, str]) -> Any: ...
 
 
-def httpx_getter(timeout: float = DEFAULT_TIMEOUT_SECONDS) -> JsonGetter:
-    """The real implementation, built lazily so importing this module is cheap."""
+def httpx_getter(
+    timeout: float = DEFAULT_TIMEOUT_SECONDS,
+    headers: dict[str, str] | None = None,
+) -> JsonGetter:
+    """The real implementation, built lazily so importing this module is cheap.
+
+    `headers` is closed over rather than added to `JsonGetter.__call__`, so the
+    protocol every feed and every test fake implements stays two arguments wide.
+    X needs an `Authorization: Bearer` header; Marketaux and Finnhub pass their
+    key as a query parameter and are unaffected.
+    """
 
     def _get(url: str, params: dict[str, str]) -> Any:
         import httpx
 
-        response = httpx.get(url, params=params, timeout=timeout)
+        response = httpx.get(url, params=params, timeout=timeout, headers=headers or {})
         response.raise_for_status()
         return response.json()
 

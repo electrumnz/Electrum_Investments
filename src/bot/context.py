@@ -26,6 +26,8 @@ def build_market_context(
     expiry_alerts: list[ExpiryAlert] | None = None,
     indicators: dict[str, Indicators] | None = None,
     symbols_without_history: list[str] | None = None,
+    social_posts: list[str] | None = None,
+    social_degraded: bool = False,
 ) -> str:
     """Render a stable, parseable text blob. Goes AFTER the cached system prompt."""
     now = datetime.now(UTC).isoformat(timespec="seconds")
@@ -104,6 +106,22 @@ def build_market_context(
             "moving average, an ATR or a level for them from the single quote "
             "above, and propose nothing on them."
         )
+    lines.append("")
+
+    # Ahead of the headlines, deliberately. These accounts move a price before
+    # the wire story exists, so by the time a headline carries it the gap has
+    # already opened. Reading them second would invert that.
+    lines.append("## Posts from watched accounts (context only, gates nothing)")
+    if social_degraded:
+        lines.append(
+            "- FEED DEGRADED: the last fetch failed, so this list is incomplete. "
+            "An empty list here does NOT mean nothing was posted."
+        )
+    if not social_posts:
+        lines.append("- (none in the lookback window)")
+    else:
+        for post in social_posts:
+            lines.append(f"- {post}")
     lines.append("")
 
     lines.append("## Recent headlines")

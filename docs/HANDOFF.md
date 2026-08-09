@@ -132,9 +132,31 @@ This is probably the highest-value thing to build next.
 Discord is deferred because Telegram, WhatsApp and Signal all want a phone
 number. See `docs/HERMES_SETUP.md`.
 
-**Whale-tracking and sentiment feeds.** Headlines and the earnings calendar are
-wired (`src/bot/data/`), but nothing tracks large-holder flow or social
-sentiment. The adapter interfaces are shaped for it.
+**Whale-tracking.** Headlines, the earnings calendar and posts from watched
+accounts are all wired (`src/bot/data/`), but nothing tracks large-holder flow.
+The adapter interfaces are shaped for it.
+
+**A blackout window after a high-impact post.** `xfeed.py` reads posts from the
+accounts in the `social:` block, and they are context only: they reach the
+prompt and never the risk gate. The obvious next step is a blackout mirroring
+`news_blackout_minutes_after` — refuse new positions for N minutes after a
+watched account posts, on the grounds that the first move is spread and noise,
+which is exactly the reasoning behind the earnings blackout.
+
+It is not built, and the reasons are worth stating rather than rediscovering:
+
+- It changes what the gate refuses, so it belongs in its own commit with a
+  reason and a test that proves it rejects. That is the standing rule for every
+  limit in this repo.
+- An earnings blackout works because the event is *scheduled*, so a window can
+  open before it. A post is unscheduled, so only the "after" half is
+  implementable, and the "before" half is the part that protects you from
+  trading into a coin flip.
+- It needs a definition of "high impact" that is deterministic. "The model
+  thought it sounded important" is not one, and a gate that can be talked into
+  a verdict is the thing this project exists to avoid. A defensible version
+  would key on the account and perhaps a keyword list, both written down in
+  `config/rules.yaml` where they can be reviewed.
 
 ---
 

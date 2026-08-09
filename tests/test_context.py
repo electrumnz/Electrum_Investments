@@ -206,3 +206,36 @@ def test_short_history_is_rendered_as_unavailable_not_omitted(account):
     assert missing == []
     assert "200-day average: unavailable" in context
     assert "NOT AVAILABLE for this symbol" in context
+
+
+def test_watched_posts_lead_the_headlines_in_the_prompt(account):
+    """A post moves the price before the wire carries it, so it is read first."""
+    context = build_market_context(
+        account=account,
+        ticks={},
+        headlines=["Reuters: steel makers rally"],
+        news_windows=[],
+        social_posts=["[@realDonaldTrump 14:31] Tariffs on steel imports"],
+    )
+
+    posts_at = context.index("Posts from watched accounts")
+    headlines_at = context.index("## Recent headlines")
+
+    assert posts_at < headlines_at
+    assert "Tariffs on steel imports" in context
+    assert "gates nothing" in context
+
+
+def test_a_degraded_social_feed_says_so_in_the_prompt(account):
+    """An empty list from a dead token must not read as a quiet morning."""
+    context = build_market_context(
+        account=account,
+        ticks={},
+        headlines=[],
+        news_windows=[],
+        social_posts=[],
+        social_degraded=True,
+    )
+
+    assert "FEED DEGRADED" in context
+    assert "does NOT mean nothing was posted" in context

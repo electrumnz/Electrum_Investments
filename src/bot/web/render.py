@@ -876,6 +876,19 @@ def _read(entry: DecisionEntry) -> str:
             "is context the model did without.</span></div>"
         )
 
+    if inputs.social_posts:
+        items = "".join(f"<li>{_e(s)}</li>" for s in inputs.social_posts[:10])
+        parts += (
+            '<div class="rung"><span class="lbl">Posts</span>'
+            f'<ul class="feed">{items}</ul></div>'
+        )
+    elif inputs.social_degraded:
+        parts += (
+            '<div class="rung gate no"><span class="lbl">Posts</span>'
+            "the social feed was DEGRADED. An empty list here means the fetch "
+            "failed, not that nothing was posted.</div>"
+        )
+
     if inputs.news_windows:
         items = "".join(f"<li>{_e(w)}</li>" for w in inputs.news_windows)
         parts += f'<div class="rung"><span class="lbl">Blackouts</span><ul class="feed">{items}</ul></div>'
@@ -1297,6 +1310,19 @@ def settings_page(rules: Rules, env: Env, *, chat_enabled: bool) -> str:
             "Marketaux",
             "configured" if env.marketaux_api_key else "not configured",
             "Headlines only. Gates nothing.",
+        )
+        + _row(
+            "X posts",
+            (
+                "off in rules.yaml"
+                if not rules.social.enabled
+                else ("configured" if env.x_bearer_token else "enabled but no token")
+            ),
+            (
+                f"Watching {', '.join(rules.social.accounts)}. Context only."
+                if rules.social.enabled and rules.social.accounts
+                else "Accounts to watch live in the social block of rules.yaml."
+            ),
         )
         + _row("Dashboard chat", "on" if chat_enabled else "off")
         + '</dl><p class="source">Presence only. No key is rendered on this page, '

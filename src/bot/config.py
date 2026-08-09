@@ -58,6 +58,9 @@ class Env(BaseSettings):
 
     finnhub_api_key: str = Field(default="", alias="FINNHUB_API_KEY")
     marketaux_api_key: str = Field(default="", alias="MARKETAUX_API_KEY")
+    # Reading timelines needs a paid X tier. Absent, the social feed is simply
+    # off and the loop says so once at startup.
+    x_bearer_token: str = Field(default="", alias="X_BEARER_TOKEN")
 
     claude_tier: ClaudeTier = Field(default=ClaudeTier.HAIKU, alias="CLAUDE_TIER")
     decision_interval_seconds: int = Field(default=900, alias="DECISION_INTERVAL_SECONDS")
@@ -258,6 +261,31 @@ class InstrumentRules(BaseModel):
         return self
 
 
+class SocialRules(BaseModel):
+    """Accounts whose posts are worth reading before trading.
+
+    Context only. Nothing here reaches `RiskGate`, and adding a blackout window
+    after a high-impact post would be a change to what the gate refuses, which
+    belongs in its own commit with a test that proves it rejects.
+    """
+
+    enabled: bool = False
+    # Handles, without the @. Kept short on purpose: this is a feed of accounts
+    # that move prices, not a timeline.
+    accounts: list[str] = Field(default_factory=list)
+    lookback_minutes: int = Field(default=90, gt=0, le=1440)
+    max_posts: int = Field(default=12, gt=0, le=100)
+
+    @model_validator(mode="after")
+    def _enabled_needs_accounts(self) -> SocialRules:
+        if self.enabled and not self.accounts:
+            raise ValueError(
+                "social.enabled is true but accounts is empty, so the feed would "
+                "fetch nothing every cycle and report itself healthy."
+            )
+        return self
+
+
 class Rules(BaseModel):
     account: AccountRules
     frequency: FrequencyRules
@@ -266,6 +294,8 @@ class Rules(BaseModel):
     options: OptionRules = Field(default_factory=OptionRules)
     news_blackout_minutes_before: int = Field(ge=0)
     news_blackout_minutes_after: int = Field(ge=0)
+
+    social: SocialRules = Field(default_factory=SocialRules)
 
     # Keyed by AssetClass value: "us_equity", "crypto".
     instruments: dict[str, InstrumentRules] = Field(default_factory=dict)

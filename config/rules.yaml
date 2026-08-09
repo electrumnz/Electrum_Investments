@@ -124,6 +124,30 @@ options:
 news_blackout_minutes_before: 15
 news_blackout_minutes_after: 15
 
+# Accounts whose posts move prices before the wire story lands.
+#
+# CONTEXT ONLY. These reach Claude's prompt and nothing else; the risk gate
+# never sees them. A blackout window after a high-impact post would be a change
+# to what the gate refuses, and that belongs in its own commit with a test.
+#
+# Reading timelines needs a paid X tier and X_BEARER_TOKEN in .env. Without the
+# token this block is inert, whatever it says here.
+social:
+  enabled: false
+
+  accounts:
+    - realDonaldTrump    # tariffs, named companies, Fed commentary
+    - federalreserve
+    - SecScottBessent
+
+  # How far back to look each cycle. Longer than one cycle so a post is not
+  # missed when the loop restarts or a cycle runs long.
+  lookback_minutes: 90
+
+  # One line each in the prompt. More than this and a busy account crowds out
+  # the market data it is meant to be read beside.
+  max_posts: 12
+
 # Instruments. Each asset class carries its own session window, symbol list and
 # strategy, because they genuinely differ: equities trade a fixed window, crypto
 # trades continuously. Holding both under one global session setting meant

@@ -252,9 +252,9 @@ A backup on the same droplet survives a bad restore, not a dead droplet. Copying
 `backups/daily` off the box is deliberately not automated, because it needs a
 destination and a credential that should not live on the trading box.
 
-### The two data feeds are not equally important
+### The three data feeds are not equally important
 
-`src/bot/data/` holds two adapters and they fail in different ways.
+`src/bot/data/` holds three adapters and they fail in different ways.
 
 **Marketaux** supplies headlines for Claude's context. It gates nothing. If it
 is down or unconfigured the model reasons with less information and that is all.
@@ -271,10 +271,37 @@ So `FinnhubCalendar.is_degraded` exists and the loop reports it as
 it is zero. Do not "simplify" the flag away, and do not make a failed fetch
 return an empty list without setting it.
 
+**X** (`xfeed.py`) supplies posts from the accounts in the `social:` block of
+`config/rules.yaml` — the ones whose words move a price before the wire story
+exists. It gates nothing, exactly like Marketaux, and it is off unless both
+`social.enabled` and `X_BEARER_TOKEN` are set. Reading timelines needs a paid
+X tier, so off is the normal state and a deployment without it is fully
+functional.
+
+It carries `is_degraded` anyway, unlike Marketaux, and the reason is the Finnhub
+lesson in a different costume: an empty post list from an expired token looks
+exactly like a quiet morning, and only one of those should change how a price
+move is read. A degraded result is deliberately **not cached**, so one bad
+minute does not silence the feed for the whole TTL.
+
+**Do not make it gate anything.** A blackout window after a high-impact post
+would mirror `news_blackout_minutes_after` and is a genuinely reasonable idea,
+but it changes what the gate refuses. That is its own commit, with a reason and
+a test that proves it rejects. The gate is deterministic Python precisely so it
+cannot be persuaded, and "the model thought this post sounded bearish" is the
+opposite of a deterministic input.
+
+Posts are rendered **ahead of** the headlines in the prompt, on purpose. By the
+time a headline carries the story the gap has already opened, so reading them
+in the other order would invert the thing that makes the feed worth having.
+
 **The caches are rate-limit requirements, not optimisations.** Marketaux's free
 tier allows 100 requests a day against a loop that wakes 96 times, so the
 30-minute TTL is what keeps the quota intact. Lowering it exhausts the day's
-allowance before the session ends.
+allowance before the session ends. The X cache is shorter (10 minutes) because
+its binding constraint is a monthly cap on posts retrieved rather than a daily
+request count, and because caching a market-moving post for half an hour would
+defeat the point of fetching it.
 
 ### A bare `.gitignore` directory pattern matches at every depth
 
@@ -468,7 +495,8 @@ src/bot/
   strategy.py           Base strategies. Placeholders with a shape, not an edge.
                         `requires` names what each one still cannot see.
   data/                 External feeds. marketaux.py = headlines (context only);
-                        finnhub.py = earnings calendar (feeds the blackout gate).
+                        finnhub.py = earnings calendar (feeds the blackout gate);
+                        xfeed.py = posts from watched accounts (context only).
   audit.py              Append-only JSONL decision log, and the reader the
                         Decisions page renders. The only record of a REJECTED
                         proposal.
@@ -505,7 +533,7 @@ reference/              Third-party projects we borrow from. See reference/STATU
 ## Running it
 
 ```sh
-.venv/bin/python -m pytest              # full suite (310 tests)
+.venv/bin/python -m pytest              # full suite (325 tests)
 electrum-bot smoketest --mock           # no credentials needed
 electrum-bot smoketest                  # needs Alpaca paper keys
 electrum-bot loop                       # proposes and vets; places nothing
