@@ -125,6 +125,27 @@ quarters of the day. Do not collapse it back to one list.
 `Rules.allowed_symbols` is **derived**, unioning enabled classes, so disabling a
 class removes its symbols everywhere at once.
 
+**A session is a day and an hour, and `session_days_utc` has no default on
+purpose.** `sessions_utc` was hours only, so 15:00 on a Saturday sat inside the
+equity window `[14, 21)` and the gate approved. That was free while the loop
+placed nothing and stopped being free the moment `--execute` went on: Alpaca
+does **not** refuse an out-of-hours equity order, it queues it to the next
+session, so a weekend proposal fills at Monday's open — inside the half-hour
+the window exists to skip.
+
+Both plausible defaults for the new field are wrong for one of the two classes
+already configured. Monday-to-Friday silently shuts crypto for two days a week,
+which is the per-instrument bug above wearing a new costume; all seven days
+leaves the equity hole open. So an enabled class must declare it and the
+config validator refuses one that does not.
+
+**Market holidays are still not covered, and the rejection message says so.**
+Thanksgiving is a Thursday and passes this gate. Closing that needs Alpaca's
+calendar endpoint, which is a network call, and a network call does not belong
+inside a gate that has to stay deterministic and must not fail open. The guard
+is weekday-shaped, not market-open-shaped, and should not be described as more
+than that.
+
 ### The journal must be wired in or the caps count nothing
 
 `AccountSnapshot.open_risk_usd` is what the total-risk cap counts against, and it
@@ -544,7 +565,7 @@ reference/              Third-party projects we borrow from. See reference/STATU
 ## Running it
 
 ```sh
-.venv/bin/python -m pytest              # full suite (339 tests)
+.venv/bin/python -m pytest              # full suite (346 tests)
 electrum-bot smoketest --mock           # no credentials needed
 electrum-bot smoketest                  # needs Alpaca paper keys
 electrum-bot loop                       # proposes and vets; places nothing

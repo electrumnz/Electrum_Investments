@@ -273,6 +273,11 @@ footer{padding:2rem 0 3rem;color:var(--pewter);font-size:.75rem;
 @media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
 """
 
+# Indexed by Python weekday, so Monday is 0. Written out rather than taken from
+# `calendar.day_abbr`, which is locale-dependent and would render the operator's
+# limits in whatever language the droplet happens to be configured for.
+DAY_NAMES = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
+
 MARK = (
     '<svg viewBox="0 0 64 64" width="22" height="22" aria-hidden="true">'
     '<path fill-rule="evenodd" d="M32 2a30 30 0 1 0 0 60 30 30 0 0 0 0-60Z'
@@ -1264,12 +1269,17 @@ def settings_page(rules: Rules, env: Env, *, chat_enabled: bool) -> str:
     instrument_cards = ""
     for name, inst in rules.instruments.items():
         sessions = ", ".join(f"{s:02d}:00-{e:02d}:00" for s, e in inst.sessions_utc)
+        # Shown beside the hours rather than folded into them. The hours alone
+        # read as "this is when it trades", and for three quarters of a year
+        # that is wrong by two days a week.
+        days = ", ".join(DAY_NAMES[d] for d in sorted(inst.session_days_utc) if 0 <= d <= 6)
         instrument_cards += (
             f'<div class="card"><h3>{_e(name)}</h3><dl class="kv">'
             + _row("Enabled", "yes" if inst.enabled else "no")
             + _row("Strategy", inst.strategy)
             + _row("Symbols", ", ".join(inst.allowed_symbols) or "none")
             + _row("Sessions (UTC)", sessions or "none")
+            + _row("Trading days", days or "none")
             + (
                 _row("Capital cap", f"{inst.capital_cap_pct:.1f}%")
                 if inst.capital_cap_pct is not None

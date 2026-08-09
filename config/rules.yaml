@@ -180,6 +180,17 @@ instruments:
     sessions_utc:
       - [14, 21]
 
+    # Monday to Friday. Monday is 0, Sunday is 6.
+    #
+    # Without this the hours alone made Saturday 15:00 UTC a valid session, and
+    # Alpaca queues an out-of-hours equity order to the next open rather than
+    # refusing it — so a weekend proposal would have filled at Monday's open,
+    # inside the half-hour the window above exists to avoid.
+    #
+    # Market holidays are NOT covered by this. A Thanksgiving Thursday still
+    # passes. See the note in RiskGate._within_session.
+    session_days_utc: [0, 1, 2, 3, 4]
+
   crypto:
     # Disabled until the equity core is proven on paper.
     enabled: false
@@ -193,6 +204,11 @@ instruments:
     # block, and the reason instruments are configured separately at all.
     sessions_utc:
       - [0, 24]
+
+    # Every day, including the weekend. This is why session_days_utc has no
+    # default: Monday-to-Friday would be a sane-looking default that silently
+    # shuts crypto for two days a week.
+    session_days_utc: [0, 1, 2, 3, 4, 5, 6]
 
     # Ceiling on crypto's share of equity. It trades continuously and moves
     # harder than the equity book, so it gets a cap the equity side does not.

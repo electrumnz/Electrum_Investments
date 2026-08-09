@@ -133,3 +133,42 @@ def test_enabled_instrument_must_have_symbols_and_sessions():
 
     with pytest.raises(ValueError, match="allowed_symbols"):
         InstrumentRules(enabled=True, allowed_symbols=[], sessions_utc=[(14, 21)])
+
+
+def test_enabled_instrument_must_declare_its_trading_days():
+    """Required rather than defaulted, because both defaults are wrong somewhere.
+
+    Monday-to-Friday would silently shut crypto at weekends; all seven would
+    leave equities tradeable on a Saturday, where Alpaca queues the order to
+    Monday's open rather than refusing it. Failing at startup beats either.
+    """
+    from bot.config import InstrumentRules
+
+    with pytest.raises(ValueError, match="session_days_utc"):
+        InstrumentRules(
+            enabled=True,
+            allowed_symbols=["SPY"],
+            sessions_utc=[(14, 21)],
+            session_days_utc=[],
+        )
+
+    with pytest.raises(ValueError, match="0-6"):
+        InstrumentRules(
+            enabled=True,
+            allowed_symbols=["SPY"],
+            sessions_utc=[(14, 21)],
+            session_days_utc=[1, 7],
+        )
+
+
+def test_the_shipped_rules_close_the_weekend_for_equities():
+    """Guards the config, not just the gate. The rule is only as good as the file."""
+    from bot.config import Rules
+
+    from .conftest import RULES_PATH
+
+    equities = Rules.load(RULES_PATH).instruments["us_equity"]
+
+    assert equities.session_days_utc == [0, 1, 2, 3, 4]
+    assert 5 not in equities.session_days_utc  # Saturday
+    assert 6 not in equities.session_days_utc  # Sunday

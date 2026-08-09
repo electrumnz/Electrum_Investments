@@ -258,6 +258,14 @@ def test_settings_shows_the_limits_without_offering_to_change_them(client):
         assert control not in body.lower(), f"settings page carries a {control}"
 
 
+def test_settings_shows_trading_days_beside_the_session_hours(client):
+    """Hours alone read as "this is when it trades", and miss by two days a week."""
+    body = client.get("/settings").text
+
+    assert "Trading days" in body
+    assert "Mon, Tue, Wed, Thu, Fri" in body
+
+
 def test_settings_never_renders_a_credential(tmp_path, journal):
     """Loopback-bound is not the same as private. A screenshot travels."""
     env = Env(_env_file=None)  # type: ignore[call-arg]

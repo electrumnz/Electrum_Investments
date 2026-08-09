@@ -178,17 +178,38 @@ class RiskGate:
     def _within_session(self, instrument: InstrumentRules | None) -> str | None:
         """Session window comes from the instrument class, not a global setting.
 
-        A 24/7 market configures `[[0, 24]]` and is therefore always in session,
-        rather than needing to be special-cased in code.
+        A 24/7 market configures `[[0, 24]]` across all seven days and is
+        therefore always in session, rather than needing to be special-cased in
+        code.
+
+        The day is checked as well as the hour. Hours alone made Saturday at
+        15:00 UTC a valid equity session, and Alpaca does not refuse an
+        out-of-hours equity order: it queues it to the next session, so the
+        fill arrives at Monday's open — the noisy half-hour `sessions_utc` is
+        set to skip. That gap cost nothing while the loop placed no orders and
+        became live the moment `--execute` went on.
+
+        **Market holidays are still not covered.** Thanksgiving is a Thursday,
+        so this passes it, and the order queues to the next open exactly as a
+        weekend one used to. Closing that needs Alpaca's calendar endpoint, and
+        it is a network call, which does not belong inside a gate that has to
+        stay deterministic and cannot fail open. Named here rather than left as
+        an absence: the guard is weekday-shaped, not market-open-shaped.
         """
         if instrument is None:
             return None  # the allowlist gate already rejected this
-        hour = self._now().hour
-        if any(start <= hour < end for start, end in instrument.sessions_utc):
+        now = self._now()
+        label = proposal_class_label(instrument)
+
+        if now.weekday() not in instrument.session_days_utc:
+            return (
+                f"{now.strftime('%A')} is not a trading day for {label} "
+                f"(an equity order placed now would queue to the next open)"
+            )
+        if any(start <= now.hour < end for start, end in instrument.sessions_utc):
             return None
         return (
-            f"{hour:02d}:00 UTC is outside the trading sessions for "
-            f"{proposal_class_label(instrument)}"
+            f"{now.hour:02d}:00 UTC is outside the trading sessions for {label}"
         )
 
     def _news_blackout(self, symbol: str, windows: list[NewsWindow]) -> str | None:

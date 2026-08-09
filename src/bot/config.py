@@ -243,6 +243,18 @@ class InstrumentRules(BaseModel):
     allowed_symbols: list[str] = Field(default_factory=list)
     sessions_utc: list[tuple[int, int]] = Field(default_factory=list)
 
+    # Which days those hours apply to, as Python weekdays: Monday 0, Sunday 6.
+    #
+    # Required rather than defaulted, because both plausible defaults are wrong
+    # for one of the two classes already configured. Mon-Fri would silently
+    # forbid crypto at weekends, which is the exact failure the per-instrument
+    # split was introduced to fix. All seven would leave equities tradeable on
+    # a Saturday, and Alpaca queues an out-of-hours equity order to the next
+    # session rather than refusing it, so the fill lands at Monday's open — the
+    # half-hour `sessions_utc` deliberately skips. A missing value fails loudly
+    # at startup instead.
+    session_days_utc: list[int] = Field(default_factory=list)
+
     # Optional ceiling on this class's share of equity, as a fraction of the
     # portfolio. Used to keep a volatile class from quietly dominating.
     capital_cap_pct: float | None = Field(default=None, ge=0, le=100)
@@ -257,6 +269,16 @@ class InstrumentRules(BaseModel):
             raise ValueError(
                 "instrument is enabled but sessions_utc is empty, so nothing could "
                 "ever trade. Use [[0, 24]] for a 24/7 market."
+            )
+        if not self.session_days_utc:
+            raise ValueError(
+                "instrument is enabled but session_days_utc is empty, so nothing "
+                "could ever trade. Monday is 0 and Sunday is 6: use [0, 1, 2, 3, 4] "
+                "for a weekday market and [0, 1, 2, 3, 4, 5, 6] for a 24/7 one."
+            )
+        if any(day < 0 or day > 6 for day in self.session_days_utc):
+            raise ValueError(
+                f"session_days_utc must be weekdays 0-6, got {self.session_days_utc}"
             )
         return self
 

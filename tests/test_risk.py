@@ -92,6 +92,67 @@ def test_rejects_outside_session(rules, account, spy_tick, buy_proposal):
     assert _reasons_mention(verdict, "outside the trading sessions")
 
 
+@pytest.mark.parametrize(
+    ("moment", "day"),
+    [
+        (datetime(2026, 5, 9, 15, 0, tzinfo=UTC), "Saturday"),
+        (datetime(2026, 5, 10, 15, 0, tzinfo=UTC), "Sunday"),
+    ],
+)
+def test_rejects_a_weekend_even_inside_the_session_hours(
+    rules, account, spy_tick, buy_proposal, moment, day
+):
+    """The hours matched and the market was shut.
+
+    `sessions_utc` is hours only, so 15:00 on a Saturday sat inside `[14, 21)`
+    and the gate approved. That cost nothing while the loop placed no orders.
+    It stopped being free the moment `--execute` went on, because Alpaca does
+    not refuse an out-of-hours equity order — it queues it to the next session,
+    so a Saturday proposal would have filled at Monday's open, inside the
+    half-hour the window is set to skip.
+    """
+    verdict = _gate(rules, now=moment).evaluate(
+        buy_proposal, account=account, tick=spy_tick
+    )
+
+    assert not verdict.approved
+    assert _reasons_mention(verdict, f"{day} is not a trading day")
+
+
+def test_a_weekday_inside_the_hours_is_still_approved(
+    rules, account, spy_tick, buy_proposal
+):
+    """The day check must not have swallowed the ordinary case."""
+    verdict = _gate(rules).evaluate(buy_proposal, account=account, tick=spy_tick)
+
+    assert verdict.approved, verdict.reasons
+
+
+def test_crypto_still_trades_at_the_weekend(rules):
+    """The reason session_days_utc has no default.
+
+    Monday-to-Friday looks like a sensible default and would silently shut the
+    24/7 class for two days a week, which is the same failure the per-instrument
+    split was introduced to fix, in a new costume.
+    """
+    enabled = _with_crypto(rules)
+    saturday = datetime(2026, 5, 9, 3, 0, tzinfo=UTC)
+    account = AccountSnapshot(
+        equity_usd=PAPER_EQUITY,
+        cash_usd=PAPER_EQUITY,
+        buying_power_usd=PAPER_EQUITY,
+        open_positions=[],
+    )
+
+    verdict = _gate(enabled, now=saturday).evaluate(
+        _btc(0.02, "Crypto on a Saturday should be allowed; it trades 24/7."),
+        account=account,
+        tick=_btc_tick(saturday),
+    )
+
+    assert verdict.approved, verdict.reasons
+
+
 def test_rejects_during_news_blackout(rules, account, spy_tick, buy_proposal):
     window = NewsWindow(
         timestamp=INSIDE_SESSION + timedelta(minutes=5),
