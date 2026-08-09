@@ -26,6 +26,7 @@ from ..metrics import build_report
 from ..models import AccountSnapshot
 from ..options import alerts_for_positions
 from . import render
+from .chat import HermesBridge
 
 
 def build_app(
@@ -37,10 +38,11 @@ def build_app(
 ) -> Any:
     """Construct the FastAPI app. Dependencies are injectable so tests never
     touch a real journal or broker."""
-    from fastapi import FastAPI
-    from fastapi.responses import HTMLResponse
+    from fastapi import FastAPI, HTTPException
+    from fastapi.responses import HTMLResponse, JSONResponse
 
     app = FastAPI(title="Mudhorn Capital", docs_url=None, redoc_url=None)
+    bridge = HermesBridge()
 
     resolved_env = env or Env()
     resolved_env.assert_paper_only()
@@ -96,9 +98,61 @@ def build_app(
             )
             + render.analytics(report)
             + render.trades(closed[-50:])
+            + render.chat_panel(
+                enabled=bool(resolved_env.dashboard_chat_token),
+                token=resolved_env.dashboard_chat_token,
+                hermes_available=bridge.available,
+            )
             + render.rules_view(_rules_text())
         )
         return render.page("Dashboard", body)
+
+    @app.post("/chat", response_class=JSONResponse)
+    def chat(payload: dict[str, Any]) -> dict[str, Any]:
+        """Ask Hermes a question. The one non-GET route in this application.
+
+        The dashboard was read-only and a test enforced it. That changed
+        deliberately, not incidentally, so the reasoning belongs here:
+
+        Rendering equity is safe to expose because the worst case is disclosure.
+        Driving an agent is not — the worst case is action. The page is still
+        loopback-bound and still reached over Tailscale, so nothing new is
+        internet-facing, but the margin is thinner and the mitigations are
+        correspondingly explicit:
+
+        - chat is **off** unless `DASHBOARD_CHAT_TOKEN` is set, so a deploy never
+          switches it on by itself
+        - Hermes runs as a different, unprivileged user; this process holding the
+          broker credentials does not lend them to the agent
+        - every tool the agent can reach still runs `RiskGate.evaluate` first
+
+        The token is embedded in the page, so it does not defend against someone
+        who can already load the dashboard — they could POST regardless. What it
+        buys is that enabling this is a decision, and that a device which never
+        loaded the page cannot drive the agent blind.
+
+        Takes the body as a plain `dict` rather than the more obvious
+        `request: Request`. This module imports FastAPI lazily inside
+        `build_app` so that importing it does not require FastAPI installed, and
+        `from __future__ import annotations` turns every annotation into a
+        string that FastAPI resolves against *module* globals. A function-local
+        `Request` is therefore invisible to it, and the parameter is silently
+        treated as a query field — every POST 422s with
+        `{"loc": ["query", "request"]}`. `dict[str, Any]` resolves from module
+        scope and means the same thing here.
+        """
+        if not resolved_env.dashboard_chat_token:
+            raise HTTPException(status_code=404, detail="chat is not enabled")
+
+        if payload.get("token") != resolved_env.dashboard_chat_token:
+            raise HTTPException(status_code=403, detail="bad token")
+
+        history = [
+            (str(t.get("user", "")), str(t.get("agent", "")))
+            for t in payload.get("history") or []
+        ]
+        reply = bridge.ask(str(payload.get("message", "")), history)
+        return {"ok": reply.ok, "text": reply.text, "error": reply.error}
 
     @app.get("/healthz")
     def healthz() -> dict[str, Any]:

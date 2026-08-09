@@ -157,6 +157,7 @@ def page(title: str, body: str) -> str:
   <nav>
     <a href="#overview">Overview</a><a href="#analytics">Analytics</a>
     <a href="#trades">Trades</a><a href="#rules">Rules</a>
+    <a href="#chat">Chat</a>
   </nav>
 </div></header>
 <main>{body}</main>
@@ -369,4 +370,99 @@ def rules_view(rules_yaml: str) -> str:
   change behaviour, so every change leaves a commit behind rather than happening
   quietly from a phone after a bad day.</p>
 <div class="readout">{_e(rules_yaml)}</div>
+</section>"""
+
+
+def chat_panel(*, enabled: bool, token: str, hermes_available: bool) -> str:
+    """The one interactive thing on an otherwise read-only page.
+
+    Kept last, below the rules, because it is the part that acts and everything
+    above it merely reports. If it is switched off — the default — this renders
+    an explanation rather than nothing, so a blank space is never mistaken for a
+    broken feature.
+    """
+    if not enabled:
+        return """<section id="chat" class="wrap reveal">
+<p class="eyebrow">Chat</p>
+<h2>Ask the agent</h2>
+<p class="note">Disabled. Set <code>DASHBOARD_CHAT_TOKEN</code> in
+  <code>.env</code> and restart to switch it on. It is off by default because
+  everything else on this page reports, and this one acts.</p>
+</section>"""
+
+    if not hermes_available:
+        return """<section id="chat" class="wrap reveal">
+<p class="eyebrow">Chat</p>
+<h2>Ask the agent</h2>
+<p class="note">Enabled, but Hermes is not installed on this machine. See
+  <code>docs/HERMES_SETUP.md</code>.</p>
+</section>"""
+
+    return f"""<section id="chat" class="wrap reveal">
+<p class="eyebrow">Chat</p>
+<h2>Ask the agent</h2>
+<p class="note">Hermes answers, with the same tools and the same approval rules
+  as anywhere else. Every order-placing tool still runs the risk gate first, so
+  nothing here can talk its way past <code>config/rules.yaml</code>.</p>
+<div id="chat-log" class="readout" style="min-height:6rem"></div>
+<div style="display:flex;gap:.5rem;margin-top:1rem">
+  <input id="chat-input" type="text" placeholder="What is my risk status?"
+         style="flex:1;padding:.6rem .8rem;background:var(--ink);color:var(--bone);
+                border:1px solid var(--slate);border-radius:2px;font:inherit">
+  <button id="chat-send" class="replay" style="margin-top:0">Send</button>
+</div>
+<script>
+(function () {{
+  const log = document.getElementById('chat-log');
+  const input = document.getElementById('chat-input');
+  const send = document.getElementById('chat-send');
+  const history = [];
+
+  function line(who, text) {{
+    const p = document.createElement('p');
+    p.style.margin = '0 0 .6rem';
+    const b = document.createElement('b');
+    b.textContent = who + ': ';
+    p.appendChild(b);
+    // textContent, never innerHTML: the reply is model output.
+    p.appendChild(document.createTextNode(text));
+    log.appendChild(p);
+    log.scrollTop = log.scrollHeight;
+  }}
+
+  async function ask() {{
+    const message = input.value.trim();
+    if (!message) return;
+    input.value = '';
+    line('You', message);
+    send.disabled = true;
+    line('Agent', 'thinking...');
+    const pending = log.lastChild;
+    try {{
+      const r = await fetch('/chat', {{
+        method: 'POST',
+        headers: {{'Content-Type': 'application/json'}},
+        body: JSON.stringify({{token: {token!r}, message: message, history: history}})
+      }});
+      const data = await r.json();
+      log.removeChild(pending);
+      if (data.ok) {{
+        line('Agent', data.text);
+        history.push({{user: message, agent: data.text}});
+      }} else {{
+        line('Error', data.error || 'request failed');
+      }}
+    }} catch (e) {{
+      log.removeChild(pending);
+      line('Error', String(e));
+    }} finally {{
+      send.disabled = false;
+      input.focus();
+    }}
+  }}
+
+  send.addEventListener('click', ask);
+  input.addEventListener('keydown', function (e) {{ if (e.key === 'Enter') ask(); }});
+}})();
+</script>
 </section>"""

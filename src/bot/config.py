@@ -51,6 +51,11 @@ class Env(BaseSettings):
     alpaca_secret_key: str = Field(default="", alias="ALPACA_SECRET_KEY")
     alpaca_paper_trade: bool = Field(default=True, alias="ALPACA_PAPER_TRADE")
 
+    # Chat is off unless this is set. Fail-closed: a dashboard that gains the
+    # ability to drive an agent should do so because someone decided to, not
+    # because they deployed a new version.
+    dashboard_chat_token: str = Field(default="", alias="DASHBOARD_CHAT_TOKEN")
+
     finnhub_api_key: str = Field(default="", alias="FINNHUB_API_KEY")
     marketaux_api_key: str = Field(default="", alias="MARKETAUX_API_KEY")
 

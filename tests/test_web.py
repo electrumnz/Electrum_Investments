@@ -167,11 +167,44 @@ def test_untracked_position_warning(client, journal, tmp_path):
 # ---------------------------------------------------------------- read-only
 
 
-def test_dashboard_exposes_no_write_routes(client):
-    """Nothing here may place, close or alter anything."""
+def test_chat_is_the_only_write_route(client):
+    """The dashboard was wholly read-only and this test enforced it.
+
+    That changed deliberately when the chat panel was added, so the assertion
+    changed with it rather than being deleted: exactly one POST, and it is
+    `/chat`. Anything else appearing here means a write route arrived without
+    anyone deciding it should.
+    """
     app = client.app
-    methods = {m for route in app.routes for m in getattr(route, "methods", set())}
-    assert methods <= {"GET", "HEAD"}, f"unexpected write methods: {methods}"
+    writes = {
+        (r.path, m)
+        for r in app.routes
+        for m in getattr(r, "methods", set())
+        if m not in {"GET", "HEAD"}
+    }
+    assert writes == {("/chat", "POST")}, f"unexpected write routes: {writes}"
+
+
+def test_chat_is_off_unless_a_token_is_set(client):
+    """Fail closed. A deploy must not switch on the ability to drive an agent."""
+    assert client.post("/chat", json={"message": "hello"}).status_code == 404
+
+
+def test_chat_rejects_a_wrong_token(tmp_path, journal):
+    from bot.web.app import build_app
+
+    env = Env(_env_file=None)  # type: ignore[call-arg]
+    env.dashboard_chat_token = "correct-horse"
+    app = build_app(journal=journal, rules=load_rules(), env=env, force_mock=True)
+
+    r = TestClient(app).post("/chat", json={"token": "wrong", "message": "hi"})
+    assert r.status_code == 403
+
+
+def test_chat_panel_says_why_it_is_hidden_rather_than_rendering_nothing(client):
+    """A blank space reads as a broken feature; a sentence reads as a choice."""
+    body = client.get("/").text
+    assert "DASHBOARD_CHAT_TOKEN" in body
 
 
 def test_rules_are_shown_not_editable(client):
