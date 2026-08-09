@@ -67,9 +67,15 @@ mcp_servers:
   # The only path to an order. Runs as `mudhorn` via /etc/sudoers.d/hermes-mcp,
   # because the hermes user deliberately holds no credentials of its own. Every
   # order-placing tool behind this re-runs RiskGate.evaluate.
+  # Goes through deploy/run-mcp.sh rather than straight at the binary, because
+  # config.py resolves .env relative to the working directory and Hermes spawns
+  # MCP servers from its own home. Without the wrapper the server dies on
+  # startup and Hermes shows it as permanently "connecting" — the agent then
+  # answers questions about the account with no broker tools and no sign that
+  # anything is wrong.
   electrum-bot:
     command: sudo
-    args: ["-n", "-u", "mudhorn", "/opt/mudhorn/.venv/bin/electrum-bot-mcp"]
+    args: ["-n", "-u", "mudhorn", "/opt/mudhorn/deploy/run-mcp.sh"]
 
 # Optional, and stronger than any deny rule if it works: the agent's whole job
 # here is answering questions through the MCP tools above, so it plausibly needs

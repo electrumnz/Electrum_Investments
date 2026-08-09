@@ -159,7 +159,7 @@ runs as the account that does have access:
 
 ```sh
 sudo tee /etc/sudoers.d/hermes-mcp >/dev/null <<'EOF'
-hermes ALL=(mudhorn) NOPASSWD: /opt/mudhorn/.venv/bin/electrum-bot-mcp
+hermes ALL=(mudhorn) NOPASSWD: /opt/mudhorn/deploy/run-mcp.sh
 EOF
 sudo chmod 440 /etc/sudoers.d/hermes-mcp
 sudo visudo -c
@@ -204,7 +204,7 @@ In Hermes' MCP configuration, both servers — note the `sudo -u mudhorn`:
 mcp_servers:
   electrum-bot:
     command: sudo
-    args: ["-u", "mudhorn", "/opt/mudhorn/.venv/bin/electrum-bot-mcp"]
+    args: ["-n", "-u", "mudhorn", "/opt/mudhorn/deploy/run-mcp.sh"]
   alpaca:
     # Alpaca's official server, restricted to read-only toolsets.
     # See SETUP.md section 5 for the ALPACA_TOOLSETS value.
