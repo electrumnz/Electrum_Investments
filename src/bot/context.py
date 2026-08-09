@@ -4,12 +4,16 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
+import structlog
+
 from .broker import Broker
 from .indicators import Indicators, compute
 from .indicators import render as render_indicators
 from .models import AccountSnapshot, Tick, TradingActivity
 from .options import ExpiryAlert, render_alerts
 from .risk import NewsWindow
+
+log = structlog.get_logger()
 
 
 def build_market_context(
@@ -124,12 +128,23 @@ def build_market_context(
 
 
 def fetch_market_ticks(broker: Broker, symbols: list[str]) -> dict[str, Tick]:
-    """Pull a tick for every allowed symbol, skipping any that error out."""
+    """Pull a tick for every allowed symbol, skipping any that error out.
+
+    Catches broadly, and deliberately. The narrow `(KeyError, RuntimeError)`
+    this used to catch covers `MockBroker` and the hand-raised errors in
+    `AlpacaBroker`, but not what the Alpaca SDK actually raises on a bad day:
+    `APIError`, an `httpx` timeout, a JSON decode failure. Any of those would
+    propagate out of here and end the decision loop, which is the worst
+    available outcome — the journal stops being reconciled and open positions
+    stop being watched. Same reasoning as `data/_http.fetch_json`: there is no
+    exception from an HTTP client worth crashing a trading loop over.
+    """
     result: dict[str, Tick] = {}
     for symbol in symbols:
         try:
             result[symbol] = broker.get_tick(symbol)
-        except (KeyError, RuntimeError):
+        except Exception as exc:
+            log.warning("tick_fetch_failed", symbol=symbol, error=f"{type(exc).__name__}: {exc}")
             continue
     return result
 
@@ -144,6 +159,20 @@ def fetch_indicators(
     is indistinguishable from a symbol nobody asked about, and the model would
     reason about its live quote with no history and no warning. Same principle
     as `reconcile`'s `risk_is_understated` and `FinnhubCalendar.is_degraded`.
+
+    Catches broadly for the same reason `fetch_market_ticks` does: this runs a
+    network call per symbol on every cycle, and an Alpaca `APIError` or an
+    `httpx` timeout escaping here would kill the loop rather than degrade it.
+    A symbol that failed is reported as missing history, which is already the
+    honest description of what the model has for it.
+
+    No cache, deliberately. The Marketaux and Finnhub caches exist because
+    those free tiers allow 100 requests a day against a loop that wakes 96
+    times, so the TTL is a hard requirement. Alpaca's market-data limit is per
+    minute, not per day, and six symbols every fifteen minutes is nowhere near
+    it. Adding a TTL here would be an optimisation dressed as a rate-limit
+    control, and it would make the indicators lag the quote in the same
+    context block for no benefit.
     """
     found: dict[str, Indicators] = {}
     missing: list[str] = []
@@ -151,7 +180,8 @@ def fetch_indicators(
     for symbol in symbols:
         try:
             bars = broker.get_daily_bars(symbol)
-        except (KeyError, RuntimeError, ValueError):
+        except Exception as exc:
+            log.warning("bars_fetch_failed", symbol=symbol, error=f"{type(exc).__name__}: {exc}")
             missing.append(symbol)
             continue
 

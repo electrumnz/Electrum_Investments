@@ -139,6 +139,28 @@ Miss it and the cap silently has nothing to count. This was a real bug, fixed in
 `14b88c8`. A held position with no journal entry has an unknowable stop, so its
 risk is reported as **missing** rather than guessed at.
 
+### A feed failure must degrade the cycle, never end the loop
+
+`fetch_market_ticks` and `fetch_indicators` in `context.py` both catch
+`Exception`, deliberately. They run a network call per symbol per cycle, and the
+Alpaca SDK raises `APIError`, `httpx` timeouts and JSON decode failures, none of
+which is a `KeyError` or a `RuntimeError`. A narrow catch lets those through and
+**ends the decision loop**: the journal stops being reconciled and open
+positions stop being watched, with nothing on screen to say so.
+
+A failed symbol comes back as missing history, which is already the honest
+description of what the model has for it, and gets named in the prompt and in
+`symbols_without_history`. Same reasoning as `data/_http.fetch_json`: there is
+no exception from an HTTP client worth crashing a trading loop over, and an
+unanticipated one is exactly the case where crashing would be worst.
+
+**There is no cache on the bars, on purpose.** The Marketaux and Finnhub caches
+are rate-limit requirements: those free tiers allow 100 requests a day against a
+loop that wakes 96 times. Alpaca's market-data limit is per minute, not per day,
+and six symbols every fifteen minutes is nowhere near it. A TTL here would be an
+optimisation dressed as a rate-limit control, and it would make the indicators
+lag the quote inside the same context block for no benefit.
+
 ### The journal is backed up with `.backup`, and the busy timeout is the point
 
 `data/journal.db` is the only irreplaceable file on the droplet.
@@ -414,7 +436,7 @@ reference/              Third-party projects we borrow from. See reference/STATU
 ## Running it
 
 ```sh
-.venv/bin/python -m pytest              # full suite (272 tests)
+.venv/bin/python -m pytest              # full suite (275 tests)
 electrum-bot smoketest --mock           # no credentials needed
 electrum-bot smoketest                  # needs Alpaca paper keys
 electrum-bot loop                       # proposes and vets; places nothing

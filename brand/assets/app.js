@@ -25,7 +25,24 @@
 
   /* ------------------------------------------------------------ formatting */
 
+  /* Every formatter returns "n/a" rather than a number for a value that is
+     null, undefined or NaN.
+
+     This is the same rule as src/bot/metrics.py, and it is not defensive
+     padding. Several of these figures are legitimately undefined: a profit
+     factor with no losing trades, an R-multiple on a trade with no planned
+     risk, a capture ratio with no winners to measure. Formatting those
+     unguarded prints "$NaN", which reads as a rendering glitch rather than as
+     missing data, and "NaN" sorts and scans like a number. The repository's
+     rule is to report missing data rather than invent a plausible value, and
+     an unguarded formatter breaks that rule at the last possible moment,
+     after every layer above it got the answer right. */
+  function absent(value) {
+    return value === null || value === undefined || (typeof value === 'number' && isNaN(value));
+  }
+
   function usd(value, opts) {
+    if (absent(value)) return 'n/a';
     var o = opts || {};
     var digits = o.digits === undefined ? 2 : o.digits;
     var abs = Math.abs(value).toLocaleString('en-GB', {
@@ -37,19 +54,28 @@
   }
 
   function pct(value, digits) {
+    if (absent(value)) return 'n/a';
     var d = digits === undefined ? 2 : digits;
     return value.toFixed(d) + '%';
   }
 
   function signedPct(value, digits) {
+    if (absent(value)) return 'n/a';
     return (value > 0 ? '+' : '') + pct(value, digits);
   }
 
   function rMultiple(value) {
+    if (absent(value)) return 'n/a';
     return (value > 0 ? '+' : '') + value.toFixed(2) + 'R';
   }
 
+  function ratio(value, digits) {
+    if (absent(value)) return 'n/a';
+    return value.toFixed(digits === undefined ? 2 : digits);
+  }
+
   function qty(value) {
+    if (absent(value)) return 'n/a';
     return Number(value).toLocaleString('en-GB', { maximumFractionDigits: 4 });
   }
 
@@ -114,11 +140,16 @@
       return a.exitTime < b.exitTime ? -1 : 1;
     });
 
+    /* Carries every key the populated branch does, including rValues and
+       feesUsd. An empty-case object missing a key is how a caller ends up
+       reading `undefined.length` on a page that renders fine against the
+       shipped fixture and breaks the moment a filter matches nothing. */
     if (!closed.length) {
       return { tradeCount: 0, wins: 0, losses: 0, winRate: 0, profitFactor: null,
                expectancyUsd: 0, expectancyR: null, totalPnlUsd: 0, avgR: null,
                avgWinUsd: 0, avgLossUsd: 0, grossProfitUsd: 0, grossLossUsd: 0,
-               bestUsd: 0, worstUsd: 0, maxDrawdownUsd: 0, payoffRatio: null,
+               bestUsd: null, worstUsd: null, maxDrawdownUsd: 0, payoffRatio: null,
+               rValues: [], feesUsd: 0,
                thin: true, health: 'no closed trades yet' };
     }
 
@@ -188,7 +219,13 @@
      verdict out of nothing. */
   function analyseExcursions(trades) {
     var sampled = trades.filter(function (t) { return t.maeUsd !== 0 || t.mfeUsd !== 0; });
-    if (!sampled.length) return { sampledTrades: 0, captureRatio: null, maeToRiskRatio: null };
+    /* Same completeness rule as summarise: the averages are null rather than
+       absent, so a caller formatting them gets "n/a" instead of "$NaN". */
+    if (!sampled.length) {
+      return { sampledTrades: 0, avgMfeUsd: null, avgRealisedWinUsd: null,
+               captureRatio: null, avgMaeUsd: null, avgPlannedRiskUsd: null,
+               maeToRiskRatio: null };
+    }
 
     var winners = sampled.filter(function (t) { return t.netPnlUsd > 0; });
     var avgMfe = mean(winners.map(function (t) { return t.mfeUsd; }));
@@ -449,6 +486,7 @@
     targetVerdict: targetVerdict, stopVerdict: stopVerdict,
     equityChart: equityChart, drawdownChart: drawdownChart,
     rHistogram: rHistogram, sparkline: sparkline,
+    ratio: ratio, absent: absent,
     stat: stat, meter: meter, pips: pips,
     currentOperator: currentOperator, ready: ready
   };

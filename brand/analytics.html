@@ -146,7 +146,7 @@ MUDHORN.ready(function () {
     s.tradeCount + ' closed trades to ' + M.shortDate(d.account.asOf);
 
   /* ------------------------------------------------------------- headline */
-  var pf = s.profitFactor === null ? 'n/a' : s.profitFactor.toFixed(2);
+  var pf = M.ratio(s.profitFactor);
   document.getElementById('headline').innerHTML =
     M.stat('Win rate', Math.round(s.winRate * 100) + '%',
            s.wins + ' won, ' + s.losses + ' lost of ' + s.tradeCount) +
@@ -164,7 +164,7 @@ MUDHORN.ready(function () {
   document.getElementById('health').textContent =
     'Reading: ' + s.health + '. Average win ' + M.usd(s.avgWinUsd) +
     ' against an average loss of ' + M.usd(s.avgLossUsd) +
-    ', a payoff ratio of ' + (s.payoffRatio === null ? 'n/a' : s.payoffRatio.toFixed(2)) +
+    ', a payoff ratio of ' + M.ratio(s.payoffRatio) +
     '. Best ' + M.usd(s.bestUsd, { signed: true }) +
     ', worst ' + M.usd(s.worstUsd, { signed: true }) + '.';
 

@@ -15,7 +15,7 @@ import pytest
 
 from bot.broker import MockBroker
 from bot.context import build_market_context, fetch_indicators, fetch_market_ticks
-from bot.models import AccountSnapshot, Bar
+from bot.models import AccountSnapshot, Bar, Tick
 
 START = datetime(2026, 1, 5, tzinfo=UTC)
 
@@ -63,6 +63,62 @@ def test_mock_broker_returns_the_most_recent_bars_within_the_lookback():
 
 
 # ------------------------------------------------------------------- fetching
+
+
+class ExplodingBroker(MockBroker):
+    """A broker that fails the way the Alpaca SDK actually fails.
+
+    `APIError` and `httpx.ReadTimeout` are neither `KeyError` nor
+    `RuntimeError`, which is the whole point: the narrow catch these two
+    functions started with would have let them through.
+    """
+
+    def __init__(self, error: Exception) -> None:
+        super().__init__()
+        self._error = error
+
+    def get_daily_bars(self, symbol: str, lookback: int = 260) -> list[Bar]:
+        raise self._error
+
+    def get_tick(self, symbol: str) -> Tick:
+        raise self._error
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        Exception("APIError: rate limit exceeded"),
+        TimeoutError("read timed out"),
+        ValueError("Expecting value: line 1 column 1 (char 0)"),
+    ],
+    ids=["api_error", "timeout", "bad_json"],
+)
+def test_a_broker_failure_degrades_the_cycle_rather_than_ending_the_loop(error, account):
+    """A trading loop that dies quietly is worse than one that trades badly.
+
+    When the bars endpoint has a bad minute the journal stops being reconciled
+    and open positions stop being watched, with nothing on screen to say so.
+    So a failed fetch has to come back as "no history for this symbol", which
+    is already the honest description of what the model has.
+    """
+    broker = ExplodingBroker(error)
+
+    indicators, missing = fetch_indicators(broker, ["SPY", "QQQ"])
+    ticks = fetch_market_ticks(broker, ["SPY", "QQQ"])
+
+    assert indicators == {}
+    assert missing == ["SPY", "QQQ"]
+    assert ticks == {}
+
+    context = build_market_context(
+        account=account,
+        ticks=ticks,
+        headlines=[],
+        news_windows=[],
+        indicators=indicators,
+        symbols_without_history=missing,
+    )
+    assert "NO PRICE HISTORY AVAILABLE for: QQQ, SPY" in context
 
 
 def test_fetch_indicators_names_the_symbols_it_could_not_price():
