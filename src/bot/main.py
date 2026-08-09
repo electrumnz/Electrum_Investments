@@ -246,6 +246,30 @@ def cmd_loop(
                     "open_risk_usd": round(account.open_risk_usd, 2),
                 },
             )
+
+            # One line per cycle, unconditionally.
+            #
+            # Everything above logs only when something happened: a verdict per
+            # proposal, a warning per expiry alert. But doing nothing is the
+            # common output here and is meant to be — so on a quiet day the
+            # journal stays completely silent, and a healthy bot is
+            # indistinguishable from a wedged one at a glance. The audit file
+            # has the detail; this is the pulse.
+            log.info(
+                "cycle_complete",
+                equity_usd=round(account.equity_usd, 2),
+                open_positions=len(account.open_positions),
+                open_risk_usd=round(account.open_risk_usd, 2),
+                proposals=len(decision.proposals),
+                approved=sum(1 for v in verdicts if v.approved),
+                executed=len(executed),
+                stand_down_stage=stand_down_state.stage
+                if stand_down_state.is_active(datetime.now(UTC))
+                else 0,
+                risk_understated=recon.risk_is_understated,
+                cost_usd=round(usage.estimated_cost_usd, 6),
+                next_cycle_seconds=env.decision_interval_seconds,
+            )
             time.sleep(env.decision_interval_seconds)
     except KeyboardInterrupt:
         log.info("loop_stopped_by_user")
