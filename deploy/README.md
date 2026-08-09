@@ -25,6 +25,26 @@ comfortable, 1 GB wants a swap file. `docs/COSTS.md` has the arithmetic.
 
 ## 1. Provision
 
+### Fastest path: cloud-init
+
+If the repository is public, `deploy/cloud-init.yaml` does steps 1 and 3 of this
+runbook unattended. Edit the `REPO_URL` line, then paste the file into
+DigitalOcean's **User data** box when creating the droplet (Advanced Options →
+Add Initialization scripts).
+
+The box comes up with the code cloned, the service account created, the venv
+built, both systemd units installed and enabled, `ufw` allowing SSH only, and
+Tailscale installed but not joined. You SSH in once to fill `.env`.
+
+**No credential goes in that file, deliberately.** DigitalOcean displays user
+data in the control panel, and the droplet's own metadata service serves it back
+to anything running on the machine — including the bot's service account. Broker
+keys and Tailscale auth keys are added over SSH afterwards, which takes a minute.
+
+Skip to §2 if you use it. The manual equivalent follows.
+
+### Manual
+
 **The repository is private, so the box needs its own read credential.** Use a
 **deploy key** rather than a personal access token: a deploy key is scoped to
 this one repository and read-only, where a PAT carries the whole account with it

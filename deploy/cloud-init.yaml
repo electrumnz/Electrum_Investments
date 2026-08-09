@@ -1,0 +1,82 @@
+#cloud-config
+#
+# Paste this into DigitalOcean's "User data" box when creating the droplet
+# (Advanced Options -> Add Initialization scripts). It runs as root on first
+# boot and leaves the machine fully provisioned but not trading.
+#
+# BEFORE PASTING, edit two things below:
+#   1. REPO_URL           the repository to clone
+#   2. ssh_authorized_keys  optional, if you did not attach a key in the UI
+#
+# It deliberately does NOT install credentials or start the bot. Secrets do not
+# belong in user data: DigitalOcean shows it in the control panel and the
+# droplet's own metadata service serves it back to anything running on the box,
+# which would put broker keys somewhere the bot's own service account can read.
+# You SSH in once afterwards to fill .env, which takes a minute.
+
+package_update: true
+package_upgrade: true
+
+packages:
+  - git
+  - curl
+  - ca-certificates
+  - python3
+  - python3-venv
+  - python3-dev
+  - build-essential
+  - sqlite3
+  - ufw
+
+write_files:
+  # A note in the login banner so whoever SSHes in next knows the state.
+  - path: /etc/motd
+    permissions: "0644"
+    content: |
+
+      Mudhorn Capital trading bot
+      ---------------------------
+      Provisioned by cloud-init. Nothing is running yet, on purpose.
+
+        1. sudo -e /opt/mudhorn/.env          # Alpaca + Anthropic keys
+        2. sudo -u mudhorn /opt/mudhorn/.venv/bin/electrum-bot smoketest
+        3. sudo systemctl start mudhorn-bot mudhorn-web
+
+      The loop runs WITHOUT --execute: it proposes and vets, and places
+      nothing. Read /opt/mudhorn/deploy/README.md before changing that.
+
+      Dashboard binds to 127.0.0.1 and has no login. Reach it over Tailscale,
+      never a public address.
+
+runcmd:
+  # ---- 1. the code -------------------------------------------------------
+  # Public repo: no credential needed. If the repo is private, drop this line
+  # and clone by hand with a deploy key instead (deploy/README.md).
+  - [ git, clone, --branch, main, "REPO_URL", /opt/mudhorn ]
+
+  # ---- 2. provision ------------------------------------------------------
+  # Installs Python tooling, creates the `mudhorn` service account, builds the
+  # venv, copies .env.example to .env at mode 600, installs both systemd units
+  # enabled but stopped. Idempotent: safe to re-run after a git pull.
+  - [ bash, /opt/mudhorn/deploy/bootstrap.sh ]
+
+  # ---- 3. firewall -------------------------------------------------------
+  # SSH only. The dashboard is on loopback and must stay unreachable from the
+  # internet; Tailscale brings its own interface and does not need a port here.
+  - [ ufw, allow, OpenSSH ]
+  - [ ufw, --force, enable ]
+
+  # ---- 4. Tailscale ------------------------------------------------------
+  # Installed but NOT joined. Joining needs an auth key, and an auth key in
+  # user data is readable from the metadata service. SSH in and run:
+  #     sudo tailscale up --authkey=tskey-auth-...
+  # using a single-use, short-lived key generated in the Tailscale console.
+  - [ sh, -c, "curl -fsSL https://tailscale.com/install.sh | sh" ]
+
+# Optional: only needed if you did not attach an SSH key in the DigitalOcean UI.
+# users:
+#   - name: root
+#     ssh_authorized_keys:
+#       - ssh-ed25519 AAAA... you@example.com
+
+final_message: "Mudhorn provisioning finished after $UPTIME seconds. SSH in and fill /opt/mudhorn/.env"
