@@ -97,9 +97,29 @@ wired in. `src/bot/data/` has stub adapters with the interfaces already shaped.
    audit log. Form an opinion about whether the proposals are any good.
 2. **Backtest.** Alpaca gives free historical bars. Being able to test an idea in
    minutes instead of weeks changes everything about how fast you can learn.
+   Three options are already cloned under `reference/src/`:
+
+   | | Use it for | Licence catch |
+   |---|---|---|
+   | `backtesting.py` | Simplest credible harness. Start here. | **AGPL-3.0** — fine offline, copyleft if network-exposed |
+   | `vectorbt` | Fast parameter sweeps: "does this have any edge?" | **Commons Clause** — no commercial use, ever |
+   | `nautilus_trader` | Realistic fills, backtest/live parity | **LGPL-3.0** — linking fine, modifications must be published |
+
+   None is MIT, which is annoying and worth knowing before you build on one. For
+   a private paper-trading bot all three are usable; if this ever becomes a
+   product, `vectorbt` is the one that hard-stops you.
 3. **Pick one thesis and make it explicit.** "Buy oversold large-caps in an uptrend"
    is testable. "Trade well" is not. Put it in the system prompt in
    `claude_client.py` and measure whether it helps.
+
+   Before inventing an architecture, read the prior art in `reference/src/`.
+   `TradingAgents` (Apache-2.0) models a real trading desk — analysts,
+   researchers, trader, risk manager — and supports Claude directly.
+   `ai-hedge-fund` (MIT) runs a panel of investor personas that argue a position
+   before it is taken, which is a plausible structural answer to a lone model
+   being confidently wrong at a 25–30% win rate. `FinRL` (MIT) takes the
+   reinforcement-learning route and ships an Alpaca execution layer against the
+   same broker this bot uses, so its plumbing is directly readable.
 4. **Add one data source.** Economic calendar first (Finnhub free tier) — knowing
    when not to trade is worth more than another signal.
 5. **Only then** consider the dashboard, sentiment feeds, or a faster loop.

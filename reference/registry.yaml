@@ -106,3 +106,90 @@ repos:
       Exposes 80+ trading and market-data tools and defaults to paper trading.
       Restrict it with ALPACA_TOOLSETS so our own MCP server stays the only
       order-placing path.
+
+  # --- Backtesting -------------------------------------------------------
+  # docs/HANDOFF.md calls a backtest harness the highest-value thing to build
+  # next: right now a strategy can only be evaluated forward, which means weeks
+  # per idea. These three are the realistic options, in increasing order of
+  # power and learning curve.
+
+  - name: backtesting.py
+    repo: kernc/backtesting.py
+    url: https://github.com/kernc/backtesting.py
+    ref: master
+    expected_license: AGPL-3.0
+    why: >
+      The simplest credible backtester — small API, clean docs, readable source.
+      Start here: a first harness that works beats a sophisticated one that never
+      gets finished.
+      LICENCE WARNING: AGPL-3.0. Fine to read and to run privately, but importing
+      it into anything network-exposed carries the copyleft obligation. If the
+      backtester ends up embedded in this bot, prefer an MIT/Apache alternative
+      or keep it in a separate offline process.
+
+  - name: vectorbt
+    repo: polakowo/vectorbt
+    url: https://github.com/polakowo/vectorbt
+    ref: master
+    expected_license: Apache-2.0+CommonsClause
+    why: >
+      Vectorised backtesting built for parameter sweeps — the fastest way to ask
+      "does this signal have any edge at all?" across a large grid. Weak on
+      execution realism, so treat its results as triage rather than proof.
+      LICENCE WARNING: Apache-2.0 **with the Commons Clause**, which makes this
+      source-available rather than open source despite how it is usually
+      described. The clause forbids selling the software or any product or
+      service whose value derives substantially from it — including hosting and
+      support. Personal and research use is fine; anything commercial is not,
+      and no amount of restructuring changes that. If this bot ever becomes a
+      product, replace vectorbt rather than argue about it.
+
+  - name: nautilus_trader
+    repo: nautechsystems/nautilus_trader
+    url: https://github.com/nautechsystems/nautilus_trader
+    ref: develop
+    expected_license: LGPL-3.0
+    why: >
+      Production-grade event-driven engine with realistic fills, latency
+      modelling and backtest/live parity — the same strategy code runs in both.
+      Steep learning curve; the right graduation target once a strategy is worth
+      testing properly. Note it defaults to the `develop` branch, not `main`.
+
+  # --- LLM trading prior art ---------------------------------------------
+  # Read these before inventing an architecture. All of them have already hit
+  # the problems this project will hit.
+
+  - name: TradingAgents
+    repo: TauricResearch/TradingAgents
+    url: https://github.com/TauricResearch/TradingAgents
+    ref: main
+    expected_license: Apache-2.0
+    why: >
+      The most established multi-agent LLM trading framework, modelled on the
+      desk structure of a real trading firm (analysts, researchers, trader, risk
+      manager) with Claude among its supported providers. The closest thing to
+      prior art for what this repo is doing, and the best single source for how
+      a multi-agent version would be shaped.
+
+  - name: ai-hedge-fund
+    repo: virattt/ai-hedge-fund
+    url: https://github.com/virattt/ai-hedge-fund
+    ref: main
+    expected_license: MIT
+    why: >
+      Runs a panel of investor personas that argue a position before it is taken.
+      A genuinely different architecture from a single proposing model, and the
+      adversarial framing is a plausible answer to the Alpha Arena finding that
+      lone models are confidently wrong at a 25-30% win rate.
+
+  - name: FinRL
+    repo: AI4Finance-Foundation/FinRL
+    url: https://github.com/AI4Finance-Foundation/FinRL
+    ref: master
+    expected_license: MIT
+    why: >
+      Reinforcement learning for trading, with a documented path from research
+      notebooks through to live Alpaca execution — the same broker this bot uses,
+      so its execution layer is directly readable. Also a useful counterweight:
+      RL optimises a stated objective, which forces you to say what "good" means
+      instead of leaving it to a model's judgement.

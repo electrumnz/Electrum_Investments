@@ -1,6 +1,39 @@
 {
-  "fetched_at": "2026-08-09T07:44:51+00:00",
+  "fetched_at": "2026-08-09T07:54:04+00:00",
   "repos": [
+    {
+      "name": "FinRL",
+      "repo": "AI4Finance-Foundation/FinRL",
+      "url": "https://github.com/AI4Finance-Foundation/FinRL",
+      "ref": "master",
+      "commit": "2334a5fe6d30629157f13c3b0319e1637e15e123",
+      "commit_date": "2026-07-12T14:22:09+08:00",
+      "commit_subject": "Merge pull request #1427 from Jaco-Ren/fix-single-stock-colab-link",
+      "license_detected": "MIT",
+      "expected_license": "MIT"
+    },
+    {
+      "name": "TradingAgents",
+      "repo": "TauricResearch/TradingAgents",
+      "url": "https://github.com/TauricResearch/TradingAgents",
+      "ref": "main",
+      "commit": "a33fd4c0f134485a43553a2c23a63cb14adbd88f",
+      "commit_date": "2026-07-18T15:55:04+00:00",
+      "commit_subject": "docs: streamline README header",
+      "license_detected": "Apache-2.0",
+      "expected_license": "Apache-2.0"
+    },
+    {
+      "name": "ai-hedge-fund",
+      "repo": "virattt/ai-hedge-fund",
+      "url": "https://github.com/virattt/ai-hedge-fund",
+      "ref": "main",
+      "commit": "eff8a7320fcf0b473b135690fa1a5b0d9b022a83",
+      "commit_date": "2026-08-07T10:21:54-07:00",
+      "commit_subject": "Bump version to 2.2.0",
+      "license_detected": "MIT",
+      "expected_license": "MIT"
+    },
     {
       "name": "alpaca-mcp-server",
       "repo": "alpacahq/alpaca-mcp-server",
@@ -22,6 +55,17 @@
       "commit_subject": "Merge pull request #272 from Coooder-Crypto/feat/multi-assistant-support",
       "license_detected": "MIT",
       "expected_license": "MIT"
+    },
+    {
+      "name": "backtesting.py",
+      "repo": "kernc/backtesting.py",
+      "url": "https://github.com/kernc/backtesting.py",
+      "ref": "master",
+      "commit": "ca2e2611621e472542ba90f7243a1fa06a7d7108",
+      "commit_date": "2026-08-05T14:39:16+02:00",
+      "commit_subject": "BUG: Size shared memory by materialized array, not lazy Index.nbytes",
+      "license_detected": "AGPL-3.0",
+      "expected_license": "AGPL-3.0"
     },
     {
       "name": "buzz",
@@ -88,6 +132,28 @@
       "commit_subject": "fix: require explicit AI tool disclosure in issues (#3421)",
       "license_detected": "Apache-2.0",
       "expected_license": "Apache-2.0"
+    },
+    {
+      "name": "nautilus_trader",
+      "repo": "nautechsystems/nautilus_trader",
+      "url": "https://github.com/nautechsystems/nautilus_trader",
+      "ref": "develop",
+      "commit": "d2ef777cf98a127b0d6262769d1ee8d4b80ea734",
+      "commit_date": "2026-08-09T17:32:53+10:00",
+      "commit_subject": "Make option expiry settlement transactional in the matching engine (#4618)",
+      "license_detected": "LGPL-3.0",
+      "expected_license": "LGPL-3.0"
+    },
+    {
+      "name": "vectorbt",
+      "repo": "polakowo/vectorbt",
+      "url": "https://github.com/polakowo/vectorbt",
+      "ref": "master",
+      "commit": "34b6d5935e3ea3eccd549e2592bc0f455b8045f5",
+      "commit_date": "2026-08-02T11:14:09+02:00",
+      "commit_subject": "Fix formatting of Star History section in README",
+      "license_detected": "Apache-2.0+CommonsClause",
+      "expected_license": "Apache-2.0+CommonsClause"
     }
   ]
 }

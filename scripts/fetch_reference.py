@@ -98,17 +98,29 @@ def detect_license(path: Path) -> str:
         candidate = path / filename
         if not candidate.exists():
             continue
-        head = candidate.read_text(encoding="utf-8", errors="replace")[:600].upper()
-        # Order matters: check the copyleft variants before the generic GPL string,
-        # since "GNU AFFERO GENERAL PUBLIC LICENSE" contains neither the plain GPL
-        # wording nor anything permissive, and mistaking AGPL for MIT is exactly
-        # the kind of error this whole lockfile exists to prevent.
+        head = candidate.read_text(encoding="utf-8", errors="replace")[:2000].upper()
+
+        # Commons Clause is a rider bolted onto an otherwise permissive licence
+        # that forbids selling the software or a service built substantially on
+        # it. It makes a project source-available rather than open source, so it
+        # has to be checked FIRST — the text below it still says "Apache 2.0",
+        # and reporting that alone would be actively misleading.
+        if "COMMONS CLAUSE" in head:
+            base = "Apache-2.0" if "APACHE" in head else "unknown-base"
+            return f"{base}+CommonsClause"
+
+        # Copyleft before permissive, and the more specific variants before the
+        # general ones: "AFFERO GENERAL PUBLIC LICENSE" and "LESSER GENERAL
+        # PUBLIC LICENSE" both contain neither plain-GPL nor permissive wording,
+        # and mistaking either for MIT is the exact error this lockfile exists
+        # to prevent.
         if "AFFERO GENERAL PUBLIC LICENSE" in head:
             return "AGPL-3.0"
         if "GNU LESSER GENERAL PUBLIC LICENSE" in head:
-            return "LGPL"
+            return "LGPL-3.0" if "VERSION 3" in head else "LGPL"
         if "GNU GENERAL PUBLIC LICENSE" in head:
-            return "GPL"
+            return "GPL-3.0" if "VERSION 3" in head else "GPL"
+
         if "APACHE LICENSE" in head:
             return "Apache-2.0"
         if "MIT LICENSE" in head or "PERMISSION IS HEREBY GRANTED, FREE OF CHARGE" in head:

@@ -162,17 +162,64 @@ def render(rows: list[dict[str, Any]], checked_at: str, fetched_at: str | None) 
             f"{row.get('head_commit_date') or '—'} | {release_cell} | {status} |"
         )
 
-    lines += [
-        "",
-        "## Why each project is here",
-        "",
-    ]
+    lines += ["", *render_licence_summary(rows), "## Why each project is here", ""]
     for row in rows:
         why = " ".join((row.get("why") or "").split())
         lines.append(f"- **{row['name']}** (`{row.get('repo', '?')}`) — {why}")
     lines.append("")
 
     return "\n".join(lines)
+
+
+def render_licence_summary(rows: list[dict[str, Any]]) -> list[str]:
+    """Group projects by what their licence actually obliges you to do.
+
+    Reading a repo is unrestricted. Depending on one is a decision, and these
+    three groups have very different consequences — so they get called out here
+    rather than left as a column someone has to interpret.
+    """
+    buckets: dict[str, list[str]] = {"source_available": [], "strong": [], "weak": []}
+    for row in rows:
+        lic = row.get("license") or row.get("license_detected") or ""
+        if "CommonsClause" in lic:
+            buckets["source_available"].append(f"{row['name']} ({lic})")
+        elif "AGPL" in lic:
+            buckets["strong"].append(f"{row['name']} ({lic})")
+        elif "LGPL" in lic or lic.startswith("GPL"):
+            buckets["weak"].append(f"{row['name']} ({lic})")
+
+    if not any(buckets.values()):
+        return ["## Licences", "", "All tracked projects are permissive (MIT / Apache-2.0).", ""]
+
+    out = [
+        "## Licence obligations",
+        "",
+        "Reading any of these is unrestricted. **Depending** on the ones below is a "
+        "decision with consequences — check before importing, not after.",
+        "",
+    ]
+    if buckets["source_available"]:
+        out += [
+            f"- **Source-available, not open source:** {', '.join(buckets['source_available'])}. "
+            "The Commons Clause forbids selling the software or any product or service "
+            "whose value derives substantially from it, including hosting and support. "
+            "Personal and research use only.",
+        ]
+    if buckets["strong"]:
+        out += [
+            f"- **Strong copyleft (network clause):** {', '.join(buckets['strong'])}. "
+            "Modify it and let anyone reach it over a network, and you must publish "
+            "your modified source. Keep it in a separate process behind a documented "
+            "interface, or avoid it.",
+        ]
+    if buckets["weak"]:
+        out += [
+            f"- **Weak copyleft:** {', '.join(buckets['weak'])}. "
+            "Linking is generally fine; modifications to the library itself must be "
+            "published. Safer than AGPL, still not MIT.",
+        ]
+    out.append("")
+    return out
 
 
 def main() -> int:
