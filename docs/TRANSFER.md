@@ -95,10 +95,19 @@ harder rather than easier.
    one, update `/opt/mudhorn/.env`, revoke the old
 4. **Regenerate the Alpaca paper keys.** Keys two people have held are keys
    neither can reason about. Regenerating costs nothing on a paper account
-5. **Change the passwords** on the accounts themselves, once he has them
+5. **Swap the SSH key on the droplet.** The key authorised at creation belongs
+   to the builder's machine, and it grants root on the box holding the broker
+   credentials. Josh adds his own public key to `/root/.ssh/authorized_keys`,
+   confirms he can log in with it **in a second terminal while the first is
+   still open**, then removes the builder's line. Delete it from the
+   DigitalOcean account too, or it reappears on the next droplet
+6. **Change the passwords** on the accounts themselves, once he has them
 
-Steps 3 and 4 are the ones people skip. Both are two minutes and both close a
-door that is otherwise left open indefinitely.
+Steps 3 to 5 are the ones people skip. Each is two minutes, and each closes a
+door that is otherwise left open indefinitely. Step 5 is the one that matters
+most: an API key can be revoked from a web console later, but an SSH key nobody
+remembers granting is root access that outlives every other credential on the
+list.
 
 ---
 
