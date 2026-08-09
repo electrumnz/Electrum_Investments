@@ -625,10 +625,15 @@ Three details are load-bearing and should not be tidied away:
 - **The demo banner is plain HTML in all six files**, not something `app.js`
   writes. A label saying the figures are invented must not depend on a script
   having run.
-- **The sign-in page gates nothing.** It is prefilled, accepts anything, and
-  every page is reachable without it, which the page itself says. A working gate
-  would imply the site holds something worth protecting. Making it real is the
-  prerequisite for showing live data, never a follow-up to it.
+- **There is no sign-in form, and there must not be one.** There used to be:
+  prefilled, accepting anything, gating nothing, with every page reachable
+  without it. It was removed because a gate-shaped ornament implies the site
+  holds something worth protecting, and this one holds a committed fixture. The
+  landing page is now a link straight into the overview, plus a link out to the
+  **live** dashboard, which is a different host with a real server-side
+  password. Do not reintroduce a decorative login here; if live data ever needs
+  showing on this host, real authentication is the prerequisite, not a
+  follow-up.
 - **The generator asserts its own output** before writing: no trade over the 1%
   cap, open risk under 2%, a stop on every trade, and the limits echoed into the
   JSON still matching `config/rules.yaml`. A demo showing a 1.4% risk against a
@@ -777,7 +782,7 @@ reference/              Third-party projects we borrow from. See reference/STATU
 ## Running it
 
 ```sh
-.venv/bin/python -m pytest              # full suite (470 tests)
+.venv/bin/python -m pytest              # full suite (476 tests)
 electrum-bot smoketest --mock           # no credentials needed
 electrum-bot smoketest                  # needs Alpaca paper keys
 electrum-bot loop                       # proposes and vets; places nothing

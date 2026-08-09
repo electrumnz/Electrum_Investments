@@ -73,8 +73,33 @@ class HermesBridge:
 
     @property
     def available(self) -> bool:
-        """Whether Hermes looks installed. The page says so rather than erroring."""
-        return self.binary.exists() and shutil.which("sudo") is not None
+        """Whether Hermes looks runnable from here. Never raises.
+
+        `Path.exists()` does NOT return False when a parent directory refuses
+        traversal — it raises `PermissionError`, and that took the whole Chat
+        page down with a 500. `/home/hermes` is 0700 and owned by `hermes`,
+        while this process runs as `mudhorn`, which is the user split working
+        exactly as intended.
+
+        **A permission error is answered optimistically, and that is the
+        deliberate part.** It says something about this process's reach and
+        nothing about whether Hermes is installed — and reach is not what
+        matters here, because the binary is never executed directly. It is
+        invoked through `sudo -u hermes`, which can stat and run a file this
+        process cannot even see. Reporting "not installed" on an EACCES would
+        put a confidently wrong message on the page about a working
+        installation.
+
+        So: a definite "no such file" is absent, a missing `sudo` is absent,
+        and anything we cannot determine is left to the attempt itself, which
+        reports the real error rather than a guess at it.
+        """
+        if shutil.which("sudo") is None:
+            return False
+        try:
+            return self.binary.exists()
+        except OSError:
+            return True
 
     def ask(self, message: str, history: list[tuple[str, str]] | None = None) -> ChatReply:
         if not message.strip():

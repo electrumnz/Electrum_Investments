@@ -455,15 +455,13 @@
 
   /* --------------------------------------------------------------- chrome */
 
-  /* The sign-in form sets a display name and nothing else. It is not a session
-     and it does not gate anything: every page here is reachable without it,
-     which is stated on the sign-in page itself. */
+  /* Straight from the fixture. There used to be a sign-in form that stashed a
+     display name in sessionStorage, and this read it with a fallback — but the
+     form checked nothing, gated nothing and let every page through anyway, so
+     it was removed as a gate-shaped ornament. Reading a key that nothing
+     writes any more would just be a branch that can never be taken. */
   function currentOperator() {
-    try {
-      return window.sessionStorage.getItem('mudhorn.demo.operator') || DATA.operator.name;
-    } catch (e) {
-      return DATA.operator.name;
-    }
+    return DATA.operator.name;
   }
 
   function mountWhoami() {

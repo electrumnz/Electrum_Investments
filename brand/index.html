@@ -47,29 +47,29 @@
     <h1>MUDHORN <span>CAPITAL</span></h1>
     <p class="tagline">Earned, not handed over</p>
 
-    <div class="callout" style="margin-bottom:1.5rem">
-      <h3>This form checks nothing</h3>
-      <p class="note" style="margin:0">It is a prototype shell, not authentication. The
-        credentials are filled in, any submission is accepted, and every page is
-        reachable without signing in at all. There is nothing here to protect:
-        the whole interface runs on a committed fixture of invented numbers.</p>
-    </div>
+    <!-- The prefilled form that used to sit here has gone. It checked nothing,
+         accepted anything, and let every page through regardless — a
+         gate-shaped ornament implying there was something behind it worth
+         protecting, when the whole interface runs on a committed fixture of
+         invented numbers. A plain link says the same thing honestly and in
+         fewer words.
 
-    <form id="signin" novalidate>
-      <div class="field">
-        <label for="email">Email</label>
-        <input type="email" id="email" name="email" value="operator@mudhorn.demo" autocomplete="off" spellcheck="false">
-      </div>
-      <div class="field">
-        <label for="password">Passphrase</label>
-        <input type="password" id="password" name="password" value="demonstration" autocomplete="off">
-      </div>
-      <button class="btn primary" type="submit">Enter the demonstration</button>
-    </form>
+         The REAL account does have a real login, and it is not on this host:
+         it is a Python app on the trading box, behind a server-side password.
+         Hence the second link below going somewhere else entirely. -->
 
-    <p class="note" style="text-align:center;margin-top:1.5rem">
-      <a href="overview.html">Skip straight to the overview</a> &middot;
-      <a href="about.html">What this is</a>
+    <p class="note" style="margin-bottom:1.75rem">A worked demonstration of the
+      operator interface, running on a committed fixture. Every figure is
+      invented. Nothing here reads a broker, a journal or an account.</p>
+
+    <a class="btn primary" href="overview.html"
+       style="display:block;text-align:center;text-decoration:none">
+      Open the demonstration
+    </a>
+
+    <p class="note" style="text-align:center;margin-top:1.75rem">
+      <a href="about.html">What this is</a> &middot;
+      <a href="https://mudhorn.tailc04415.ts.net">Sign in to the live account</a>
     </p>
   </div>
 </main>
@@ -83,23 +83,11 @@
   </div>
 </footer>
 
+<!-- The submit handler that lived here has gone with the form. It bound to
+     getElementById('signin'), which now returns null, so leaving it would have
+     thrown a TypeError into the console on every load of the landing page —
+     dead code that still makes noise. -->
 <script src="assets/demo-data.js"></script>
 <script src="assets/app.js"></script>
-<script>
-  // Accepts anything. Stores a display name for the masthead and moves on. No
-  // validation, no request, no session, no gate.
-  document.getElementById('signin').addEventListener('submit', function (event) {
-    event.preventDefault();
-    var email = document.getElementById('email').value.trim();
-    var name = email ? email.split('@')[0] : 'Operator';
-    try {
-      window.sessionStorage.setItem('mudhorn.demo.operator', name);
-    } catch (e) {
-      // Private browsing refuses storage. The masthead falls back to a default,
-      // which is not worth blocking anyone over.
-    }
-    window.location.href = 'overview.html';
-  });
-</script>
 </body>
 </html>
