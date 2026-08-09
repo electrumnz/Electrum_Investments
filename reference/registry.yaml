@@ -122,10 +122,9 @@ repos:
       The simplest credible backtester — small API, clean docs, readable source.
       Start here: a first harness that works beats a sophisticated one that never
       gets finished.
-      LICENCE WARNING: AGPL-3.0. Fine to read and to run privately, but importing
-      it into anything network-exposed carries the copyleft obligation. If the
-      backtester ends up embedded in this bot, prefer an MIT/Apache alternative
-      or keep it in a separate offline process.
+      Licence: AGPL-3.0. Its copyleft obligation triggers on conveying the software
+      to others over a network, which a single-operator personal tool never does.
+      Only relevant if this is ever exposed to other users.
 
   - name: vectorbt
     repo: polakowo/vectorbt
@@ -136,13 +135,11 @@ repos:
       Vectorised backtesting built for parameter sweeps — the fastest way to ask
       "does this signal have any edge at all?" across a large grid. Weak on
       execution realism, so treat its results as triage rather than proof.
-      LICENCE WARNING: Apache-2.0 **with the Commons Clause**, which makes this
-      source-available rather than open source despite how it is usually
-      described. The clause forbids selling the software or any product or
-      service whose value derives substantially from it — including hosting and
-      support. Personal and research use is fine; anything commercial is not,
-      and no amount of restructuring changes that. If this bot ever becomes a
-      product, replace vectorbt rather than argue about it.
+      Licence: Apache-2.0 with the Commons Clause, which makes it source-available
+      rather than open source despite being widely described as the latter. The
+      clause restricts *selling* the software or a service built substantially on
+      it. Personal and research use is explicitly fine, so it does not constrain
+      this project.
 
   - name: nautilus_trader
     repo: nautechsystems/nautilus_trader

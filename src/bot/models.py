@@ -25,10 +25,40 @@ class AssetClass(StrEnum):
 
     The distinction matters for risk: PDT rules bind on equities but not on
     crypto, and crypto trades 24/7 while equities respect the market calendar.
+
+    ETFs are `us_equity` at Alpaca, so they need no separate class. CFDs are
+    absent deliberately — they are barred for US residents under CFTC rules,
+    which is why this project moved off BlackBull.
     """
 
     EQUITY = "us_equity"
     CRYPTO = "crypto"
+
+
+class ExecutionMode(StrEnum):
+    """Where an order actually goes.
+
+    A stand-down forces `PAPER` for its duration: the rule is "can't trade
+    money, only paper", not "stop trading". Today the whole build is locked to
+    PAPER regardless, so this is inert — but the machinery is exercised and
+    tested now rather than written in a hurry the day real money is involved.
+    """
+
+    PAPER = "paper"
+    LIVE = "live"
+
+
+class TradeOutcome(StrEnum):
+    """How a closed trade is classified for the consecutive-loss counter.
+
+    SCRATCH exists so that cutting a trade for a few dollars does not count as
+    a loss. A counter that punished scratches would push the bot toward holding
+    losers to avoid tripping its own rule, which is exactly backwards.
+    """
+
+    WIN = "win"
+    LOSS = "loss"
+    SCRATCH = "scratch"
 
 
 class Tick(BaseModel):
@@ -163,6 +193,106 @@ class RiskVerdict(BaseModel):
     @classmethod
     def reject(cls, *reasons: str) -> RiskVerdict:
         return cls(approved=False, reasons=list(reasons))
+
+
+class Trade(BaseModel):
+    """One trade's full lifecycle, from proposal through to close.
+
+    This is the journal's unit of record. Everything the metrics engine reports
+    — R-multiple, expectancy, profit factor, MAE/MFE — is derived from these.
+    """
+
+    id: int | None = None
+
+    symbol: str
+    asset_class: AssetClass = AssetClass.EQUITY
+    strategy: str = "unspecified"
+    direction: Direction
+    qty: float = Field(gt=0)
+
+    entry_time: datetime
+    entry_price: float = Field(gt=0)
+    planned_stop: float = Field(gt=0)
+    planned_target: float = Field(gt=0)
+
+    exit_time: datetime | None = None
+    exit_price: float | None = None
+
+    realised_pnl_usd: float | None = None
+    fees_usd: float = 0.0
+
+    # Worst and best unrealised P&L seen while the trade was open, in USD.
+    # Sampled at the decision interval rather than from ticks, so both
+    # understate the true excursion — see docs.
+    mae_usd: float = 0.0
+    mfe_usd: float = 0.0
+
+    execution_mode: ExecutionMode = ExecutionMode.PAPER
+    rationale: str = ""
+    entry_order_id: str | None = None
+    exit_order_id: str | None = None
+
+    @property
+    def planned_risk_usd(self) -> float:
+        """What the trade was designed to lose if the stop filled as planned."""
+        return abs(self.entry_price - self.planned_stop) * self.qty
+
+    @property
+    def is_open(self) -> bool:
+        return self.exit_time is None
+
+    @property
+    def net_pnl_usd(self) -> float | None:
+        if self.realised_pnl_usd is None:
+            return None
+        return self.realised_pnl_usd - self.fees_usd
+
+    @property
+    def r_multiple(self) -> float | None:
+        """Net result as a multiple of the risk actually planned.
+
+        The unit that makes trades of different sizes comparable: +2R is the
+        same quality of outcome whether the position was $500 or $5,000.
+        """
+        net = self.net_pnl_usd
+        risk = self.planned_risk_usd
+        if net is None or risk <= 0:
+            return None
+        return net / risk
+
+    def outcome(self, scratch_threshold_r: float) -> TradeOutcome | None:
+        """Classify for the consecutive-loss counter. None while still open."""
+        r = self.r_multiple
+        if r is None:
+            return None
+        if r > scratch_threshold_r:
+            return TradeOutcome.WIN
+        if r < -scratch_threshold_r:
+            return TradeOutcome.LOSS
+        return TradeOutcome.SCRATCH
+
+
+class StandDownState(BaseModel):
+    """Persisted stand-down state.
+
+    Lives in SQLite rather than in memory: a stand-down that vanished when the
+    process restarted would be trivially defeated by restarting the process,
+    which is precisely what someone tilting would do.
+    """
+
+    stage: int = Field(default=0, ge=0, le=2, description="0 = not standing down")
+    started_at: datetime | None = None
+    ends_at: datetime | None = None
+    consecutive_losses: int = Field(default=0, ge=0)
+    last_triggered_at: datetime | None = None
+
+    def is_active(self, now: datetime) -> bool:
+        return self.ends_at is not None and now < self.ends_at
+
+    def days_remaining(self, now: datetime) -> float:
+        if not self.is_active(now) or self.ends_at is None:
+            return 0.0
+        return (self.ends_at - now).total_seconds() / 86_400
 
 
 class Decision(BaseModel):

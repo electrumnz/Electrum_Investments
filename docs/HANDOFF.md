@@ -39,6 +39,24 @@ already done and it was the easy part.
 
 ---
 
+## Scope
+
+**Single operator, personal trading, paper account.** Not a product, not
+multi-user, not exposed to anyone over a network.
+
+That assumption is load-bearing and worth stating plainly, because it is why:
+
+- non-permissive licences in `reference/` are not a constraint — the Commons
+  Clause triggers on selling, AGPL's network clause on conveying to other users,
+  and neither happens here
+- there is no auth, no multi-tenancy, and no compliance surface beyond personal tax
+- the dashboard and settings page bind to `127.0.0.1` with no login
+
+If that ever stops being true, re-read `reference/STATUS.md` first — the licence
+groupings there become real obligations rather than a record.
+
+---
+
 ## What exists
 
 **A deterministic risk gate** (`src/bot/risk.py`). Claude proposes orders; this
@@ -99,15 +117,19 @@ wired in. `src/bot/data/` has stub adapters with the interfaces already shaped.
    minutes instead of weeks changes everything about how fast you can learn.
    Three options are already cloned under `reference/src/`:
 
-   | | Use it for | Licence catch |
+   | | Use it for | Licence |
    |---|---|---|
-   | `backtesting.py` | Simplest credible harness. Start here. | **AGPL-3.0** — fine offline, copyleft if network-exposed |
-   | `vectorbt` | Fast parameter sweeps: "does this have any edge?" | **Commons Clause** — no commercial use, ever |
-   | `nautilus_trader` | Realistic fills, backtest/live parity | **LGPL-3.0** — linking fine, modifications must be published |
+   | `backtesting.py` | Simplest credible harness. **Start here.** | AGPL-3.0 |
+   | `vectorbt` | Parameter sweeps: "does this have any edge at all?" | Apache-2.0 + Commons Clause |
+   | `nautilus_trader` | Realistic fills, backtest/live parity | LGPL-3.0 |
 
-   None is MIT, which is annoying and worth knowing before you build on one. For
-   a private paper-trading bot all three are usable; if this ever becomes a
-   product, `vectorbt` is the one that hard-stops you.
+   Suggested path: `backtesting.py` to get a working harness, `vectorbt`
+   alongside it once you want to sweep parameters, and `nautilus_trader` only if
+   you outgrow both.
+
+   None is MIT, which is worth knowing, but none of them constrains this project
+   — see **Scope** above. That would only change if this stopped being a personal
+   tool.
 3. **Pick one thesis and make it explicit.** "Buy oversold large-caps in an uptrend"
    is testable. "Trade well" is not. Put it in the system prompt in
    `claude_client.py` and measure whether it helps.

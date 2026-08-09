@@ -194,8 +194,11 @@ def render_licence_summary(rows: list[dict[str, Any]]) -> list[str]:
     out = [
         "## Licence obligations",
         "",
-        "Reading any of these is unrestricted. **Depending** on the ones below is a "
-        "decision with consequences — check before importing, not after.",
+        "**For this project, none of these bind.** It is a single-operator personal "
+        "tool: nothing is sold, and nothing is conveyed to other users over a "
+        "network, which is what the restrictions below actually trigger on. This "
+        "section is a record, not a blocker — it matters only if that scope ever "
+        "changes.",
         "",
     ]
     if buckets["source_available"]:
