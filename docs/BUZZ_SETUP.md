@@ -181,11 +181,50 @@ website. The dashboard, when it exists, binds to `127.0.0.1`.
 
 **Only the Hermes gateway forces an always-on machine**, and the reason is
 obvious once stated: a chat bot that is offline when you message it is not a chat
-bot. A $5 Hetzner box is plenty; this process does almost nothing between
-messages.
+bot. This process does almost nothing between messages, so the smallest box on
+offer is plenty.
 
 Everything else runs on demand. If you drop the gateway and use Claude Code
 directly, the whole stack costs nothing beyond Anthropic API usage.
+
+### One provider, not two
+
+A reasonable assumption is that this needs a web host *and* a VPS. It does not,
+because **there is no website**. One small box runs the gateway, the dashboard
+and the SQLite journal together.
+
+**Vercel cannot host this**, and that is a capability mismatch rather than a
+preference. It runs serverless functions and static sites: no always-on
+processes, execution time limits, and no persistent local filesystem. The
+gateway is long-running and the journal is a file on disk. Both are precisely
+what Vercel does not do.
+
+| Option | Cost | Why |
+|---|---|---|
+| **DigitalOcean droplet** | $6/mo | Friendliest console and documentation. The pick if this is your first VPS |
+| Hetzner CX22 | ~€4/mo | Better value, plainer console |
+| Fly.io | ~$5/mo | Works (persistent volumes, always-on machines) but is container-oriented, so you learn deploys to save nothing |
+| **Josh's own PC** | Free | Genuinely fine if it stays on. Cheapest correct answer |
+
+### Reaching the dashboard when away from the desk
+
+The dashboard binds to `127.0.0.1`, so on its own it is only reachable from the
+machine running it. That is deliberate and it is why no login exists.
+
+Day to day this does not matter, because **the phone interface is chat, not the
+dashboard**. Buzz and Telegram both reach the gateway from anywhere. The
+dashboard is for sitting down and studying an equity curve, which is a desk
+activity.
+
+When remote access to the dashboard is genuinely wanted, use
+**[Tailscale](https://tailscale.com/)** (free for personal use, about five
+minutes to set up). It is a private mesh network, so the dashboard keeps binding
+to `127.0.0.1` and the phone reaches it over the private link. Nothing is
+published.
+
+Do **not** simply put the dashboard on a public URL. The moment it is publicly
+reachable it needs real authentication, and the reason there is none today is
+precisely that it is not.
 
 ---
 
