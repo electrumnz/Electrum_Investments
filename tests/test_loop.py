@@ -25,7 +25,7 @@ from pydantic import ValidationError
 import bot.main as main_mod
 from bot.audit import AuditLog
 from bot.claude_client import CallUsage, ClaudeDecision
-from bot.config import Env, load_rules
+from bot.config import Env, Rules, load_rules
 from bot.journal import Journal
 
 
@@ -65,6 +65,10 @@ def _run_one_cycle(
 
     env = Env(_env_file=None)  # type: ignore[call-arg]
     rules = load_rules()
+    # These tests are about what the cycle decides, not about when it runs. Left
+    # on, the market-closed skip would make them pass or fail according to the
+    # clock on the machine running them.
+    rules.loop.skip_model_call_when_all_markets_closed = False
 
     with structlog.testing.capture_logs() as logs:
         assert main_mod.cmd_loop(env, rules, execute=False, force_mock=True) == 0
@@ -92,7 +96,16 @@ class _ExplodingClaude:
         raise self._error
 
 
-def _run_one_cycle_with_client(monkeypatch, tmp_path, client: object) -> list[Any]:
+def _run_one_cycle_with_client(
+    monkeypatch, tmp_path, client: object, *, in_session: bool | None = None
+) -> list[Any]:
+    """Run one cycle with an arbitrary Claude stand-in.
+
+    `in_session` pins whether any instrument class is open. Without it these
+    tests would pass or fail depending on what time of day the suite ran, which
+    is exactly the kind of test nobody trusts by the third flake.
+    """
+
     def _stop(_seconds: float) -> None:
         raise KeyboardInterrupt
 
@@ -103,10 +116,56 @@ def _run_one_cycle_with_client(monkeypatch, tmp_path, client: object) -> list[An
 
     env = Env(_env_file=None)  # type: ignore[call-arg]
     rules = load_rules()
+    if in_session is None:
+        rules.loop.skip_model_call_when_all_markets_closed = False
+    else:
+        monkeypatch.setattr(
+            Rules, "any_class_in_session", lambda self, moment: in_session
+        )
 
     with structlog.testing.capture_logs() as logs:
         assert main_mod.cmd_loop(env, rules, execute=False, force_mock=True) == 0
     return logs
+
+
+def test_a_closed_market_skips_the_model_call_but_still_reconciles(
+    monkeypatch, tmp_path
+):
+    """The cost control. Nothing enabled is open, so no proposal could be approved.
+
+    The stand-in explodes if called, so this fails loudly if the skip ever stops
+    skipping rather than passing on a technicality.
+    """
+    logs = _run_one_cycle_with_client(
+        monkeypatch,
+        tmp_path,
+        _ExplodingClaude(AssertionError("the model must not be called when shut")),
+        in_session=False,
+    )
+
+    skips = [e for e in logs if e["event"] == "cycle_skipped_market_closed"]
+    assert len(skips) == 1
+    # Distinguishable from a cycle that ran and decided to do nothing, and from
+    # one that never ran at all.
+    assert not [e for e in logs if e["event"] == "cycle_complete"]
+    assert not [e for e in logs if e["event"] == "model_call_failed"]
+    # Still reports the state an operator glances at, so a shut market does not
+    # mean a blank log.
+    assert "open_risk_usd" in skips[0]
+    assert "risk_understated" in skips[0]
+
+
+def test_an_open_market_still_calls_the_model(monkeypatch, tmp_path):
+    """The other half. A skip that fires while the market is open is a dead bot."""
+    logs = _run_one_cycle_with_client(
+        monkeypatch,
+        tmp_path,
+        _StubClaude(ClaudeDecision(market_assessment="Open and quiet.", proposals=[])),
+        in_session=True,
+    )
+
+    assert [e for e in logs if e["event"] == "cycle_complete"]
+    assert not [e for e in logs if e["event"] == "cycle_skipped_market_closed"]
 
 
 @pytest.mark.parametrize(

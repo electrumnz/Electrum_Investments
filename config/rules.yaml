@@ -155,6 +155,27 @@ social:
 #
 # Account-level rules above (1% per trade, 2% total risk, stand-down, daily loss,
 # margin) stay portfolio-wide and apply across every class.
+# How the loop spends its time and money. NOT risk rules: nothing here reaches
+# the risk gate, and the worst a wrong value can do is stop the model being
+# asked. It can never widen what the model is allowed to answer.
+loop:
+
+  # Skip the model call on a cycle where no enabled instrument class is in
+  # session. Reconcile, the stand-down state and the option expiry alerts still
+  # run every single cycle — only the proposal is skipped.
+  #
+  # The loop wakes 96 times a day. US equities are open for 32.5 hours of the
+  # 168 in a week, so with equities alone about 80% of those cycles pay for a
+  # decision that the session gate will refuse whatever it says. Observed: a
+  # Sunday-night AAPL proposal, rejected on the day rule, having cost a full
+  # call to produce.
+  #
+  # The window is DERIVED from the instruments block below, never a copy of it.
+  # Enabling a 24/7 class makes this a no-op on its own, because that class is
+  # always in session — so this cannot silently switch the bot off when the
+  # instrument mix grows.
+  skip_model_call_when_all_markets_closed: true
+
 instruments:
 
   us_equity:

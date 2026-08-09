@@ -201,12 +201,12 @@ class RiskGate:
         now = self._now()
         label = proposal_class_label(instrument)
 
-        if now.weekday() not in instrument.session_days_utc:
+        if not instrument.is_trading_day(now):
             return (
                 f"{now.strftime('%A')} is not a trading day for {label} "
                 f"(an equity order placed now would queue to the next open)"
             )
-        if any(start <= now.hour < end for start, end in instrument.sessions_utc):
+        if instrument.is_within_hours(now):
             return None
         return (
             f"{now.hour:02d}:00 UTC is outside the trading sessions for {label}"

@@ -1287,6 +1287,24 @@ def settings_page(rules: Rules, env: Env, *, chat_enabled: bool) -> str:
             )
             + "</dl></div>"
         )
+    open_now = rules.classes_in_session(datetime.now(UTC))
+    skip = rules.loop.skip_model_call_when_all_markets_closed
+    body += (
+        '<section class="block"><h2>Loop</h2>'
+        '<div class="card"><dl class="kv">'
+        + _row("Open right now", ", ".join(open_now) or "nothing")
+        + _row(
+            "Skip the model call when everything is shut",
+            "yes" if skip else "no",
+        )
+        + "</dl>"
+        '<p class="source">Not a risk limit. The worst a wrong value here does is '
+        "stop the model being asked; it cannot widen what the gate allows. The "
+        "open window is derived from the instrument classes below, so enabling a "
+        "class that trades at the weekend widens it with nothing else to change. "
+        "Owned by config/rules.yaml.</p></div></section>"
+    )
+
     body += (
         '<section class="block"><h2>Instruments</h2>'
         '<p class="note">Each class carries its own session window, symbol list '

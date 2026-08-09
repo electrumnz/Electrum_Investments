@@ -258,6 +258,15 @@ def test_settings_shows_the_limits_without_offering_to_change_them(client):
         assert control not in body.lower(), f"settings page carries a {control}"
 
 
+def test_settings_shows_the_loop_controls_and_marks_them_as_not_limits(client):
+    """A reader must not mistake a cost control for a risk rule."""
+    body = client.get("/settings").text
+
+    assert "Skip the model call when everything is shut" in body
+    assert "Open right now" in body
+    assert "Not a risk limit" in body
+
+
 def test_settings_shows_trading_days_beside_the_session_hours(client):
     """Hours alone read as "this is when it trades", and miss by two days a week."""
     body = client.get("/settings").text

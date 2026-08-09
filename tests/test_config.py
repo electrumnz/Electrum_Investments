@@ -161,6 +161,51 @@ def test_enabled_instrument_must_declare_its_trading_days():
         )
 
 
+def test_the_open_window_is_derived_from_the_instruments_not_copied():
+    """The loop's skip and the gate's rejection must never disagree.
+
+    Both read the same `is_in_session`, so enabling a 24/7 class widens the
+    loop's working hours without a second setting being touched. A separate
+    copy of the equity hours would drift, and the symptom would be the loop
+    skipping a session the gate would have allowed, with nothing to say why.
+    """
+    from datetime import UTC, datetime
+
+    from bot.config import Rules
+
+    from .conftest import RULES_PATH
+
+    rules = Rules.load(RULES_PATH)
+    monday_open = datetime(2026, 5, 4, 15, 0, tzinfo=UTC)
+    saturday = datetime(2026, 5, 9, 15, 0, tzinfo=UTC)
+    monday_night = datetime(2026, 5, 4, 3, 0, tzinfo=UTC)
+
+    assert rules.classes_in_session(monday_open) == ["us_equity"]
+    assert rules.any_class_in_session(monday_open)
+    assert not rules.any_class_in_session(saturday)
+    assert not rules.any_class_in_session(monday_night)
+
+    # Enabling the 24/7 class makes the account a seven-day operation, and the
+    # skip becomes a no-op, without any second setting being edited.
+    rules.instruments["crypto"].enabled = True
+    rules.instruments["crypto"].allowed_symbols = ["BTC/USD"]
+
+    assert rules.any_class_in_session(saturday)
+    assert rules.classes_in_session(saturday) == ["crypto"]
+
+
+def test_the_skip_defaults_to_on_and_is_not_a_risk_rule():
+    """It can stop the model being asked. It can never widen what it may answer."""
+    from bot.config import Rules
+
+    from .conftest import RULES_PATH
+
+    rules = Rules.load(RULES_PATH)
+
+    assert rules.loop.skip_model_call_when_all_markets_closed is True
+    assert not hasattr(rules.loop, "max_risk_per_trade_pct")
+
+
 def test_the_shipped_rules_close_the_weekend_for_equities():
     """Guards the config, not just the gate. The rule is only as good as the file."""
     from bot.config import Rules

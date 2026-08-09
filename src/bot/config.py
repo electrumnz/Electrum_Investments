@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
 from typing import Self
@@ -253,6 +254,14 @@ class InstrumentRules(BaseModel):
     # session rather than refusing it, so the fill lands at Monday's open — the
     # half-hour `sessions_utc` deliberately skips. A missing value fails loudly
     # at startup instead.
+    #
+    # KNOWN GAP: `sessions_utc` applies uniformly to every day listed here, so a
+    # CME Globex schedule cannot be written down. Futures, crude and gold run
+    # Sunday 17:00 CT to Friday 16:00 CT with a daily 60-minute break — Sunday
+    # opens only in the evening and Saturday is dark. `[0,1,2,3,4,6]` would give
+    # Sunday Monday's hours and declare the market open all Sunday morning.
+    # Supporting one needs per-day windows, not a longer day list. Not urgent:
+    # Alpaca offers equities, options and crypto, and nothing on Globex.
     session_days_utc: list[int] = Field(default_factory=list)
 
     # Optional ceiling on this class's share of equity, as a fraction of the
@@ -282,6 +291,22 @@ class InstrumentRules(BaseModel):
             )
         return self
 
+    # These three live here rather than in `risk.py` so that the gate and the
+    # loop cannot drift apart on what "open" means. The gate uses the two halves
+    # separately, because a rejection has to say whether it was the day or the
+    # hour; the loop only asks the combined question. A second implementation of
+    # either would be a silent disagreement waiting to happen — the loop skipping
+    # a session the gate would have allowed, and nothing to say why.
+
+    def is_trading_day(self, moment: datetime) -> bool:
+        return moment.weekday() in self.session_days_utc
+
+    def is_within_hours(self, moment: datetime) -> bool:
+        return any(start <= moment.hour < end for start, end in self.sessions_utc)
+
+    def is_in_session(self, moment: datetime) -> bool:
+        return self.is_trading_day(moment) and self.is_within_hours(moment)
+
 
 class SocialRules(BaseModel):
     """Accounts whose posts are worth reading before trading.
@@ -308,6 +333,25 @@ class SocialRules(BaseModel):
         return self
 
 
+class LoopRules(BaseModel):
+    """How the decision loop spends its time and money.
+
+    **Not risk rules.** Nothing here reaches `RiskGate`, and nothing here can
+    permit a trade the gate would refuse — the worst a wrong value does is stop
+    the model being asked, never widen what it is allowed to answer. Kept in a
+    separate block so that stays obvious.
+    """
+
+    skip_model_call_when_all_markets_closed: bool = Field(
+        default=True,
+        description=(
+            "Skip the model call on a cycle where no enabled instrument class "
+            "is in session. Reconcile, stand-down state and expiry alerts still "
+            "run every cycle."
+        ),
+    )
+
+
 class Rules(BaseModel):
     account: AccountRules
     frequency: FrequencyRules
@@ -318,6 +362,7 @@ class Rules(BaseModel):
     news_blackout_minutes_after: int = Field(ge=0)
 
     social: SocialRules = Field(default_factory=SocialRules)
+    loop: LoopRules = Field(default_factory=LoopRules)
 
     # Keyed by AssetClass value: "us_equity", "crypto".
     instruments: dict[str, InstrumentRules] = Field(default_factory=dict)
@@ -349,6 +394,23 @@ class Rules(BaseModel):
             if symbol in instrument.allowed_symbols:
                 return instrument
         return None
+
+    def classes_in_session(self, moment: datetime) -> list[str]:
+        """Enabled classes whose window is open right now.
+
+        Derived from the instrument blocks, exactly like `allowed_symbols`, so
+        enabling crypto makes the whole account a seven-day operation without
+        anything else being edited. Nothing here holds a second copy of the
+        equity hours.
+        """
+        return sorted(
+            name
+            for name, instrument in self.enabled_instruments.items()
+            if instrument.is_in_session(moment)
+        )
+
+    def any_class_in_session(self, moment: datetime) -> bool:
+        return bool(self.classes_in_session(moment))
 
     def class_name_for(self, symbol: str) -> str | None:
         for name, instrument in self.enabled_instruments.items():

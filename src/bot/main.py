@@ -230,6 +230,39 @@ def cmd_loop(
                         detail=alert.message,
                     )
 
+            # Nothing enabled is open, so a proposal cannot be approved whatever
+            # it says. Skipping the model call here is a cost control, not a
+            # risk one: everything above this line has already run, so the
+            # journal is still reconciled, the stand-down state still advances
+            # and an option expiry is still warned about on the cycle it needs
+            # to be.
+            #
+            # The window is derived from the instruments block, so a 24/7 class
+            # is always in session and this becomes a no-op the moment one is
+            # enabled. It cannot quietly switch the bot off as the instrument
+            # mix grows.
+            #
+            # Logged rather than passed over in silence, on the same principle
+            # as the heartbeat: a cycle that deliberately did nothing has to be
+            # distinguishable from one that never ran.
+            now = datetime.now(UTC)
+            if rules.loop.skip_model_call_when_all_markets_closed and not (
+                rules.any_class_in_session(now)
+            ):
+                log.info(
+                    "cycle_skipped_market_closed",
+                    equity_usd=round(account.equity_usd, 2),
+                    open_positions=len(account.open_positions),
+                    open_risk_usd=round(account.open_risk_usd, 2),
+                    stand_down_stage=stand_down_state.stage
+                    if stand_down_state.is_active(now)
+                    else 0,
+                    risk_understated=recon.risk_is_understated,
+                    next_cycle_seconds=env.decision_interval_seconds,
+                )
+                time.sleep(env.decision_interval_seconds)
+                continue
+
             headlines = news.recent_headlines(rules.allowed_symbols)
             posts = [p.render() for p in social.recent_posts()] if social else []
             social_degraded = bool(social and social.is_degraded)

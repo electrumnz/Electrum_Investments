@@ -139,6 +139,24 @@ which is the per-instrument bug above wearing a new costume; all seven days
 leaves the equity hole open. So an enabled class must declare it and the
 config validator refuses one that does not.
 
+**The schema cannot express a CME session, and that is a known gap.** One
+`sessions_utc` applies uniformly to every day in `session_days_utc`, which is
+fine for equities and for a 24/7 class and wrong for anything on CME Globex —
+futures, crude, gold. Those run Sunday 17:00 CT to Friday 16:00 CT with a
+60-minute maintenance break each day: Sunday is open only in the evening, and
+Saturday is dark. Writing `session_days_utc: [0,1,2,3,4,6]` would hand Sunday
+the same hours as Monday and declare the market open all Sunday morning.
+
+Adding one needs **per-day windows** (`sessions_utc` keyed by weekday), not
+another day list. Do not approximate it with a wider window: the gate would
+approve into a closed market and the broker would queue the fill, which is the
+weekend bug again with more steps.
+
+It is not urgent, because **Alpaca does not offer futures or commodities at
+all** — equities, options and crypto only. Anything on Globex is a second
+broker, which is the case `max_total_risk_pct` was already made
+leverage-neutral for.
+
 **Market holidays are still not covered, and the rejection message says so.**
 Thanksgiving is a Thursday and passes this gate. Closing that needs Alpaca's
 calendar endpoint, which is a network call, and a network call does not belong
@@ -589,7 +607,7 @@ reference/              Third-party projects we borrow from. See reference/STATU
 ## Running it
 
 ```sh
-.venv/bin/python -m pytest              # full suite (362 tests)
+.venv/bin/python -m pytest              # full suite (367 tests)
 electrum-bot smoketest --mock           # no credentials needed
 electrum-bot smoketest                  # needs Alpaca paper keys
 electrum-bot loop                       # proposes and vets; places nothing
