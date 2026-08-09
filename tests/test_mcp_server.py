@@ -49,7 +49,7 @@ def _good_args(**overrides: Any) -> dict[str, Any]:
     args: dict[str, Any] = {
         "symbol": "SPY",
         "direction": "buy",
-        "qty": 10,
+        "qty": 3,
         "limit_price": 580.00,
         "stop_loss_price": 575.00,
         "take_profit_price": 590.00,
@@ -62,8 +62,8 @@ def _good_args(**overrides: Any) -> dict[str, Any]:
 def test_check_order_approves_a_sound_proposal():
     result = mcp_server.check_order(**_good_args())
     assert result["approved"], result["reasons"]
-    assert result["risk_usd"] == pytest.approx(50.0)
-    assert result["notional_usd"] == pytest.approx(5800.0)
+    assert result["risk_usd"] == pytest.approx(15.0)
+    assert result["notional_usd"] == pytest.approx(1740.0)
 
 
 def test_check_order_rejects_and_explains():

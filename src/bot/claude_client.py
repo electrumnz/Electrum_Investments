@@ -107,10 +107,17 @@ def build_system_prompt(rules: Rules) -> str:
             crypto_line,
             f"- Max risk per trade: {rules.account.max_risk_per_trade_pct:.2f}% of equity",
             f"- Max single position: {rules.account.max_position_pct:.1f}% of equity",
+            f"- Max total invested across all positions: "
+            f"{rules.account.max_total_invested_pct:.1f}% of equity "
+            f"(measured at cost, checked at entry)",
             f"- Minimum cash reserve: {rules.account.min_cash_reserve_pct:.1f}% of equity",
             f"- Max concurrent positions: {rules.account.max_concurrent_positions}",
-            f"- Max gross exposure: {rules.account.max_gross_exposure_pct:.1f}% of equity",
             f"- Daily loss kill-switch: {rules.account.daily_loss_kill_pct:.1f}%",
+            f"- Stand-down: {rules.stand_down.consecutive_losses_trigger} consecutive "
+            f"losses beyond {rules.stand_down.loss_threshold_r:.2f}R suspends live "
+            f"trading for {rules.stand_down.stage_one_days} days "
+            f"({rules.stand_down.stage_two_days} on a repeat within "
+            f"{rules.stand_down.repeat_window_days} days). Paper trading continues.",
             f"- Max trades: {rules.frequency.max_trades_per_day}/day, "
             f"{rules.frequency.max_trades_per_week}/week",
             f"- Cooldown per symbol: {rules.frequency.min_seconds_between_trades_per_symbol}s",

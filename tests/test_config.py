@@ -38,17 +38,43 @@ def test_claude_model_ids_and_pricing_complete():
         assert cache_read == pytest.approx(base_in * 0.1)
 
 
+def _account_rules(**overrides: Any) -> AccountRules:
+    base: dict[str, Any] = {
+        "min_equity_floor_usd": 90_000,
+        "max_risk_per_trade_pct": 1.0,
+        "max_position_pct": 2.0,
+        "max_total_invested_pct": 2.0,
+        "min_cash_reserve_pct": 20,
+        "max_concurrent_positions": 1,
+        "daily_loss_kill_pct": 1,
+    }
+    base.update(overrides)
+    return AccountRules(**base)
+
+
 def test_invalid_max_risk_pct_rejected():
     with pytest.raises(ValueError):
-        AccountRules(
-            min_equity_floor_usd=90_000,
-            max_risk_per_trade_pct=0,
-            max_position_pct=10,
-            min_cash_reserve_pct=20,
-            max_concurrent_positions=1,
-            max_gross_exposure_pct=80,
-            daily_loss_kill_pct=1,
-        )
+        _account_rules(max_risk_per_trade_pct=0)
+
+
+def test_position_cap_above_total_cap_rejected():
+    """A per-position cap larger than the total cap could never bind."""
+    with pytest.raises(ValueError, match="max_total_invested_pct"):
+        _account_rules(max_position_pct=10.0, max_total_invested_pct=2.0)
+
+
+def test_stand_down_stage_two_must_exceed_stage_one():
+    from bot.config import StandDownRules
+
+    with pytest.raises(ValueError, match="stage_one_days"):
+        StandDownRules(stage_one_days=10, stage_two_days=3)
+
+
+def test_execution_mode_follows_paper_flag():
+    from bot.models import ExecutionMode
+
+    assert _env().execution_mode == ExecutionMode.PAPER
+    assert _env(ALPACA_PAPER_TRADE=False).execution_mode == ExecutionMode.LIVE
 
 
 # --------------------------------------------------------- paper-only guard

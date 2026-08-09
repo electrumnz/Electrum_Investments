@@ -55,13 +55,14 @@ def spy_tick() -> Tick:
 def buy_proposal() -> OrderProposal:
     """A well-formed proposal that passes every gate against the `account` fixture.
 
-    10 shares at $580 is $5,800 notional (5.8% of equity) risking $50 if the
-    stop fills (0.05% of equity) — comfortably inside every cap in rules.yaml.
+    3 shares at $580 is $1,740 notional — 1.74% of equity, just inside the 2%
+    total-invested cap, which is the binding constraint on a $100k account.
+    Risk if the stop fills is $15.
     """
     return OrderProposal(
         symbol="SPY",
         direction=Direction.BUY,
-        qty=10,
+        qty=3,
         limit_price=580.00,
         stop_loss_price=575.00,
         take_profit_price=590.00,

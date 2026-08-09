@@ -10,6 +10,8 @@ import yaml
 from pydantic import BaseModel, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from .models import ExecutionMode
+
 
 class LiveTradingRefused(RuntimeError):
     """Raised when something tries to start the bot against a live-money account.
@@ -63,6 +65,15 @@ class Env(BaseSettings):
             else "https://api.alpaca.markets"
         )
 
+    @property
+    def execution_mode(self) -> ExecutionMode:
+        """Where orders would actually go, before any stand-down is applied.
+
+        Derived from ALPACA_PAPER_TRADE rather than being its own env var, so
+        there is exactly one switch and it is the one Alpaca itself uses.
+        """
+        return ExecutionMode.PAPER if self.alpaca_paper_trade else ExecutionMode.LIVE
+
     def assert_paper_only(self) -> None:
         """Refuse to run against real money.
 
@@ -82,10 +93,52 @@ class AccountRules(BaseModel):
     min_equity_floor_usd: float = Field(ge=0)
     max_risk_per_trade_pct: float = Field(gt=0, le=10)
     max_position_pct: float = Field(gt=0, le=100)
+    max_total_invested_pct: float = Field(gt=0, le=100)
     min_cash_reserve_pct: float = Field(ge=0, le=100)
     max_concurrent_positions: int = Field(gt=0)
-    max_gross_exposure_pct: float = Field(gt=0)
     daily_loss_kill_pct: float = Field(gt=0, le=100)
+
+    @model_validator(mode="after")
+    def _position_within_total(self) -> Self:
+        if self.max_position_pct > self.max_total_invested_pct:
+            raise ValueError(
+                f"max_position_pct ({self.max_position_pct}) exceeds "
+                f"max_total_invested_pct ({self.max_total_invested_pct}), so the "
+                "per-position cap could never bind"
+            )
+        return self
+
+
+class StandDownRules(BaseModel):
+    """Consecutive-loss circuit breaker.
+
+    Exists to interrupt revenge trading: a run of losses is when discipline is
+    weakest and position sizing gets worst. Breaching it demotes live trading to
+    paper for a fixed period — trading continues, the money stops.
+    """
+
+    consecutive_losses_trigger: int = Field(default=3, gt=0)
+    loss_threshold_r: float = Field(
+        default=0.25,
+        ge=0,
+        description="Losses smaller than this many R are scratches, not losses",
+    )
+    stage_one_days: int = Field(default=3, gt=0)
+    stage_two_days: int = Field(default=10, gt=0)
+    repeat_window_days: int = Field(
+        default=30,
+        gt=0,
+        description="A second trigger inside this window escalates to stage two",
+    )
+
+    @model_validator(mode="after")
+    def _stage_two_is_longer(self) -> Self:
+        if self.stage_two_days <= self.stage_one_days:
+            raise ValueError(
+                f"stage_two_days ({self.stage_two_days}) must exceed "
+                f"stage_one_days ({self.stage_one_days}) — escalation has to escalate"
+            )
+        return self
 
 
 class FrequencyRules(BaseModel):
@@ -143,6 +196,7 @@ class Rules(BaseModel):
     account: AccountRules
     frequency: FrequencyRules
     pdt: PdtRules
+    stand_down: StandDownRules = Field(default_factory=StandDownRules)
     sessions_utc: list[tuple[int, int]]
     news_blackout_minutes_before: int = Field(ge=0)
     news_blackout_minutes_after: int = Field(ge=0)

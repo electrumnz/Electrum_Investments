@@ -23,9 +23,11 @@ from .models import (
     AccountSnapshot,
     AssetClass,
     Direction,
+    ExecutionMode,
     OrderProposal,
     Position,
     RiskVerdict,
+    StandDownState,
     Tick,
     TradingActivity,
 )
@@ -51,10 +53,12 @@ class RiskGate:
         rules: Rules,
         *,
         equity_at_session_start: float,
+        execution_mode: ExecutionMode = ExecutionMode.PAPER,
         now: datetime | None = None,
     ) -> None:
         self._rules = rules
         self._equity_at_session_start = equity_at_session_start
+        self._execution_mode = execution_mode
         self._kill_switch_tripped = False
         self._now_override = now
 
@@ -71,13 +75,20 @@ class RiskGate:
         tick: Tick,
         activity: TradingActivity | None = None,
         news_windows: list[NewsWindow] | None = None,
+        stand_down: StandDownState | None = None,
     ) -> RiskVerdict:
-        """Run every gate. Returns approve() only if all of them pass."""
+        """Run every gate. Returns approve() only if all of them pass.
+
+        This gates *opening* exposure only. Closing a position and moving a stop
+        never come through here, which is deliberate: a stand-down that also
+        froze position management would strand open trades with no way out.
+        """
         activity = activity or TradingActivity()
         is_crypto = self._is_crypto(proposal)
 
         checks: list[str | None] = [
             self._kill_switch(),
+            self._stand_down(stand_down),
             self._equity_floor(account),
             self._symbol_allowed(proposal),
             # Crypto trades 24/7, so the equities session window does not apply.
@@ -90,7 +101,7 @@ class RiskGate:
             self._per_trade_risk(proposal, account),
             self._position_size(proposal, account),
             self._cash_reserve(proposal, account),
-            self._gross_exposure(proposal, account),
+            self._total_invested(proposal, account),
             self._trades_per_day(activity),
             self._trades_per_week(activity),
             self._symbol_cooldown(proposal, activity),
@@ -119,6 +130,27 @@ class RiskGate:
         if self._kill_switch_tripped:
             return "daily loss kill-switch is tripped; no new positions until reset"
         return None
+
+    def _stand_down(self, state: StandDownState | None) -> str | None:
+        """Block live entries during a consecutive-loss stand-down.
+
+        The rule is "can't trade money, only paper" — not "stop trading". So in
+        paper mode a stand-down changes nothing: the bot keeps proposing, keeps
+        being gated, and keeps journalling. Only live execution is withheld,
+        which is the part that costs money and the part that revenge trading
+        does damage with.
+        """
+        if state is None or not state.is_active(self._now()):
+            return None
+        if self._execution_mode == ExecutionMode.PAPER:
+            return None
+        days = state.days_remaining(self._now())
+        ends = state.ends_at.date().isoformat() if state.ends_at else "unknown"
+        return (
+            f"stage {state.stage} stand-down after {state.consecutive_losses} "
+            f"consecutive losses: live trading is suspended until {ends} "
+            f"({days:.1f} days). Paper trading is unaffected."
+        )
 
     def _equity_floor(self, account: AccountSnapshot) -> str | None:
         floor = self._rules.account.min_equity_floor_usd
@@ -235,14 +267,24 @@ class RiskGate:
             )
         return None
 
-    def _gross_exposure(self, proposal: OrderProposal, account: AccountSnapshot) -> str | None:
+    def _total_invested(self, proposal: OrderProposal, account: AccountSnapshot) -> str | None:
+        """Cap total capital committed, measured at cost rather than market value.
+
+        Checked at entry only: existing positions count at what they cost, not
+        what they are now worth. A winner running up therefore never
+        retroactively breaches the cap or forces a close — which would be a
+        perverse way to punish a trade going right.
+        """
         if account.equity_usd <= 0:
             return None
-        exposure_after = account.gross_exposure_usd + proposal.notional_usd
-        pct_after = exposure_after / account.equity_usd * 100
-        cap = self._rules.account.max_gross_exposure_pct
+        invested_after = account.total_invested_usd + proposal.notional_usd
+        pct_after = invested_after / account.equity_usd * 100
+        cap = self._rules.account.max_total_invested_pct
         if pct_after > cap:
-            return f"gross exposure would reach {pct_after:.1f}% of equity (max {cap:.1f}%)"
+            return (
+                f"total invested would reach {pct_after:.2f}% of equity "
+                f"(max {cap:.2f}%)"
+            )
         return None
 
     def _trades_per_day(self, activity: TradingActivity) -> str | None:

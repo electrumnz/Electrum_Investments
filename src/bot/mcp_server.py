@@ -248,13 +248,20 @@ def get_risk_status() -> dict[str, Any]:
         "cash_pct": round(account.cash_pct, 1),
         "gross_exposure_usd": round(account.gross_exposure_usd, 2),
         "open_positions": len(account.open_positions),
+        "total_invested_usd": round(account.total_invested_usd, 2),
+        "total_invested_pct": round(
+            account.total_invested_usd / account.equity_usd * 100
+            if account.equity_usd
+            else 0.0,
+            2,
+        ),
         "limits": {
             "min_equity_floor_usd": acct.min_equity_floor_usd,
             "max_risk_per_trade_pct": acct.max_risk_per_trade_pct,
             "max_position_pct": acct.max_position_pct,
+            "max_total_invested_pct": acct.max_total_invested_pct,
             "min_cash_reserve_pct": acct.min_cash_reserve_pct,
             "max_concurrent_positions": acct.max_concurrent_positions,
-            "max_gross_exposure_pct": acct.max_gross_exposure_pct,
             "daily_loss_kill_pct": acct.daily_loss_kill_pct,
         },
         "frequency": {

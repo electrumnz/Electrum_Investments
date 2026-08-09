@@ -135,7 +135,7 @@ def test_rejects_oversized_risk(rules, account, spy_tick):
 
 
 def test_rejects_position_larger_than_max_position_pct(rules, account, spy_tick):
-    """A tight stop keeps risk small, but concentration is capped independently."""
+    """A tight stop keeps risk small, but position size is capped independently."""
     concentrated = OrderProposal(
         symbol="SPY",
         direction=Direction.BUY,
@@ -143,7 +143,7 @@ def test_rejects_position_larger_than_max_position_pct(rules, account, spy_tick)
         limit_price=580.00,
         stop_loss_price=579.50,  # only $50 of risk
         take_profit_price=590.00,
-        rationale="Tiny stop but a huge position; concentration gate should catch it.",
+        rationale="Tiny stop but a huge position; the size gate should catch it.",
     )
     verdict = _gate(rules).evaluate(concentrated, account=account, tick=spy_tick)
     assert not verdict.approved
@@ -153,8 +153,8 @@ def test_rejects_position_larger_than_max_position_pct(rules, account, spy_tick)
 def test_rejects_when_cash_reserve_would_be_breached(rules, spy_tick, buy_proposal):
     poor_cash = AccountSnapshot(
         equity_usd=PAPER_EQUITY,
-        cash_usd=PAPER_EQUITY * 0.21,  # 21% cash; the $5,800 order drops it below 20%
-        buying_power_usd=PAPER_EQUITY * 0.21,
+        cash_usd=PAPER_EQUITY * 0.201,  # 20.1% cash; a $1,740 order drops it under 20%
+        buying_power_usd=PAPER_EQUITY * 0.201,
         open_positions=[],
     )
     verdict = _gate(rules).evaluate(buy_proposal, account=poor_cash, tick=spy_tick)
@@ -162,8 +162,12 @@ def test_rejects_when_cash_reserve_would_be_breached(rules, spy_tick, buy_propos
     assert _reasons_mention(verdict, "reserve")
 
 
-def test_rejects_when_gross_exposure_would_be_breached(rules, spy_tick, buy_proposal):
-    heavy = AccountSnapshot(
+# ------------------------------------------------------------ 2% invested cap
+
+
+def test_rejects_when_total_invested_would_be_breached(rules, spy_tick, buy_proposal):
+    """An existing position at the cap blocks the next one."""
+    at_cap = AccountSnapshot(
         equity_usd=PAPER_EQUITY,
         cash_usd=PAPER_EQUITY,
         buying_power_usd=PAPER_EQUITY,
@@ -171,16 +175,42 @@ def test_rejects_when_gross_exposure_would_be_breached(rules, spy_tick, buy_prop
             Position(
                 symbol="QQQ",
                 direction=Direction.BUY,
-                qty=160,
-                entry_price=500.0,  # $80,000 = 80% of equity, already at the cap
+                qty=4,
+                entry_price=500.0,  # $2,000 cost = 2% of equity, exactly at the cap
                 opened_at=INSIDE_SESSION,
                 current_price=500.0,
             )
         ],
     )
-    verdict = _gate(rules).evaluate(buy_proposal, account=heavy, tick=spy_tick)
+    verdict = _gate(rules).evaluate(buy_proposal, account=at_cap, tick=spy_tick)
     assert not verdict.approved
-    assert _reasons_mention(verdict, "gross exposure")
+    assert _reasons_mention(verdict, "total invested")
+
+
+def test_total_invested_uses_cost_not_market_value(rules, spy_tick, buy_proposal):
+    """A winner running up must not retroactively breach the cap.
+
+    The QQQ position cost $200 (0.2% of equity) but is now worth $4,000 (4%).
+    Measured at market value it would blow the 2% cap on its own; measured at
+    cost — which is what the rule says — there is still room to trade.
+    """
+    winner = AccountSnapshot(
+        equity_usd=PAPER_EQUITY,
+        cash_usd=PAPER_EQUITY,
+        buying_power_usd=PAPER_EQUITY,
+        open_positions=[
+            Position(
+                symbol="QQQ",
+                direction=Direction.BUY,
+                qty=4,
+                entry_price=50.0,       # cost $200
+                opened_at=INSIDE_SESSION,
+                current_price=1000.0,   # now worth $4,000
+            )
+        ],
+    )
+    verdict = _gate(rules).evaluate(buy_proposal, account=winner, tick=spy_tick)
+    assert verdict.approved, verdict.reasons
 
 
 def test_rejects_limit_price_far_from_market(rules, account, spy_tick):
@@ -236,7 +266,7 @@ def test_accepts_well_formed_sell(rules, account, spy_tick):
     good = OrderProposal(
         symbol="SPY",
         direction=Direction.SELL,
-        qty=10,
+        qty=3,
         limit_price=580.00,
         stop_loss_price=585.00,
         take_profit_price=570.00,
@@ -429,7 +459,7 @@ def test_pdt_does_not_bind_on_crypto(rules, spy_tick):
         symbol="BTC/USD",
         asset_class=AssetClass.CRYPTO,
         direction=Direction.BUY,
-        qty=0.02,  # $1,300 notional = 6.5% of equity
+        qty=0.005,  # $325 notional = 1.6% of a $20k account
         limit_price=65_000.0,
         stop_loss_price=63_000.0,
         take_profit_price=70_000.0,
@@ -519,7 +549,7 @@ def test_crypto_ignores_equity_session_window(rules):
         symbol="BTC/USD",
         asset_class=AssetClass.CRYPTO,
         direction=Direction.BUY,
-        qty=0.05,
+        qty=0.02,  # $1,300 notional = 1.3% of equity
         limit_price=65_000.0,
         stop_loss_price=63_000.0,
         take_profit_price=70_000.0,

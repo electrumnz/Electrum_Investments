@@ -13,21 +13,24 @@ account:
   # If you reset the paper account to a different balance, change this to match.
   min_equity_floor_usd: 90000
 
-  # Max loss on a single trade, as % of equity, assuming the stop-loss fills.
+  # Max loss on a single trade, as % of equity, assuming the stop fills.
+  # A RISK limit, not a size limit — a wider stop means a smaller position.
   max_risk_per_trade_pct: 1.0
 
-  # Max size of any one position, as % of equity. Caps concentration even when
-  # a tight stop would technically satisfy max_risk_per_trade_pct.
-  max_position_pct: 10.0
+  # Max capital in any one position, as % of equity.
+  max_position_pct: 2.0
 
-  # Keep at least this much of equity in cash. Stops the bot going all-in.
+  # Max capital committed across ALL open positions, as % of equity.
+  # Measured at what positions cost, and checked when one is opened — a winner
+  # running up does not retroactively breach this or force a close.
+  max_total_invested_pct: 2.0
+
+  # Keep at least this much of equity in cash. A backstop; with a 2% invested
+  # cap it should never be the binding constraint.
   min_cash_reserve_pct: 20.0
 
   # Max simultaneous open positions across all symbols.
   max_concurrent_positions: 3
-
-  # Max total exposure (sum of position values) as % of equity. 100 = no margin.
-  max_gross_exposure_pct: 80.0
 
   # Daily loss kill-switch: once the day is down this much from starting equity,
   # no new positions open until the next session. Sticky — a recovery within the
@@ -42,6 +45,31 @@ frequency:
   max_trades_per_week: 15
   # Cooldown before re-trading the same symbol. Prevents flip-flopping.
   min_seconds_between_trades_per_symbol: 1800   # 30 minutes
+
+# Consecutive-loss circuit breaker. A losing run is when discipline is weakest
+# and sizing gets worst, so this interrupts the loop rather than trying to
+# predict the next trade.
+#
+# During a stand-down: LIVE trading is suspended, PAPER trading continues
+# exactly as normal. The money stops, the practice does not — staying in the
+# market on paper is the point. Closing positions and moving stops are never
+# blocked, in any mode.
+stand_down:
+  # Losses in a row before the breaker trips.
+  consecutive_losses_trigger: 3
+
+  # A loss smaller than this many R is a scratch: it neither counts toward the
+  # streak nor resets it. Without this, cutting a trade for a few dollars would
+  # count against you, which would push the bot toward holding losers.
+  loss_threshold_r: 0.25
+
+  # First trip.
+  stage_one_days: 3
+
+  # A second trip inside repeat_window_days looks like a pattern rather than
+  # variance, so it costs more.
+  stage_two_days: 10
+  repeat_window_days: 30
 
 # US Pattern Day Trader rule. Below the equity threshold, a margin account may
 # make only 3 day trades per rolling 5 business days; a 4th triggers a 90-day

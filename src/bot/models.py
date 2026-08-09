@@ -103,6 +103,16 @@ class Position(BaseModel):
         """Current market value of the position, falling back to entry price."""
         return self.qty * (self.current_price or self.entry_price)
 
+    @property
+    def cost_basis_usd(self) -> float:
+        """What the position cost to open, ignoring what it is worth now.
+
+        The total-invested cap is measured on this rather than on market value,
+        so a winner drifting upward never retroactively breaches the cap or
+        forces a close.
+        """
+        return self.qty * self.entry_price
+
 
 class AccountSnapshot(BaseModel):
     """Account state as reported by Alpaca.
@@ -122,7 +132,13 @@ class AccountSnapshot(BaseModel):
 
     @property
     def gross_exposure_usd(self) -> float:
+        """Current market value of all open positions."""
         return sum(p.notional_usd for p in self.open_positions)
+
+    @property
+    def total_invested_usd(self) -> float:
+        """What all open positions cost to open. Basis for the total-invested cap."""
+        return sum(p.cost_basis_usd for p in self.open_positions)
 
     @property
     def cash_pct(self) -> float:
