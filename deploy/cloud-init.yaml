@@ -4,9 +4,9 @@
 # (Advanced Options -> Add Initialization scripts). It runs as root on first
 # boot and leaves the machine fully provisioned but not trading.
 #
-# BEFORE PASTING, edit two things below:
-#   1. REPO_URL           the repository to clone
-#   2. ssh_authorized_keys  optional, if you did not attach a key in the UI
+# The clone URL below is filled in. Change it only if you rename or transfer the
+# repository first (see docs/TRANSFER.md), and note the repo must be public for
+# the credential-free clone to work.
 #
 # It deliberately does NOT install credentials or start the bot. Secrets do not
 # belong in user data: DigitalOcean shows it in the control panel and the
@@ -52,7 +52,7 @@ runcmd:
   # ---- 1. the code -------------------------------------------------------
   # Public repo: no credential needed. If the repo is private, drop this line
   # and clone by hand with a deploy key instead (deploy/README.md).
-  - [ git, clone, --branch, main, "REPO_URL", /opt/mudhorn ]
+  - [ git, clone, --branch, main, "https://github.com/electrumnz/Electrum_Investments.git", /opt/mudhorn ]
 
   # ---- 2. provision ------------------------------------------------------
   # Installs Python tooling, creates the `mudhorn` service account, builds the
