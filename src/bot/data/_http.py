@@ -104,7 +104,7 @@ def fetch_json(
     """
     try:
         return FeedResult(payload=getter(url, params))
-    except Exception as exc:  # noqa: BLE001 - see docstring
+    except Exception as exc:
         detail = f"{type(exc).__name__}: {exc}"
         log.warning("feed_fetch_failed", feed=feed, url=url, error=detail)
         return FeedResult.failed(detail)
