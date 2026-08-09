@@ -1,120 +1,141 @@
-# Transferring ownership
+# Handing it over
 
-Everything currently sits on the accounts of the person who built this. That was
-the fast way to get it running and it is not the end state. This is the checklist
-for moving it across.
+Josh owns nothing yet. Every account is created and held by the person who built
+this, under a Mudhorn Capital identity, and handed over as a set. That makes the
+handover a **credential transfer plus a payment-method swap**, not six separate
+account migrations.
 
-Do it in one sitting when the new owner has their accounts. Split across two
-sessions and you reconnect Vercel twice.
+That is the easier shape, and it is worth protecting: the closer everything sits
+to a single brand identity beforehand, the less there is to do on the day.
 
 ---
 
-## Order matters
+## The two things that actually cost money
 
-Rename first, transfer second, reconnect third. Each step invalidates something
-the next one depends on, so going out of order means redoing work.
+Everything else on the list is free, so the handover event is narrower than it
+looks:
 
-## 1. Rename the repo — optional, but do it before transferring
+| | Cost | Why it matters |
+|---|---|---|
+| **Anthropic Console** | metered, ~$3–15/mo | Every decision the bot makes bills here |
+| **VPS** (DigitalOcean) | $12/mo flat | The always-on box |
 
-`Electrum_Investments` is a working title from before the name was chosen, and
-"Electrum" is also a very well known Bitcoin wallet, which is a search collision
-for a trading company. `mudhorn-capital` matches the brand.
+Swap the card on those two and the money has moved. Nothing else has a payment
+method attached.
 
-GitHub redirects old URLs after a rename, so nothing breaks immediately, but
-three files hardcode the repository URL and should be updated in the same commit:
+**Until then, the builder is paying both.** Small, but it starts the day the VPS
+is provisioned rather than the day Josh takes over, so provisioning early has a
+running cost.
+
+---
+
+## Where each account sits
+
+| Service | Held under | At handover |
+|---|---|---|
+| GitHub `mudhorncapital` | brand account | Hand over credentials |
+| GitHub repo | **`electrumnz` (personal)** | Move first — see below |
+| Vercel project | **personal team** | Move first — see below |
+| Tailscale `mudhorncapital.github` | brand account | Hand over credentials |
+| Alpaca (paper) | project Gmail | Hand over credentials, then rotate keys |
+| Anthropic Console | project Gmail | Hand over credentials, swap card, rotate key |
+| DigitalOcean | builder's account | Hand over credentials, swap card |
+
+Two rows are the odd ones out.
+
+### Move the repo to `mudhorncapital`
+
+The repo is `electrumnz/Electrum_Investments`, on a personal account, under a
+working title chosen before the name existed. Both are worth fixing in one go:
+rename to `mudhorn-capital`, then transfer to the `mudhorncapital` account
+(Settings → General → Danger Zone → Transfer ownership). Commits, branches and
+issues travel; old URLs redirect.
+
+Three files hardcode the repository URL and should be updated in the same commit:
 
 - `SETUP.md`, the `git clone` line
 - `deploy/systemd/mudhorn-bot.service`, the `Documentation=` line
 - `deploy/systemd/mudhorn-web.service`, the same
 
-The `electrum-bot` command name is a separate question and a bigger sweep. It
-appears in about forty places across the docs, `pyproject.toml` and the systemd
-units. The Python package is `bot`, not `electrum_bot`, so renaming the command
-touches no imports and breaks nothing at runtime. Cosmetic either way.
+Do this **before** wiring anything else to the repo, because the transfer breaks
+Vercel's connection (its GitHub App is installed per account, not per
+repository).
 
-## 2. Transfer the GitHub repository
+### Re-import Vercel afterwards
 
-Settings → General → Danger Zone → **Transfer ownership**.
-
-Commits, branches, issues and pull requests all travel. Old URLs redirect. The
-recipient has to accept the transfer before it completes.
-
-**Transfer to a personal account, not a new organisation.** Organisations earn
-their keep through teams and permission tiers. For one person they are admin
-surface with no return.
-
-## 3. Reconnect Vercel
-
-The transfer **breaks the existing Vercel connection**, because Vercel's GitHub
-App is installed on the old owner's account rather than on the repository.
-
-Do not try to transfer the Vercel project. The site is a single static HTML file
-with no database, no environment variables and no build step, so there is nothing
-worth preserving. The new owner imports the repo into their own Vercel:
+The site is a single static file with no database, environment variables or
+build step, so there is nothing worth preserving. Import the repo again from the
+`mudhorncapital` side:
 
 - Project Name: `mudhorn-capital`
 - Root Directory: **`brand`**
 - Framework Preset: Other, no build command
 - Production Branch: `main`
 
-Two minutes, and they own it cleanly from the start. The URL changes unless the
-old project is deleted first and the name is free again.
+Two minutes. Delete the old project first if you want the same URL back.
+
+### Do not create a GitHub organisation
+
+Organisations earn their keep through teams and permission tiers. For one person
+they are admin surface with no return, and they make the credential handover
+harder rather than easier.
 
 ---
 
-## What does not travel, and matters
+## On the day
 
-### The Anthropic API key — the only thing that costs money
+1. **Hand over the password manager entry** covering every account above
+2. **Swap the payment method** on Anthropic Console and DigitalOcean
+3. **Rotate the Anthropic API key** — the old one is in the builder's `.env` and
+   on the VPS, and it bills to whoever's card is now attached. Generate a new
+   one, update `/opt/mudhorn/.env`, revoke the old
+4. **Regenerate the Alpaca paper keys.** Keys two people have held are keys
+   neither can reason about. Regenerating costs nothing on a paper account
+5. **Change the passwords** on the accounts themselves, once he has them
 
-This is the one to get right. If the new owner keeps using the old owner's key,
-**the old owner is paying for the new owner's trading**, indefinitely and
-invisibly. It is metered per call.
+Steps 3 and 4 are the ones people skip. Both are two minutes and both close a
+door that is otherwise left open indefinitely.
 
-The new owner needs their own account at
-[console.anthropic.com](https://console.anthropic.com), their own key in `.env`,
-and the old key revoked afterwards. See `docs/COSTS.md` for what to expect.
+---
 
-### Alpaca keys
+## What does not travel automatically
 
-`.env` is gitignored, so credentials never travel with a clone. That is
-deliberate. A paper account needs only an email address, so the cleanest split is
-a fresh paper account on the new owner's email rather than sharing keys.
+### `.env` is gitignored, on purpose
 
-If the existing paper account is kept, regenerate the keys after handover. Keys
-that two people have held are keys neither can reason about.
+Credentials never travel with a clone. A fresh clone starts with no keys and the
+bot refuses to run until they are filled in. That is correct — it just means the
+`.env` on the VPS is the only copy, and it needs recreating anywhere else the
+bot runs.
 
-### `data/journal.db` — the only irreplaceable file
+### `data/journal.db` is the only irreplaceable file
 
-Gitignored, so it does not travel either. It holds every trade, the equity curve
-and the persistent stand-down state.
-
-If there is paper history worth keeping, copy it across deliberately:
+Also gitignored. It holds every trade, the equity curve and the persistent
+stand-down state. If there is paper history worth keeping, copy it deliberately:
 
 ```sh
 sudo -u mudhorn sqlite3 /opt/mudhorn/data/journal.db ".backup '/tmp/journal.db'"
 ```
 
-Use `.backup` rather than `cp`, which can catch the database mid-write. Leave it
-behind and the new box starts with an empty journal and a cleared stand-down
-breaker. That is a legitimate choice for a clean start, but it should be a
-choice rather than something noticed three weeks later.
+`.backup` rather than `cp`, which can catch the database mid-write.
 
-### The VPS
+Leaving it behind is a legitimate choice — a clean journal and a cleared
+stand-down breaker is a reasonable place for a new owner to start. It should
+just be a decision rather than something noticed three weeks later.
 
-Not transferable in any useful sense. The new owner provisions their own box from
-`deploy/README.md`, which is two commands, and copies the journal across if they
-want the history. Then the old box gets destroyed rather than left running and
-billed.
+### The VPS itself
+
+Transferring a droplet between DigitalOcean accounts is more trouble than
+rebuilding it. `deploy/README.md` provisions a fresh box in two commands; copy
+the journal across and destroy the old one so it stops billing.
 
 ---
 
-## After
+## What stays true regardless of owner
 
-- Revoke the old Anthropic key
-- Regenerate or retire the old Alpaca paper keys
-- Destroy the old VPS
-- Update `homepage` on the repo if the Vercel URL changed
+`brand/` is published at https://mudhorn-capital.vercel.app and is safe there:
+static, and it reads no journal, no broker and no credential.
 
-The identity page under `brand/` is the only thing published, and it reads no
-journal, no broker and no credential. The dashboard stays on `127.0.0.1` behind
-Tailscale on whichever machine now runs it. That does not change with ownership.
+**The dashboard is not.** It renders account equity, open positions and realised
+P&L, and it has no login *because* it binds to `127.0.0.1`. Remote access is
+Tailscale. That does not change with ownership, and it is written into
+`CLAUDE.md` so a future session cannot quietly undo it.
