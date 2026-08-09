@@ -109,12 +109,19 @@ the code refuses to start twice over without it.
 ## 3. Prove it before trusting it
 
 ```sh
-sudo -u mudhorn /opt/mudhorn/.venv/bin/electrum-bot smoketest
+cd /opt/mudhorn && sudo -u mudhorn .venv/bin/electrum-bot smoketest
 ```
 
 Connects, prints equity, cash, position count and tick count, asks Claude one
 question, and **places nothing**. If that prints an equity figure the whole chain
 is wired.
+
+**The `cd` is load-bearing.** `src/bot/config.py` sets `env_file=".env"`, a
+relative path, so credentials are found relative to the working directory. Run
+this from `/root` instead and it tries to read `/root/.env`, which the service
+account cannot even stat — a `PermissionError` traceback that looks like the
+`.env` you just wrote is broken when it is fine. The systemd units are unaffected:
+both set `WorkingDirectory=/opt/mudhorn`.
 
 A fresh Alpaca paper account starts at **$100,000**, which matches
 `min_equity_floor_usd: 90000` in `config/rules.yaml`. Reset the paper account to

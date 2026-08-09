@@ -100,8 +100,10 @@ Next, in order:
      Leave ALPACA_PAPER_TRADE=true. The code refuses to start without it.
 
   2. Prove the credentials work before running anything as a service:
-         sudo -u $APP_USER $APP_DIR/.venv/bin/electrum-bot smoketest
+         cd $APP_DIR && sudo -u $APP_USER .venv/bin/electrum-bot smoketest
      It connects, prints equity, and places nothing.
+     The 'cd' matters: .env is found relative to the working directory, so
+     running this from elsewhere fails with a confusing PermissionError.
 
   3. Start:
          sudo systemctl start mudhorn-bot mudhorn-web

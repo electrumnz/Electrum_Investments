@@ -39,7 +39,7 @@ write_files:
       Provisioned by cloud-init. Nothing is running yet, on purpose.
 
         1. sudo -e /opt/mudhorn/.env          # Alpaca + Anthropic keys
-        2. sudo -u mudhorn /opt/mudhorn/.venv/bin/electrum-bot smoketest
+        2. cd /opt/mudhorn && sudo -u mudhorn .venv/bin/electrum-bot smoketest
         3. sudo systemctl start mudhorn-bot mudhorn-web
 
       The loop runs WITHOUT --execute: it proposes and vets, and places
