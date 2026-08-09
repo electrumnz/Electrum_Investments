@@ -92,25 +92,11 @@ units, not lots), `limit_price`, `stop_loss_price`, `take_profit_price`, and a
 # is that every trade is tagged with which strategy produced it, so metrics.py
 # can tell them apart. Deciding what these should actually be is the operator's
 # job and is the genuinely hard part of the whole project.
-STRATEGY_GUIDANCE: dict[str, str] = {
-    "mean_reversion": (
-        "look for stretched moves away from a reference level with evidence of "
-        "exhaustion, and state the level you expect price to revert toward"
-    ),
-    "momentum": (
-        "look for continuation with confirming participation, and state the "
-        "level whose loss would end the move"
-    ),
-    "unspecified": (
-        "no strategy has been defined for this class yet, so be especially "
-        "reluctant to propose anything"
-    ),
-}
+def _strategy_block(name: str) -> str:
+    """Indent a strategy's guidance so it sits under its instrument heading."""
+    from .strategy import guidance_for
 
-STRATEGY_FALLBACK = (
-    "no guidance is configured for this strategy name, so treat it as undefined "
-    "and be reluctant to propose anything"
-)
+    return "\n".join(f"      {line}" for line in guidance_for(name).splitlines())
 
 
 def build_system_prompt(rules: Rules) -> str:
@@ -132,7 +118,7 @@ def build_system_prompt(rules: Rules) -> str:
             f"- {name} — strategy '{instrument.strategy}'{cap}\n"
             f"    symbols: {', '.join(sorted(instrument.allowed_symbols))}\n"
             f"    sessions (UTC): {instrument.sessions_utc}\n"
-            f"    approach: {STRATEGY_GUIDANCE.get(instrument.strategy, STRATEGY_FALLBACK)}"
+            f"    approach:\n{_strategy_block(instrument.strategy)}"
         )
 
     rules_summary = "\n".join(

@@ -181,6 +181,30 @@ patterns anchored, and do not delete that test.**
 The general form is worth carrying: a green local suite says nothing about what
 is actually in the repository.
 
+### The strategies describe data the bot cannot see
+
+`src/bot/strategy.py` defines mean reversion, trend break, news reaction and
+momentum properly — thesis, entry conditions, invalidation, exit. None has a
+demonstrated edge; they are scaffolding so the model has something falsifiable
+to work against instead of "trade well".
+
+**None of them is currently evaluable.** `Broker.get_tick` returns one bid/ask,
+so the context carries a single live quote per symbol and no history at all: no
+bars, no moving average, no ATR, no volume, no levels.
+
+That is why every strategy carries a `requires` list which renders into the
+prompt as an explicit "you do not have this, do not estimate it, propose
+nothing". A model asked to apply a 200-day moving-average filter it cannot see
+will not decline — it will estimate one, phrase it confidently, and the risk gate
+will approve it, because the gate checks size and stops rather than whether the
+reasoning was invented. That is the Alpha Arena failure arriving through the data
+layer rather than the model.
+
+**Closing that gap is the highest-value work left in this repo:** historical bars
+on the `Broker` protocol (Alpaca supplies them free), indicators computed in
+Python rather than by the model, both rendered into `context.py`. Until then the
+correct output is nothing, and the prompt says so.
+
 ### One directory is published. The rest must never be
 
 `brand/` is deployed publicly at **https://mudhorn-capital.vercel.app** (Vercel,
@@ -239,6 +263,7 @@ src/bot/
   config.py             Typed env + rules loader. Validators reject incoherent limits.
   claude_client.py      Anthropic SDK wrapper (1h prompt cache, structured output).
   context.py            Renders market state for Claude.
+  strategy.py           Base strategies. Placeholders with a shape, not an edge.
   data/                 External feeds. marketaux.py = headlines (context only);
                         finnhub.py = earnings calendar (feeds the blackout gate).
   audit.py              Append-only JSONL decision log.
