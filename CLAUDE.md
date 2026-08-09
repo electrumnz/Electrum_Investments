@@ -129,6 +129,22 @@ Miss it and the cap silently has nothing to count. This was a real bug, fixed in
 `14b88c8`. A held position with no journal entry has an unknowable stop, so its
 risk is reported as **missing** rather than guessed at.
 
+### One directory is published. The rest must never be
+
+`brand/` is deployed publicly at **https://mudhorn-capital.vercel.app** (Vercel,
+Root Directory `brand`, so every push redeploys). It is static, and it reads no
+journal, no broker and no credential.
+
+**That is not a precedent for `src/bot/web/`.** The dashboard renders account
+equity, open positions and realised P&L, and it has no login *because* it binds
+to `127.0.0.1`. The absence of auth is safe only while nothing is published, so
+deploying it would put a live view of a brokerage account on the open internet.
+Remote access is Tailscale, never a public URL.
+
+If asked to "host the dashboard too because the brand page worked", the answer
+is no, and building real authentication first is the prerequisite, not a
+follow-up.
+
 ---
 
 ## Why the guardrails are this strict

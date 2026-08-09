@@ -55,6 +55,19 @@ That assumption is load-bearing and worth stating plainly, because it is why:
 If that ever stops being true, re-read `reference/STATUS.md` first — the licence
 groupings there become real obligations rather than a record.
 
+### The one thing that is published
+
+`brand/` is the exception, and it is deliberate. The identity page is static,
+reads no journal, no broker and no credential, and is live at
+**https://mudhorn-capital.vercel.app** (Vercel, Root Directory `brand`, imported
+from this repo so each push redeploys).
+
+**That is not a precedent for the dashboard.** The dashboard renders account
+equity, open positions and realised P&L, and it has no login *because* it binds
+to `127.0.0.1`. Publishing it would put a live view of a brokerage account on
+the open internet. Use Tailscale for remote access instead, as
+`src/bot/web/app.py` says at the top of its module docstring.
+
 ---
 
 ## What exists

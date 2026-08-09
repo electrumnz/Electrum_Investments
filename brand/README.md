@@ -3,15 +3,17 @@
 Open **`index.html`** in any browser. Single file, no build step, no network
 requests.
 
-## Hosting it
+## Where it is live
 
-The file is named `index.html` and sits alone in this directory so that a static
-host can serve the folder with no configuration at all:
+**https://mudhorn-capital.vercel.app**
 
-- **Vercel** — import the repo, set **Root Directory** to `brand`, framework
-  "Other", no build command. Every push to the branch redeploys.
-- **GitHub Pages** — needs a public repository, so it would mean a second
-  brand-only repo rather than this private one.
+Vercel, imported from this repo with **Root Directory** set to `brand`,
+framework "Other", no build command. The file is named `index.html` and sits
+alone in this directory so the host serves it with no configuration at all, and
+every push to the tracked branch redeploys.
+
+(GitHub Pages would also work, but only from a public repository, so it would
+mean a second brand-only repo rather than this private one.)
 
 Nothing here reads the journal, the broker or any credential, so unlike the
 dashboard it is safe to publish.
