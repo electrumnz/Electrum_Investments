@@ -169,6 +169,21 @@ Install Tailscale on the phone and laptop too, then browse to the box's private
 address on port 8787. Free for personal use, and it signs in with the project
 Google account rather than needing another password.
 
+**Turn off key expiry on the droplet, in the Tailscale admin console.**
+Machines → the droplet → the ⋯ menu → *Disable key expiry*.
+
+Tailscale node keys expire after about six months by default. On a laptop that
+is a mild annoyance; on this box it means the dashboard stops being reachable
+and **nothing says so** — the bot keeps trading, the service stays green, and
+the only symptom is a private address that no longer answers. Worse, the
+documented way to fix it is to SSH in and re-authenticate, which is itself over
+the network you have just lost.
+
+So: disable expiry on the server node, and keep the droplet's **public IPv4**
+written down somewhere outside this repository. It is the fallback that works
+when Tailscale does not, and the DigitalOcean control panel is the only place
+it lives otherwise.
+
 The alternative for desk use only is an SSH tunnel, which needs no extra account
 but has to be re-run each time and is awkward from a phone:
 
