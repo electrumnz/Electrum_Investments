@@ -37,16 +37,44 @@ def test_every_strategy_states_a_falsifiable_thesis(name):
     "name", [n for n, s in sorted(REGISTRY.items()) if s.requires]
 )
 def test_missing_data_is_declared_in_the_prompt(name):
-    """The bot has one quote per symbol and no history.
+    """The context now carries daily bars and the indicators computed from them.
 
-    Any strategy needing more must say so where the model will read it, or the
-    model will invent the numbers rather than decline.
+    Anything a strategy needs beyond that must say so where the model will read
+    it, or the model will invent the numbers rather than decline.
     """
     rendered = guidance_for(name)
 
     assert "DATA YOU DO NOT HAVE" in rendered
-    assert "Do not estimate these values" in rendered
+    assert "Do not estimate the values listed above" in rendered
     assert "propose nothing" in rendered.lower()
+
+
+@pytest.mark.parametrize("name", ["mean_reversion", "momentum"])
+def test_the_strategies_daily_bars_made_evaluable_carry_no_warning(name):
+    """`get_daily_bars` plus `indicators.py` supply everything these two name.
+
+    The warning has to keep meaning something. A strategy whose data is now
+    present must stop claiming otherwise, or the sentence becomes decoration and
+    the model learns to skip it on the two that still need it.
+    """
+    strategy = REGISTRY[name]
+
+    assert strategy.requires == []
+    assert "DATA YOU DO NOT HAVE" not in strategy.render()
+
+
+@pytest.mark.parametrize("name", ["trend_break", "news_reaction"])
+def test_the_strategies_still_missing_intraday_data_keep_theirs(name):
+    """Neither is evaluable on daily bars, and both must keep saying so.
+
+    Trimming these to nothing because the repo now has *some* history would be
+    the worst outcome available: the warning would go and the gap would stay.
+    """
+    strategy = REGISTRY[name]
+
+    assert strategy.requires != []
+    assert any("intraday" in item for item in strategy.requires)
+    assert "DATA YOU DO NOT HAVE" in strategy.render()
 
 
 def test_an_unknown_strategy_name_fails_loudly():
@@ -63,7 +91,12 @@ def test_the_configured_strategy_reaches_the_system_prompt():
 
     assert "Invalidation (this is your stop)" in prompt
     assert "200-day moving average" in prompt
-    assert "DATA YOU DO NOT HAVE" in prompt
+    # mean_reversion is evaluable now, so it carries no missing-data warning.
+    # What it must carry instead is the instruction to read the computed
+    # figures rather than work them out, which is the same failure guarded
+    # from the other side.
+    assert "DATA YOU DO NOT HAVE" not in prompt
+    assert "Do not recompute them" in prompt
 
 
 def test_trend_break_names_the_failed_break_as_the_main_risk():

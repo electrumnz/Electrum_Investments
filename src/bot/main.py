@@ -19,7 +19,7 @@ from .audit import AuditLog
 from .broker import AlpacaBroker, Broker, MockBroker
 from .claude_client import ClaudeClient, build_system_prompt
 from .config import Env, LiveTradingRefused, Rules
-from .context import build_market_context, fetch_market_ticks
+from .context import build_market_context, fetch_indicators, fetch_market_ticks
 from .data.calendar import CalendarFeed, EmptyCalendar
 from .data.finnhub import FinnhubCalendar
 from .data.marketaux import MarketauxNews
@@ -83,12 +83,15 @@ def cmd_smoketest(env: Env, rules: Rules, *, force_mock: bool = False) -> int:
     try:
         account = broker.get_account()
         ticks = fetch_market_ticks(broker, rules.allowed_symbols)
+        indicators, no_history = fetch_indicators(broker, rules.allowed_symbols)
         log.info(
             "connected",
             equity=account.equity_usd,
             cash=account.cash_usd,
             positions=len(account.open_positions),
             ticks=len(ticks),
+            indicators=len(indicators),
+            symbols_without_history=no_history,
         )
 
         if not env.anthropic_api_key:
@@ -108,6 +111,8 @@ def cmd_smoketest(env: Env, rules: Rules, *, force_mock: bool = False) -> int:
                 lookahead_minutes=60
             ),
             activity=broker.get_activity(),
+            indicators=indicators,
+            symbols_without_history=no_history,
         )
         decision, usage = claude.propose(context)
         log.info(
@@ -164,6 +169,7 @@ def cmd_loop(
             account = broker.get_account()
             activity = broker.get_activity()
             ticks = fetch_market_ticks(broker, rules.allowed_symbols)
+            indicators, no_history = fetch_indicators(broker, rules.allowed_symbols)
             news_windows = calendar.upcoming_windows(lookahead_minutes=60)
 
             # Bring the journal in step before anything is evaluated: this is
@@ -201,6 +207,8 @@ def cmd_loop(
                 news_windows=news_windows,
                 activity=activity,
                 expiry_alerts=expiry_alerts,
+                indicators=indicators,
+                symbols_without_history=no_history,
             )
             decision, usage = claude.propose(context)
 
@@ -305,6 +313,11 @@ def cmd_loop(
                 risk_understated=recon.risk_is_understated,
                 news_windows=len(news_windows),
                 calendar_degraded=getattr(calendar, "is_degraded", False),
+                # Same reason calendar_degraded is here. A symbol whose bars
+                # failed to fetch is one the model sees a live quote for and no
+                # history at all, and that has to be visible from the log line
+                # rather than only inside the prompt.
+                symbols_without_history=no_history,
                 cost_usd=round(usage.estimated_cost_usd, 6),
                 next_cycle_seconds=env.decision_interval_seconds,
             )

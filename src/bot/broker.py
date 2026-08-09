@@ -17,6 +17,7 @@ from .config import Env
 from .models import (
     AccountSnapshot,
     AssetClass,
+    Bar,
     Direction,
     OrderProposal,
     OrderResult,
@@ -34,12 +35,19 @@ def is_crypto_symbol(symbol: str) -> bool:
     return "/" in symbol
 
 
+# Enough daily bars for a 200-day average with room to spare, which is the
+# longest period anything in src/bot/strategy.py names. Alpaca charges nothing
+# for this data and the request is one call per symbol per cycle.
+DEFAULT_BAR_LOOKBACK = 260
+
+
 @runtime_checkable
 class Broker(Protocol):
     def connect(self) -> None: ...
     def disconnect(self) -> None: ...
     def get_account(self) -> AccountSnapshot: ...
     def get_tick(self, symbol: str) -> Tick: ...
+    def get_daily_bars(self, symbol: str, lookback: int = ...) -> list[Bar]: ...
     def get_activity(self) -> TradingActivity: ...
     def place_order(self, proposal: OrderProposal) -> OrderResult: ...
     def close_position(self, symbol: str) -> OrderResult: ...
@@ -61,6 +69,7 @@ class MockBroker:
         self._connected = False
         self._order_seq = 0
         self._fills: list[tuple[datetime, str]] = []
+        self._bars: dict[str, list[Bar]] = {}
 
     def connect(self) -> None:
         self._connected = True
@@ -77,6 +86,22 @@ class MockBroker:
         if symbol not in self._prices:
             raise KeyError(f"No price seeded for {symbol}; call set_price first")
         return self._prices[symbol]
+
+    def set_bars(self, symbol: str, bars: list[Bar]) -> None:
+        """Seed daily history. Oldest first, matching what Alpaca returns."""
+        self._bars[symbol] = list(bars)
+
+    def get_daily_bars(self, symbol: str, lookback: int = DEFAULT_BAR_LOOKBACK) -> list[Bar]:
+        """Seeded history, or nothing.
+
+        Raises rather than returning `[]` for an unseeded symbol, for the same
+        reason `get_tick` does: an empty list is indistinguishable from "this
+        symbol genuinely has no history", and the caller needs to be able to
+        tell a missing fixture from a missing instrument.
+        """
+        if symbol not in self._bars:
+            raise KeyError(f"No bars seeded for {symbol}; call set_bars first")
+        return self._bars[symbol][-lookback:]
 
     def get_account(self) -> AccountSnapshot:
         return AccountSnapshot(
@@ -257,6 +282,55 @@ class AlpacaBroker:
             ask=float(quote.ask_price),
             timestamp=quote.timestamp,
         )
+
+    def get_daily_bars(self, symbol: str, lookback: int = DEFAULT_BAR_LOOKBACK) -> list[Bar]:
+        """Daily bars, oldest first, for the indicators in `src/bot/indicators.py`.
+
+        The calendar window is padded well past `lookback` because weekends and
+        holidays are not sessions: asking for 260 calendar days back and
+        expecting 260 daily bars leaves the 200-day average permanently short by
+        about a third. Crypto trades every day and does not need the padding,
+        but the padding costs nothing there either.
+
+        Returns whatever the API gives back rather than raising on a short
+        history. `indicators.compute` reports each period it cannot support as
+        unavailable, which is the honest handling: a 200-day average over 40
+        bars is a 40-day average wearing the wrong label.
+        """
+        from alpaca.data.requests import CryptoBarsRequest, StockBarsRequest
+        from alpaca.data.timeframe import TimeFrame
+
+        # 1.6x plus a fortnight covers weekends, the nine US market holidays and
+        # a long weekend at either end.
+        start = datetime.now(UTC) - timedelta(days=int(lookback * 1.6) + 14)
+
+        if is_crypto_symbol(symbol):
+            raw: Any = self._crypto_data.get_crypto_bars(
+                CryptoBarsRequest(
+                    symbol_or_symbols=symbol, timeframe=TimeFrame.Day, start=start
+                )
+            )
+        else:
+            raw = self._stock_data.get_stock_bars(
+                StockBarsRequest(
+                    symbol_or_symbols=symbol, timeframe=TimeFrame.Day, start=start
+                )
+            )
+
+        rows = raw.data.get(symbol, []) if hasattr(raw, "data") else raw.get(symbol, [])
+        bars = [
+            Bar(
+                symbol=symbol,
+                timestamp=row.timestamp,
+                open=float(row.open),
+                high=float(row.high),
+                low=float(row.low),
+                close=float(row.close),
+                volume=float(row.volume),
+            )
+            for row in rows
+        ]
+        return bars[-lookback:]
 
     def get_activity(self) -> TradingActivity:
         """Derive recent trade counts from Alpaca's filled-order history."""

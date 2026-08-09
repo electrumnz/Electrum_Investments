@@ -181,29 +181,44 @@ patterns anchored, and do not delete that test.**
 The general form is worth carrying: a green local suite says nothing about what
 is actually in the repository.
 
-### The strategies describe data the bot cannot see
+### The indicators are computed in Python, and the model is handed the answers
 
 `src/bot/strategy.py` defines mean reversion, trend break, news reaction and
 momentum properly — thesis, entry conditions, invalidation, exit. None has a
 demonstrated edge; they are scaffolding so the model has something falsifiable
 to work against instead of "trade well".
 
-**None of them is currently evaluable.** `Broker.get_tick` returns one bid/ask,
-so the context carries a single live quote per symbol and no history at all: no
-bars, no moving average, no ATR, no volume, no levels.
+**`Broker.get_daily_bars` now supplies history and `src/bot/indicators.py`
+computes the figures.** The averages, the Wilder ATR, the volume average and the
+confirmed swing levels are all arithmetic done in code, and `context.py` renders
+the results.
 
-That is why every strategy carries a `requires` list which renders into the
-prompt as an explicit "you do not have this, do not estimate it, propose
-nothing". A model asked to apply a 200-day moving-average filter it cannot see
-will not decline — it will estimate one, phrase it confidently, and the risk gate
-will approve it, because the gate checks size and stops rather than whether the
-reasoning was invented. That is the Alpha Arena failure arriving through the data
-layer rather than the model.
+**Do not replace that with bars in the prompt.** Handing the model a series and
+asking it to work out a 200-day average reintroduces the exact failure this
+guards against: it will produce a number, state it confidently, and the risk gate
+will approve the trade, because the gate checks size and stops rather than
+whether the reasoning was invented. That is the Alpha Arena failure arriving
+through the data layer. The model reads figures; it does not derive them.
 
-**Closing that gap is the highest-value work left in this repo:** historical bars
-on the `Broker` protocol (Alpaca supplies them free), indicators computed in
-Python rather than by the model, both rendered into `context.py`. Until then the
-correct output is nothing, and the prompt says so.
+**Missing stays missing.** Every field is `None` when the bars cannot support it,
+and `render` prints it as `unavailable` and names it. `sma_200` over 40 bars is a
+40-day average wearing the wrong label, and it is worse than nothing because it
+gets believed. `fetch_indicators` returns the symbols that produced nothing as a
+second value for the same reason, and the loop logs them as
+`symbols_without_history` in every `cycle_complete` line, alongside
+`calendar_degraded`. A symbol dropped silently is one the model sees a live quote
+for with no history and no warning.
+
+**Two strategies are still not evaluable, and must keep saying so.** Trend break
+needs intraday bars, because on a daily bar a close through a level and a wick
+that closed back inside are the same row, and telling those apart is the whole
+strategy. News reaction needs the same, plus a spread history. Both keep a
+`requires` naming exactly what is absent. Trimming those to nothing because the
+repo now has *some* history would remove the warning and leave the gap, which is
+worse than never having added bars at all.
+
+The remaining work is `get_intraday_bars` on the `Broker` protocol, which Alpaca
+also supplies free, and a spread history.
 
 ### One directory is published. The rest must never be
 
@@ -284,13 +299,16 @@ src/bot/
   journal.py            SQLite trade store + persistent stand-down state.
   stand_down.py         Consecutive-loss breaker: when to trigger, when to escalate.
   options.py            OCC parsing and expiry safety. Protective only.
-  broker.py             Broker Protocol + AlpacaBroker + MockBroker.
+  broker.py             Broker Protocol + AlpacaBroker + MockBroker. Daily bars live here.
+  indicators.py         Averages, ATR, volume ratio, swing levels. Pure functions over
+                        bars. Computed in Python so the model never derives them.
   mcp_server.py         MCP tools: check_order, place_order, get_risk_status, ...
   models.py             Domain models. Quantities are shares/coin units, never "lots".
   config.py             Typed env + rules loader. Validators reject incoherent limits.
   claude_client.py      Anthropic SDK wrapper (1h prompt cache, structured output).
   context.py            Renders market state for Claude.
   strategy.py           Base strategies. Placeholders with a shape, not an edge.
+                        `requires` names what each one still cannot see.
   data/                 External feeds. marketaux.py = headlines (context only);
                         finnhub.py = earnings calendar (feeds the blackout gate).
   audit.py              Append-only JSONL decision log.
@@ -324,7 +342,7 @@ reference/              Third-party projects we borrow from. See reference/STATU
 ## Running it
 
 ```sh
-.venv/bin/python -m pytest              # full suite (225 tests)
+.venv/bin/python -m pytest              # full suite (272 tests)
 electrum-bot smoketest --mock           # no credentials needed
 electrum-bot smoketest                  # needs Alpaca paper keys
 electrum-bot loop                       # proposes and vets; places nothing
