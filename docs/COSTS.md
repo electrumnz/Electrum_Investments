@@ -90,12 +90,13 @@ the 5-minute TTL existed and concluded caching was useless here. That was wrong.
 
 Cost scales roughly linearly with call frequency:
 
+All continuous, since that is how the loop runs:
+
 | Cadence | Calls/month | Haiku | Sonnet 5 |
 |---|---|---|---|
-| 15 min (default) | 600 | ~$3 | ~$6 |
-| 5 min | 1,800 | ~$9 | ~$18 |
-| 1 min | 9,000 | ~$45 | ~$90 |
-| 1 min, 24/7 (crypto) | 43,200 | ~$215 | ~$430 |
+| 15 min (default) | ~2,900 | ~$8 | ~$16 |
+| 5 min | ~8,800 | ~$24 | ~$48 |
+| 1 min | ~43,800 | ~$118 | ~$236 |
 
 **Frequency is not free, and it is not just a cost problem.** In the Alpha Arena
 competition the heaviest trader made 238 trades and lost 57%; the lightest made 38
