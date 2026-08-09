@@ -10,6 +10,8 @@ on **9 August 2026**. Re-check before relying on the arithmetic; these move.
 | **Anthropic API** | The decision engine | ~$5–15/mo (see below) |
 | **Alpaca** | Broker, paper trading | **$0** |
 | **Alpaca market data** | Quotes and bars, free tier | **$0** |
+| **Finnhub** | Earnings calendar for the news blackout | **$0** (60 req/min) |
+| **Marketaux** | Headlines for Claude's context | **$0** (100 req/day) |
 | **GitHub** | Code hosting | **$0** |
 | **Buzz** | Chat interface, self-hosted or Block's relay | **$0** |
 | **Hermes Agent** | Agent runtime | **$0** (MIT; you pay only for inference) |

@@ -135,6 +135,30 @@ Miss it and the cap silently has nothing to count. This was a real bug, fixed in
 `14b88c8`. A held position with no journal entry has an unknowable stop, so its
 risk is reported as **missing** rather than guessed at.
 
+### The two data feeds are not equally important
+
+`src/bot/data/` holds two adapters and they fail in different ways.
+
+**Marketaux** supplies headlines for Claude's context. It gates nothing. If it
+is down or unconfigured the model reasons with less information and that is all.
+
+**Finnhub** supplies the earnings calendar that `RiskGate._news_blackout` reads.
+Before it existed the only calendar was `EmptyCalendar`, so that rule shipped
+and never once fired. It is live now, which means the failure mode is new: an
+outage produces zero windows, and **zero windows is indistinguishable from "no
+announcements this week"** to the gate.
+
+So `FinnhubCalendar.is_degraded` exists and the loop reports it as
+`calendar_degraded` in every `cycle_complete` line. Same principle as
+`reconcile`'s `risk_is_understated`: say the number is unknown rather than imply
+it is zero. Do not "simplify" the flag away, and do not make a failed fetch
+return an empty list without setting it.
+
+**The caches are rate-limit requirements, not optimisations.** Marketaux's free
+tier allows 100 requests a day against a loop that wakes 96 times, so the
+30-minute TTL is what keeps the quota intact. Lowering it exhausts the day's
+allowance before the session ends.
+
 ### One directory is published. The rest must never be
 
 `brand/` is deployed publicly at **https://mudhorn-capital.vercel.app** (Vercel,
@@ -187,6 +211,8 @@ src/bot/
   config.py             Typed env + rules loader. Validators reject incoherent limits.
   claude_client.py      Anthropic SDK wrapper (1h prompt cache, structured output).
   context.py            Renders market state for Claude.
+  data/                 External feeds. marketaux.py = headlines (context only);
+                        finnhub.py = earnings calendar (feeds the blackout gate).
   audit.py              Append-only JSONL decision log.
   metrics.py            Win rate, profit factor, expectancy, R, MAE/MFE. Pure functions.
   web/                  Local read-only dashboard. Binds 127.0.0.1; no auth by design.

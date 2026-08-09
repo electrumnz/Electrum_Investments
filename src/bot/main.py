@@ -20,8 +20,10 @@ from .broker import AlpacaBroker, Broker, MockBroker
 from .claude_client import ClaudeClient, build_system_prompt
 from .config import Env, LiveTradingRefused, Rules
 from .context import build_market_context, fetch_market_ticks
-from .data.calendar import EmptyCalendar
-from .data.news import EmptyNews
+from .data.calendar import CalendarFeed, EmptyCalendar
+from .data.finnhub import FinnhubCalendar
+from .data.marketaux import MarketauxNews
+from .data.news import EmptyNews, NewsFeed
 from .journal import Journal
 from .models import Decision
 from .options import alerts_for_positions
@@ -39,6 +41,38 @@ def build_broker(env: Env, *, force_mock: bool = False) -> Broker:
         log.warning("no_alpaca_credentials_using_mock_broker")
         return MockBroker()
     return AlpacaBroker(env)
+
+
+def build_news_feed(env: Env) -> NewsFeed:
+    """Marketaux when a key is present, otherwise nothing.
+
+    Headlines are context only. Running without them is a supported
+    configuration, not a degraded one, so this logs at info rather than warning.
+    """
+    if not env.marketaux_api_key:
+        log.info("no_marketaux_key_running_without_headlines")
+        return EmptyNews()
+    return MarketauxNews(api_key=env.marketaux_api_key)
+
+
+def build_calendar_feed(env: Env, rules: Rules) -> CalendarFeed:
+    """Finnhub's earnings calendar when a key is present, otherwise nothing.
+
+    Unlike headlines this one feeds a risk rule: with no calendar,
+    `RiskGate._news_blackout` has no windows and therefore never fires. That is
+    a real gap rather than a preference, so it warns.
+    """
+    if not env.finnhub_api_key:
+        log.warning(
+            "no_finnhub_key_news_blackout_inactive",
+            detail=(
+                "Without an earnings calendar the news blackout rule in "
+                "config/rules.yaml cannot fire. Trades will not be held back "
+                "around announcements."
+            ),
+        )
+        return EmptyCalendar()
+    return FinnhubCalendar(api_key=env.finnhub_api_key, symbols=list(rules.allowed_symbols))
 
 
 def cmd_smoketest(env: Env, rules: Rules, *, force_mock: bool = False) -> int:
@@ -69,8 +103,10 @@ def cmd_smoketest(env: Env, rules: Rules, *, force_mock: bool = False) -> int:
         context = build_market_context(
             account=account,
             ticks=ticks,
-            headlines=EmptyNews().recent_headlines(rules.allowed_symbols),
-            news_windows=EmptyCalendar().upcoming_windows(lookahead_minutes=60),
+            headlines=build_news_feed(env).recent_headlines(rules.allowed_symbols),
+            news_windows=build_calendar_feed(env, rules).upcoming_windows(
+                lookahead_minutes=60
+            ),
             activity=broker.get_activity(),
         )
         decision, usage = claude.propose(context)
@@ -105,8 +141,8 @@ def cmd_loop(
     broker = build_broker(env, force_mock=force_mock)
     broker.connect()
     claude = ClaudeClient(env, build_system_prompt(rules))
-    news = EmptyNews()
-    calendar = EmptyCalendar()
+    news = build_news_feed(env)
+    calendar = build_calendar_feed(env, rules)
 
     journal = Journal()
     account = broker.get_account()
@@ -267,6 +303,8 @@ def cmd_loop(
                 if stand_down_state.is_active(datetime.now(UTC))
                 else 0,
                 risk_understated=recon.risk_is_understated,
+                news_windows=len(news_windows),
+                calendar_degraded=getattr(calendar, "is_degraded", False),
                 cost_usd=round(usage.estimated_cost_usd, 6),
                 next_cycle_seconds=env.decision_interval_seconds,
             )
