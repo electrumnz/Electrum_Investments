@@ -1,7 +1,20 @@
-# Mudhorn Capital — identity
+# Mudhorn Capital identity
 
-Open **`mudhorn-capital.html`** in any browser. Single file, no build step, no
-network requests.
+Open **`index.html`** in any browser. Single file, no build step, no network
+requests.
+
+## Hosting it
+
+The file is named `index.html` and sits alone in this directory so that a static
+host can serve the folder with no configuration at all:
+
+- **Vercel** — import the repo, set **Root Directory** to `brand`, framework
+  "Other", no build command. Every push to the branch redeploys.
+- **GitHub Pages** — needs a public repository, so it would mean a second
+  brand-only repo rather than this private one.
+
+Nothing here reads the journal, the broker or any credential, so unlike the
+dashboard it is safe to publish.
 
 ## What is in it
 

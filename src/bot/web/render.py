@@ -5,7 +5,7 @@ on a single-user tool, a template dependency and its packaging problems buy
 nothing, and keeping the markup next to the data that shapes it makes the
 whole thing easier to follow.
 
-Styling is the Mudhorn Capital identity from `brand/mudhorn-capital.html`:
+Styling is the Mudhorn Capital identity from `brand/index.html`:
 cold, mineral, one accent used sparingly. A trading dashboard is scanned rather
 than read, so state is encoded in shape as well as number — severity stripes and
 pills, so anything needing attention reads before the figures do.
