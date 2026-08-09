@@ -18,10 +18,9 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from typing import NamedTuple
 
-from .config import Rules
+from .config import InstrumentRules, Rules
 from .models import (
     AccountSnapshot,
-    AssetClass,
     Direction,
     ExecutionMode,
     OrderProposal,
@@ -32,6 +31,15 @@ from .models import (
     TradingActivity,
 )
 from .options import parse_occ_symbol
+
+
+def proposal_class_label(instrument: InstrumentRules) -> str:
+    """Readable name for an instrument class, taken from its strategy label.
+
+    Rejection messages should say which class refused the trade, not just that
+    something did.
+    """
+    return instrument.strategy if instrument.strategy != "unspecified" else "this instrument"
 
 
 class NewsWindow(NamedTuple):
@@ -85,15 +93,18 @@ class RiskGate:
         froze position management would strand open trades with no way out.
         """
         activity = activity or TradingActivity()
-        is_crypto = self._is_crypto(proposal)
+
+        # Each asset class carries its own session window and symbol list, so
+        # the gate resolves the class once and applies that class's rules. This
+        # replaces special-casing crypto, which did not generalise.
+        instrument = self._rules.for_symbol(proposal.symbol)
 
         checks: list[str | None] = [
             self._kill_switch(),
             self._stand_down(stand_down),
             self._equity_floor(account),
             self._symbol_allowed(proposal),
-            # Crypto trades 24/7, so the equities session window does not apply.
-            None if is_crypto else self._within_session(),
+            self._within_session(instrument),
             self._news_blackout(proposal.symbol, news_windows or []),
             self._concurrent_positions(account),
             self._daily_loss(account),
@@ -108,7 +119,7 @@ class RiskGate:
             self._trades_per_week(activity),
             self._symbol_cooldown(proposal, activity),
             self._option_expiry(proposal),
-            self._crypto_sleeve_cap(proposal, account) if is_crypto else None,
+            self._instrument_capital_cap(proposal, account, instrument),
         ]
 
         reasons = [c for c in checks if c is not None]
@@ -164,11 +175,21 @@ class RiskGate:
             return f"symbol {proposal.symbol} is not in the allowed list"
         return None
 
-    def _within_session(self) -> str | None:
+    def _within_session(self, instrument: InstrumentRules | None) -> str | None:
+        """Session window comes from the instrument class, not a global setting.
+
+        A 24/7 market configures `[[0, 24]]` and is therefore always in session,
+        rather than needing to be special-cased in code.
+        """
+        if instrument is None:
+            return None  # the allowlist gate already rejected this
         hour = self._now().hour
-        if any(start <= hour < end for start, end in self._rules.sessions_utc):
+        if any(start <= hour < end for start, end in instrument.sessions_utc):
             return None
-        return f"{hour:02d}:00 UTC is outside the allowed trading sessions"
+        return (
+            f"{hour:02d}:00 UTC is outside the trading sessions for "
+            f"{proposal_class_label(instrument)}"
+        )
 
     def _news_blackout(self, symbol: str, windows: list[NewsWindow]) -> str | None:
         before = timedelta(minutes=self._rules.news_blackout_minutes_before)
@@ -353,32 +374,33 @@ class RiskGate:
             )
         return None
 
-    def _crypto_sleeve_cap(
-        self, proposal: OrderProposal, account: AccountSnapshot
+    def _instrument_capital_cap(
+        self,
+        proposal: OrderProposal,
+        account: AccountSnapshot,
+        instrument: InstrumentRules | None,
     ) -> str | None:
-        sleeve = self._rules.crypto_sleeve
-        if not sleeve.enabled:
-            return "crypto sleeve is disabled"
+        """Optional ceiling on one asset class's share of the portfolio.
+
+        Keeps a volatile class from quietly growing into the whole account. Only
+        applies where a cap is configured; classes without one are bounded by the
+        portfolio-wide risk and exposure limits alone.
+        """
+        if instrument is None or instrument.capital_cap_pct is None:
+            return None
         if account.equity_usd <= 0:
             return None
-        crypto_now = sum(
-            p.notional_usd for p in account.open_positions if p.asset_class == AssetClass.CRYPTO
-        )
-        pct_after = (crypto_now + proposal.notional_usd) / account.equity_usd * 100
-        if pct_after > sleeve.capital_cap_pct:
+
+        symbols = set(instrument.allowed_symbols)
+        held = sum(p.notional_usd for p in account.open_positions if p.symbol in symbols)
+        pct_after = (held + proposal.notional_usd) / account.equity_usd * 100
+
+        if pct_after > instrument.capital_cap_pct:
             return (
-                f"crypto allocation would reach {pct_after:.1f}% of equity "
-                f"(sleeve cap {sleeve.capital_cap_pct:.1f}%)"
+                f"{proposal_class_label(instrument)} allocation would reach "
+                f"{pct_after:.1f}% of equity (cap {instrument.capital_cap_pct:.1f}%)"
             )
         return None
-
-    # ---------------------------------------------------------------- helpers
-
-    def _is_crypto(self, proposal: OrderProposal) -> bool:
-        return (
-            proposal.asset_class == AssetClass.CRYPTO
-            or self._rules.is_crypto(proposal.symbol)
-        )
 
 
 def aggregate_pnl_today(positions: list[Position], realised_pnl_today_usd: float) -> float:

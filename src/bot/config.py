@@ -218,17 +218,38 @@ class OptionRules(BaseModel):
     escalate_to_action_days: float = Field(default=1.0, gt=0)
 
 
-class CryptoSleeve(BaseModel):
-    enabled: bool
-    capital_cap_pct: float = Field(ge=0, le=100)
-    allowed_symbols: list[str]
+class InstrumentRules(BaseModel):
+    """Rules that differ by asset class.
+
+    Session windows are the reason this exists. Equities trade a fixed window;
+    crypto trades continuously. Holding both under one top-level `sessions_utc`
+    meant enabling crypto silently forbade trading it for three quarters of the
+    day, which is not a limit anyone would choose on purpose.
+    """
+
+    enabled: bool = False
+    strategy: str = Field(
+        default="unspecified",
+        description="Label recorded on every trade so metrics can separate them",
+    )
+    allowed_symbols: list[str] = Field(default_factory=list)
+    sessions_utc: list[tuple[int, int]] = Field(default_factory=list)
+
+    # Optional ceiling on this class's share of equity, as a fraction of the
+    # portfolio. Used to keep a volatile class from quietly dominating.
+    capital_cap_pct: float | None = Field(default=None, ge=0, le=100)
 
     @model_validator(mode="after")
-    def _consistency(self) -> Self:
-        if self.enabled and self.capital_cap_pct == 0:
-            raise ValueError("crypto_sleeve.enabled=true but capital_cap_pct is 0")
-        if self.enabled and not self.allowed_symbols:
-            raise ValueError("crypto_sleeve.enabled=true but allowed_symbols is empty")
+    def _enabled_classes_must_be_usable(self) -> Self:
+        if not self.enabled:
+            return self
+        if not self.allowed_symbols:
+            raise ValueError("instrument is enabled but allowed_symbols is empty")
+        if not self.sessions_utc:
+            raise ValueError(
+                "instrument is enabled but sessions_utc is empty, so nothing could "
+                "ever trade. Use [[0, 24]] for a 24/7 market."
+            )
         return self
 
 
@@ -238,24 +259,52 @@ class Rules(BaseModel):
     margin: MarginRules = Field(default_factory=MarginRules)
     stand_down: StandDownRules = Field(default_factory=StandDownRules)
     options: OptionRules = Field(default_factory=OptionRules)
-    sessions_utc: list[tuple[int, int]]
     news_blackout_minutes_before: int = Field(ge=0)
     news_blackout_minutes_after: int = Field(ge=0)
-    allowed_symbols: list[str]
-    crypto_sleeve: CryptoSleeve
+
+    # Keyed by AssetClass value: "us_equity", "crypto".
+    instruments: dict[str, InstrumentRules] = Field(default_factory=dict)
 
     @classmethod
     def load(cls, path: Path) -> Rules:
         with path.open() as f:
             return cls.model_validate(yaml.safe_load(f))
 
-    def is_symbol_allowed(self, symbol: str) -> bool:
-        if symbol in self.allowed_symbols:
-            return True
-        return self.crypto_sleeve.enabled and symbol in self.crypto_sleeve.allowed_symbols
+    @property
+    def enabled_instruments(self) -> dict[str, InstrumentRules]:
+        return {name: i for name, i in self.instruments.items() if i.enabled}
 
-    def is_crypto(self, symbol: str) -> bool:
-        return symbol in self.crypto_sleeve.allowed_symbols
+    @property
+    def allowed_symbols(self) -> list[str]:
+        """Every tradeable symbol across enabled classes.
+
+        Derived rather than configured, so call sites that just want a watchlist
+        (`fetch_market_ticks`, the system prompt) keep working unchanged.
+        """
+        symbols: list[str] = []
+        for instrument in self.enabled_instruments.values():
+            symbols.extend(instrument.allowed_symbols)
+        return sorted(set(symbols))
+
+    def for_symbol(self, symbol: str) -> InstrumentRules | None:
+        """Which instrument class a symbol belongs to, if any enabled one claims it."""
+        for instrument in self.enabled_instruments.values():
+            if symbol in instrument.allowed_symbols:
+                return instrument
+        return None
+
+    def class_name_for(self, symbol: str) -> str | None:
+        for name, instrument in self.enabled_instruments.items():
+            if symbol in instrument.allowed_symbols:
+                return name
+        return None
+
+    def is_symbol_allowed(self, symbol: str) -> bool:
+        return self.for_symbol(symbol) is not None
+
+    def strategy_for(self, symbol: str) -> str:
+        instrument = self.for_symbol(symbol)
+        return instrument.strategy if instrument else "unspecified"
 
 
 DEFAULT_RULES_PATH = Path(__file__).resolve().parents[2] / "config" / "rules.yaml"

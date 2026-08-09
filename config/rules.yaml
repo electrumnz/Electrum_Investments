@@ -119,34 +119,57 @@ options:
   # Inside this many days, warnings are marked as requiring action.
   escalate_to_action_days: 1.0
 
-# Allowed trading windows in UTC, as [start_hour, end_hour) pairs.
-# US equities regular session is 09:30–16:00 ET = 13:30–20:00 UTC (14:30–21:00 during EDT).
-# Deliberately excludes the first 30 minutes of the US open, which is the noisiest period.
-sessions_utc:
-  - [14, 21]
-
 # Don't open new positions in the N minutes around high-impact news.
+# Applies across every instrument class.
 news_blackout_minutes_before: 15
 news_blackout_minutes_after: 15
 
-# Symbol allowlist. The bot refuses anything not listed here.
-# Starter universe: liquid, low-volatility, heavily-covered US large caps + index ETFs.
-allowed_symbols:
-  - SPY      # S&P 500 ETF
-  - QQQ      # Nasdaq 100 ETF
-  - AAPL
-  - MSFT
-  - JNJ      # defensive, low beta
-  - KO       # defensive, low beta
+# Instruments. Each asset class carries its own session window, symbol list and
+# strategy, because they genuinely differ: equities trade a fixed window, crypto
+# trades continuously. Holding both under one global session setting meant
+# enabling crypto silently forbade trading it for three quarters of the day.
+#
+# Account-level rules above (1% per trade, 2% total risk, stand-down, daily loss,
+# margin) stay portfolio-wide and apply across every class.
+instruments:
 
-# Crypto sleeve — disabled until the equity core is proven on paper.
-# Crypto is PDT-exempt and trades 24/7, which is exactly why it needs its own
-# capital cap rather than sharing the equity budget.
-crypto_sleeve:
-  enabled: false
-  capital_cap_pct: 0.0
-  allowed_symbols: []
-  # When enabling, set e.g.:
-  #   enabled: true
-  #   capital_cap_pct: 15.0
-  #   allowed_symbols: [BTC/USD, ETH/USD]
+  us_equity:
+    enabled: true
+
+    # Label recorded on every trade so metrics can tell strategies apart, and
+    # injected into Claude's system prompt. Defining what it actually means is
+    # the operator's job and is the genuinely hard part.
+    strategy: mean_reversion
+
+    # Liquid, heavily covered US large caps and index ETFs. ETFs are the same
+    # asset class as equities at Alpaca, so they need no separate entry.
+    allowed_symbols:
+      - SPY
+      - QQQ
+      - AAPL
+      - MSFT
+      - JNJ
+      - KO
+
+    # US regular session is 09:30-16:00 ET = 13:30-20:00 UTC (14:30-21:00 EDT).
+    # Deliberately skips the first 30 minutes of the open, the noisiest period.
+    sessions_utc:
+      - [14, 21]
+
+  crypto:
+    # Disabled until the equity core is proven on paper.
+    enabled: false
+
+    strategy: momentum
+
+    allowed_symbols: []
+    # When enabling, set e.g. [BTC/USD, ETH/USD]
+
+    # 24/7. This is the setting that was wrong under the old global sessions
+    # block, and the reason instruments are configured separately at all.
+    sessions_utc:
+      - [0, 24]
+
+    # Ceiling on crypto's share of equity. It trades continuously and moves
+    # harder than the equity book, so it gets a cap the equity side does not.
+    capital_cap_pct: 15.0

@@ -88,23 +88,58 @@ units, not lots), `limit_price`, `stop_loss_price`, `take_profit_price`, and a
 """
 
 
+# A strategy is a label plus one line of guidance. Deliberately thin: the point
+# is that every trade is tagged with which strategy produced it, so metrics.py
+# can tell them apart. Deciding what these should actually be is the operator's
+# job and is the genuinely hard part of the whole project.
+STRATEGY_GUIDANCE: dict[str, str] = {
+    "mean_reversion": (
+        "look for stretched moves away from a reference level with evidence of "
+        "exhaustion, and state the level you expect price to revert toward"
+    ),
+    "momentum": (
+        "look for continuation with confirming participation, and state the "
+        "level whose loss would end the move"
+    ),
+    "unspecified": (
+        "no strategy has been defined for this class yet, so be especially "
+        "reluctant to propose anything"
+    ),
+}
+
+STRATEGY_FALLBACK = (
+    "no guidance is configured for this strategy name, so treat it as undefined "
+    "and be reluctant to propose anything"
+)
+
+
 def build_system_prompt(rules: Rules) -> str:
     """Render the (static) system prompt from rules.
 
     Same rules in, same bytes out, so the prompt cache actually hits.
     """
-    crypto = rules.crypto_sleeve
-    crypto_line = f"- Crypto sleeve: {'enabled' if crypto.enabled else 'disabled'}"
-    if crypto.enabled:
-        crypto_line += (
-            f" (cap {crypto.capital_cap_pct}% of equity, "
-            f"symbols: {', '.join(sorted(crypto.allowed_symbols))})"
+    # One block per enabled class, since each carries its own session window,
+    # symbol list and strategy. Disabled classes are omitted entirely rather
+    # than listed as unavailable, which would only invite proposals for them.
+    instrument_lines: list[str] = []
+    for name, instrument in sorted(rules.enabled_instruments.items()):
+        cap = (
+            f", max {instrument.capital_cap_pct:.0f}% of equity"
+            if instrument.capital_cap_pct is not None
+            else ""
+        )
+        instrument_lines.append(
+            f"- {name} — strategy '{instrument.strategy}'{cap}\n"
+            f"    symbols: {', '.join(sorted(instrument.allowed_symbols))}\n"
+            f"    sessions (UTC): {instrument.sessions_utc}\n"
+            f"    approach: {STRATEGY_GUIDANCE.get(instrument.strategy, STRATEGY_FALLBACK)}"
         )
 
     rules_summary = "\n".join(
         [
-            f"- Allowed symbols: {', '.join(sorted(rules.allowed_symbols))}",
-            crypto_line,
+            "## Instruments you may trade\n",
+            *instrument_lines,
+            "\n## Portfolio limits (apply across every instrument)\n",
             f"- Max risk per trade: {rules.account.max_risk_per_trade_pct:.2f}% of equity",
             f"- Max COMBINED risk across all open positions: "
             f"{rules.account.max_total_risk_pct:.2f}% of equity. This is the "
@@ -125,7 +160,6 @@ def build_system_prompt(rules: Rules) -> str:
             f"- Cooldown per symbol: {rules.frequency.min_seconds_between_trades_per_symbol}s",
             f"- Max buying power per order: "
             f"{rules.margin.max_buying_power_utilisation_pct:.0f}%",
-            f"- Allowed UTC sessions: {rules.sessions_utc}",
             f"- News blackout: {rules.news_blackout_minutes_before} min before / "
             f"{rules.news_blackout_minutes_after} min after high-impact events",
         ]

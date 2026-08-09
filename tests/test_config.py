@@ -22,7 +22,7 @@ def test_rules_load_from_yaml():
     rules = Rules.load(REPO_ROOT / "config" / "rules.yaml")
     assert rules.account.max_concurrent_positions > 0
     assert rules.allowed_symbols, "allowed_symbols must not be empty"
-    assert rules.crypto_sleeve.enabled is False, "crypto must default OFF for staged rollout"
+    assert rules.instruments["crypto"].enabled is False, "crypto must default OFF"
     assert rules.frequency.max_trades_per_day > 0
     assert rules.margin.max_gross_notional_pct > 0, "margin guards must ship configured"
 
@@ -109,9 +109,27 @@ def test_alpaca_broker_refuses_live_env():
         AlpacaBroker(env)
 
 
-def test_is_crypto_uses_sleeve_symbols():
+def test_allowed_symbols_is_derived_from_enabled_classes():
+    """Disabled classes contribute nothing, so their symbols are not tradeable."""
     rules = Rules.load(REPO_ROOT / "config" / "rules.yaml")
+    assert "SPY" in rules.allowed_symbols
+    assert rules.is_symbol_allowed("SPY")
+    assert not rules.is_symbol_allowed("BTC/USD")   # crypto class is disabled
+
     enabled = rules.model_copy(deep=True)
-    enabled.crypto_sleeve.allowed_symbols = ["BTC/USD"]
-    assert enabled.is_crypto("BTC/USD")
-    assert not enabled.is_crypto("SPY")
+    enabled.instruments["crypto"].enabled = True
+    enabled.instruments["crypto"].allowed_symbols = ["BTC/USD"]
+    assert enabled.is_symbol_allowed("BTC/USD")
+    assert enabled.class_name_for("BTC/USD") == "crypto"
+    assert enabled.strategy_for("BTC/USD") == "momentum"
+
+
+def test_enabled_instrument_must_have_symbols_and_sessions():
+    """An enabled class with no session window could never trade."""
+    from bot.config import InstrumentRules
+
+    with pytest.raises(ValueError, match="sessions_utc"):
+        InstrumentRules(enabled=True, allowed_symbols=["SPY"], sessions_utc=[])
+
+    with pytest.raises(ValueError, match="allowed_symbols"):
+        InstrumentRules(enabled=True, allowed_symbols=[], sessions_utc=[(14, 21)])

@@ -89,7 +89,7 @@ def test_rejects_outside_session(rules, account, spy_tick, buy_proposal):
     night = datetime(2026, 5, 4, 3, 0, tzinfo=UTC)  # outside [14, 21)
     verdict = _gate(rules, now=night).evaluate(buy_proposal, account=account, tick=spy_tick)
     assert not verdict.approved
-    assert _reasons_mention(verdict, "outside the allowed trading sessions")
+    assert _reasons_mention(verdict, "outside the trading sessions")
 
 
 def test_rejects_during_news_blackout(rules, account, spy_tick, buy_proposal):
@@ -478,31 +478,80 @@ def test_cooldown_on_other_symbol_does_not_block(rules, account, spy_tick, buy_p
     assert verdict.approved, verdict.reasons
 
 
-# ------------------------------------------------------------- crypto sleeve
+# ------------------------------------------------------- per-instrument rules
 
 
-def test_crypto_rejected_while_sleeve_disabled(rules, account):
-    btc_tick = Tick(symbol="BTC/USD", bid=64_990.0, ask=65_010.0, timestamp=INSIDE_SESSION)
-    proposal = OrderProposal(
+def _with_crypto(rules: Rules, cap: float = 15.0) -> Rules:
+    enabled = rules.model_copy(deep=True)
+    crypto = enabled.instruments["crypto"]
+    crypto.enabled = True
+    crypto.allowed_symbols = ["BTC/USD"]
+    crypto.capital_cap_pct = cap
+    return enabled
+
+
+def _btc_tick(when: datetime) -> Tick:
+    return Tick(symbol="BTC/USD", bid=64_990.0, ask=65_010.0, timestamp=when)
+
+
+def _btc(qty: float, rationale: str) -> OrderProposal:
+    return OrderProposal(
         symbol="BTC/USD",
         asset_class=AssetClass.CRYPTO,
         direction=Direction.BUY,
-        qty=0.01,
+        qty=qty,
         limit_price=65_000.0,
         stop_loss_price=63_000.0,
         take_profit_price=70_000.0,
-        rationale="Sleeve is disabled in the shipped rules, so this must be refused.",
+        rationale=rationale,
     )
-    verdict = _gate(rules).evaluate(proposal, account=account, tick=btc_tick)
+
+
+def test_disabled_instrument_class_blocks_its_symbols(rules, account):
+    """Crypto ships disabled, so its symbols are simply not tradeable."""
+    verdict = _gate(rules).evaluate(
+        _btc(0.01, "Crypto class is disabled in the shipped rules."),
+        account=account,
+        tick=_btc_tick(INSIDE_SESSION),
+    )
     assert not verdict.approved
+    assert _reasons_mention(verdict, "not in the allowed list")
 
 
-def test_crypto_sleeve_cap_is_enforced(rules, spy_tick):
-    enabled = rules.model_copy(deep=True)
-    enabled.crypto_sleeve.enabled = True
-    enabled.crypto_sleeve.capital_cap_pct = 5.0
-    enabled.crypto_sleeve.allowed_symbols = ["BTC/USD"]
+def test_crypto_trades_outside_the_equity_session(rules):
+    """The bug this restructure fixes.
 
+    Under a single global session window, enabling crypto silently forbade
+    trading it for three quarters of the day. Each class now carries its own.
+    """
+    enabled = _with_crypto(rules)
+    night = datetime(2026, 5, 4, 3, 0, tzinfo=UTC)
+    account = AccountSnapshot(
+        equity_usd=PAPER_EQUITY,
+        cash_usd=PAPER_EQUITY,
+        buying_power_usd=PAPER_EQUITY,
+        open_positions=[],
+    )
+    verdict = _gate(enabled, now=night).evaluate(
+        _btc(0.02, "Crypto at 03:00 UTC should be allowed; it trades 24/7."),
+        account=account,
+        tick=_btc_tick(night),
+    )
+    assert verdict.approved, verdict.reasons
+
+
+def test_equities_are_still_bound_by_their_session(rules, account, spy_tick, buy_proposal):
+    """The equity window must keep applying, or the fix went too far."""
+    night = datetime(2026, 5, 4, 3, 0, tzinfo=UTC)
+    verdict = _gate(rules, now=night).evaluate(
+        buy_proposal, account=account, tick=spy_tick
+    )
+    assert not verdict.approved
+    assert _reasons_mention(verdict, "outside the trading sessions")
+
+
+def test_instrument_capital_cap_is_enforced(rules):
+    enabled = _with_crypto(rules, cap=5.0)
     account = AccountSnapshot(
         equity_usd=PAPER_EQUITY,
         cash_usd=PAPER_EQUITY,
@@ -513,72 +562,35 @@ def test_crypto_sleeve_cap_is_enforced(rules, spy_tick):
                 asset_class=AssetClass.CRYPTO,
                 direction=Direction.BUY,
                 qty=0.07,
-                entry_price=65_000.0,  # $4,550 = 4.55% of equity
+                entry_price=65_000.0,   # $4,550 = 4.55% of equity
                 opened_at=INSIDE_SESSION,
                 current_price=65_000.0,
             )
         ],
     )
-    btc_tick = Tick(symbol="BTC/USD", bid=64_990.0, ask=65_010.0, timestamp=INSIDE_SESSION)
-    more = OrderProposal(
-        symbol="BTC/USD",
-        asset_class=AssetClass.CRYPTO,
-        direction=Direction.BUY,
-        qty=0.05,  # would take the sleeve past 5%
-        limit_price=65_000.0,
-        stop_loss_price=63_000.0,
-        take_profit_price=70_000.0,
-        rationale="Second crypto position that should breach the sleeve cap.",
+    verdict = _gate(enabled).evaluate(
+        _btc(0.05, "Second crypto position breaching the class capital cap."),
+        account=account,
+        tick=_btc_tick(INSIDE_SESSION),
     )
-    verdict = _gate(enabled).evaluate(more, account=account, tick=btc_tick)
     assert not verdict.approved
-    assert _reasons_mention(verdict, "sleeve cap")
+    assert _reasons_mention(verdict, "allocation would reach")
 
 
-def test_crypto_ignores_equity_session_window(rules):
-    """Crypto trades 24/7, so the equities session gate must not apply."""
-    enabled = rules.model_copy(deep=True)
-    enabled.crypto_sleeve.enabled = True
-    enabled.crypto_sleeve.capital_cap_pct = 15.0
-    enabled.crypto_sleeve.allowed_symbols = ["BTC/USD"]
-
-    account = AccountSnapshot(
-        equity_usd=PAPER_EQUITY,
-        cash_usd=PAPER_EQUITY,
-        buying_power_usd=PAPER_EQUITY,
-        open_positions=[],
-    )
-    middle_of_the_night = datetime(2026, 5, 4, 3, 0, tzinfo=UTC)
-    btc_tick = Tick(
-        symbol="BTC/USD", bid=64_990.0, ask=65_010.0, timestamp=middle_of_the_night
-    )
-    proposal = OrderProposal(
-        symbol="BTC/USD",
-        asset_class=AssetClass.CRYPTO,
-        direction=Direction.BUY,
-        qty=0.02,  # $1,300 notional = 1.3% of equity
-        limit_price=65_000.0,
-        stop_loss_price=63_000.0,
-        take_profit_price=70_000.0,
-        rationale="Crypto at 03:00 UTC should still be allowed through the gate.",
-    )
-    verdict = _gate(enabled, now=middle_of_the_night).evaluate(
-        proposal, account=account, tick=btc_tick
-    )
+def test_a_class_without_a_cap_is_not_capped(rules, account, spy_tick, buy_proposal):
+    """Equities configure no capital_cap_pct, so only portfolio limits apply."""
+    assert rules.instruments["us_equity"].capital_cap_pct is None
+    verdict = _gate(rules).evaluate(buy_proposal, account=account, tick=spy_tick)
     assert verdict.approved, verdict.reasons
 
 
+def test_strategy_label_resolves_per_class(rules):
+    enabled = _with_crypto(rules)
+    assert enabled.strategy_for("SPY") == "mean_reversion"
+    assert enabled.strategy_for("BTC/USD") == "momentum"
+
+
 # ------------------------------------------------------------------- config
-
-
-def test_crypto_sleeve_validation_rejects_inconsistent_config():
-    from bot.config import CryptoSleeve
-
-    with pytest.raises(ValueError, match="capital_cap_pct"):
-        CryptoSleeve(enabled=True, capital_cap_pct=0, allowed_symbols=["BTC/USD"])
-
-    with pytest.raises(ValueError, match="allowed_symbols"):
-        CryptoSleeve(enabled=True, capital_cap_pct=10, allowed_symbols=[])
 
 
 def test_frequency_rules_reject_weekly_below_daily():

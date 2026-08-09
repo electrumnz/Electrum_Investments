@@ -101,6 +101,20 @@ losing streak that caused it.
 State lives in SQLite, not in memory, so restarting the process does not clear
 it. That is the point.
 
+### Each instrument class carries its own rules
+
+`config/rules.yaml` has an `instruments:` block keyed by asset class. Session
+windows, symbol lists and strategy live there; the portfolio limits (1% per
+trade, 2% total risk, stand-down, daily loss, margin) stay global.
+
+This exists because a single global `sessions_utc` is wrong the moment there is
+more than one class. Equities trade a fixed window, crypto trades continuously,
+so a shared window meant enabling crypto silently forbade trading it for three
+quarters of the day. Do not collapse it back to one list.
+
+`Rules.allowed_symbols` is **derived**, unioning enabled classes, so disabling a
+class removes its symbols everywhere at once.
+
 ### The journal must be wired in or the caps count nothing
 
 `AccountSnapshot.open_risk_usd` is what the total-risk cap counts against, and it
@@ -176,7 +190,7 @@ reference/              Third-party projects we borrow from. See reference/STATU
 ## Running it
 
 ```sh
-.venv/bin/python -m pytest              # full suite (182 tests)
+.venv/bin/python -m pytest              # full suite (185 tests)
 electrum-bot smoketest --mock           # no credentials needed
 electrum-bot smoketest                  # needs Alpaca paper keys
 electrum-bot loop                       # proposes and vets; places nothing

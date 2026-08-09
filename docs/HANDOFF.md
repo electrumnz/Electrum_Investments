@@ -65,17 +65,24 @@ allowlist, session windows, news blackouts, per-trade risk, **combined risk
 across all open positions**, position concentration, buying-power utilisation,
 gross notional, stop/target placement sanity, limit-price sanity, trades per day
 and per week, per-symbol cooldown, a sticky daily-loss kill switch, a
-**consecutive-loss stand-down**, and a capped crypto sleeve. Every rule has a test
+**consecutive-loss stand-down**, per-instrument session windows, and an
+optional per-class capital cap. Every rule has a test
 that proves it rejects.
 
 **An Alpaca paper broker** (`src/bot/broker.py`) behind a `Broker` Protocol, with
 a `MockBroker` for tests. Paper-only is enforced twice — at startup and again in
 the broker constructor.
 
-**An MCP server** (`src/bot/mcp_server.py`) exposing `check_order`, `place_order`,
-`close_position`, `get_risk_status`, `get_positions`, `get_rules`,
-`get_recent_decisions`, `reset_trading_session`. `place_order` re-runs the gate,
-so the tool surface cannot be talked past.
+**An MCP server** (`src/bot/mcp_server.py`) exposing `check_order`,
+`place_order`, `close_position`, `get_risk_status`, `get_positions`,
+`get_rules`, `get_option_expiries`, `get_journal_stats`, `get_trades`,
+`get_stand_down_status`, `get_recent_decisions` and `reset_trading_session`.
+`place_order` re-runs the gate, so the tool surface cannot be talked past.
+
+**A trade journal and metrics engine** (`src/bot/journal.py`,
+`src/bot/metrics.py`). SQLite trade store feeding win rate, profit factor,
+expectancy, R-multiples, drawdown, and an MAE/MFE analysis that judges whether
+the model's own stop and target placement was sane.
 
 **An audit log** (`audit/<date>.jsonl`) recording every proposal, verdict,
 execution, and the token cost of every Claude call.
@@ -83,7 +90,7 @@ execution, and the token cost of every Claude call.
 **A reference library** (`reference/`) tracking fourteen agent, backtesting and LLM-trading projects with pinned
 commits and detected licences, so upstream drift shows up as a git diff.
 
-**135 tests**, `ruff` clean, `mypy --strict` clean.
+**185 tests**, `ruff` clean, `mypy --strict` clean.
 
 ---
 
@@ -101,9 +108,10 @@ name), and it should need a track record you actually believe.
 **A backtesting harness.** Right now you can only evaluate forward, which is slow.
 This is probably the highest-value thing to build next.
 
-**A dashboard.** The audit log is JSONL. A Next.js + Supabase dashboard was
-scoped and deliberately deferred — build it when you know which numbers you
-actually look at, not before.
+**A dashboard.** Deliberately deferred. Everything it would show is already
+reachable through `get_journal_stats`, `get_risk_status` and
+`get_option_expiries` in Claude Code, so build it once you know which numbers you
+actually look at.
 
 **Paid data feeds.** No news, sentiment, whale-tracking or economic calendar is
 wired in. `src/bot/data/` has stub adapters with the interfaces already shaped.
@@ -155,7 +163,7 @@ wired in. `src/bot/data/` has stub adapters with the interfaces already shaped.
 triggers and wake Claude only when one fires. Same responsiveness, ~10× less API
 cost than calling every minute. See `docs/COSTS.md`.
 
-**Crypto sleeve.** `config/rules.yaml` has it wired and disabled. It trades 24/7
+**Crypto.** `config/rules.yaml` has the class wired and disabled. It trades 24/7
 and is driven by different things than equities, which is the case for it — and
 also why the cap exists, because 24/7 means 24/7 opportunities to lose money.
 Enable with a real capital cap, never a shared budget.

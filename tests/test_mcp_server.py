@@ -137,7 +137,7 @@ def test_get_risk_status_reports_limits_and_usage():
 
 def test_get_rules_exposes_the_active_config():
     rules = mcp_server.get_rules()
-    assert rules["crypto_sleeve"]["enabled"] is False
+    assert rules["instruments"]["crypto"]["enabled"] is False
     assert rules["stand_down"]["consecutive_losses_trigger"] > 0
 
 

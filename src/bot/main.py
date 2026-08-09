@@ -202,6 +202,10 @@ def cmd_loop(
                         proposal,
                         result,
                         execution_mode=env.execution_mode,
+                        # Tagged from the instrument class rather than asked of
+                        # the model, so the label is always accurate and
+                        # metrics.breakdown_by can separate strategies.
+                        strategy=rules.strategy_for(proposal.symbol),
                     )
                     log.info(
                         "order_submitted",
