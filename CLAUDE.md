@@ -191,6 +191,9 @@ src/bot/
   metrics.py            Win rate, profit factor, expectancy, R, MAE/MFE. Pure functions.
   web/                  Local read-only dashboard. Binds 127.0.0.1; no auth by design.
   main.py               CLI: `electrum-bot smoketest`, `electrum-bot loop`.
+deploy/                 VPS provisioning: bootstrap.sh + systemd units. Runs the
+                        loop WITHOUT --execute; src/ and config/ stay root-owned
+                        so the service account cannot edit its own limits.
 audit/                  Append-only JSONL. Gitignored.
 data/journal.db         SQLite journal. Gitignored.
 reference/              Third-party projects we borrow from. See reference/STATUS.md.

@@ -1,0 +1,38 @@
+[Unit]
+Description=Mudhorn Capital read-only dashboard
+Documentation=https://github.com/electrumnz/Electrum_Investments/blob/main/deploy/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=mudhorn
+Group=mudhorn
+WorkingDirectory=/opt/mudhorn
+
+# --host is not passed, so it binds to 127.0.0.1. That is the whole reason the
+# dashboard has no login. Reach it from a phone over Tailscale, never by binding
+# to 0.0.0.0 or putting a reverse proxy in front of it.
+ExecStart=/opt/mudhorn/.venv/bin/electrum-bot-web --port 8787
+
+Restart=on-failure
+RestartSec=10s
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+# The dashboard only reads, but SQLite still needs to write its journal and
+# temp files alongside the database.
+ReadWritePaths=/opt/mudhorn/data
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=mudhorn-web
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,45 @@
+[Unit]
+Description=Mudhorn Capital trading bot decision loop
+Documentation=https://github.com/electrumnz/Electrum_Investments/blob/main/deploy/README.md
+After=network-online.target
+Wants=network-online.target
+
+# Rate limiting lives in [Unit], not [Service]. systemd ignores these keys
+# silently if they are put next to Restart=, which looks like it works.
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=mudhorn
+Group=mudhorn
+WorkingDirectory=/opt/mudhorn
+
+# No --execute. The loop proposes and vets; it places nothing. Turning this on
+# is a deliberate decision taken after watching the proposals, not a default.
+# See deploy/README.md.
+ExecStart=/opt/mudhorn/.venv/bin/electrum-bot loop
+
+# A trading loop that dies quietly is worse than one that dies loudly: the
+# journal stops being reconciled and open positions stop being watched, with
+# nothing on screen to say so. Restart, but back off rather than hot-loop on a
+# bad credential.
+Restart=on-failure
+RestartSec=30s
+
+# The process needs the broker over HTTPS and two paths on disk. Nothing else.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+ReadWritePaths=/opt/mudhorn/data /opt/mudhorn/audit
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=mudhorn-bot
+
+[Install]
+WantedBy=multi-user.target

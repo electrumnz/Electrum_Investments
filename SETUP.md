@@ -24,6 +24,11 @@ You do **not** need: money, a funded brokerage account, or trading experience.
 > that. Read the "Reality check" section of `docs/HANDOFF.md` before you decide
 > how much of your life to spend on this.
 
+**Running it on a server instead of a laptop?** Do sections 1 and 5 here for the
+accounts and the MCP wiring, then follow **`deploy/README.md`** rather than
+sections 2 to 4. It provisions a fresh Ubuntu box in one script and runs the bot
+as a service that survives a reboot. The two are alternatives, not a sequence.
+
 ---
 
 ## 1. Accounts
