@@ -84,15 +84,32 @@ journalctl -u mudhorn-bot -f
 
 Both restart on failure and come back after a reboot.
 
-## 5. Reach the dashboard from a phone
+## 5. Reach the dashboard at all
+
+On a laptop the dashboard was on the same machine as the browser, so
+`127.0.0.1:8787` just worked and Tailscale was a convenience for viewing it on a
+phone. **On a VPS that is no longer true.** The dashboard binds to loopback on a
+box you are not sitting at, so without a private link there is no route to it
+from anywhere, laptop included.
 
 ```sh
 curl -fsSL https://tailscale.com/install.sh | sh
 sudo tailscale up
 ```
 
-Install Tailscale on the phone too, then browse to the box's private address on
-port 8787.
+Install Tailscale on the phone and laptop too, then browse to the box's private
+address on port 8787. Free for personal use, and it signs in with the project
+Google account rather than needing another password.
+
+The alternative for desk use only is an SSH tunnel, which needs no extra account
+but has to be re-run each time and is awkward from a phone:
+
+```sh
+ssh -L 8787:127.0.0.1:8787 mudhorn@<vps-ip>    # then browse to 127.0.0.1:8787
+```
+
+What you should **not** do is reach for a public hostname to avoid installing
+something. See below.
 
 **Do not put the dashboard on a public URL.** It renders account equity, open
 positions and realised P&L, and it has no login *because* it binds to
