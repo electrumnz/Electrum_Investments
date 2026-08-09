@@ -149,3 +149,20 @@ def test_reset_session_clears_kill_switch(wired_session):
     assert result["reset"] is True
     assert result["kill_switch_tripped"] is False
     assert mcp_server.place_order(**_good_args())["placed"] is True
+
+
+def test_risk_status_reports_complete_when_journal_matches():
+    assert mcp_server.get_risk_status()["open_risk_is_complete"] is True
+
+
+def test_risk_status_flags_untracked_positions(wired_session):
+    """A position the journal never saw makes reported open risk understated."""
+    wired_session.broker.place_order(
+        mcp_server._build_proposal(
+            "SPY", "buy", 3, 580.0, 575.0, 590.0, "Opened outside the journal."
+        )
+    )
+    status = mcp_server.get_risk_status()
+    assert status["open_risk_is_complete"] is False
+    assert status["untracked_positions"] == ["SPY"]
+    assert "higher than reported" in status["open_risk_warning"]

@@ -22,8 +22,10 @@ from .config import Env, LiveTradingRefused, Rules
 from .context import build_market_context, fetch_market_ticks
 from .data.calendar import EmptyCalendar
 from .data.news import EmptyNews
+from .journal import Journal
 from .models import Decision
 from .options import alerts_for_positions
+from .reconcile import apply_journal_state, reconcile, record_fill
 from .risk import RiskGate
 
 log = structlog.get_logger()
@@ -106,8 +108,13 @@ def cmd_loop(
     news = EmptyNews()
     calendar = EmptyCalendar()
 
+    journal = Journal()
     account = broker.get_account()
-    risk = RiskGate(rules, equity_at_session_start=account.equity_usd)
+    risk = RiskGate(
+        rules,
+        equity_at_session_start=account.equity_usd,
+        execution_mode=env.execution_mode,
+    )
 
     audit.record_event(
         "loop_start",
@@ -122,6 +129,13 @@ def cmd_loop(
             activity = broker.get_activity()
             ticks = fetch_market_ticks(broker, rules.allowed_symbols)
             news_windows = calendar.upcoming_windows(lookahead_minutes=60)
+
+            # Bring the journal in step before anything is evaluated: this is
+            # what populates open risk and advances the loss streak, so the
+            # total-risk cap and the stand-down both depend on it having run.
+            recon = reconcile(journal, broker, rules, account=account)
+            account = apply_journal_state(account, journal)
+            stand_down_state = journal.get_stand_down()
 
             # Checked every cycle, before anything else. An option expiry is the
             # one thing here that resolves itself automatically and irreversibly
@@ -168,6 +182,7 @@ def cmd_loop(
                     tick=tick,
                     activity=activity,
                     news_windows=news_windows,
+                    stand_down=stand_down_state,
                 )
                 verdicts.append(verdict)
                 log.info(
@@ -182,13 +197,25 @@ def cmd_loop(
                 if verdict.approved and execute:
                     result = broker.place_order(proposal)
                     executed.append(result)
+                    trade_id = record_fill(
+                        journal,
+                        proposal,
+                        result,
+                        execution_mode=env.execution_mode,
+                    )
                     log.info(
                         "order_submitted",
                         symbol=proposal.symbol,
                         accepted=result.accepted,
                         order_id=result.order_id,
+                        trade_id=trade_id,
                         error=result.error,
                     )
+                    # A new position changes open risk, so later proposals in
+                    # this same cycle are gated against the updated figure
+                    # rather than a stale one.
+                    if trade_id is not None:
+                        account = apply_journal_state(account, journal)
 
             audit.record(
                 Decision(
@@ -202,6 +229,18 @@ def cmd_loop(
                     estimated_cost_usd=usage.estimated_cost_usd,
                     notes=decision.market_assessment,
                 )
+            )
+            audit.record_event(
+                "reconcile",
+                {
+                    "opened": recon.opened,
+                    "closed": recon.closed,
+                    "excursions_updated": recon.excursions_updated,
+                    "estimated_exits": recon.estimated_exits,
+                    "untracked_positions": recon.untracked_positions,
+                    "risk_understated": recon.risk_is_understated,
+                    "open_risk_usd": round(account.open_risk_usd, 2),
+                },
             )
             time.sleep(env.decision_interval_seconds)
     except KeyboardInterrupt:

@@ -261,6 +261,28 @@ def close_position(symbol: str) -> dict[str, Any]:
     }
 
 
+def _untracked_position_warning(account: AccountSnapshot) -> dict[str, Any]:
+    """Flag held positions the journal has no record of.
+
+    Their planned stop is unknowable, so their risk cannot be counted and the
+    reported open risk is lower than what is actually at risk. A cap running
+    blind should say so rather than return a confident wrong number.
+    """
+    journalled = {t.symbol for t in _session.journal.open_trades()}
+    untracked = sorted(p.symbol for p in account.open_positions if p.symbol not in journalled)
+    if not untracked:
+        return {"open_risk_is_complete": True}
+    return {
+        "open_risk_is_complete": False,
+        "untracked_positions": untracked,
+        "open_risk_warning": (
+            f"{len(untracked)} held position(s) have no journal entry, so their "
+            f"planned stop is unknown and their risk is NOT included above. "
+            f"Actual open risk is higher than reported."
+        ),
+    }
+
+
 @server.tool()
 def get_risk_status() -> dict[str, Any]:
     """Show current account state against every limit in config/rules.yaml.
@@ -291,6 +313,7 @@ def get_risk_status() -> dict[str, Any]:
             account.open_risk_usd / account.equity_usd * 100 if account.equity_usd else 0.0,
             2,
         ),
+        **_untracked_position_warning(account),
         "limits": {
             "min_equity_floor_usd": acct.min_equity_floor_usd,
             "max_risk_per_trade_pct": acct.max_risk_per_trade_pct,
