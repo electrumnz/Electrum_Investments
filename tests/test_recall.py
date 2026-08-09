@@ -23,7 +23,15 @@ from bot.claude_client import CallUsage, ClaudeDecision
 from bot.config import Env, Rules, load_rules
 from bot.context import build_market_context
 from bot.journal import Journal
-from bot.models import AccountSnapshot, Decision, Stance, SymbolAssessment
+from bot.models import (
+    AccountSnapshot,
+    Decision,
+    Direction,
+    OrderProposal,
+    RiskVerdict,
+    Stance,
+    SymbolAssessment,
+)
 
 ACCOUNT = AccountSnapshot(
     equity_usd=100_000.0, cash_usd=100_000.0, buying_power_usd=100_000.0
@@ -101,6 +109,56 @@ def test_the_section_sits_after_the_figures_it_must_be_checked_against():
     assert context.index("## Indicators") < context.index("## What you said last cycle")
     assert context.index("## Intraday") < context.index("## What you said last cycle")
     assert context.index("## What you said last cycle") < context.index("## Recent headlines")
+
+
+# -------------------------------------------------------- the gate's answer
+
+
+OVERSIZED = OrderProposal(
+    symbol="AAPL",
+    direction=Direction.BUY,
+    qty=87,
+    limit_price=232.50,
+    stop_loss_price=219.50,
+    take_profit_price=250.00,
+    rationale="Deliberately 13% over the per-trade cap, as observed live.",
+)
+REFUSED = RiskVerdict.reject(
+    "risk 1,131.00 exceeds the per-trade cap 1,000.00 (1.00% of equity)"
+)
+
+
+def test_a_rejection_is_quoted_back_with_its_reason():
+    """Observed live: 87 AAPL, 13% over the cap. Not wildly wrong, which is the danger.
+
+    Without this the model sizes the same way every cycle forever, because
+    nothing it can see ever tells it the last attempt was refused.
+    """
+    context = _context(previous_verdicts=[(OVERSIZED, REFUSED)])
+
+    assert "REJECTED: buy 87 AAPL" in context
+    assert "exceeds the per-trade cap" in context
+
+
+def test_the_model_is_told_the_gate_cannot_be_argued_with():
+    context = _context(previous_verdicts=[(OVERSIZED, REFUSED)])
+
+    assert "deterministic code, not a reader you can persuade" in context
+    assert "do not re-send it unchanged" in context
+
+
+def test_an_approval_is_shown_too_not_only_a_refusal():
+    """One-sided feedback would read as "the gate only ever says no"."""
+    context = _context(previous_verdicts=[(OVERSIZED, RiskVerdict.approve())])
+
+    assert "APPROVED: buy 87 AAPL" in context
+
+
+def test_the_section_is_absent_when_nothing_was_proposed():
+    """Most cycles propose nothing, and a heading over an empty list is noise."""
+    context = _context(previous_assessments=[WATCHING])
+
+    assert "What the risk gate did" not in context
 
 
 # ------------------------------------------------------------------ the loop

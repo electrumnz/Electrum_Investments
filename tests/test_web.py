@@ -258,6 +258,45 @@ def test_settings_shows_the_limits_without_offering_to_change_them(client):
         assert control not in body.lower(), f"settings page carries a {control}"
 
 
+def test_a_breakdown_row_carries_the_same_hedge_as_the_headline():
+    """A three-trade row showing 67% reads as a result. The headline says noise.
+
+    Two figures from the same module disagreeing about how far they can be
+    trusted is the sma_200-over-40-bars error moved into a table.
+    """
+    from datetime import UTC, datetime, timedelta
+
+    from bot.metrics import build_report
+    from bot.models import Direction, Trade
+    from bot.web.render import analytics_page
+
+    start = datetime(2026, 5, 4, 15, 0, tzinfo=UTC)
+    trades = [
+        Trade(
+            symbol="SPY",
+            strategy="trend_break",
+            direction=Direction.BUY,
+            qty=10,
+            entry_time=start + timedelta(minutes=i * 30),
+            entry_price=580.0,
+            planned_stop=575.0,
+            planned_target=600.0,
+            exit_time=start + timedelta(minutes=i * 30 + 20),
+            exit_price=585.0 if i < 2 else 574.0,
+            realised_pnl_usd=50.0 if i < 2 else -60.0,
+        )
+        for i in range(3)
+    ]
+
+    body = analytics_page(build_report(trades))
+
+    assert "trend_break" in body
+    assert "Reading" in body
+    # Three trades is well under THIN_SAMPLE_THRESHOLD, so the row must say so
+    # in the same words the headline uses.
+    assert "only 3 trades so treat as noise" in body
+
+
 def test_settings_shows_the_loop_controls_and_marks_them_as_not_limits(client):
     """A reader must not mistake a cost control for a risk rule."""
     body = client.get("/settings").text

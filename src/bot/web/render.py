@@ -247,6 +247,7 @@ button.btn:disabled{opacity:.5;cursor:not-allowed}
 .kv dd{margin:0;font-family:var(--mono);font-variant-numeric:tabular-nums}
 .kv dd .why{display:block;font-family:var(--sans);font-size:.8125rem;
   color:var(--pewter);margin-top:.1rem}
+td.thin{color:var(--pewter);font-style:italic}
 .source{margin-top:.875rem;font-size:.75rem;color:var(--pewter);
   border-top:1px solid var(--slate);padding-top:.6rem}
 .source code{font-family:var(--mono);color:var(--bone)}
@@ -1139,18 +1140,27 @@ def analytics_page(report: JournalReport) -> str:
     ):
         if not table:
             continue
+        # The reading column carries `PerformanceSummary.health`, which hedges
+        # itself below the thin-sample threshold. Without it a three-trade row
+        # showing 67% and +$400 reads as a result, while the headline above —
+        # computed from the same code — says the sample is noise. Two figures
+        # from one module disagreeing about how much they can be trusted is the
+        # sma_200-over-40-bars error in a table.
         rows = "".join(
             f'<tr class="data"><td data-l="Group"><b>{_e(name)}</b></td>'
             f'<td data-l="Trades" class="r num">{g.trade_count}</td>'
             f'<td data-l="Win rate" class="r num">{g.win_rate:.0%}</td>'
             f'<td data-l="Net" class="r num {_cls(g.total_pnl_usd)}">'
-            f"{_money(g.total_pnl_usd, sign=True)}</td></tr>"
+            f"{_money(g.total_pnl_usd, sign=True)}</td>"
+            f'<td data-l="Reading"{" class=thin" if g.sample_is_thin else ""}>'
+            f"{_e(g.health)}</td></tr>"
             for name, g in table.items()
         )
         body += (
             f'<section class="block"><h2>{_e(title)}</h2>'
             '<div class="scroll"><table><thead><tr><th>Group</th>'
             "<th class=r>Trades</th><th class=r>Win rate</th><th class=r>Net</th>"
+            "<th>Reading</th>"
             f"</tr></thead><tbody>{rows}</tbody></table></div></section>"
         )
     return body

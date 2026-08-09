@@ -33,7 +33,13 @@ from .data.xfeed import XFeed
 from .indicators import summarise as summarise_indicators
 from .intraday import summarise as summarise_intraday
 from .journal import Journal
-from .models import Decision, MarketInputs, SymbolAssessment
+from .models import (
+    Decision,
+    MarketInputs,
+    OrderProposal,
+    RiskVerdict,
+    SymbolAssessment,
+)
 from .options import alerts_for_positions
 from .reconcile import apply_journal_state, reconcile, record_fill
 from .risk import RiskGate
@@ -211,11 +217,21 @@ def cmd_loop(
     # truth. A failure here costs the recall and nothing else.
     previous_assessments: list[SymbolAssessment] = []
     previous_at: datetime | None = None
+    previous_verdicts: list[tuple[OrderProposal, RiskVerdict]] = []
     try:
         recent = audit.read(limit=1, days=4).decisions
         if recent:
             previous_assessments = list(recent[0].decision.assessments)
             previous_at = recent[0].timestamp
+            # Zipped because the two lists are written in proposal order and a
+            # RiskVerdict carries reasons but not the symbol they belong to.
+            previous_verdicts = list(
+                zip(
+                    recent[0].decision.proposals,
+                    recent[0].decision.verdicts,
+                    strict=False,
+                )
+            )
             log.info(
                 "recalled_previous_assessments",
                 count=len(previous_assessments),
@@ -310,6 +326,7 @@ def cmd_loop(
                 symbols_without_intraday=no_intraday,
                 previous_assessments=previous_assessments,
                 previous_at=previous_at,
+                previous_verdicts=previous_verdicts,
                 social_posts=posts,
                 social_degraded=social_degraded,
             )
@@ -440,6 +457,7 @@ def cmd_loop(
             # Monday would start from nothing.
             previous_assessments = list(decision.assessments)
             previous_at = datetime.now(UTC)
+            previous_verdicts = list(zip(decision.proposals, verdicts, strict=False))
 
             audit.record_event(
                 "reconcile",

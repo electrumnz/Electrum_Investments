@@ -12,7 +12,14 @@ from .indicators import render as render_indicators
 from .intraday import IntradayView
 from .intraday import compute as compute_intraday
 from .intraday import render as render_intraday
-from .models import AccountSnapshot, SymbolAssessment, Tick, TradingActivity
+from .models import (
+    AccountSnapshot,
+    OrderProposal,
+    RiskVerdict,
+    SymbolAssessment,
+    Tick,
+    TradingActivity,
+)
 from .options import ExpiryAlert, render_alerts
 from .risk import NewsWindow
 
@@ -33,6 +40,7 @@ def build_market_context(
     symbols_without_intraday: list[str] | None = None,
     previous_assessments: list[SymbolAssessment] | None = None,
     previous_at: datetime | None = None,
+    previous_verdicts: list[tuple[OrderProposal, RiskVerdict]] | None = None,
     social_posts: list[str] | None = None,
     social_degraded: bool = False,
 ) -> str:
@@ -181,6 +189,39 @@ def build_market_context(
             "longer justify is worse than passing."
         )
     lines.append("")
+
+    # The gate's answer to what you proposed last time.
+    #
+    # Deliberately separate from the P&L question, and safe in a way that is
+    # not. A rejection is a deterministic fact about a rule, not an inference
+    # from a small sample: "risk 1,131.00 exceeds the per-trade cap 1,000.00"
+    # is true regardless of how the trade would have gone, and it will be true
+    # again next cycle for the same proposal. Feeding it back cannot overfit to
+    # noise, because there is no noise in it.
+    #
+    # Observed live and the reason this exists: the model proposed 87 AAPL with
+    # $1,131 of risk against a $1,000 cap — 13% over, not wildly wrong, which is
+    # the dangerous kind — and with no feedback it would size the same way again
+    # every cycle forever.
+    if previous_verdicts:
+        lines.append("## What the risk gate did with your last proposals")
+        for proposal, verdict in previous_verdicts:
+            outcome = "APPROVED" if verdict.approved else "REJECTED"
+            lines.append(
+                f"- {outcome}: {proposal.direction.value} {proposal.qty:g} "
+                f"{proposal.symbol} @ {proposal.limit_price:,.4f}, "
+                f"stop {proposal.stop_loss_price:,.4f}"
+            )
+            for reason in verdict.reasons:
+                lines.append(f"    - {reason}")
+        lines.append(
+            "The gate is deterministic code, not a reader you can persuade. A "
+            "rejection above will happen again, identically, for the same "
+            "proposal. If you still want the trade, fix the specific defect "
+            "named — size down to fit the cap, move the stop, wait for the "
+            "session — and do not re-send it unchanged or argue with the reason."
+        )
+        lines.append("")
 
     # Ahead of the headlines, deliberately. These accounts move a price before
     # the wire story exists, so by the time a headline carries it the gap has

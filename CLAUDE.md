@@ -316,6 +316,31 @@ The prompt is explicit that a trigger the model wrote is **not evidence**.
 Restating one it can no longer justify is worse than passing, because it reads
 as conviction.
 
+**The gate's verdicts go back too, and they are a different kind of fact.** The
+previous cycle's proposals render with what the gate did and why. This is safe
+in a way a P&L history is not: "risk 1,131.00 exceeds the per-trade cap
+1,000.00" is deterministic, true regardless of how the trade would have gone,
+and true again next cycle for the same proposal. There is no sample to overfit
+to. Observed live and the reason it exists — the model proposed 87 AAPL at 13%
+over the cap, which is the dangerous kind of wrong, and with nothing fed back it
+would size that way every cycle forever. The prompt says the gate is code and
+cannot be argued with: fix the named defect or drop the trade.
+
+**What is deliberately NOT fed back is the track record.** Win rate, profit
+factor, expectancy and R exist in `metrics.py` and reach the operator through
+the Analytics page. They do not reach the model, and the reason is sample size:
+forty trades is noise, a model shown three losses will confidently change
+approach, and that is overfitting to randomness — the Alpha Arena failure
+exactly. `PerformanceSummary.sample_is_thin` (20 trades) already encodes the
+threshold for a human reader. Revisit when a *per-strategy* group clears it
+several times over, and even then hand over a bounded summary with the sample
+count attached, never a narrative.
+
+**So the system learns and the model does not, on purpose.** The loop is
+journal → `metrics.py` → Analytics → the operator changes `config/rules.yaml`
+or `strategy.py` in a commit. That is memory held in SQLite and in git, moving
+at human speed, with an audit trail. For money that is the right place for it.
+
 ### A feed failure must degrade the cycle, never end the loop
 
 `fetch_market_ticks` and `fetch_indicators` in `context.py` both catch
@@ -681,7 +706,7 @@ reference/              Third-party projects we borrow from. See reference/STATU
 ## Running it
 
 ```sh
-.venv/bin/python -m pytest              # full suite (412 tests)
+.venv/bin/python -m pytest              # full suite (417 tests)
 electrum-bot smoketest --mock           # no credentials needed
 electrum-bot smoketest                  # needs Alpaca paper keys
 electrum-bot loop                       # proposes and vets; places nothing
