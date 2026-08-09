@@ -24,11 +24,15 @@ rejection is final. If a rejection looks wrong, the fix is to change
   MCP server, which runs the gate first.
 - Never add an order path that skips `RiskGate.evaluate`.
 - **Do not install [`alpacahq/cli`](https://github.com/alpacahq/cli)** on the box
-  that runs the bot, however useful `alpaca account` looks. It submits orders,
-  and Hermes cannot drop its `terminal` toolset, so a shell-reachable order
-  binary is a live bypass of all four of the operator's rules sitting one command
-  away from the agent. Everything it offers read-only is already covered by the
-  dashboard, `get_risk_status` and `electrum-bot smoketest`.
+  that runs the bot, however useful `alpaca account` looks. It submits orders, so
+  a shell-reachable order binary is a live bypass of all four of the operator's
+  rules sitting one command away from anything with a prompt. Everything it
+  offers read-only is already covered by the dashboard, `get_risk_status` and
+  `electrum-bot smoketest`.
+  Hermes' `terminal` toolset **is** dropped now (see below), which weakens the
+  original argument for this rule without retiring it: a dropped toolset is a
+  line in a YAML file and it fails silently, whereas a binary that is not
+  installed cannot be reached by a bad merge.
 - Never widen a limit in `config/rules.yaml` to make a specific trade fit. Limits
   change deliberately, in their own commit, with a reason.
 - Never set `ALPACA_PAPER_TRADE=false`. The code refuses to start, twice, on
@@ -135,6 +139,54 @@ Miss it and the cap silently has nothing to count. This was a real bug, fixed in
 `14b88c8`. A held position with no journal entry has an unknowable stop, so its
 risk is reported as **missing** rather than guessed at.
 
+### A feed failure must degrade the cycle, never end the loop
+
+`fetch_market_ticks` and `fetch_indicators` in `context.py` both catch
+`Exception`, deliberately. They run a network call per symbol per cycle, and the
+Alpaca SDK raises `APIError`, `httpx` timeouts and JSON decode failures, none of
+which is a `KeyError` or a `RuntimeError`. A narrow catch lets those through and
+**ends the decision loop**: the journal stops being reconciled and open
+positions stop being watched, with nothing on screen to say so.
+
+A failed symbol comes back as missing history, which is already the honest
+description of what the model has for it, and gets named in the prompt and in
+`symbols_without_history`. Same reasoning as `data/_http.fetch_json`: there is
+no exception from an HTTP client worth crashing a trading loop over, and an
+unanticipated one is exactly the case where crashing would be worst.
+
+**There is no cache on the bars, on purpose.** The Marketaux and Finnhub caches
+are rate-limit requirements: those free tiers allow 100 requests a day against a
+loop that wakes 96 times. Alpaca's market-data limit is per minute, not per day,
+and six symbols every fifteen minutes is nowhere near it. A TTL here would be an
+optimisation dressed as a rate-limit control, and it would make the indicators
+lag the quote inside the same context block for no benefit.
+
+### The journal is backed up with `.backup`, and the busy timeout is the point
+
+`data/journal.db` is the only irreplaceable file on the droplet.
+`deploy/backup-journal.sh` snapshots it hourly under `mudhorn-backup.timer`.
+
+**Never change it to `cp`.** The bot may be part-way through a write, and SQLite
+keeps a WAL and an shm alongside the database. A copy taken between two of those
+writes opens fine and reports corruption later, at whatever moment something
+reads the wrong page.
+
+Two things in that script look like defensive padding and are not:
+
+- **The busy timeout on the `sqlite3` connection.** Without it `.backup` returns
+  "database is locked" the instant the bot is mid-write, so the snapshots that
+  fail are exactly the ones taken during the activity worth keeping. It fails
+  closed, so the symptom is a missing backup rather than a bad one, and nothing
+  notices. This was found by running the script against a journal under a
+  continuous writer, not by reading it.
+- **The integrity check on every snapshot before it is kept.** It is written to a
+  temporary name, opened, checked, and discarded unless it comes back `ok`. A
+  backup nobody has opened is a hope.
+
+A backup on the same droplet survives a bad restore, not a dead droplet. Copying
+`backups/daily` off the box is deliberately not automated, because it needs a
+destination and a credential that should not live on the trading box.
+
 ### The two data feeds are not equally important
 
 `src/bot/data/` holds two adapters and they fail in different ways.
@@ -181,35 +233,117 @@ patterns anchored, and do not delete that test.**
 The general form is worth carrying: a green local suite says nothing about what
 is actually in the repository.
 
-### The strategies describe data the bot cannot see
+### The indicators are computed in Python, and the model is handed the answers
 
 `src/bot/strategy.py` defines mean reversion, trend break, news reaction and
 momentum properly — thesis, entry conditions, invalidation, exit. None has a
 demonstrated edge; they are scaffolding so the model has something falsifiable
 to work against instead of "trade well".
 
-**None of them is currently evaluable.** `Broker.get_tick` returns one bid/ask,
-so the context carries a single live quote per symbol and no history at all: no
-bars, no moving average, no ATR, no volume, no levels.
+**`Broker.get_daily_bars` now supplies history and `src/bot/indicators.py`
+computes the figures.** The averages, the Wilder ATR, the volume average and the
+confirmed swing levels are all arithmetic done in code, and `context.py` renders
+the results.
 
-That is why every strategy carries a `requires` list which renders into the
-prompt as an explicit "you do not have this, do not estimate it, propose
-nothing". A model asked to apply a 200-day moving-average filter it cannot see
-will not decline — it will estimate one, phrase it confidently, and the risk gate
-will approve it, because the gate checks size and stops rather than whether the
-reasoning was invented. That is the Alpha Arena failure arriving through the data
-layer rather than the model.
+**Do not replace that with bars in the prompt.** Handing the model a series and
+asking it to work out a 200-day average reintroduces the exact failure this
+guards against: it will produce a number, state it confidently, and the risk gate
+will approve the trade, because the gate checks size and stops rather than
+whether the reasoning was invented. That is the Alpha Arena failure arriving
+through the data layer. The model reads figures; it does not derive them.
 
-**Closing that gap is the highest-value work left in this repo:** historical bars
-on the `Broker` protocol (Alpaca supplies them free), indicators computed in
-Python rather than by the model, both rendered into `context.py`. Until then the
-correct output is nothing, and the prompt says so.
+**Missing stays missing.** Every field is `None` when the bars cannot support it,
+and `render` prints it as `unavailable` and names it. `sma_200` over 40 bars is a
+40-day average wearing the wrong label, and it is worse than nothing because it
+gets believed. `fetch_indicators` returns the symbols that produced nothing as a
+second value for the same reason, and the loop logs them as
+`symbols_without_history` in every `cycle_complete` line, alongside
+`calendar_degraded`. A symbol dropped silently is one the model sees a live quote
+for with no history and no warning.
+
+**Two strategies are still not evaluable, and must keep saying so.** Trend break
+needs intraday bars, because on a daily bar a close through a level and a wick
+that closed back inside are the same row, and telling those apart is the whole
+strategy. News reaction needs the same, plus a spread history. Both keep a
+`requires` naming exactly what is absent. Trimming those to nothing because the
+repo now has *some* history would remove the warning and leave the gap, which is
+worse than never having added bars at all.
+
+The remaining work is `get_intraday_bars` on the `Broker` protocol, which Alpaca
+also supplies free, and a spread history.
+
+### Hermes ships a large surface, and both ways of trimming it fail quietly
+
+`deploy/hermes-config.yaml` disables 25 toolsets and all 77 bundled skills.
+Verified against hermes-agent `934546f` by reading the resolver and running it.
+
+**`terminal` CAN be dropped.** This reverses the earlier note. `terminal` is a
+plain toolset resolving to `["terminal", "process"]`, and
+`model_tools._compute_tool_definitions` applies `disabled_toolsets` as a final
+subtraction **regardless of what `enabled_toolsets` selected**, so the tools go
+even when a `hermes-*` bundle pulled them in. Measured: 24 tools with
+`hermes-cli` enabled, 22 with `terminal` also disabled. The old finding was
+about `platform_toolsets.acp`, a different key, which still stands for ACP mode.
+
+Three traps, all of which fail without an error message:
+
+- **`/tools` and the startup banner still list `terminal` after it is dropped.**
+  The four `get_tool_definitions` calls in `cli.py` pass `enabled_toolsets` and
+  omit `disabled_toolsets`. They are display only and never assign to
+  `agent.tools`; the real list comes from `agent/agent_init.py`, which does pass
+  it. Verify by **asking the agent to run `ls`**, never by reading `/tools`.
+- **`skills.disabled` takes skill NAMES, not categories or directories.** The
+  filter is `if name in disabled` against the `name:` in each `SKILL.md`. A
+  category name matches nothing and is discarded silently. Four of the shipped
+  skills are not named after their directory at all: `mlops/evaluation` and
+  `mlops/inference` are grouping folders, so the names are
+  `evaluating-llms-harness`, `weights-and-biases`, `llama-cpp` and
+  `serving-llms-vllm`. Writing `evaluation` there does nothing and says nothing.
+- **A duplicate `agent:` key is not a merge.** It is invalid YAML, and Hermes
+  comes up on defaults rather than complaining. Merge into the existing block.
+
+**None of this replaces the user split or the sudoers rule.** A dropped toolset
+is a line in a YAML file, and every failure mode above is silent: the agent
+comes back holding a shell and nothing says so. Unix permissions do not fail
+that way. Config trimming is the second lock, never the first.
+
+The denylist admits whatever the next Hermes release adds. `toolsets:` is an
+allowlist and would not, and MCP server names are valid entries there, but it is
+deliberately left commented out because it could not be verified end to end from
+outside the box, and getting it wrong yields an agent with almost no tools.
 
 ### One directory is published. The rest must never be
 
 `brand/` is deployed publicly at **https://mudhorn-capital.vercel.app** (Vercel,
 Root Directory `brand`, so every push redeploys). It is static, and it reads no
 journal, no broker and no credential.
+
+It is now a six-page app — sign-in shell, overview, trades, analytics, rules,
+about — rather than a single identity page, and **that made the rule matter more
+rather than less.** Everything it renders comes from `brand/assets/demo-data.js`,
+a committed fixture generated by `scripts/generate_demo_data.py`. There is no
+`fetch` anywhere in it and no API to point one at.
+
+Three details are load-bearing and should not be tidied away:
+
+- **The demo banner is plain HTML in all six files**, not something `app.js`
+  writes. A label saying the figures are invented must not depend on a script
+  having run.
+- **The sign-in page gates nothing.** It is prefilled, accepts anything, and
+  every page is reachable without it, which the page itself says. A working gate
+  would imply the site holds something worth protecting. Making it real is the
+  prerequisite for showing live data, never a follow-up to it.
+- **The generator asserts its own output** before writing: no trade over the 1%
+  cap, open risk under 2%, a stop on every trade, and the limits echoed into the
+  JSON still matching `config/rules.yaml`. A demo showing a 1.4% risk against a
+  1% cap teaches the reader the wrong thing about what the gate does.
+
+`config/rules.yaml` is the single exception, copied verbatim onto the Rules page.
+It is limits rather than secrets and is already public.
+
+If asked to point the public site at the real journal: that is a separate and
+much larger project — real authentication, an API off the droplet, TLS, a threat
+model — and not a matter of swapping the data source. Say so.
 
 **That is not a precedent for `src/bot/web/`.** The dashboard renders account
 equity, open positions and realised P&L, and it has no login *because* it binds
@@ -257,13 +391,16 @@ src/bot/
   journal.py            SQLite trade store + persistent stand-down state.
   stand_down.py         Consecutive-loss breaker: when to trigger, when to escalate.
   options.py            OCC parsing and expiry safety. Protective only.
-  broker.py             Broker Protocol + AlpacaBroker + MockBroker.
+  broker.py             Broker Protocol + AlpacaBroker + MockBroker. Daily bars live here.
+  indicators.py         Averages, ATR, volume ratio, swing levels. Pure functions over
+                        bars. Computed in Python so the model never derives them.
   mcp_server.py         MCP tools: check_order, place_order, get_risk_status, ...
   models.py             Domain models. Quantities are shares/coin units, never "lots".
   config.py             Typed env + rules loader. Validators reject incoherent limits.
   claude_client.py      Anthropic SDK wrapper (1h prompt cache, structured output).
   context.py            Renders market state for Claude.
   strategy.py           Base strategies. Placeholders with a shape, not an edge.
+                        `requires` names what each one still cannot see.
   data/                 External feeds. marketaux.py = headlines (context only);
                         finnhub.py = earnings calendar (feeds the blackout gate).
   audit.py              Append-only JSONL decision log.
@@ -275,6 +412,8 @@ src/bot/
 deploy/                 VPS provisioning: bootstrap.sh + systemd units. Runs the
                         loop WITHOUT --execute; src/ and config/ stay root-owned
                         so the service account cannot edit its own limits.
+                        backup-journal.sh + mudhorn-backup.timer snapshot the
+                        journal hourly with sqlite3 .backup, never cp.
 audit/                  Append-only JSONL. Gitignored.
 data/journal.db         SQLite journal. Gitignored.
 reference/              Third-party projects we borrow from. See reference/STATUS.md.
@@ -297,7 +436,7 @@ reference/              Third-party projects we borrow from. See reference/STATU
 ## Running it
 
 ```sh
-.venv/bin/python -m pytest              # full suite (225 tests)
+.venv/bin/python -m pytest              # full suite (275 tests)
 electrum-bot smoketest --mock           # no credentials needed
 electrum-bot smoketest                  # needs Alpaca paper keys
 electrum-bot loop                       # proposes and vets; places nothing

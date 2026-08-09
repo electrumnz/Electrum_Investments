@@ -1,0 +1,40 @@
+[Unit]
+Description=Snapshot the Mudhorn Capital trade journal
+Documentation=https://github.com/electrumnz/Electrum_Investments/blob/main/deploy/README.md
+
+# Before the bot has ever run there is no journal, and a timer that failed
+# hourly on a fresh box would train everyone to ignore it. systemd skips a unit
+# whose condition is unmet and records it as skipped rather than failed, which
+# is visible in `systemctl status` without being an alert.
+#
+# Once the file exists, a missing database IS an error and the script exits
+# non-zero, because at that point it means the journal has gone.
+ConditionPathExists=/opt/mudhorn/data/journal.db
+
+[Service]
+Type=oneshot
+User=mudhorn
+Group=mudhorn
+WorkingDirectory=/opt/mudhorn
+ExecStart=/opt/mudhorn/deploy/backup-journal.sh
+
+# The source is only read, but SQLite still writes the WAL and shm alongside the
+# database to take its read lock, so data/ has to be writable. Same reason
+# mudhorn-web.service carries it.
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateNetwork=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+ReadWritePaths=/opt/mudhorn/data /opt/mudhorn/backups
+
+# Nothing here touches the network. Saying so means a compromised sqlite3 or
+# gzip on this box cannot post the journal anywhere.
+RestrictAddressFamilies=AF_UNIX
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=mudhorn-backup

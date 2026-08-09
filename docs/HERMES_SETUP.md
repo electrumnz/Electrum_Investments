@@ -129,9 +129,19 @@ MCP server, and already holds the credentials.
 
 ### 1. The user question, which is the whole security design
 
-**Hermes cannot drop its `terminal` toolset.** Whatever else is configured, the
-agent can run shell commands. So the question is not "can it be trusted with a
-shell" but "what does a shell on that box actually get it".
+**Hermes CAN drop its `terminal` toolset, and `deploy/hermes-config.yaml` now
+does.** That corrects an earlier note here; see section 6b for how it was
+verified. It does not change the design below one bit.
+
+The user split is what makes the shell uninteresting rather than merely gated,
+and it holds whether or not a toolset is dropped. A config key can be lost to a
+bad merge, a duplicate `agent:` block, or an upgrade that renames it, and the
+failure mode is silent: Hermes starts, the agent works, and the shell is back.
+Unix permissions do not fail that way. So the question below is still the right
+one to answer, and the answer is still the load-bearing part.
+
+So the question is not "can it be trusted with a shell" but "what does a shell
+on that box actually get it".
 
 Run it as `root` and the answer is everything. Run it as `mudhorn` — the bot's
 own service account — and the answer is the broker credentials in `.env` and
@@ -279,28 +289,48 @@ bombs, `mkfs` on mounted filesystems, `dd` to physical disks, piping untrusted
 URLs into a shell. Useful, but it protects the machine rather than the account,
 so it is not a substitute for the list above.
 
-### 6b. Better still, if it works: no terminal at all
+### 6b. Better still, and now confirmed: no terminal at all
 
-```yaml
-agent:
-  disabled_toolsets:
-    - web          # no web_search / web_extract
-    - terminal     # UNVERIFIED for terminal specifically — try it
-```
+A dropped toolset beats any number of deny rules, because a deny rule refuses a
+call the model can still make, and a dropped toolset never reaches the model at
+all. An approval prompt is something a person waves through after a bad day.
 
-For this use case the agent's whole job is answering questions about the bot
-through MCP tools. It plausibly needs no shell at all, and a dropped toolset
-beats any number of deny rules.
+**This is now verified rather than hoped for**, against hermes-agent `934546f`,
+by reading the resolver and by running it:
 
-The documented examples are `memory` and `web`; whether `terminal` can be
-dropped the same way was **not confirmed** when this was written — the earlier
-finding that it cannot be dropped was about `platform_toolsets.acp`, which is a
-different key. Try it, then verify by asking the agent to run something harmless
-and checking it has no tool to do it with.
+- `terminal` is a plain toolset resolving to exactly `["terminal", "process"]`.
+  It carries no `posture` flag and is not a `hermes-*` bundle, so the disable
+  path subtracts both tools outright.
+- `model_tools._compute_tool_definitions` applies `disabled_toolsets` as a
+  final subtraction step **regardless of what `enabled_toolsets` selected**, so
+  the tools go even when a platform bundle pulled them in. The docstring on
+  `get_tool_definitions` still says the old behaviour ("if enabled_toolsets is
+  None"); the code below it does not, and the code is what runs.
+- Measured: 24 tools with `hermes-cli` enabled, 22 with `terminal` also
+  disabled, and neither `terminal` nor `process` in the result.
 
-Keep the `hermes` user and the sudoers rule regardless. They hold whether or not
-the toolset can be dropped, and they are what makes the shell uninteresting
-rather than merely gated.
+The earlier "cannot be dropped" finding was about `platform_toolsets.acp`,
+which is a different key and still stands for ACP mode.
+
+`deploy/hermes-config.yaml` ships the full list. Two traps are worth carrying
+in your head:
+
+**`/tools` will still show terminal.** The four `get_tool_definitions` calls in
+`cli.py` pass `enabled_toolsets` and omit `disabled_toolsets`, so the banner,
+the status line and `/tools` all render the unfiltered catalogue. They are
+display only and never assign to `agent.tools`; the list the model receives
+comes from `agent/agent_init.py`, which does pass it. **Verify by asking the
+agent to run `ls` and confirming it has no tool for it**, never by reading
+`/tools`.
+
+**Never put a `hermes-*` bundle name in `disabled_toolsets`.** Those bundles
+are defined as the shared core tools plus platform extras, so Hermes
+deliberately subtracts only the non-core delta to avoid emptying the tool list.
+Bundle names belong in `toolsets:`.
+
+Keep the `hermes` user and the sudoers rule regardless. A config key can be
+lost to a bad merge or an upgrade, and it fails silently when it is. Unix
+permissions do not.
 
 ### 7. Run it as a service
 

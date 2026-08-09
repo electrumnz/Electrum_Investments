@@ -14,25 +14,29 @@ measure with `src/bot/metrics.py`, not as a reason to trust a proposal.
 
 ## The part that matters most
 
-**The bot cannot currently evaluate any of these.** `Broker.get_tick` returns a
-single bid/ask, so the market context carries one live quote per symbol and no
-history at all: no bars, no moving average, no RSI, no ATR, no trendline.
+`requires` is the list of things a strategy needs that the market context does
+not carry. It renders into the prompt as an explicit "you do not have this,
+do not estimate it, propose nothing", and it exists because a model asked to
+apply a moving-average filter it cannot see will not decline — it will estimate
+one, phrase the estimate confidently, and the risk gate will wave it through,
+because the gate checks size and stops rather than whether the reasoning was
+invented. That is the Alpha Arena failure mode arriving through the data layer.
 
-That gap is the whole reason `requires` exists on every strategy below and gets
-rendered into the prompt. A model asked to apply a moving-average filter it
-cannot see will not decline — it will estimate one, phrase the estimate
-confidently, and the risk gate will wave it through because the gate checks size
-and stops rather than whether the reasoning was invented. That is the Alpha
-Arena failure mode arriving through the data layer.
+**Two of the four are now evaluable.** `Broker.get_daily_bars` supplies daily
+history, `src/bot/indicators.py` computes the averages, the ATR, the volume
+average and the swing levels **in Python**, and `context.py` renders the answers.
+So mean reversion and momentum carry no `requires` any more: everything they
+name is measured and handed over.
 
-So until the context carries real history, these read as "here is the shape of
-the idea, and here is what you do not have" — and the correct output remains
-nothing.
+**Two are still not.** Trend break and news reaction both need intraday bars,
+and news reaction also needs a spread history to compare against. Neither is
+fetched, so both keep a `requires` naming exactly what is still absent. Trimming
+those lists to nothing because the file now has *some* history would be the
+worst outcome available: the warning would disappear while the gap stayed.
 
-**Closing that gap is the highest-value next task in this repo.** It needs
-historical bars on the `Broker` protocol (Alpaca supplies them free), the
-indicators computed in Python rather than by the model, and both rendered into
-`context.py`.
+The remaining work is `get_intraday_bars` on the `Broker` protocol, which Alpaca
+also supplies free, and a spread history to make "the spread has normalised"
+checkable.
 """
 
 from __future__ import annotations
@@ -63,10 +67,11 @@ class Strategy:
             lines.append(
                 "DATA YOU DO NOT HAVE: "
                 + "; ".join(self.requires)
-                + ". The market context carries one current quote per symbol and no "
-                "history. Do not estimate these values, do not reason as though you "
-                "can see them, and do not propose a trade whose justification depends "
-                "on them. Say that the data is missing and propose nothing."
+                + ". The market context carries daily bars and the indicators "
+                "computed from them, and nothing finer. Do not estimate the values "
+                "listed above, do not reason as though you can see them, and do not "
+                "propose a trade whose justification depends on them. Say that the "
+                "data is missing and propose nothing."
             )
         return "\n".join(lines)
 
@@ -90,11 +95,16 @@ MEAN_REVERSION = Strategy(
         "below entry, whichever is nearer"
     ),
     exit="the 20-day average, or roughly 3 ATR, whichever comes first",
-    requires=["a 20-day and 200-day moving average", "ATR", "recent swing lows", "volume"],
     notes=(
         "The trend filter is the load-bearing part and the one people drop first. "
         "Without it this is a strategy for buying things on their way to zero: the "
-        "cheapest-looking entry is a company in genuine trouble."
+        "cheapest-looking entry is a company in genuine trouble. "
+        "Every condition above is measured for you in the Indicators section of the "
+        "market context: the two averages, the ATR, the distance from the 20-day in "
+        "ATR, the volume against its average, and the most recent confirmed swing "
+        "low. Read those figures. Do not recompute them, and if one of them is "
+        "reported as unavailable for a symbol, that condition cannot be checked and "
+        "the trade is not there to take."
     ),
 )
 
@@ -122,11 +132,14 @@ TREND_BREAK = Strategy(
         "range that broke"
     ),
     requires=[
-        "intraday and daily bars",
-        "volume and its recent average",
-        "identified support and resistance levels",
+        "intraday bars, so a break can be told from a wick",
     ],
     notes=(
+        "Daily bars, volume against its average, the most recent confirmed swing high "
+        "and low, and the 60-session close range ARE supplied, in the Indicators "
+        "section. What is missing is the intraday detail: on a daily bar a close "
+        "through a level and a wick through it that closed back inside are the same "
+        "row, and telling those apart is the entire strategy. "
         "SPY is the vehicle for an S&P 500 view here. Alpaca does not offer futures, "
         "so ES and MES are unavailable without a second broker — see docs/HANDOFF.md. "
         "The failed break is the most common way to lose money on this: a level gives "
@@ -150,11 +163,14 @@ NEWS_REACTION = Strategy(
     invalidation="a return through the level established after the announcement",
     exit="a measured move, or the close of the session in which the news landed",
     requires=[
-        "an economic and earnings calendar with timestamps",
-        "intraday bars covering the announcement",
-        "historical spread for comparison",
+        "intraday bars covering the announcement and the half hour after it",
+        "a spread history to judge 'normalised' against",
     ],
     notes=(
+        "The earnings calendar IS available, through Finnhub, and it is what the "
+        "news blackout gate reads. The two missing pieces are both intraday: on a "
+        "daily bar the initial spike and the direction that survived it are one "
+        "number, and there is no spread history to say what normal looks like. "
         "This works WITH the news blackout in config/rules.yaml, not against it. "
         "The blackout refuses new positions for 15 minutes either side of a "
         "scheduled announcement, which forbids trading INTO the release — the part "
@@ -177,8 +193,10 @@ MOMENTUM = Strategy(
     ],
     invalidation="a close below the last higher low",
     exit="a trailing stop behind successive higher lows",
-    requires=["daily bars over the lookback", "volume and its recent average"],
     notes=(
+        "The 60-session close range, the volume ratio and the most recent confirmed "
+        "swing low are all in the Indicators section, so the new high, the "
+        "participation and the invalidation level are measured rather than guessed. "
         "Configured for the crypto sleeve, which is currently disabled. Momentum and "
         "mean reversion are opposite bets on the same observation, so running both on "
         "one instrument at once is how a book ends up flat and paying commission."

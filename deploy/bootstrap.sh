@@ -32,8 +32,11 @@ echo "==> Packages"
 apt-get update -qq
 # python3-venv is separate from python3 on Debian and Ubuntu, and its absence is
 # the single most common reason a first deploy fails.
+# sqlite3 is the CLI, not the Python module. deploy/backup-journal.sh needs it
+# for the online backup API, which is the only safe way to copy a database the
+# bot may be writing to.
 DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
-  python3 python3-venv python3-dev build-essential git curl ca-certificates
+  python3 python3-venv python3-dev build-essential git curl ca-certificates sqlite3
 
 PY_VERSION="$(python3 -c 'import sys; print("%d.%d" % sys.version_info[:2])')"
 echo "    python3 is $PY_VERSION"
@@ -57,7 +60,9 @@ else
 fi
 
 echo "==> Directories"
-install -d -o "$APP_USER" -g "$APP_USER" -m 750 "$APP_DIR/data" "$APP_DIR/audit"
+install -d -o "$APP_USER" -g "$APP_USER" -m 750 \
+  "$APP_DIR/data" "$APP_DIR/audit" \
+  "$APP_DIR/backups" "$APP_DIR/backups/hourly" "$APP_DIR/backups/daily"
 
 echo "==> Virtualenv"
 if [[ ! -x "$APP_DIR/.venv/bin/python" ]]; then
@@ -80,14 +85,24 @@ chmod 600 "$APP_DIR/.env"
 # The checkout itself stays root-owned so the service account cannot rewrite its
 # own code. Only the two paths that must be written at runtime are handed over.
 chown -R root:root "$APP_DIR/src" "$APP_DIR/config" "$APP_DIR/deploy"
-chown -R "$APP_USER:$APP_USER" "$APP_DIR/data" "$APP_DIR/audit"
+chown -R "$APP_USER:$APP_USER" "$APP_DIR/data" "$APP_DIR/audit" "$APP_DIR/backups"
 
 echo "==> systemd units"
 install -m 644 "$APP_DIR/deploy/systemd/mudhorn-bot.service" /etc/systemd/system/
 install -m 644 "$APP_DIR/deploy/systemd/mudhorn-web.service" /etc/systemd/system/
+install -m 644 "$APP_DIR/deploy/systemd/mudhorn-backup.service" /etc/systemd/system/
+install -m 644 "$APP_DIR/deploy/systemd/mudhorn-backup.timer" /etc/systemd/system/
+chmod 755 "$APP_DIR/deploy/backup-journal.sh"
 systemctl daemon-reload
 systemctl enable --quiet mudhorn-bot.service mudhorn-web.service
 echo "    enabled at boot, not started"
+
+# The timer IS started here, unlike the two services. It costs nothing while
+# there is no journal to snapshot, the unit skips cleanly until one exists, and
+# a backup that waits for somebody to remember to switch it on is the backup
+# that turns out not to have been running.
+systemctl enable --now --quiet mudhorn-backup.timer
+echo "    mudhorn-backup.timer started (hourly)"
 
 cat <<EOF
 

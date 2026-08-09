@@ -6,7 +6,12 @@
 # Check first that none of these top-level keys already exist, because a
 # duplicate key makes the whole file invalid YAML:
 #
-#     grep -n "^approvals:\|^mcp_servers:\|^agent:" ~/.hermes/config.yaml
+#     grep -n "^approvals:\|^mcp_servers:\|^agent:\|^skills:" ~/.hermes/config.yaml
+#
+# **If `agent:` already exists, merge the keys into it rather than appending a
+# second block.** Two `agent:` keys is not a merge, it is invalid YAML, and the
+# failure arrives as Hermes starting with default settings rather than as an
+# error anyone notices.
 #
 # Then confirm it still parses:
 #
@@ -77,18 +82,247 @@ mcp_servers:
     command: sudo
     args: ["-n", "-u", "mudhorn", "/opt/mudhorn/deploy/run-mcp.sh"]
 
-# Optional, and stronger than any deny rule if it works: the agent's whole job
-# here is answering questions through the MCP tools above, so it plausibly needs
-# no shell at all.
+# Stronger than any deny rule, because it removes the tool rather than
+# refusing the call. An approval rule is a prompt somebody can wave through
+# after a bad day; a tool that was never sent to the model cannot be called at
+# all.
 #
-# UNVERIFIED for `terminal` specifically. The documented examples are `memory`
-# and `web`, and the earlier "terminal cannot be dropped" finding was about
-# platform_toolsets.acp, which is a different key. Uncomment, restart, then ask
-# the agent to run `ls` and check it has no tool to do it with. If Hermes
-# misbehaves, comment it back out — the user split and the sudoers rule hold
-# either way.
+# **VERIFIED against hermes-agent `934546f`, by reading the resolver and by
+# running it.** `terminal` is a plain toolset resolving to exactly
+# `["terminal", "process"]`, and `model_tools._compute_tool_definitions`
+# applies `disabled_toolsets` as a final subtraction step regardless of what
+# was enabled, so the two tools disappear even when a `hermes-*` platform
+# bundle pulled them in. Measured: 24 tools with `hermes-cli` enabled, 22 with
+# `terminal` also disabled, and neither `terminal` nor `process` present.
 #
-# agent:
-#   disabled_toolsets:
-#     - terminal
-#     - web
+# This supersedes the older "Hermes cannot drop its terminal toolset" note.
+# That finding was about `platform_toolsets.acp`, which is a different key.
+#
+# Two things worth knowing before you conclude it has not worked:
+#
+#   1. `/tools` and the startup banner will STILL list terminal. Those four
+#      call sites in cli.py pass `enabled_toolsets` and omit
+#      `disabled_toolsets`, so they render the unfiltered catalogue. They are
+#      display only and never assign to `agent.tools`; the list the model
+#      actually receives comes from `agent/agent_init.py`, which does pass it.
+#      Verify by ASKING THE AGENT to run `ls` and confirming it has no tool to
+#      do it with, not by reading `/tools`.
+#   2. Do not put `hermes-*` bundle names in here. Those carry the shared core
+#      tools, and Hermes deliberately subtracts only their non-core delta to
+#      avoid emptying the tool list. Bundle names belong in `toolsets:`.
+agent:
+  disabled_toolsets:
+    # The one that matters. This box has a shell-reachable path to a brokerage
+    # account, and the agent's whole job is answering questions through the MCP
+    # tools below, so it needs no shell at all. Removes `terminal` and
+    # `process`.
+    - terminal
+
+    # Thirteen browser tools and a computer_use tool, on a headless droplet
+    # whose only reason to exist is a trading loop. Nothing here can succeed,
+    # and each one is a schema in the context window every single turn.
+    - browser
+    - computer_use
+    - desktop_ui
+
+    # File writes and patches. The checkout is root-owned so these would fail
+    # anyway, but failing is not the same as being absent: a tool that exists
+    # gets attempted, and the attempt is an approval prompt to wave through.
+    - file
+    - code_execution
+    - coding
+    - debugging
+
+    # Media generation. Expensive, irrelevant, and several carry their own API
+    # credentials.
+    - image_gen
+    - video_gen
+    - video
+    - bfl
+    - tts
+    - vision
+
+    # Other people's platforms and services. None is configured here.
+    - discord
+    - discord_admin
+    - spotify
+    - homeassistant
+    - feishu_doc
+    - feishu_drive
+    - yuanbao
+    - x_search
+    - kanban
+    - delegation
+
+    # Hermes can already schedule itself. On a box that trades money, a
+    # scheduled turn is one that runs with nobody watching, and
+    # `approvals.cron_mode: deny` above exists precisely because of that. This
+    # removes the ability to create one in the first place.
+    - cronjob
+
+  # NOT SET, and worth explaining rather than leaving as an absence.
+  #
+  # `toolsets:` is an allowlist and is strictly stronger than the denylist
+  # above: it would keep a toolset added by a future Hermes release from
+  # appearing here on its own. MCP server names are valid entries, so
+  # `toolsets: [electrum-bot, memory, skills]` is the shape.
+  #
+  # It is left off because it could not be verified end to end from outside the
+  # box. The MCP server name resolves through the live registry, and registry
+  # aliases are populated by `discover_mcp_tools` AFTER startup validation
+  # runs; the code handles that deliberately, but "handled deliberately" and
+  # "confirmed working on this droplet" are different claims. Getting it wrong
+  # gives an agent with almost no tools, which looks like a broken deployment.
+  #
+  # To adopt it: set it, restart, and confirm the electrum-bot tools are still
+  # listed and still answer. Then this denylist becomes redundant and can go.
+  # toolsets:
+  #   - electrum-bot
+  #   - memory
+  #   - skills
+
+# Skills are documents the agent loads as instructions, and Hermes ships 76 of
+# them. Every one is description text in the context window on every turn, and
+# a handful are live capability on a box that should have none of it.
+#
+# The schema is `skills.disabled`, a list of SKILL NAMES. Category names do not
+# work: the filter in tools/skills_tool.py is `if name in disabled`, matched
+# against the skill's own name, so `disabled: [apple]` is silently ignored and
+# leaves all four Apple skills loaded. `hermes skills` offers a "toggle by
+# category" mode, but it expands the category into individual names before
+# writing, which is why the file always holds names.
+#
+# Listing every skill by hand is the cost of that. The alternative, an
+# allowlist, does not exist for skills.
+skills:
+  disabled:
+    # Named in the brief. github-auth manages credentials, computer-use drives
+    # a GUI that is not here, and the Apple skills target a Mac that is not
+    # here either.
+    - github-auth
+    - computer-use
+    - imessage
+    - apple-notes
+    - apple-reminders
+    - findmy
+
+    # Other agent runtimes. Hermes launching Claude Code or Codex on this box
+    # would put a second agent, with its own tool surface and its own approval
+    # settings, next to the broker credentials.
+    - claude-code
+    - codex
+    - opencode
+    - hermes-agent
+
+    # GitHub. The repository is public and read from a laptop; nothing needs to
+    # be done to it from the trading box.
+    - github-code-review
+    - github-issue-to-pr
+    - github-issues
+    - github-pr-workflow
+    - github-repo-management
+    - codebase-inspection
+
+    # Creative and media. None of it applies to a trading loop.
+    - architecture-diagram
+    - ascii-art
+    - ascii-video
+    - baoyu-infographic
+    - claude-design
+    - comfyui
+    - design-md
+    - excalidraw
+    - humanizer
+    - manim-video
+    - p5js
+    - popular-web-designs
+    - pretext
+    - sketch
+    - songwriting-and-ai-music
+    - touchdesigner-mcp
+    - gif-search
+    - songsee
+    - youtube-content
+
+    # Documents, office formats and third-party productivity services.
+    - airtable
+    - document-to-action-items
+    - docx
+    - google-workspace
+    - maps
+    - meeting-action-items
+    - nano-pdf
+    - notion
+    - obsidian
+    - ocr-and-documents
+    - pdf
+    - powerpoint
+    - product-price-monitor
+    - teams-meeting-pipeline
+    - weekly-review-planning
+    - xlsx
+    - email-inbox-triage
+    - himalaya
+    - openhue
+    - xurl
+
+    # ML tooling and research helpers.
+    #
+    # These four are NOT named after their directories. `mlops/evaluation` and
+    # `mlops/inference` are grouping folders holding two skills each, and the
+    # names below come from the `name:` field in each SKILL.md. Writing
+    # `evaluation`, `inference` or `models` here matches nothing and is
+    # discarded without a warning, which is the whole reason the note above
+    # says the list is names rather than paths.
+    - evaluating-llms-harness
+    - weights-and-biases
+    - llama-cpp
+    - serving-llms-vllm
+    - huggingface-hub
+    - arxiv
+    - blogwatcher
+    - competitor-news-monitor
+    - grounded-citations
+    - llm-wiki
+    - research-paper-writing
+
+    # Software-development skills. This agent answers questions about an
+    # account; it does not write code, and the checkout is root-owned so it
+    # could not act on any of these anyway.
+    - dogfood
+    - hermes-agent-skill-authoring
+    - inspecting-hermes-desktop-dom
+    - node-inspect-debugger
+    - plan
+    - python-debugpy
+    - requesting-code-review
+    - simplify-code
+    - spike
+    - systematic-debugging
+    - test-driven-development
+
+# That is all 77 skills Hermes ships at `934546f`, which is the intended
+# outcome rather than an overshoot. Not one of them is about a brokerage
+# account, and the agent's entire job here is answering questions through the
+# electrum-bot MCP tools, which are not skills and are unaffected.
+#
+# Two that sound market-adjacent are disabled anyway, and the reasoning belongs
+# on the record rather than looking like carelessness: competitor-news-monitor
+# and blogwatcher both fetch news on their own schedule. Headlines already
+# reach the model through Marketaux in src/bot/data/, and that adapter's
+# 30-minute cache exists because the free tier allows 100 requests a day
+# against a loop that wakes 96 times. A skill fetching on its own would sit
+# outside that accounting and exhaust the quota before the session ends.
+#
+# **This list needs revisiting when Hermes is upgraded.** A denylist admits
+# whatever the next release adds, and skills are the one surface here with no
+# allowlist available. `hermes skills` after an upgrade shows what appeared.
+#
+# After editing, confirm the file still parses and check what survived:
+#
+#     python3 -c "import yaml;yaml.safe_load(open('/home/hermes/.hermes/config.yaml'));print('ok')"
+#     hermes skills          # lists what is enabled
+#
+# Then restart the gateway and ask the agent to run `ls`. It should say it has
+# no tool for that. If it runs the command, `disabled_toolsets` did not take
+# effect: check for a duplicate `agent:` key first, which is the usual cause.

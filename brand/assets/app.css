@@ -1,0 +1,450 @@
+/* ==========================================================================
+   Mudhorn Capital web app.
+
+   The design system is brand/about.html, which is the identity reference this
+   app was built from. Tokens, type stacks and the signet mark are carried over
+   unchanged. Two semantic colours are added and explained where they are
+   defined; nothing else here departs from the identity.
+
+   No build step, no framework, no network request. Every page is a plain HTML
+   file that loads this stylesheet, demo-data.js and app.js.
+   ========================================================================== */
+
+:root {
+  /* ---------------------------------------------------------- identity */
+  /* Cold and mineral on purpose. "Mudhorn" starts with "mud", so any brown
+     or tan reads agricultural. Everything here is blue-shifted, and the one
+     accent is oxidised metal rather than gold. */
+  --ink:      #0B0E12;   /* page ground */
+  --graphite: #161B22;   /* raised surfaces, cards */
+  --slate:    #29313C;   /* hairlines, dividers */
+  --pewter:   #7D8896;   /* secondary text, captions */
+  --bone:     #E9ECEF;   /* primary text. Cold white, never cream */
+  --patina:   #4E8C7D;   /* the single accent. Oxidised copper */
+
+  /* ------------------------------------------------- semantic additions */
+  /* The identity palette has one accent and no second hue, which is right for
+     a brand page and insufficient for a trading interface: a book of forty
+     trades has to be scannable for wins against losses without reading every
+     figure.
+
+     So exactly two colours are added, and they are used ONLY on numbers and on
+     the small state chips beside them. Chrome, links, focus rings and hover
+     states all still belong to patina, so the accent keeps meaning something.
+
+     Both are lifted for legibility rather than picked fresh: gain is patina
+     brightened until it clears 4.5:1 on graphite, and loss is a cold rose
+     rather than a warm red, because a warm red on this ground reads as brick
+     and drags the whole palette toward the agricultural register the identity
+     rules out. */
+  --gain: #5FA795;
+  --loss: #C0707B;
+
+  --measure: 68ch;
+  --radius: 2px;         /* almost none. Rounded corners read consumer app */
+
+  --serif: ui-serif, "Iowan Old Style", "Palatino Linotype", Palatino,
+           Georgia, "Times New Roman", serif;
+  --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
+          "Helvetica Neue", Arial, sans-serif;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
+          "Liberation Mono", monospace;
+
+  --ease: cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--ink);
+  color: var(--bone);
+  font-family: var(--sans);
+  font-size: 16px;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Visible focus everywhere. Keyboard users are not an afterthought. */
+:focus-visible { outline: 2px solid var(--patina); outline-offset: 3px; }
+
+a { color: var(--bone); text-decoration-color: var(--slate); text-underline-offset: 4px; }
+a:hover { text-decoration-color: var(--patina); }
+
+h1, h2, h3 { font-family: var(--serif); font-weight: 400; letter-spacing: -0.01em; }
+h1 { font-size: clamp(1.75rem, 4vw, 2.5rem); margin: 0.25rem 0 0; }
+h2 { font-size: clamp(1.25rem, 2.6vw, 1.625rem); margin: 0 0 0.25rem; }
+h3 { font-size: 1.0625rem; margin: 0 0 0.5rem; letter-spacing: 0; }
+
+.wrap { width: min(100% - 2rem, 1180px); margin-inline: auto; }
+
+.eyebrow {
+  font-family: var(--mono);
+  font-size: 0.6875rem;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--pewter);
+  margin: 0;
+}
+.lede { color: var(--pewter); max-width: var(--measure); margin: 0.75rem 0 0; }
+.note { font-size: 0.875rem; color: var(--pewter); }
+
+/* Figures are tabular everywhere, so a changing digit never shifts a row. */
+.num { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+.gain { color: var(--gain); }
+.loss { color: var(--loss); }
+.muted { color: var(--pewter); }
+
+.visually-hidden {
+  position: absolute; width: 1px; height: 1px; overflow: hidden;
+  clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap;
+}
+
+/* ------------------------------------------------------------ demo banner */
+/* Persistent, at the top of every page, above the masthead and never
+   dismissible. The whole site is invented figures, and a reader who lands
+   mid-way through the trade journal has to be told that there rather than in a
+   footer they will not scroll to. */
+.demo-banner {
+  background: var(--graphite);
+  border-bottom: 1px solid var(--patina);
+  padding: 0.625rem 0;
+  font-size: 0.8125rem;
+  color: var(--bone);
+}
+.demo-banner .wrap { display: flex; gap: 0.75rem; align-items: baseline; flex-wrap: wrap; }
+.demo-banner b {
+  font-family: var(--mono);
+  font-size: 0.625rem;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--patina);
+  font-weight: 400;
+  border: 1px solid var(--patina);
+  border-radius: var(--radius);
+  padding: 0.125rem 0.5rem;
+  white-space: nowrap;
+}
+.demo-banner span { color: var(--pewter); }
+
+/* ---------------------------------------------------------------- masthead */
+.masthead { border-bottom: 1px solid var(--slate); background: var(--ink); }
+.masthead .wrap {
+  display: flex; align-items: center; gap: 1.25rem;
+  padding: 0.875rem 0; flex-wrap: wrap;
+}
+
+.lockup { display: flex; align-items: center; gap: 0.75rem; text-decoration: none; }
+.lockup svg { display: block; flex: none; }
+.lockup svg path { fill: var(--bone); }
+.lockup .word {
+  font-family: var(--serif); font-size: 1.0625rem; letter-spacing: 0.06em;
+  white-space: nowrap;
+}
+.lockup .word span { color: var(--pewter); }
+
+nav.primary { margin-left: auto; }
+nav.primary ul {
+  list-style: none; margin: 0; padding: 0;
+  display: flex; gap: 0.25rem; flex-wrap: wrap;
+}
+nav.primary a {
+  display: block;
+  padding: 0.375rem 0.75rem;
+  font-size: 0.875rem;
+  text-decoration: none;
+  color: var(--pewter);
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  transition: color 180ms var(--ease), border-color 180ms var(--ease);
+}
+nav.primary a:hover { color: var(--bone); border-color: var(--slate); }
+nav.primary a[aria-current="page"] { color: var(--bone); border-color: var(--patina); }
+
+.whoami {
+  font-family: var(--mono); font-size: 0.6875rem; letter-spacing: 0.1em;
+  color: var(--pewter); text-transform: uppercase;
+  padding-left: 1rem; border-left: 1px solid var(--slate);
+}
+.whoami a { color: var(--pewter); }
+
+/* ------------------------------------------------------------------ layout */
+main { padding: clamp(2rem, 5vw, 3.5rem) 0 4rem; }
+
+.page-head { margin-bottom: 2rem; }
+.page-head .row { display: flex; align-items: baseline; gap: 1rem; flex-wrap: wrap; }
+.asof { margin-left: auto; font-family: var(--mono); font-size: 0.75rem; color: var(--pewter); }
+
+section.block { margin-top: clamp(2.5rem, 5vw, 3.5rem); }
+section.block > h2 { margin-bottom: 1rem; }
+
+.grid { display: grid; gap: 1rem; }
+.g2 { grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); }
+.g3 { grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }
+.g4 { grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); }
+
+.card {
+  background: var(--graphite);
+  border: 1px solid var(--slate);
+  border-radius: var(--radius);
+  padding: 1.25rem;
+}
+
+/* ------------------------------------------------------------------- stats */
+.stat .label {
+  font-family: var(--mono); font-size: 0.625rem; letter-spacing: 0.16em;
+  text-transform: uppercase; color: var(--pewter); display: block;
+}
+.stat .value {
+  font-family: var(--mono); font-variant-numeric: tabular-nums;
+  font-size: clamp(1.375rem, 3vw, 1.75rem); display: block; margin-top: 0.5rem;
+  letter-spacing: -0.01em;
+}
+.stat .meta { font-size: 0.8125rem; color: var(--pewter); display: block; margin-top: 0.375rem; }
+
+/* ------------------------------------------------------------------ meters */
+/* Risk used against a cap. The cap is the end of the track, so "nearly full"
+   is legible without reading the number. */
+.meter { margin-top: 0.875rem; }
+.meter .track {
+  height: 6px; background: var(--ink); border: 1px solid var(--slate);
+  border-radius: var(--radius); overflow: hidden;
+}
+.meter .fill { height: 100%; background: var(--patina); }
+.meter .fill.over { background: var(--loss); }
+.meter .legend {
+  display: flex; justify-content: space-between; margin-top: 0.5rem;
+  font-family: var(--mono); font-size: 0.6875rem; color: var(--pewter);
+}
+
+/* Stand-down counter: one pip per qualifying loss, lit as the streak grows. */
+.pips { display: flex; gap: 0.375rem; margin-top: 0.75rem; }
+.pips i {
+  width: 26px; height: 6px; border: 1px solid var(--slate);
+  border-radius: var(--radius); background: var(--ink);
+}
+.pips i.lit { background: var(--loss); border-color: var(--loss); }
+
+/* ------------------------------------------------------------------- chips */
+.chip {
+  display: inline-block;
+  font-family: var(--mono); font-size: 0.625rem; letter-spacing: 0.12em;
+  text-transform: uppercase;
+  padding: 0.1875rem 0.5rem;
+  border: 1px solid var(--slate);
+  border-radius: var(--radius);
+  color: var(--pewter);
+  white-space: nowrap;
+}
+.chip.win { color: var(--gain); border-color: color-mix(in srgb, var(--gain) 55%, transparent); }
+.chip.loss { color: var(--loss); border-color: color-mix(in srgb, var(--loss) 55%, transparent); }
+.chip.open { color: var(--bone); border-color: var(--patina); }
+
+/* ------------------------------------------------------------------ tables */
+.table-wrap { overflow-x: auto; border: 1px solid var(--slate); border-radius: var(--radius); }
+table { width: 100%; border-collapse: collapse; font-size: 0.875rem; }
+caption { text-align: left; padding: 0 0 0.75rem; color: var(--pewter); font-size: 0.8125rem; }
+thead th {
+  position: sticky; top: 0; z-index: 1;
+  background: var(--graphite);
+  font-family: var(--mono); font-size: 0.625rem; letter-spacing: 0.14em;
+  text-transform: uppercase; color: var(--pewter); font-weight: 400;
+  text-align: left; padding: 0.75rem 0.875rem;
+  border-bottom: 1px solid var(--slate); white-space: nowrap;
+}
+tbody td { padding: 0.75rem 0.875rem; border-bottom: 1px solid var(--slate); vertical-align: top; }
+tbody tr:last-child td { border-bottom: 0; }
+td.r, th.r { text-align: right; }
+/* Figures and short labels never wrap. A right-aligned column that breaks
+   "0.64% of equity" over three lines makes the row three times as tall for no
+   gain, and the column is narrow precisely because the content is short. */
+tbody tr.data td.r, td.nw { white-space: nowrap; }
+tbody tr.data:hover td { background: color-mix(in srgb, var(--graphite) 60%, transparent); }
+
+/* The rationale row. A trade journal without the reasoning is a brokerage
+   statement, so it sits under every trade at full width rather than behind a
+   disclosure control. */
+tr.why td {
+  padding-top: 0; padding-bottom: 0.875rem;
+  border-bottom: 1px solid var(--slate);
+  color: var(--pewter); font-size: 0.875rem; line-height: 1.55;
+  max-width: 0; /* lets the cell obey the table width rather than its text */
+}
+tr.why .quote {
+  border-left: 2px solid var(--patina);
+  padding-left: 0.875rem;
+  font-family: var(--serif);
+  font-size: 0.9375rem;
+  color: var(--bone);
+}
+tr.data td { border-bottom: 0; }
+
+/* ----------------------------------------------------------------- filters */
+.filters {
+  display: flex; gap: 0.75rem; flex-wrap: wrap; align-items: flex-end;
+  margin-bottom: 1.25rem;
+}
+.field { display: flex; flex-direction: column; gap: 0.375rem; }
+.field label {
+  font-family: var(--mono); font-size: 0.625rem; letter-spacing: 0.14em;
+  text-transform: uppercase; color: var(--pewter);
+}
+select, input[type="text"], input[type="email"], input[type="password"], input[type="search"] {
+  background: var(--graphite);
+  color: var(--bone);
+  border: 1px solid var(--slate);
+  border-radius: var(--radius);
+  padding: 0.5rem 0.75rem;
+  font-family: var(--sans);
+  font-size: 0.875rem;
+  min-height: 40px;
+}
+select { appearance: none; padding-right: 2rem;
+  background-image: linear-gradient(45deg, transparent 50%, var(--pewter) 50%),
+                    linear-gradient(135deg, var(--pewter) 50%, transparent 50%);
+  background-position: right 1rem center, right 0.7rem center;
+  background-size: 5px 5px, 5px 5px;
+  background-repeat: no-repeat;
+}
+select:hover, input:hover { border-color: var(--pewter); }
+
+.btn {
+  background: transparent; color: var(--pewter);
+  border: 1px solid var(--slate); border-radius: var(--radius);
+  padding: 0.5rem 1.125rem; min-height: 40px;
+  font-family: var(--mono); font-size: 0.6875rem; letter-spacing: 0.16em;
+  text-transform: uppercase; cursor: pointer;
+  transition: color 180ms, border-color 180ms, background 180ms;
+}
+.btn:hover { color: var(--bone); border-color: var(--patina); background: var(--graphite); }
+.btn.primary { color: var(--bone); border-color: var(--patina); }
+.btn.primary:hover { background: color-mix(in srgb, var(--patina) 18%, transparent); }
+
+.result-count { font-family: var(--mono); font-size: 0.75rem; color: var(--pewter); margin: 0 0 0.75rem; }
+
+/* ------------------------------------------------------------------ charts */
+.chart { width: 100%; height: auto; display: block; overflow: visible; }
+.chart .axis { stroke: var(--slate); stroke-width: 1; }
+.chart .baseline { stroke: var(--slate); stroke-width: 1; stroke-dasharray: 3 4; }
+.chart .line { fill: none; stroke: var(--patina); stroke-width: 1.75;
+               stroke-linejoin: round; stroke-linecap: round; }
+.chart .area { fill: color-mix(in srgb, var(--patina) 14%, transparent); stroke: none; }
+.chart .under { fill: color-mix(in srgb, var(--loss) 16%, transparent); stroke: none; }
+.chart .under-line { fill: none; stroke: var(--loss); stroke-width: 1.25; }
+.chart .tick { fill: var(--pewter); font-family: var(--mono); font-size: 10px; }
+.chart .bar { fill: var(--patina); }
+.chart .bar.neg { fill: var(--loss); }
+.chart .marker { fill: var(--bone); }
+
+.spark { width: 90px; height: 22px; display: block; overflow: visible; }
+.spark path { fill: none; stroke: var(--pewter); stroke-width: 1.25; }
+.spark path.up { stroke: var(--gain); }
+.spark path.down { stroke: var(--loss); }
+
+.chart-frame {
+  background: var(--graphite); border: 1px solid var(--slate);
+  border-radius: var(--radius); padding: 1.25rem;
+}
+.chart-frame h3 { margin-bottom: 1rem; }
+.chart-note { margin: 0.875rem 0 0; font-size: 0.8125rem; color: var(--pewter); }
+
+/* ----------------------------------------------------------------- callout */
+.callout {
+  border: 1px solid var(--slate); border-left: 2px solid var(--patina);
+  border-radius: var(--radius);
+  background: var(--graphite);
+  padding: 1.125rem 1.25rem;
+  font-size: 0.9375rem;
+}
+.callout p { margin: 0; }
+.callout p + p { margin-top: 0.75rem; }
+.callout h3 { margin-bottom: 0.5rem; }
+
+/* -------------------------------------------------------------- yaml block */
+.yaml {
+  font-family: var(--mono); font-size: 0.8125rem; line-height: 1.7;
+  background: var(--graphite); border: 1px solid var(--slate);
+  border-radius: var(--radius);
+  padding: 1.25rem; margin: 0;
+  overflow-x: auto; white-space: pre; tab-size: 2;
+  color: var(--bone);
+}
+.yaml .c { color: var(--pewter); }   /* comment */
+.yaml .k { color: var(--patina); }   /* key */
+
+/* ------------------------------------------------------------------ signin */
+.signin-page { min-height: 100svh; display: flex; flex-direction: column; }
+.signin-main { flex: 1; display: grid; place-items: center; padding: 3rem 0; }
+.signin-card { width: min(100% - 2rem, 420px); }
+.signin-card .mark { display: block; margin: 0 auto 1.5rem; }
+.signin-card .mark path { fill: var(--bone); }
+.signin-card h1 {
+  font-size: 1.5rem; text-align: center; letter-spacing: 0.06em; margin: 0 0 0.5rem;
+}
+.signin-card h1 span { color: var(--pewter); }
+.signin-card .tagline {
+  font-family: var(--mono); font-size: 0.6875rem; letter-spacing: 0.2em;
+  text-transform: uppercase; color: var(--pewter); text-align: center;
+  margin: 0 0 2rem;
+}
+.signin-card form { display: flex; flex-direction: column; gap: 1rem; }
+.signin-card .field input { width: 100%; }
+.signin-card .btn { width: 100%; }
+
+/* ------------------------------------------------------------------ footer */
+footer.site {
+  border-top: 1px solid var(--slate);
+  padding: 2.5rem 0 3.5rem;
+  color: var(--pewter);
+  font-size: 0.8125rem;
+}
+footer.site p { margin: 0 0 0.75rem; max-width: var(--measure); }
+footer.site a { color: var(--pewter); }
+
+/* --------------------------------------------------------- narrow screens */
+/* Phone first in practice as well as in intent: the tables become stacked
+   records rather than a horizontal scroll, because a forty-row journal read
+   sideways on a phone is not readable. */
+@media (max-width: 760px) {
+  .masthead .wrap { gap: 0.75rem; }
+  nav.primary { margin-left: 0; width: 100%; order: 3; }
+  nav.primary ul { gap: 0.125rem; }
+  nav.primary a { padding: 0.375rem 0.5rem; font-size: 0.8125rem; }
+  .whoami { margin-left: auto; padding-left: 0; border-left: 0; }
+
+  .table-wrap { border: 0; overflow-x: visible; }
+  table, thead, tbody, tr, td { display: block; width: 100%; }
+  /* A table-caption inside a block-level table collapses to the width of its
+     longest word, which turns the note into a one-letter column. */
+  caption { display: block; }
+  thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+
+  tbody tr.data {
+    border: 1px solid var(--slate); border-bottom: 0;
+    border-radius: var(--radius) var(--radius) 0 0;
+    background: var(--graphite);
+    padding: 0.5rem 0;
+    margin-top: 1rem;
+  }
+  tbody tr.why {
+    border: 1px solid var(--slate); border-top: 0;
+    border-radius: 0 0 var(--radius) var(--radius);
+    background: var(--graphite);
+  }
+  tbody tr.data td, tbody tr.why td {
+    border-bottom: 0; padding: 0.3125rem 0.875rem; max-width: none;
+    display: flex; gap: 1rem; align-items: baseline; justify-content: space-between;
+  }
+  tbody tr.why td { display: block; padding-bottom: 0.875rem; }
+  tbody td[data-label]::before {
+    content: attr(data-label);
+    font-family: var(--mono); font-size: 0.625rem; letter-spacing: 0.14em;
+    text-transform: uppercase; color: var(--pewter); flex: none;
+  }
+  td.r, th.r { text-align: right; }
+}
+
+/* --------------------------------------------------- reduced motion honoured */
+@media (prefers-reduced-motion: reduce) {
+  * { animation: none !important; transition: none !important; }
+}

@@ -1,0 +1,23 @@
+[Unit]
+Description=Hourly snapshot of the Mudhorn Capital trade journal
+Documentation=https://github.com/electrumnz/Electrum_Investments/blob/main/deploy/README.md
+
+[Timer]
+# Hourly rather than daily. The loop wakes every 15 minutes, so a daily snapshot
+# would put up to a full session of trades, excursions and stand-down state at
+# risk. The database is small and the snapshot is cheap, so the interval is
+# chosen by what is acceptable to lose rather than by what is affordable to run.
+OnCalendar=hourly
+
+# Fire on boot if the box was down when a run was due. Without this a droplet
+# rebooted at 03:00 silently skips that hour, and the gap is invisible until
+# somebody goes looking for the snapshot that is not there.
+Persistent=true
+
+# Off the top of the hour, away from everything else on the box that also
+# thought hourly was a good idea.
+RandomizedDelaySec=5min
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

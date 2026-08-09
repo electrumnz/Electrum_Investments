@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="en-GB">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Rules &middot; Mudhorn Capital</title>
+<meta name="description" content="The trading limits, shown read-only. A copy of config/rules.yaml from the repository.">
+<meta name="robots" content="noindex">
+<link rel="icon" href="assets/mark.svg" type="image/svg+xml">
+<link rel="stylesheet" href="assets/app.css">
+</head>
+<body>
+
+<div class="demo-banner">
+  <div class="wrap">
+    <b>Demonstration</b>
+    <span>Every figure on this site is invented. It reads no broker, no journal and no account, and it makes no network request.</span>
+  </div>
+</div>
+
+<header class="masthead">
+  <div class="wrap">
+    <a class="lockup" href="overview.html">
+      <svg viewBox="0 0 64 64" width="30" height="30" aria-hidden="true">
+        <path fill-rule="evenodd" d="M32 2a30 30 0 1 0 0 60 30 30 0 0 0 0-60Zm0 8a22 22 0 1 1 0 44 22 22 0 0 1 0-44Z"/>
+        <path d="M32 17 47 45h-9.4L32 34.2 26.4 45H17L32 17Z"/>
+      </svg>
+      <span class="word">MUDHORN <span>CAPITAL</span></span>
+    </a>
+    <nav class="primary" aria-label="Primary">
+      <ul>
+        <li><a href="overview.html">Overview</a></li>
+        <li><a href="trades.html">Trades</a></li>
+        <li><a href="analytics.html">Analytics</a></li>
+        <li><a href="rules.html" aria-current="page">Rules</a></li>
+        <li><a href="about.html">About</a></li>
+      </ul>
+    </nav>
+    <p class="whoami"><span data-whoami>Operator</span> &middot; <a href="index.html">Sign out</a></p>
+  </div>
+</header>
+
+<main>
+  <div class="wrap">
+    <div class="page-head">
+      <div class="row">
+        <div>
+          <p class="eyebrow">Limits</p>
+          <h1>Rules</h1>
+        </div>
+      </div>
+      <p class="lede">These are enforced in deterministic Python before any order
+        reaches a broker, not by asking a model nicely. A rejection is final, and
+        the way to change behaviour is to change this file in a commit, with a
+        reason, never to argue with the agent.</p>
+    </div>
+
+    <section class="block">
+      <h2>The four that matter</h2>
+      <div class="grid g4" id="four"></div>
+    </section>
+
+    <section class="block">
+      <h2>Read-only</h2>
+      <div class="callout">
+        <p>Nothing on this page can be edited, here or anywhere else on this site.
+          That is deliberate rather than unfinished. Limits that could be widened
+          from a browser would be limits that get widened at exactly the moment
+          they are doing their job, which is during a losing run.</p>
+        <p>In the repository this file is owned by root and the service account
+          that runs the bot cannot write to it, so the process cannot edit its own
+          limits either.</p>
+      </div>
+    </section>
+
+    <section class="block">
+      <h2><code>config/rules.yaml</code></h2>
+      <p class="lede">Reproduced verbatim from the repository at the time this
+        page's fixture was generated.</p>
+      <pre class="yaml" id="yaml" tabindex="0" aria-label="Contents of config/rules.yaml"></pre>
+    </section>
+  </div>
+</main>
+
+<footer class="site">
+  <div class="wrap">
+    <p><b>This is a demonstration.</b> The limits above are real and are copied
+      from the repository. Every account figure, trade and chart elsewhere on this
+      site is synthetic. Nothing here reads a broker, a journal, an account or an API.</p>
+    <p>Mudhorn Capital is a private vehicle. It trades one paper account, for one
+      person, and takes no money from anyone else. Not an offer, not advice, and
+      not managing anyone else's money.</p>
+    <p><a href="https://github.com/electrumnz/Electrum_Investments">Source on GitHub</a></p>
+  </div>
+</footer>
+
+<script src="assets/demo-data.js"></script>
+<script src="assets/app.js"></script>
+<script>
+MUDHORN.ready(function () {
+  var M = MUDHORN, d = M.data, limits = d.limits;
+
+  document.getElementById('four').innerHTML =
+    M.stat('Per trade', limits.maxRiskPerTradePct.toFixed(1) + '%',
+           'Most any single position may lose. A wider stop buys a smaller ' +
+           'position, never more risk.') +
+    M.stat('Across the book', limits.maxTotalRiskPct.toFixed(1) + '%',
+           'Most everything open may lose if every stop filled at once.') +
+    M.stat('Stops', 'Required',
+           'Every proposal carries a stop, and it is validated before the order ' +
+           'is accepted. There is no path to an order without one.') +
+    M.stat('Stand-down', limits.consecutiveLossesTrigger + ' in a row',
+           'Qualifying losses that suspend live execution. Paper trading ' +
+           'continues, and closing a position is never blocked.');
+
+  /* Light syntax colouring: comments in pewter, keys in patina. Enough to make
+     a long YAML file scannable, and deliberately not a full highlighter. */
+  var yaml = d.rulesYaml.replace(/\r\n/g, '\n');
+  var html = yaml.split('\n').map(function (line) {
+    var escaped = M.escapeHtml(line);
+    if (/^\s*#/.test(line)) return '<span class="c">' + escaped + '</span>';
+    return escaped.replace(/^(\s*-?\s*)([A-Za-z_][\w]*)(:)/,
+      function (all, indent, key, colon) {
+        return indent + '<span class="k">' + key + '</span>' + colon;
+      });
+  }).join('\n');
+
+  document.getElementById('yaml').innerHTML = html;
+});
+</script>
+</body>
+</html>
