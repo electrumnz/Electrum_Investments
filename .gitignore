@@ -16,12 +16,18 @@ dist/
 *.pem
 *.key
 
-# Bot runtime artefacts
-logs/
-data/
-audit/*.jsonl
-audit/*.db
-*.db
+# Bot runtime artefacts.
+#
+# These MUST stay anchored with a leading slash. A bare `data/` matches a
+# directory of that name at ANY depth, which silently excluded src/bot/data/ —
+# three source modules were never committed, main.py imported them anyway, and
+# the failure only surfaced on a deployed machine. tests/test_packaging.py now
+# fails the build if a src/ module is untracked.
+/logs/
+/data/
+/audit/*.jsonl
+/audit/*.db
+/data/*.db
 
 # Third-party reference clones. reference/registry.yaml, versions.json and
 # STATUS.md are committed; the checked-out source is not.
