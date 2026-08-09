@@ -50,7 +50,7 @@ and **trade frequency is a risk parameter**, not a performance one.
 ```sh
 python3 -m venv .venv
 .venv/bin/pip install -e '.[dev]'
-.venv/bin/python -m pytest            # 64 tests, no credentials needed
+.venv/bin/python -m pytest            # 104 tests, no credentials needed
 
 cp .env.example .env                  # add Alpaca paper + Anthropic keys
 .venv/bin/electrum-bot smoketest      # connects, asks Claude one question, places nothing
@@ -83,14 +83,15 @@ All of it from [`config/rules.yaml`](config/rules.yaml), all of it tested:
 | Session windows | UTC hours; crypto exempt (24/7) |
 | News blackouts | No entries around high-impact events |
 | Per-trade risk | Max % of equity lost if the stop fills |
-| Position size | Max % of equity in any one position |
-| Cash reserve | Minimum % of equity kept in cash |
-| Gross exposure | Cap on total position value |
+| **Total risk** | Max combined loss if every open stop filled — the usual binding limit |
+| Position size | Concentration backstop on any one position |
+| Buying power | Max share of buying power one order may consume |
+| Gross notional | Cap on total market exposure |
 | Concurrent positions | Hard count limit |
 | Trade frequency | Per day and per week |
 | Per-symbol cooldown | Stops flip-flopping |
 | Daily loss kill switch | Sticky for the session once tripped |
-| Pattern Day Trader | Blocks the 4th day trade below $25k equity |
+| Stand-down | Suspends live trading after consecutive losses; paper continues |
 | Crypto sleeve | Disabled by default; capped when enabled |
 | Order sanity | Limit orders only; stops and targets on the correct side |
 
@@ -127,7 +128,7 @@ src/bot/
   data/                   News and calendar adapters (stubs for now)
 reference/                Tracked third-party projects (clones gitignored)
 scripts/                  fetch_reference.py, check_reference_updates.py
-tests/                    64 tests; the risk suite is the important one
+tests/                    104 tests; the risk suite is the important one
 ```
 
 ---

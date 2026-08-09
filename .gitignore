@@ -18,9 +18,10 @@ dist/
 
 # Bot runtime artefacts
 logs/
-data/runtime/
+data/
 audit/*.jsonl
 audit/*.db
+*.db
 
 # Third-party reference clones. reference/registry.yaml, versions.json and
 # STATUS.md are committed; the checked-out source is not.

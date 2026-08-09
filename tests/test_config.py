@@ -24,7 +24,7 @@ def test_rules_load_from_yaml():
     assert rules.allowed_symbols, "allowed_symbols must not be empty"
     assert rules.crypto_sleeve.enabled is False, "crypto must default OFF for staged rollout"
     assert rules.frequency.max_trades_per_day > 0
-    assert rules.pdt.enforce is True, "PDT guard must ship enabled"
+    assert rules.margin.max_gross_notional_pct > 0, "margin guards must ship configured"
 
 
 def test_claude_model_ids_and_pricing_complete():
@@ -42,9 +42,8 @@ def _account_rules(**overrides: Any) -> AccountRules:
     base: dict[str, Any] = {
         "min_equity_floor_usd": 90_000,
         "max_risk_per_trade_pct": 1.0,
-        "max_position_pct": 2.0,
-        "max_total_invested_pct": 2.0,
-        "min_cash_reserve_pct": 20,
+        "max_position_pct": 50.0,
+        "max_total_risk_pct": 2.0,
         "max_concurrent_positions": 1,
         "daily_loss_kill_pct": 1,
     }
@@ -57,10 +56,10 @@ def test_invalid_max_risk_pct_rejected():
         _account_rules(max_risk_per_trade_pct=0)
 
 
-def test_position_cap_above_total_cap_rejected():
-    """A per-position cap larger than the total cap could never bind."""
-    with pytest.raises(ValueError, match="max_total_invested_pct"):
-        _account_rules(max_position_pct=10.0, max_total_invested_pct=2.0)
+def test_total_risk_below_per_trade_risk_rejected():
+    """A total cap under the per-trade cap would block every possible trade."""
+    with pytest.raises(ValueError, match="max_risk_per_trade_pct"):
+        _account_rules(max_risk_per_trade_pct=2.0, max_total_risk_pct=1.0)
 
 
 def test_stand_down_stage_two_must_exceed_stage_one():

@@ -27,7 +27,9 @@ def build_market_context(
     lines.append(f"- Buying power: ${account.buying_power_usd:,.2f}")
     lines.append(f"- Gross exposure: ${account.gross_exposure_usd:,.2f}")
     lines.append(f"- Realised P&L today: ${account.realised_pnl_today_usd:,.2f}")
-    lines.append(f"- Day trades in last 5 business days: {account.daytrade_count}")
+    lines.append(
+        f"- Open risk (loss if every stop filled): ${account.open_risk_usd:,.2f}"
+    )
     lines.append("")
 
     if activity is not None:

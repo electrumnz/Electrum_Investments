@@ -23,8 +23,8 @@ class Direction(StrEnum):
 class AssetClass(StrEnum):
     """Alpaca asset classes we support.
 
-    The distinction matters for risk: PDT rules bind on equities but not on
-    crypto, and crypto trades 24/7 while equities respect the market calendar.
+    The distinction still matters for sessions — crypto trades 24/7 while
+    equities respect the market calendar — and for the crypto capital sleeve.
 
     ETFs are `us_equity` at Alpaca, so they need no separate class. CFDs are
     absent deliberately — they are barred for US residents under CFTC rules,
@@ -115,11 +115,11 @@ class Position(BaseModel):
 
 
 class AccountSnapshot(BaseModel):
-    """Account state as reported by Alpaca.
+    """Account state as reported by Alpaca, plus open risk from the journal.
 
-    `daytrade_count` and `pattern_day_trader` come straight from Alpaca rather
-    than being recomputed locally — the broker is the authority on what counts
-    as a day trade, and getting it wrong risks a 90-day account restriction.
+    Carries no day-trade fields: FINRA retired the Pattern Day Trader rule on
+    2026-06-04, and Alpaca removed `daytrade_count` and `pattern_day_trader`
+    from its API on 2026-07-06.
     """
 
     equity_usd: float
@@ -127,8 +127,14 @@ class AccountSnapshot(BaseModel):
     buying_power_usd: float
     open_positions: list[Position] = Field(default_factory=list)
     realised_pnl_today_usd: float = 0.0
-    daytrade_count: int = Field(default=0, ge=0)
-    pattern_day_trader: bool = False
+
+    # Combined planned risk across open positions. Alpaca keeps stop-losses as
+    # separate orders rather than attributes of a position, so this cannot be
+    # derived from broker state — it comes from the journal, which records the
+    # planned stop for every trade. Callers populate it via
+    # `Journal.open_risk_usd()`; left at zero the total-risk cap silently has
+    # nothing to count, so keep them wired together.
+    open_risk_usd: float = Field(default=0.0, ge=0)
 
     @property
     def gross_exposure_usd(self) -> float:
@@ -188,6 +194,16 @@ class OrderProposal(BaseModel):
     @property
     def notional_usd(self) -> float:
         return self.qty * self.limit_price
+
+    @property
+    def risk_usd(self) -> float:
+        """What this trade loses if the stop fills as planned.
+
+        The unit the risk caps are measured in, and the reason they are
+        leverage-neutral: this is the same number whether the position was paid
+        for in cash, on margin, or as a futures contract.
+        """
+        return abs(self.limit_price - self.stop_loss_price) * self.qty
 
 
 class OrderResult(BaseModel):

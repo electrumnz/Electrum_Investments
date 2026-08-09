@@ -90,23 +90,56 @@ class Env(BaseSettings):
 
 
 class AccountRules(BaseModel):
+    """Portfolio-level limits.
+
+    The two that matter are risk-based: `max_risk_per_trade_pct` and
+    `max_total_risk_pct`. Both measure what would be lost if stops fill, which
+    is leverage-neutral — the same rule means the same thing on cash equities,
+    on margin, on options or on futures. Notional-based caps do not have that
+    property, which is why they are relegated to sanity checks here.
+    """
+
     min_equity_floor_usd: float = Field(ge=0)
+
+    # The load-bearing pair.
     max_risk_per_trade_pct: float = Field(gt=0, le=10)
-    max_position_pct: float = Field(gt=0, le=100)
-    max_total_invested_pct: float = Field(gt=0, le=100)
-    min_cash_reserve_pct: float = Field(ge=0, le=100)
+    max_total_risk_pct: float = Field(gt=0, le=20)
+
+    # Concentration sanity check, not the binding constraint. A 1%-risk trade
+    # with a 2% stop implies a position worth 50% of equity, so this has to be
+    # generous or it would silently become the real limit.
+    max_position_pct: float = Field(gt=0, le=200)
+
     max_concurrent_positions: int = Field(gt=0)
     daily_loss_kill_pct: float = Field(gt=0, le=100)
 
     @model_validator(mode="after")
-    def _position_within_total(self) -> Self:
-        if self.max_position_pct > self.max_total_invested_pct:
+    def _total_risk_covers_one_trade(self) -> Self:
+        if self.max_total_risk_pct < self.max_risk_per_trade_pct:
             raise ValueError(
-                f"max_position_pct ({self.max_position_pct}) exceeds "
-                f"max_total_invested_pct ({self.max_total_invested_pct}), so the "
-                "per-position cap could never bind"
+                f"max_total_risk_pct ({self.max_total_risk_pct}) is below "
+                f"max_risk_per_trade_pct ({self.max_risk_per_trade_pct}), so no "
+                "trade could ever be opened"
             )
         return self
+
+
+class MarginRules(BaseModel):
+    """Guards against Intraday Margin Deficit calls.
+
+    Replaces the Pattern Day Trader gate, which FINRA retired on 2026-06-04
+    (Regulatory Notice 26-10). Alpaca now rejects orders that would create a
+    margin deficit in real time, and repeated non-compliance inside five
+    business days triggers a 90-day account restriction — a far worse outcome
+    than a skipped trade, which is the same reasoning the PDT gate used.
+    """
+
+    max_buying_power_utilisation_pct: float = Field(default=50.0, gt=0, le=100)
+    max_gross_notional_pct: float = Field(
+        default=150.0,
+        gt=0,
+        description="Reg T permits 200% overnight; the default leaves headroom",
+    )
 
 
 class StandDownRules(BaseModel):
@@ -164,20 +197,6 @@ class FrequencyRules(BaseModel):
         return self
 
 
-class PdtRules(BaseModel):
-    """US Pattern Day Trader rule.
-
-    Under FINRA rules a margin account below the equity threshold may not make
-    more than three day trades in any rolling five business days. Breaching it
-    triggers a 90-day restriction, so the gate blocks the fourth attempt.
-    Crypto is exempt — it is not a security.
-    """
-
-    enforce: bool = True
-    equity_threshold_usd: float = Field(default=25_000.0, ge=0)
-    max_day_trades_per_5_days: int = Field(default=3, ge=0)
-
-
 class CryptoSleeve(BaseModel):
     enabled: bool
     capital_cap_pct: float = Field(ge=0, le=100)
@@ -195,7 +214,7 @@ class CryptoSleeve(BaseModel):
 class Rules(BaseModel):
     account: AccountRules
     frequency: FrequencyRules
-    pdt: PdtRules
+    margin: MarginRules = Field(default_factory=MarginRules)
     stand_down: StandDownRules = Field(default_factory=StandDownRules)
     sessions_utc: list[tuple[int, int]]
     news_blackout_minutes_before: int = Field(ge=0)

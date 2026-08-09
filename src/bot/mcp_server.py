@@ -23,8 +23,10 @@ from mcp.server.mcpserver import MCPServer
 from .audit import AuditLog
 from .broker import Broker
 from .config import Env, Rules, load_rules
-from .models import AssetClass, Direction, OrderProposal
+from .journal import Journal
+from .models import AccountSnapshot, AssetClass, Direction, OrderProposal
 from .risk import RiskGate
+from .stand_down import describe
 
 server = MCPServer(
     name="electrum-bot",
@@ -45,6 +47,7 @@ class _Session:
         self._rules: Rules | None = None
         self._broker: Broker | None = None
         self._gate: RiskGate | None = None
+        self._journal: Journal | None = None
         self._audit = AuditLog()
 
     @property
@@ -71,15 +74,37 @@ class _Session:
         return self._broker
 
     @property
+    def journal(self) -> Journal:
+        if self._journal is None:
+            self._journal = Journal()
+        return self._journal
+
+    @property
     def gate(self) -> RiskGate:
         if self._gate is None:
             equity = self.broker.get_account().equity_usd
-            self._gate = RiskGate(self.rules, equity_at_session_start=equity)
+            self._gate = RiskGate(
+                self.rules,
+                equity_at_session_start=equity,
+                execution_mode=self.env.execution_mode,
+            )
         return self._gate
 
     @property
     def audit(self) -> AuditLog:
         return self._audit
+
+    def account(self) -> AccountSnapshot:
+        """Broker state with open risk filled in from the journal.
+
+        The broker cannot supply open risk — Alpaca keeps stop-losses as
+        separate orders — so every read goes through here rather than calling
+        `broker.get_account()` directly, or the total-risk cap would have
+        nothing to count.
+        """
+        snapshot = self.broker.get_account()
+        snapshot.open_risk_usd = self.journal.open_risk_usd()
+        return snapshot
 
     def reset(self) -> None:
         """Start a new trading session: re-baseline equity and clear the kill switch."""
@@ -145,7 +170,7 @@ def check_order(
     except Exception as e:  # malformed input is a rejection, not a crash
         return {"approved": False, "reasons": [f"invalid proposal: {e}"]}
 
-    account = _session.broker.get_account()
+    account = _session.account()
     activity = _session.broker.get_activity()
     try:
         tick = _session.broker.get_tick(proposal.symbol)
@@ -153,17 +178,22 @@ def check_order(
         return {"approved": False, "reasons": [f"no market price for {proposal.symbol}: {e}"]}
 
     verdict = _session.gate.evaluate(
-        proposal, account=account, tick=tick, activity=activity
+        proposal,
+        account=account,
+        tick=tick,
+        activity=activity,
+        stand_down=_session.journal.get_stand_down(),
     )
     return {
         "approved": verdict.approved,
         "reasons": verdict.reasons,
         "proposal": proposal.model_dump(mode="json"),
-        "risk_usd": round(
-            abs(proposal.limit_price - proposal.stop_loss_price) * proposal.qty, 2
+        "risk_usd": round(proposal.risk_usd, 2),
+        "risk_pct_of_equity": round(
+            proposal.risk_usd / account.equity_usd * 100 if account.equity_usd else 0.0, 3
         ),
         "notional_usd": round(proposal.notional_usd, 2),
-        "pct_of_equity": round(
+        "notional_pct_of_equity": round(
             proposal.notional_usd / account.equity_usd * 100 if account.equity_usd else 0.0, 2
         ),
     }
@@ -236,7 +266,7 @@ def get_risk_status() -> dict[str, Any]:
 
     Use this to explain *why* something would be blocked before proposing it.
     """
-    account = _session.broker.get_account()
+    account = _session.account()
     activity = _session.broker.get_activity()
     rules = _session.rules
     acct = rules.account
@@ -255,12 +285,16 @@ def get_risk_status() -> dict[str, Any]:
             else 0.0,
             2,
         ),
+        "open_risk_usd": round(account.open_risk_usd, 2),
+        "open_risk_pct": round(
+            account.open_risk_usd / account.equity_usd * 100 if account.equity_usd else 0.0,
+            2,
+        ),
         "limits": {
             "min_equity_floor_usd": acct.min_equity_floor_usd,
             "max_risk_per_trade_pct": acct.max_risk_per_trade_pct,
+            "max_total_risk_pct": acct.max_total_risk_pct,
             "max_position_pct": acct.max_position_pct,
-            "max_total_invested_pct": acct.max_total_invested_pct,
-            "min_cash_reserve_pct": acct.min_cash_reserve_pct,
             "max_concurrent_positions": acct.max_concurrent_positions,
             "daily_loss_kill_pct": acct.daily_loss_kill_pct,
         },
@@ -273,22 +307,32 @@ def get_risk_status() -> dict[str, Any]:
                 rules.frequency.min_seconds_between_trades_per_symbol
             ),
         },
-        "pattern_day_trader": {
-            "enforced": rules.pdt.enforce,
-            "day_trades_last_5_days": account.daytrade_count,
-            "max_allowed": rules.pdt.max_day_trades_per_5_days,
-            "binds_below_equity_usd": rules.pdt.equity_threshold_usd,
-            "currently_binding": (
-                rules.pdt.enforce and account.equity_usd < rules.pdt.equity_threshold_usd
+        "margin": {
+            "buying_power_usd": round(account.buying_power_usd, 2),
+            "max_buying_power_utilisation_pct": (
+                rules.margin.max_buying_power_utilisation_pct
+            ),
+            "gross_notional_pct": round(
+                account.gross_exposure_usd / account.equity_usd * 100
+                if account.equity_usd
+                else 0.0,
+                1,
+            ),
+            "max_gross_notional_pct": rules.margin.max_gross_notional_pct,
+            "note": (
+                "The Pattern Day Trader rule was retired by FINRA on 2026-06-04; "
+                "the $25,000 threshold no longer applies. These are Intraday "
+                "Margin Deficit guards instead."
             ),
         },
+        "stand_down": describe(_session.journal.get_stand_down()),
     }
 
 
 @server.tool()
 def get_positions() -> list[dict[str, Any]]:
     """List every open position on the paper account."""
-    account = _session.broker.get_account()
+    account = _session.account()
     return [p.model_dump(mode="json") for p in account.open_positions]
 
 
@@ -333,7 +377,7 @@ def reset_trading_session() -> dict[str, Any]:
     re-enables trading, so it is a deliberate act, not a way around the limit.
     """
     _session.reset()
-    account = _session.broker.get_account()
+    account = _session.account()
     return {
         "reset": True,
         "equity_at_session_start": round(account.equity_usd, 2),

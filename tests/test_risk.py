@@ -150,67 +150,141 @@ def test_rejects_position_larger_than_max_position_pct(rules, account, spy_tick)
     assert _reasons_mention(verdict, "of equity")
 
 
-def test_rejects_when_cash_reserve_would_be_breached(rules, spy_tick, buy_proposal):
-    poor_cash = AccountSnapshot(
-        equity_usd=PAPER_EQUITY,
-        cash_usd=PAPER_EQUITY * 0.201,  # 20.1% cash; a $1,740 order drops it under 20%
-        buying_power_usd=PAPER_EQUITY * 0.201,
-        open_positions=[],
-    )
-    verdict = _gate(rules).evaluate(buy_proposal, account=poor_cash, tick=spy_tick)
-    assert not verdict.approved
-    assert _reasons_mention(verdict, "reserve")
+# --------------------------------------------------------- 2% total-risk cap
 
 
-# ------------------------------------------------------------ 2% invested cap
-
-
-def test_rejects_when_total_invested_would_be_breached(rules, spy_tick, buy_proposal):
-    """An existing position at the cap blocks the next one."""
-    at_cap = AccountSnapshot(
+def _account_with_open_risk(risk_usd: float) -> AccountSnapshot:
+    """Equity account carrying `risk_usd` of planned risk already on the books."""
+    return AccountSnapshot(
         equity_usd=PAPER_EQUITY,
         cash_usd=PAPER_EQUITY,
         buying_power_usd=PAPER_EQUITY,
+        open_positions=[],
+        open_risk_usd=risk_usd,
+    )
+
+
+def test_two_full_size_trades_fit_under_the_total_risk_cap(rules, spy_tick):
+    """1% per trade against a 2% total means two full-size trades, not one."""
+    full_size = OrderProposal(
+        symbol="SPY",
+        direction=Direction.BUY,
+        qty=83,
+        limit_price=580.00,
+        stop_loss_price=568.00,  # $12 x 83 = $996, just under 1% of equity
+        take_profit_price=600.00,
+        rationale="Full-size trade at roughly the per-trade risk cap.",
+    )
+    # First trade: nothing open yet.
+    assert _gate(rules).evaluate(
+        full_size, account=_account_with_open_risk(0.0), tick=spy_tick
+    ).approved
+
+    # Second: 1% already committed, so this reaches exactly 2%.
+    assert _gate(rules).evaluate(
+        full_size, account=_account_with_open_risk(1_000.0), tick=spy_tick
+    ).approved
+
+
+def test_third_full_size_trade_breaches_the_total_risk_cap(rules, spy_tick):
+    full_size = OrderProposal(
+        symbol="SPY",
+        direction=Direction.BUY,
+        qty=83,
+        limit_price=580.00,
+        stop_loss_price=568.00,
+        take_profit_price=600.00,
+        rationale="Third full-size trade; total risk would reach 3%.",
+    )
+    verdict = _gate(rules).evaluate(
+        full_size, account=_account_with_open_risk(2_000.0), tick=spy_tick
+    )
+    assert not verdict.approved
+    assert _reasons_mention(verdict, "total risk")
+
+
+def test_four_half_size_trades_fit(rules, spy_tick):
+    """The cap counts risk, not positions — half-size means twice as many."""
+    half_size = OrderProposal(
+        symbol="SPY",
+        direction=Direction.BUY,
+        qty=41,
+        limit_price=580.00,
+        stop_loss_price=568.00,  # $12 x 41 = $492, about 0.5% of equity
+        take_profit_price=600.00,
+        rationale="Half-size trade; four of these fit inside the 2% total.",
+    )
+    verdict = _gate(rules).evaluate(
+        half_size, account=_account_with_open_risk(1_500.0), tick=spy_tick
+    )
+    assert verdict.approved, verdict.reasons
+
+
+def test_total_risk_cap_is_leverage_neutral(rules, spy_tick):
+    """Notional is irrelevant to the risk cap; stop distance is what counts.
+
+    A large position with a tight stop carries less risk than a small position
+    with a wide one — which is backwards from a notional cap, and is the point
+    of measuring risk instead.
+    """
+    big_position_tight_stop = OrderProposal(
+        symbol="SPY",
+        direction=Direction.BUY,
+        qty=80,                  # $46,400 notional
+        limit_price=580.00,
+        stop_loss_price=578.00,  # $2 x 80 = $160 risk, 0.16% of equity
+        take_profit_price=590.00,
+        rationale="Large notional, tight stop, small risk.",
+    )
+    verdict = _gate(rules).evaluate(
+        big_position_tight_stop, account=_account_with_open_risk(0.0), tick=spy_tick
+    )
+    assert verdict.approved, verdict.reasons
+
+
+# --------------------------------------------------------------- margin guards
+
+
+def test_rejects_order_using_too_much_buying_power(rules, spy_tick):
+    thin = AccountSnapshot(
+        equity_usd=PAPER_EQUITY,
+        cash_usd=1_000.0,
+        buying_power_usd=1_000.0,  # a $1,740 order is 174% of this
+        open_positions=[],
+    )
+    proposal = OrderProposal(
+        symbol="SPY",
+        direction=Direction.BUY,
+        qty=3,
+        limit_price=580.00,
+        stop_loss_price=575.00,
+        take_profit_price=590.00,
+        rationale="Small risk, but it would consume most of the buying power.",
+    )
+    verdict = _gate(rules).evaluate(proposal, account=thin, tick=spy_tick)
+    assert not verdict.approved
+    assert _reasons_mention(verdict, "buying power")
+
+
+def test_rejects_when_gross_notional_would_be_breached(rules, spy_tick, buy_proposal):
+    leveraged = AccountSnapshot(
+        equity_usd=PAPER_EQUITY,
+        cash_usd=PAPER_EQUITY,
+        buying_power_usd=PAPER_EQUITY * 4,
         open_positions=[
             Position(
                 symbol="QQQ",
                 direction=Direction.BUY,
-                qty=4,
-                entry_price=500.0,  # $2,000 cost = 2% of equity, exactly at the cap
+                qty=300,
+                entry_price=500.0,     # $150,000 = 150% of equity, at the cap
                 opened_at=INSIDE_SESSION,
                 current_price=500.0,
             )
         ],
     )
-    verdict = _gate(rules).evaluate(buy_proposal, account=at_cap, tick=spy_tick)
+    verdict = _gate(rules).evaluate(buy_proposal, account=leveraged, tick=spy_tick)
     assert not verdict.approved
-    assert _reasons_mention(verdict, "total invested")
-
-
-def test_total_invested_uses_cost_not_market_value(rules, spy_tick, buy_proposal):
-    """A winner running up must not retroactively breach the cap.
-
-    The QQQ position cost $200 (0.2% of equity) but is now worth $4,000 (4%).
-    Measured at market value it would blow the 2% cap on its own; measured at
-    cost — which is what the rule says — there is still room to trade.
-    """
-    winner = AccountSnapshot(
-        equity_usd=PAPER_EQUITY,
-        cash_usd=PAPER_EQUITY,
-        buying_power_usd=PAPER_EQUITY,
-        open_positions=[
-            Position(
-                symbol="QQQ",
-                direction=Direction.BUY,
-                qty=4,
-                entry_price=50.0,       # cost $200
-                opened_at=INSIDE_SESSION,
-                current_price=1000.0,   # now worth $4,000
-            )
-        ],
-    )
-    verdict = _gate(rules).evaluate(buy_proposal, account=winner, tick=spy_tick)
-    assert verdict.approved, verdict.reasons
+    assert _reasons_mention(verdict, "gross notional")
 
 
 def test_rejects_limit_price_far_from_market(rules, account, spy_tick):
@@ -400,73 +474,6 @@ def test_cooldown_on_other_symbol_does_not_block(rules, account, spy_tick, buy_p
     )
     verdict = _gate(rules).evaluate(
         buy_proposal, account=account, tick=spy_tick, activity=other
-    )
-    assert verdict.approved, verdict.reasons
-
-
-# ---------------------------------------------------------------------- PDT
-
-
-def test_pdt_blocks_fourth_day_trade_below_threshold(rules, spy_tick, buy_proposal):
-    small = AccountSnapshot(
-        equity_usd=20_000.0,  # below the $25k threshold
-        cash_usd=20_000.0,
-        buying_power_usd=20_000.0,
-        open_positions=[],
-        daytrade_count=rules.pdt.max_day_trades_per_5_days,
-    )
-    # Equity floor is calibrated to a $100k paper account, so relax it here to
-    # isolate the PDT gate rather than tripping the floor first.
-    relaxed = rules.model_copy(deep=True)
-    relaxed.account.min_equity_floor_usd = 1_000.0
-
-    verdict = _gate(relaxed, equity=20_000.0).evaluate(
-        buy_proposal, account=small, tick=spy_tick
-    )
-    assert not verdict.approved
-    assert _reasons_mention(verdict, "pdt guard")
-
-
-def test_pdt_does_not_bind_above_threshold(rules, spy_tick, buy_proposal):
-    large = AccountSnapshot(
-        equity_usd=PAPER_EQUITY,  # well above $25k
-        cash_usd=PAPER_EQUITY,
-        buying_power_usd=PAPER_EQUITY,
-        open_positions=[],
-        daytrade_count=99,
-    )
-    verdict = _gate(rules).evaluate(buy_proposal, account=large, tick=spy_tick)
-    assert verdict.approved, verdict.reasons
-
-
-def test_pdt_does_not_bind_on_crypto(rules, spy_tick):
-    """Crypto is not a security, so PDT never applies to it."""
-    relaxed = rules.model_copy(deep=True)
-    relaxed.account.min_equity_floor_usd = 1_000.0
-    relaxed.crypto_sleeve.enabled = True
-    relaxed.crypto_sleeve.capital_cap_pct = 15.0
-    relaxed.crypto_sleeve.allowed_symbols = ["BTC/USD"]
-
-    small = AccountSnapshot(
-        equity_usd=20_000.0,
-        cash_usd=20_000.0,
-        buying_power_usd=20_000.0,
-        open_positions=[],
-        daytrade_count=99,
-    )
-    btc_tick = Tick(symbol="BTC/USD", bid=64_990.0, ask=65_010.0, timestamp=INSIDE_SESSION)
-    proposal = OrderProposal(
-        symbol="BTC/USD",
-        asset_class=AssetClass.CRYPTO,
-        direction=Direction.BUY,
-        qty=0.005,  # $325 notional = 1.6% of a $20k account
-        limit_price=65_000.0,
-        stop_loss_price=63_000.0,
-        take_profit_price=70_000.0,
-        rationale="Crypto is PDT-exempt; this should clear the day-trade gate.",
-    )
-    verdict = _gate(relaxed, equity=20_000.0).evaluate(
-        proposal, account=small, tick=btc_tick
     )
     assert verdict.approved, verdict.reasons
 

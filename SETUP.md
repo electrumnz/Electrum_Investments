@@ -91,7 +91,7 @@ Confirm the install is sound before touching any credentials:
 .venv/bin/python -m pytest
 ```
 
-You should see **64 passed**. If not, stop here — something is wrong with the
+You should see **104 passed**. If not, stop here — something is wrong with the
 environment, not with your setup.
 
 ---
@@ -183,7 +183,7 @@ Verify in Claude Code:
 /mcp
 ```
 Both servers should list their tools. Then try: *"What's my risk status?"* and
-*"Check a buy of 10 SPY at 580 with a stop at 575 and a target at 590."*
+*"Check a buy of 3 SPY at 580 with a stop at 575 and a target at 590."*
 
 ---
 

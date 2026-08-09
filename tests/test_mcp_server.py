@@ -13,17 +13,19 @@ import pytest
 from bot import mcp_server
 from bot.broker import MockBroker
 from bot.config import load_rules
+from bot.journal import Journal
 from bot.risk import RiskGate
 
 from .conftest import INSIDE_SESSION, PAPER_EQUITY
 
 
 @pytest.fixture(autouse=True)
-def wired_session(monkeypatch):
+def wired_session(monkeypatch, tmp_path):
     """Point the module-level session at a MockBroker seeded with prices.
 
     The gate's clock is pinned inside the allowed session window so these tests
-    assert on the MCP layer rather than on what time it happens to be.
+    assert on the MCP layer rather than on what time it happens to be, and the
+    journal goes to a temp file so the suite never touches a real one.
     """
     broker = MockBroker(starting_equity=PAPER_EQUITY)
     broker.connect()
@@ -37,6 +39,7 @@ def wired_session(monkeypatch):
     session = mcp_server._Session()
     session._broker = broker
     session._rules = rules
+    session._journal = Journal(tmp_path / "journal.db")
     session._gate = RiskGate(
         rules, equity_at_session_start=PAPER_EQUITY, now=INSIDE_SESSION
     )
@@ -128,14 +131,14 @@ def test_get_risk_status_reports_limits_and_usage():
     assert status["kill_switch_tripped"] is False
     assert status["limits"]["max_concurrent_positions"] > 0
     assert "trades_today" in status["frequency"]
-    # A $100k paper account sits above the $25k PDT threshold.
-    assert status["pattern_day_trader"]["currently_binding"] is False
+    assert status["limits"]["max_total_risk_pct"] > 0
+    assert "max_gross_notional_pct" in status["margin"]
 
 
 def test_get_rules_exposes_the_active_config():
     rules = mcp_server.get_rules()
     assert rules["crypto_sleeve"]["enabled"] is False
-    assert rules["pdt"]["enforce"] is True
+    assert rules["stand_down"]["consecutive_losses_trigger"] > 0
 
 
 def test_reset_session_clears_kill_switch(wired_session):

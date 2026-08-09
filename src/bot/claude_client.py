@@ -106,12 +106,14 @@ def build_system_prompt(rules: Rules) -> str:
             f"- Allowed symbols: {', '.join(sorted(rules.allowed_symbols))}",
             crypto_line,
             f"- Max risk per trade: {rules.account.max_risk_per_trade_pct:.2f}% of equity",
-            f"- Max single position: {rules.account.max_position_pct:.1f}% of equity",
-            f"- Max total invested across all positions: "
-            f"{rules.account.max_total_invested_pct:.1f}% of equity "
-            f"(measured at cost, checked at entry)",
-            f"- Minimum cash reserve: {rules.account.min_cash_reserve_pct:.1f}% of equity",
+            f"- Max COMBINED risk across all open positions: "
+            f"{rules.account.max_total_risk_pct:.2f}% of equity. This is the "
+            f"binding constraint most of the time — size each trade so the total "
+            f"stays under it.",
+            f"- Max single position value: {rules.account.max_position_pct:.0f}% of "
+            f"equity (a concentration check, rarely the limit that binds)",
             f"- Max concurrent positions: {rules.account.max_concurrent_positions}",
+            f"- Max gross exposure: {rules.margin.max_gross_notional_pct:.0f}% of equity",
             f"- Daily loss kill-switch: {rules.account.daily_loss_kill_pct:.1f}%",
             f"- Stand-down: {rules.stand_down.consecutive_losses_trigger} consecutive "
             f"losses beyond {rules.stand_down.loss_threshold_r:.2f}R suspends live "
@@ -121,9 +123,8 @@ def build_system_prompt(rules: Rules) -> str:
             f"- Max trades: {rules.frequency.max_trades_per_day}/day, "
             f"{rules.frequency.max_trades_per_week}/week",
             f"- Cooldown per symbol: {rules.frequency.min_seconds_between_trades_per_symbol}s",
-            f"- Pattern Day Trader guard: {'on' if rules.pdt.enforce else 'off'} "
-            f"(max {rules.pdt.max_day_trades_per_5_days} day trades per 5 business "
-            f"days below ${rules.pdt.equity_threshold_usd:,.0f} equity)",
+            f"- Max buying power per order: "
+            f"{rules.margin.max_buying_power_utilisation_pct:.0f}%",
             f"- Allowed UTC sessions: {rules.sessions_utc}",
             f"- News blackout: {rules.news_blackout_minutes_before} min before / "
             f"{rules.news_blackout_minutes_after} min after high-impact events",

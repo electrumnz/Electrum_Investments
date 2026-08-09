@@ -100,13 +100,12 @@ class RiskGate:
             self._stops_on_correct_side(proposal),
             self._per_trade_risk(proposal, account),
             self._position_size(proposal, account),
-            self._cash_reserve(proposal, account),
-            self._total_invested(proposal, account),
+            self._total_risk(proposal, account),
+            self._buying_power(proposal, account),
+            self._gross_notional(proposal, account),
             self._trades_per_day(activity),
             self._trades_per_week(activity),
             self._symbol_cooldown(proposal, activity),
-            # PDT binds on securities only; crypto is not a security.
-            None if is_crypto else self._pattern_day_trader(account),
             self._crypto_sleeve_cap(proposal, account) if is_crypto else None,
         ]
 
@@ -254,36 +253,55 @@ class RiskGate:
             )
         return None
 
-    def _cash_reserve(self, proposal: OrderProposal, account: AccountSnapshot) -> str | None:
-        if account.equity_usd <= 0:
-            return None
-        cash_after = account.cash_usd - proposal.notional_usd
-        pct_after = cash_after / account.equity_usd * 100
-        floor = self._rules.account.min_cash_reserve_pct
-        if pct_after < floor:
-            return (
-                f"cash would fall to {pct_after:.1f}% of equity, below the "
-                f"{floor:.1f}% reserve"
-            )
-        return None
+    def _total_risk(self, proposal: OrderProposal, account: AccountSnapshot) -> str | None:
+        """Cap combined risk across every open position plus this one.
 
-    def _total_invested(self, proposal: OrderProposal, account: AccountSnapshot) -> str | None:
-        """Cap total capital committed, measured at cost rather than market value.
-
-        Checked at entry only: existing positions count at what they cost, not
-        what they are now worth. A winner running up therefore never
-        retroactively breaches the cap or forces a close — which would be a
-        perverse way to punish a trade going right.
+        Risk, not position value: what would actually be lost if every stop
+        filled. That makes the rule leverage-neutral — it means the same thing
+        whether the exposure came from cash equities, margin, options or
+        futures — and it composes with the per-trade cap, so a 2% total against
+        a 1% per-trade allows two full-size trades or four half-size ones.
         """
         if account.equity_usd <= 0:
             return None
-        invested_after = account.total_invested_usd + proposal.notional_usd
-        pct_after = invested_after / account.equity_usd * 100
-        cap = self._rules.account.max_total_invested_pct
+        risk_after = account.open_risk_usd + proposal.risk_usd
+        pct_after = risk_after / account.equity_usd * 100
+        cap = self._rules.account.max_total_risk_pct
         if pct_after > cap:
             return (
-                f"total invested would reach {pct_after:.2f}% of equity "
+                f"total risk would reach {pct_after:.2f}% of equity "
                 f"(max {cap:.2f}%)"
+            )
+        return None
+
+    def _buying_power(self, proposal: OrderProposal, account: AccountSnapshot) -> str | None:
+        """Stay well clear of an Intraday Margin Deficit call.
+
+        Alpaca rejects deficit-creating orders in real time, and repeated
+        non-compliance inside five business days costs a 90-day restriction.
+        Leaving headroom is much cheaper than finding the edge of it.
+        """
+        if account.buying_power_usd <= 0:
+            return "no buying power available"
+        used_pct = proposal.notional_usd / account.buying_power_usd * 100
+        cap = self._rules.margin.max_buying_power_utilisation_pct
+        if used_pct > cap:
+            return (
+                f"order would use {used_pct:.1f}% of buying power (max {cap:.1f}%)"
+            )
+        return None
+
+    def _gross_notional(self, proposal: OrderProposal, account: AccountSnapshot) -> str | None:
+        """Cap total market exposure as a multiple of equity."""
+        if account.equity_usd <= 0:
+            return None
+        notional_after = account.gross_exposure_usd + proposal.notional_usd
+        pct_after = notional_after / account.equity_usd * 100
+        cap = self._rules.margin.max_gross_notional_pct
+        if pct_after > cap:
+            return (
+                f"gross notional would reach {pct_after:.0f}% of equity "
+                f"(max {cap:.0f}%)"
             )
         return None
 
@@ -309,25 +327,6 @@ class RiskGate:
         if elapsed is not None and elapsed < cooldown:
             return (
                 f"{proposal.symbol} traded {elapsed:.0f}s ago; cooldown is {cooldown}s"
-            )
-        return None
-
-    def _pattern_day_trader(self, account: AccountSnapshot) -> str | None:
-        """Block the trade that would risk a PDT flag.
-
-        Conservative by design: opening a position is not itself a day trade, but
-        once the count is at the limit any new equity entry could become the
-        fourth if it closes the same day. A 90-day restriction is a far worse
-        outcome than a skipped trade.
-        """
-        pdt = self._rules.pdt
-        if not pdt.enforce or account.equity_usd >= pdt.equity_threshold_usd:
-            return None
-        if account.daytrade_count >= pdt.max_day_trades_per_5_days:
-            return (
-                f"PDT guard: {account.daytrade_count} day trades in the last 5 "
-                f"business days (max {pdt.max_day_trades_per_5_days} below "
-                f"${pdt.equity_threshold_usd:,.0f} equity)"
             )
         return None
 

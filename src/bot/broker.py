@@ -61,7 +61,6 @@ class MockBroker:
         self._connected = False
         self._order_seq = 0
         self._fills: list[tuple[datetime, str]] = []
-        self.daytrade_count = 0
 
     def connect(self) -> None:
         self._connected = True
@@ -85,8 +84,6 @@ class MockBroker:
             cash_usd=self._cash,
             buying_power_usd=self._cash,
             open_positions=list(self._positions.values()),
-            daytrade_count=self.daytrade_count,
-            pattern_day_trader=False,
         )
 
     def get_activity(self) -> TradingActivity:
@@ -209,8 +206,6 @@ class AlpacaBroker:
             cash_usd=float(raw.cash or 0),
             buying_power_usd=float(raw.buying_power or 0),
             open_positions=self._positions(),
-            daytrade_count=int(getattr(raw, "daytrade_count", 0) or 0),
-            pattern_day_trader=bool(getattr(raw, "pattern_day_trader", False)),
         )
 
     def _positions(self) -> list[Position]:

@@ -61,10 +61,11 @@ groupings there become real obligations rather than a record.
 
 **A deterministic risk gate** (`src/bot/risk.py`). Claude proposes orders; this
 approves or rejects them against `config/rules.yaml`. It enforces: symbol
-allowlist, session windows, news blackouts, position concentration, cash reserve,
-gross exposure, per-trade risk, stop/target placement sanity, limit-price sanity,
-trades per day and per week, per-symbol cooldown, a sticky daily-loss kill switch,
-US Pattern Day Trader limits, and a capped crypto sleeve. Every rule has a test
+allowlist, session windows, news blackouts, per-trade risk, **combined risk
+across all open positions**, position concentration, buying-power utilisation,
+gross notional, stop/target placement sanity, limit-price sanity, trades per day
+and per week, per-symbol cooldown, a sticky daily-loss kill switch, a
+**consecutive-loss stand-down**, and a capped crypto sleeve. Every rule has a test
 that proves it rejects.
 
 **An Alpaca paper broker** (`src/bot/broker.py`) behind a `Broker` Protocol, with
@@ -79,10 +80,10 @@ so the tool surface cannot be talked past.
 **An audit log** (`audit/<date>.jsonl`) recording every proposal, verdict,
 execution, and the token cost of every Claude call.
 
-**A reference library** (`reference/`) tracking eight agent projects with pinned
+**A reference library** (`reference/`) tracking fourteen agent, backtesting and LLM-trading projects with pinned
 commits and detected licences, so upstream drift shows up as a git diff.
 
-**64 tests**, `ruff` clean, `mypy --strict` clean.
+**104 tests**, `ruff` clean, `mypy --strict` clean.
 
 ---
 
@@ -154,10 +155,10 @@ wired in. `src/bot/data/` has stub adapters with the interfaces already shaped.
 triggers and wake Claude only when one fires. Same responsiveness, ~10× less API
 cost than calling every minute. See `docs/COSTS.md`.
 
-**Crypto sleeve.** `config/rules.yaml` has it wired and disabled. Crypto is PDT-
-exempt and trades 24/7, which makes it attractive below $25k — and the cap exists
-because 24/7 also means 24/7 opportunities to lose money. Enable with a real
-capital cap, never a shared budget.
+**Crypto sleeve.** `config/rules.yaml` has it wired and disabled. It trades 24/7
+and is driven by different things than equities, which is the case for it — and
+also why the cap exists, because 24/7 means 24/7 opportunities to lose money.
+Enable with a real capital cap, never a shared budget.
 
 **Sentiment and whale tracking.** LunarCrush (~$30/mo) for aggregated crypto
 social sentiment is the highest-value paid feed. Whale Alert API (~$50/mo) after
@@ -188,10 +189,17 @@ alternative if you are already running the gateway.
 - **The kill switch is sticky.** Once the daily loss limit trips, recovery within
   the same session does not re-enable trading. Use `reset_trading_session` — and
   notice that you are doing it.
-- **PDT is conservative.** Below $25k equity the gate blocks new equity entries
-  once you are at three day trades in five business days, even though opening a
-  position is not itself a day trade. A 90-day restriction is worse than a missed
-  trade.
+- **The PDT rule is gone.** FINRA retired it on 2026-06-04 and Alpaca removed
+  `daytrade_count` from its API on 2026-07-06. The old $25,000 threshold no
+  longer applies — 4x intraday buying power now needs only $2,000 equity. What
+  replaced it is Intraday Margin Deficit calls, and repeated non-compliance
+  inside five business days still costs a 90-day restriction, which is what the
+  `margin:` block in `rules.yaml` leaves headroom against.
+- **Risk caps are measured in risk, not position size.** `max_total_risk_pct`
+  sums what would be lost if every stop filled. That makes it leverage-neutral,
+  but it also means a tight stop permits a large position: a 1%-risk trade with
+  a 1% stop implies a position worth ~100% of equity. `max_position_pct` is the
+  backstop for that, and it is deliberately generous at 50%.
 - **Buzz's ACP mode bypasses approval gates.** Use the native gateway path. See
   `docs/BUZZ_SETUP.md` — the security section is not boilerplate.
 - **Alpaca does not return a position open time.** `Position.opened_at` is

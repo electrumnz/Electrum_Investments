@@ -188,6 +188,16 @@ class Journal:
     def open_trades(self) -> list[Trade]:
         return self._query("SELECT * FROM trades WHERE exit_time IS NULL ORDER BY entry_time")
 
+    def open_risk_usd(self) -> float:
+        """Combined planned risk across every open trade.
+
+        Feeds `AccountSnapshot.open_risk_usd`, which the total-risk cap counts
+        against. Alpaca cannot supply this — it holds stop-losses as separate
+        orders, not as attributes of a position — so the journal is the only
+        place that knows what each open trade was designed to lose.
+        """
+        return sum(t.planned_risk_usd for t in self.open_trades())
+
     def open_trade_for(self, symbol: str) -> Trade | None:
         rows = self._query(
             "SELECT * FROM trades WHERE exit_time IS NULL AND symbol = ? "

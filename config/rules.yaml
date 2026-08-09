@@ -13,21 +13,26 @@ account:
   # If you reset the paper account to a different balance, change this to match.
   min_equity_floor_usd: 90000
 
-  # Max loss on a single trade, as % of equity, assuming the stop fills.
-  # A RISK limit, not a size limit — a wider stop means a smaller position.
+  # --- The two that matter -------------------------------------------------
+  # Both are RISK limits: what would actually be lost if stops fill. That makes
+  # them leverage-neutral — the same numbers mean the same thing on cash
+  # equities, on margin, on options, or on futures if a broker is ever added.
+
+  # Max loss on a single trade, as % of equity. A wider stop means a SMALLER
+  # position, not more risk.
   max_risk_per_trade_pct: 1.0
 
-  # Max capital in any one position, as % of equity.
-  max_position_pct: 2.0
+  # Max combined loss if every open stop filled at once, as % of equity.
+  # At 1% per trade this allows two full-size trades, or four half-size ones.
+  max_total_risk_pct: 2.0
 
-  # Max capital committed across ALL open positions, as % of equity.
-  # Measured at what positions cost, and checked when one is opened — a winner
-  # running up does not retroactively breach this or force a close.
-  max_total_invested_pct: 2.0
+  # --- Sanity checks, not the binding constraint ---------------------------
 
-  # Keep at least this much of equity in cash. A backstop; with a 2% invested
-  # cap it should never be the binding constraint.
-  min_cash_reserve_pct: 20.0
+  # Concentration cap on a single position's market value, as % of equity.
+  # Deliberately generous: a 1%-risk trade with a 2% stop implies a position
+  # worth ~50% of equity, so a tight cap here would silently become the real
+  # limit and quietly override the risk rules above.
+  max_position_pct: 50.0
 
   # Max simultaneous open positions across all symbols.
   max_concurrent_positions: 3
@@ -71,14 +76,25 @@ stand_down:
   stage_two_days: 10
   repeat_window_days: 30
 
-# US Pattern Day Trader rule. Below the equity threshold, a margin account may
-# make only 3 day trades per rolling 5 business days; a 4th triggers a 90-day
-# restriction. Day-trade counts come from Alpaca, which is the authority.
-# Crypto is exempt — it is not a security.
-pdt:
-  enforce: true
-  equity_threshold_usd: 25000
-  max_day_trades_per_5_days: 3
+# Margin guards.
+#
+# These replace the Pattern Day Trader rule, which FINRA RETIRED on 2026-06-04
+# (Regulatory Notice 26-10). The $25,000 threshold is gone: 4x intraday buying
+# power now needs only $2,000 equity, and Alpaca removed daytrade_count and
+# pattern_day_trader from its API on 2026-07-06.
+#
+# What replaced it is Intraday Margin Deficit calls — Alpaca rejects orders that
+# would create a deficit in real time, and repeated non-compliance inside five
+# business days still costs a 90-day account restriction. So the reasoning is
+# unchanged, just pointed at the rule that actually applies now: leave headroom,
+# because finding the edge is far more expensive than skipping a trade.
+margin:
+  # Share of available buying power a single order may consume.
+  max_buying_power_utilisation_pct: 50.0
+
+  # Total market exposure as % of equity. Reg T permits 200% overnight
+  # (2:1 leverage); this leaves headroom against it.
+  max_gross_notional_pct: 150.0
 
 # Allowed trading windows in UTC, as [start_hour, end_hour) pairs.
 # US equities regular session is 09:30–16:00 ET = 13:30–20:00 UTC (14:30–21:00 during EDT).
