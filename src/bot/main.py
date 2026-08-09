@@ -23,6 +23,7 @@ from .context import build_market_context, fetch_market_ticks
 from .data.calendar import EmptyCalendar
 from .data.news import EmptyNews
 from .models import Decision
+from .options import alerts_for_positions
 from .risk import RiskGate
 
 log = structlog.get_logger()
@@ -122,12 +123,34 @@ def cmd_loop(
             ticks = fetch_market_ticks(broker, rules.allowed_symbols)
             news_windows = calendar.upcoming_windows(lookahead_minutes=60)
 
+            # Checked every cycle, before anything else. An option expiry is the
+            # one thing here that resolves itself automatically and irreversibly
+            # if nobody is watching.
+            expiry_alerts = alerts_for_positions(
+                [(p.symbol, p.qty) for p in account.open_positions],
+                now=datetime.now(UTC),
+                warn_days=rules.options.warn_days_before_expiry,
+                buying_power_usd=account.buying_power_usd,
+                underlying_prices={s: t.mid for s, t in ticks.items()},
+            )
+            for alert in expiry_alerts:
+                if alert.needs_action:
+                    log.warning(
+                        "option_expiry_action_required",
+                        symbol=alert.symbol,
+                        days_to_expiry=alert.days_to_expiry,
+                        in_the_money=alert.in_the_money,
+                        can_fund_exercise=alert.can_fund_exercise,
+                        detail=alert.message,
+                    )
+
             context = build_market_context(
                 account=account,
                 ticks=ticks,
                 headlines=news.recent_headlines(rules.allowed_symbols),
                 news_windows=news_windows,
                 activity=activity,
+                expiry_alerts=expiry_alerts,
             )
             decision, usage = claude.propose(context)
 

@@ -91,7 +91,7 @@ Confirm the install is sound before touching any credentials:
 .venv/bin/python -m pytest
 ```
 
-You should see **104 passed**. If not, stop here — something is wrong with the
+You should see **135 passed**. If not, stop here — something is wrong with the
 environment, not with your setup.
 
 ---

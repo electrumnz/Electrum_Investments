@@ -25,6 +25,7 @@ from .broker import Broker
 from .config import Env, Rules, load_rules
 from .journal import Journal
 from .models import AccountSnapshot, AssetClass, Direction, OrderProposal
+from .options import alerts_for_positions, parse_occ_symbol, render_alerts
 from .risk import RiskGate
 from .stand_down import describe
 
@@ -326,6 +327,50 @@ def get_risk_status() -> dict[str, Any]:
             ),
         },
         "stand_down": describe(_session.journal.get_stand_down()),
+    }
+
+
+@server.tool()
+def get_option_expiries() -> dict[str, Any]:
+    """Report every open option position and how close it is to expiring.
+
+    Worth checking every session. Alpaca auto-exercises anything $0.01 in the
+    money at 6pm ET on expiry day, auto-assigns short positions the same way,
+    and liquidates in-the-money positions the account cannot fund inside the
+    final hour. "Do Not Exercise" cannot be filed through the API, so closing
+    the position early is the only way to choose a different outcome.
+    """
+    account = _session.account()
+    now = datetime.now(UTC)
+
+    # Underlying marks let the alert say whether exercise is actually likely.
+    # Missing quotes degrade the detail, never the timing of the warning.
+    underlying_prices: dict[str, float] = {}
+    for position in account.open_positions:
+        contract = parse_occ_symbol(position.symbol)
+        if contract is None:
+            continue
+        try:
+            underlying_prices[contract.underlying] = _session.broker.get_tick(
+                contract.underlying
+            ).mid
+        except (KeyError, RuntimeError):
+            continue
+
+    alerts = alerts_for_positions(
+        [(p.symbol, p.qty) for p in account.open_positions],
+        now=now,
+        warn_days=_session.rules.options.warn_days_before_expiry,
+        buying_power_usd=account.buying_power_usd,
+        underlying_prices=underlying_prices,
+    )
+    needing_action = [a for a in alerts if a.needs_action]
+
+    return {
+        "option_positions": len(alerts),
+        "needing_action": len(needing_action),
+        "alerts": [a.model_dump(mode="json") for a in alerts],
+        "summary": render_alerts(alerts),
     }
 
 

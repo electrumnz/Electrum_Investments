@@ -197,6 +197,27 @@ class FrequencyRules(BaseModel):
         return self
 
 
+class OptionRules(BaseModel):
+    """Expiry safety for option positions.
+
+    Alpaca auto-exercises anything $0.01 in the money, liquidates un-fundable
+    in-the-money positions inside the final hour, and does not accept "Do Not
+    Exercise" through the API. So an expiry that arrives unnoticed is not a
+    missed opportunity — it is the broker making the decision instead.
+    """
+
+    # How far ahead to start warning. A week gives time to plan an exit rather
+    # than react to one.
+    warn_days_before_expiry: float = Field(default=7.0, gt=0)
+
+    # Refuse to open anything new in a contract closer than this to expiry.
+    # Only relevant once the bot can trade options; harmless before then.
+    min_days_to_expiry_for_entry: float = Field(default=3.0, ge=0)
+
+    # Treat an approaching expiry as requiring action, not merely noting it.
+    escalate_to_action_days: float = Field(default=1.0, gt=0)
+
+
 class CryptoSleeve(BaseModel):
     enabled: bool
     capital_cap_pct: float = Field(ge=0, le=100)
@@ -216,6 +237,7 @@ class Rules(BaseModel):
     frequency: FrequencyRules
     margin: MarginRules = Field(default_factory=MarginRules)
     stand_down: StandDownRules = Field(default_factory=StandDownRules)
+    options: OptionRules = Field(default_factory=OptionRules)
     sessions_utc: list[tuple[int, int]]
     news_blackout_minutes_before: int = Field(ge=0)
     news_blackout_minutes_after: int = Field(ge=0)

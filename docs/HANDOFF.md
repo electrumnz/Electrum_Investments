@@ -83,7 +83,7 @@ execution, and the token cost of every Claude call.
 **A reference library** (`reference/`) tracking fourteen agent, backtesting and LLM-trading projects with pinned
 commits and detected licences, so upstream drift shows up as a git diff.
 
-**104 tests**, `ruff` clean, `mypy --strict` clean.
+**135 tests**, `ruff` clean, `mypy --strict` clean.
 
 ---
 
@@ -205,6 +205,13 @@ alternative if you are already running the gateway.
 - **Alpaca does not return a position open time.** `Position.opened_at` is
   populated with fetch time; the audit log is the real source of truth for when a
   position was entered.
+- **Option expiry is handled by Alpaca whether you are watching or not.** ITM by
+  $0.01 is auto-exercised at 6pm ET; a short ITM position is auto-assigned after
+  the close; and an ITM position the account cannot fund is **liquidated inside
+  the final hour**. "Do Not Exercise" cannot be filed through the API — it needs
+  a support ticket — so closing the position yourself is the only programmatic
+  way to choose a different outcome. `src/bot/options.py` watches for this and
+  the warnings lead the Claude context block; do not quietly demote them.
 
 ---
 

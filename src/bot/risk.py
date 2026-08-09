@@ -31,6 +31,7 @@ from .models import (
     Tick,
     TradingActivity,
 )
+from .options import parse_occ_symbol
 
 
 class NewsWindow(NamedTuple):
@@ -106,6 +107,7 @@ class RiskGate:
             self._trades_per_day(activity),
             self._trades_per_week(activity),
             self._symbol_cooldown(proposal, activity),
+            self._option_expiry(proposal),
             self._crypto_sleeve_cap(proposal, account) if is_crypto else None,
         ]
 
@@ -327,6 +329,27 @@ class RiskGate:
         if elapsed is not None and elapsed < cooldown:
             return (
                 f"{proposal.symbol} traded {elapsed:.0f}s ago; cooldown is {cooldown}s"
+            )
+        return None
+
+    def _option_expiry(self, proposal: OrderProposal) -> str | None:
+        """Refuse to open an option position that is already near expiry.
+
+        Buying into the last few days means inheriting Alpaca's automatic
+        exercise, assignment and liquidation behaviour with very little room to
+        change your mind — and "Do Not Exercise" cannot be filed through the
+        API, so the only exit is closing the position in time.
+        """
+        contract = parse_occ_symbol(proposal.symbol)
+        if contract is None:
+            return None
+
+        days = contract.days_to_expiry(self._now())
+        minimum = self._rules.options.min_days_to_expiry_for_entry
+        if days < minimum:
+            return (
+                f"{proposal.symbol} expires in {days:.2f} days, inside the "
+                f"{minimum:.1f}-day minimum for opening an option position"
             )
         return None
 

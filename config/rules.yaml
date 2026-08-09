@@ -96,6 +96,29 @@ margin:
   # (2:1 leverage); this leaves headroom against it.
   max_gross_notional_pct: 150.0
 
+# Option expiry safety.
+#
+# The bot does not propose option trades — that is deferred work. These rules
+# exist to make sure a contract never expires unnoticed, because Alpaca acts
+# automatically and irreversibly at expiry:
+#
+#   - in the money by $0.01 or more  -> AUTO-EXERCISED by 6pm ET on expiry day
+#   - ITM but you cannot fund it     -> LIQUIDATED inside the final hour
+#   - short and ITM                  -> AUTO-ASSIGNED after the close
+#   - "Do Not Exercise"              -> CANNOT be filed through the API
+#
+# Because DNE is not automatable, closing the position yourself is the only way
+# to choose a different outcome. Hence warning early and loudly.
+options:
+  # Start warning this many days out — enough time to plan an exit.
+  warn_days_before_expiry: 7.0
+
+  # Refuse to OPEN an option position closer than this to expiry.
+  min_days_to_expiry_for_entry: 3.0
+
+  # Inside this many days, warnings are marked as requiring action.
+  escalate_to_action_days: 1.0
+
 # Allowed trading windows in UTC, as [start_hour, end_hour) pairs.
 # US equities regular session is 09:30–16:00 ET = 13:30–20:00 UTC (14:30–21:00 during EDT).
 # Deliberately excludes the first 30 minutes of the US open, which is the noisiest period.

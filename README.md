@@ -50,7 +50,7 @@ and **trade frequency is a risk parameter**, not a performance one.
 ```sh
 python3 -m venv .venv
 .venv/bin/pip install -e '.[dev]'
-.venv/bin/python -m pytest            # 104 tests, no credentials needed
+.venv/bin/python -m pytest            # 135 tests, no credentials needed
 
 cp .env.example .env                  # add Alpaca paper + Anthropic keys
 .venv/bin/electrum-bot smoketest      # connects, asks Claude one question, places nothing
@@ -93,6 +93,7 @@ All of it from [`config/rules.yaml`](config/rules.yaml), all of it tested:
 | Daily loss kill switch | Sticky for the session once tripped |
 | Stand-down | Suspends live trading after consecutive losses; paper continues |
 | Crypto sleeve | Disabled by default; capped when enabled |
+| Option expiry | Refuses entries near expiry; warns loudly before auto-exercise |
 | Order sanity | Limit orders only; stops and targets on the correct side |
 
 A rejected proposal comes back with **every** rule it broke, not just the first.
@@ -128,7 +129,7 @@ src/bot/
   data/                   News and calendar adapters (stubs for now)
 reference/                Tracked third-party projects (clones gitignored)
 scripts/                  fetch_reference.py, check_reference_updates.py
-tests/                    104 tests; the risk suite is the important one
+tests/                    135 tests; the risk suite is the important one
 ```
 
 ---

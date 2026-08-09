@@ -33,6 +33,10 @@ class AssetClass(StrEnum):
 
     EQUITY = "us_equity"
     CRYPTO = "crypto"
+    # The bot does not propose option trades — that is deferred work. This class
+    # exists so positions opened elsewhere are recognised, tracked, and warned
+    # about before Alpaca exercises or liquidates them automatically.
+    OPTION = "us_option"
 
 
 class ExecutionMode(StrEnum):

@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 
 from .broker import Broker
 from .models import AccountSnapshot, Tick, TradingActivity
+from .options import ExpiryAlert, render_alerts
 from .risk import NewsWindow
 
 
@@ -16,10 +17,26 @@ def build_market_context(
     headlines: list[str],
     news_windows: list[NewsWindow],
     activity: TradingActivity | None = None,
+    expiry_alerts: list[ExpiryAlert] | None = None,
 ) -> str:
     """Render a stable, parseable text blob. Goes AFTER the cached system prompt."""
     now = datetime.now(UTC).isoformat(timespec="seconds")
     lines: list[str] = [f"Current UTC time: {now}", ""]
+
+    # Deliberately first. Everything else here is an opportunity; this is the
+    # only section where doing nothing has an automatic, irreversible outcome.
+    urgent = [a for a in (expiry_alerts or []) if a.needs_action]
+    if urgent:
+        lines.append("## ⚠ OPTION EXPIRY — ACTION REQUIRED")
+        lines.extend(render_alerts(urgent))
+        lines.append("")
+        lines.append(
+            "Alpaca auto-exercises anything $0.01 in the money and liquidates "
+            "un-fundable positions in the final hour. Do Not Exercise cannot be "
+            "filed through the API, so closing the position is the only way to "
+            "choose a different outcome."
+        )
+        lines.append("")
 
     lines.append("## Account")
     lines.append(f"- Equity: ${account.equity_usd:,.2f}")
