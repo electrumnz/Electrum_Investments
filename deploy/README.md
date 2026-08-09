@@ -15,6 +15,7 @@ local machine is deleting two systemd units. Nothing below is a one-way door.
 |---|---|---|
 | `mudhorn-bot` | The decision loop. Proposes, vets, reconciles the journal | nothing |
 | `mudhorn-web` | The read-only dashboard | `127.0.0.1:8787` |
+| `mudhorn-backup.timer` | Hourly snapshot of the journal | nothing |
 | Hermes gateway | Chat, if you want it. Installed separately, see below | nothing |
 
 CPU is idle almost all the time at a 15-minute cadence. **Buy RAM, not cores** —
@@ -223,6 +224,67 @@ assistant and not for something holding broker credentials.
 
 If you skip Hermes, nothing here needs to stay running between sessions and the
 VPS becomes optional.
+
+## Backups
+
+`data/journal.db` is the only irreplaceable file on the box, and until recently
+nothing copied it. `deploy/backup-journal.sh` now runs hourly under
+`mudhorn-backup.timer`.
+
+```sh
+systemctl list-timers mudhorn-backup            # when it last ran and next runs
+journalctl -u mudhorn-backup -n 20              # what it did
+ls -la /opt/mudhorn/backups/hourly              # the snapshots themselves
+```
+
+Snapshots land in `/opt/mudhorn/backups/hourly` and are kept for four days. The
+first of each day is hard-linked into `backups/daily` and kept for ninety, so a
+day's copy costs nothing until the hourly one is pruned.
+
+**It uses `sqlite3 .backup`, never `cp`.** The bot may be part-way through a
+write, and SQLite keeps a WAL and an shm alongside the database. A `cp` taken
+between two of those writes produces a file that opens fine and reports
+corruption later, at whatever moment something reads the wrong page. The online
+backup API takes a read lock and copies page by page instead.
+
+Two details are load-bearing and worth not removing:
+
+- **A busy timeout is set on the connection.** Without it `.backup` returns
+  "database is locked" the moment the bot is mid-write, and the snapshots that
+  fail are exactly the ones taken during the activity worth keeping. It fails
+  closed rather than corrupt, so the symptom is a missing backup nobody notices.
+- **Every snapshot is opened and integrity-checked before it is kept**, under a
+  temporary name, and discarded if it does not come back `ok`. A backup nobody
+  has opened is a hope.
+
+Before the bot has ever run there is no journal. The unit carries
+`ConditionPathExists`, so systemd records those runs as skipped rather than
+failed. Once the file exists, a missing database is a real error and the script
+exits non-zero.
+
+### Restoring
+
+Stop the services first. Restoring underneath a running process leaves it
+holding a handle to the database it thinks it has, and the stand-down state it
+reloads afterwards is anyone's guess.
+
+```sh
+sudo systemctl stop mudhorn-bot mudhorn-web
+gunzip -c /opt/mudhorn/backups/daily/journal-2026-08-09.db.gz \
+  | sudo -u mudhorn tee /opt/mudhorn/data/journal.db >/dev/null
+sudo -u mudhorn sqlite3 /opt/mudhorn/data/journal.db 'PRAGMA integrity_check;'
+sudo systemctl start mudhorn-bot mudhorn-web
+```
+
+The next cycle reconciles the restored journal against the broker, so a position
+opened after the snapshot is picked up as untracked and reported rather than
+silently ignored. Its planned stop is genuinely unknown at that point, so open
+risk is flagged as understated rather than guessed at.
+
+**A backup on the same droplet survives a bad restore, not a dead droplet.**
+Pulling `backups/daily` off the box periodically is the other half of this, and
+is not automated here because it needs a destination and a credential that
+should not live on the trading box.
 
 ## Updating
 

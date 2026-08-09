@@ -135,6 +135,32 @@ Miss it and the cap silently has nothing to count. This was a real bug, fixed in
 `14b88c8`. A held position with no journal entry has an unknowable stop, so its
 risk is reported as **missing** rather than guessed at.
 
+### The journal is backed up with `.backup`, and the busy timeout is the point
+
+`data/journal.db` is the only irreplaceable file on the droplet.
+`deploy/backup-journal.sh` snapshots it hourly under `mudhorn-backup.timer`.
+
+**Never change it to `cp`.** The bot may be part-way through a write, and SQLite
+keeps a WAL and an shm alongside the database. A copy taken between two of those
+writes opens fine and reports corruption later, at whatever moment something
+reads the wrong page.
+
+Two things in that script look like defensive padding and are not:
+
+- **The busy timeout on the `sqlite3` connection.** Without it `.backup` returns
+  "database is locked" the instant the bot is mid-write, so the snapshots that
+  fail are exactly the ones taken during the activity worth keeping. It fails
+  closed, so the symptom is a missing backup rather than a bad one, and nothing
+  notices. This was found by running the script against a journal under a
+  continuous writer, not by reading it.
+- **The integrity check on every snapshot before it is kept.** It is written to a
+  temporary name, opened, checked, and discarded unless it comes back `ok`. A
+  backup nobody has opened is a hope.
+
+A backup on the same droplet survives a bad restore, not a dead droplet. Copying
+`backups/daily` off the box is deliberately not automated, because it needs a
+destination and a credential that should not live on the trading box.
+
 ### The two data feeds are not equally important
 
 `src/bot/data/` holds two adapters and they fail in different ways.
@@ -320,6 +346,8 @@ src/bot/
 deploy/                 VPS provisioning: bootstrap.sh + systemd units. Runs the
                         loop WITHOUT --execute; src/ and config/ stay root-owned
                         so the service account cannot edit its own limits.
+                        backup-journal.sh + mudhorn-backup.timer snapshot the
+                        journal hourly with sqlite3 .backup, never cp.
 audit/                  Append-only JSONL. Gitignored.
 data/journal.db         SQLite journal. Gitignored.
 reference/              Third-party projects we borrow from. See reference/STATUS.md.

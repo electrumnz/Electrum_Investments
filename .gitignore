@@ -28,6 +28,10 @@ dist/
 /audit/*.jsonl
 /audit/*.db
 /data/*.db
+# Journal snapshots from deploy/backup-journal.sh. On the droplet these live at
+# /opt/mudhorn/backups; the pattern is here so a local run of the script with
+# APP_DIR=. cannot commit a copy of the trade journal.
+/backups/
 
 # Third-party reference clones. reference/registry.yaml, versions.json and
 # STATUS.md are committed; the checked-out source is not.
