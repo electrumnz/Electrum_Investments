@@ -332,6 +332,46 @@ Keep the `hermes` user and the sudoers rule regardless. A config key can be
 lost to a bad merge or an upgrade, and it fails silently when it is. Unix
 permissions do not.
 
+### 6b. Applying it — do not `cat >>`
+
+`deploy/hermes-config.yaml` used to tell you to append itself:
+
+```sh
+cat /opt/mudhorn/deploy/hermes-config.yaml >> ~/.hermes/config.yaml   # WRONG
+```
+
+That is correct exactly once, on a config that does not already define
+`approvals:`, `mcp_servers:`, `agent:` or `skills:`. Hermes writes all four
+itself on first run, so on any real box appending produces **four duplicate
+top-level keys**.
+
+Nothing reports it. `yaml.safe_load` keeps the last occurrence of a duplicate
+key rather than raising, so the file "parses"; Hermes then starts on whichever
+half survived. The symptom is an agent that still has a shell, and the usual
+next move — running the parse check from the file header — passes and confirms
+the wrong thing. That check proves the file is valid YAML, not that it says
+what you meant.
+
+Use the merge script instead. Dry run first; it writes nothing without
+`--apply`:
+
+```sh
+/opt/mudhorn/.venv/bin/python /opt/mudhorn/deploy/merge-hermes-config.py
+/opt/mudhorn/.venv/bin/python /opt/mudhorn/deploy/merge-hermes-config.py --apply
+```
+
+It deep-merges key by key, so `agent:` keeps the model settings Hermes wrote
+and simply gains `disabled_toolsets`. Lists are replaced rather than unioned,
+so removing an entry from the repo file actually removes it on the box. It
+backs the original up beside itself, preserves owner and mode (it usually runs
+as root against a file owned by `hermes`, and a root-owned config leaves Hermes
+unable to save its own settings later), refuses a file that already carries
+duplicates unless you pass `--force`, and re-reads the written file to confirm
+`agent.disabled_toolsets` and `skills.disabled` actually arrived.
+
+Comments in the live file are lost to the round trip. The reasoning lives in
+`deploy/hermes-config.yaml`, which is in git and is the source of truth.
+
 ### 7. Run it as a service
 
 Once it works interactively, the gateway wants the same treatment as the other

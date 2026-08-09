@@ -1,21 +1,33 @@
-# Hermes configuration for this deployment — append to ~/.hermes/config.yaml.
+# Hermes configuration for this deployment. Merge into ~/.hermes/config.yaml:
 #
-#     cat /opt/mudhorn/deploy/hermes-config.yaml >> ~/.hermes/config.yaml
+#     /opt/mudhorn/.venv/bin/python /opt/mudhorn/deploy/merge-hermes-config.py
+#     /opt/mudhorn/.venv/bin/python /opt/mudhorn/deploy/merge-hermes-config.py --apply
 #
-# Run that as the `hermes` user, AFTER `hermes model` has written the file.
-# Check first that none of these top-level keys already exist, because a
-# duplicate key makes the whole file invalid YAML:
+# The first is a dry run and writes nothing.
+#
+# **Do not `cat >>` this file.** That was the original instruction and it is
+# wrong on any box where Hermes has already written a config, which is every
+# box after the first `hermes model` run. All four top-level keys below —
+# `approvals:`, `mcp_servers:`, `agent:`, `skills:` — are ones Hermes writes
+# itself, so appending produces four duplicate keys rather than a merge.
+#
+# The failure is silent twice. `yaml.safe_load` keeps only the last occurrence
+# of a duplicate key rather than raising, so nothing reports a problem; Hermes
+# then starts on whichever half survived. Observed on this droplet: a live
+# config already defining all four.
+#
+# The merge script deep-merges key by key, so `agent:` keeps the model settings
+# Hermes wrote and gains `disabled_toolsets`. It backs the original up, keeps
+# the file owned by `hermes`, refuses a file that already carries duplicates,
+# and re-reads the result to confirm both blocks actually arrived.
+#
+# To check by hand instead:
 #
 #     grep -n "^approvals:\|^mcp_servers:\|^agent:\|^skills:" ~/.hermes/config.yaml
-#
-# **If `agent:` already exists, merge the keys into it rather than appending a
-# second block.** Two `agent:` keys is not a merge, it is invalid YAML, and the
-# failure arrives as Hermes starting with default settings rather than as an
-# error anyone notices.
-#
-# Then confirm it still parses:
-#
 #     python3 -c "import yaml;yaml.safe_load(open('/home/hermes/.hermes/config.yaml'));print('ok')"
+#
+# Note that the second command passes on a file with duplicate keys. It proves
+# the file parses, not that it says what you think it says.
 
 approvals:
   # smart | manual | off. `smart` is the Hermes default and hands the decision

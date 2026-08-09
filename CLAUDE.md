@@ -391,8 +391,16 @@ Three traps, all of which fail without an error message:
   `mlops/inference` are grouping folders, so the names are
   `evaluating-llms-harness`, `weights-and-biases`, `llama-cpp` and
   `serving-llms-vllm`. Writing `evaluation` there does nothing and says nothing.
-- **A duplicate `agent:` key is not a merge.** It is invalid YAML, and Hermes
-  comes up on defaults rather than complaining. Merge into the existing block.
+- **A duplicate `agent:` key is not a merge, and nothing raises on one.**
+  `yaml.safe_load` keeps the **last** occurrence of a duplicate key rather than
+  erroring, so the file parses and Hermes starts on whichever half survived.
+  The parse check in the old file header therefore passes on a broken config
+  and confirms the wrong thing. **Never `cat >> ~/.hermes/config.yaml`**: Hermes
+  writes `approvals:`, `mcp_servers:`, `agent:` and `skills:` itself on first
+  run, so appending duplicates all four at once. Observed on the droplet.
+  `deploy/merge-hermes-config.py` deep-merges instead — it backs up, keeps the
+  file owned by `hermes`, refuses a config that already carries duplicates, and
+  re-reads the result to prove both blocks arrived. Dry run by default.
 
 **None of this replaces the user split or the sudoers rule.** A dropped toolset
 is a line in a YAML file, and every failure mode above is silent: the agent
@@ -533,7 +541,7 @@ reference/              Third-party projects we borrow from. See reference/STATU
 ## Running it
 
 ```sh
-.venv/bin/python -m pytest              # full suite (325 tests)
+.venv/bin/python -m pytest              # full suite (339 tests)
 electrum-bot smoketest --mock           # no credentials needed
 electrum-bot smoketest                  # needs Alpaca paper keys
 electrum-bot loop                       # proposes and vets; places nothing
