@@ -14,7 +14,7 @@ and let `place_order` here be the only write path.
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +24,7 @@ from .audit import AuditLog
 from .broker import Broker
 from .config import Env, Rules, load_rules
 from .journal import Journal
+from .metrics import build_report, render_excursions, render_summary
 from .models import AccountSnapshot, AssetClass, Direction, OrderProposal
 from .options import alerts_for_positions, parse_occ_symbol, render_alerts
 from .risk import RiskGate
@@ -412,6 +413,129 @@ def get_rules() -> dict[str, Any]:
     config/rules.yaml and restarting — it cannot be done by asking.
     """
     return _session.rules.model_dump(mode="json")
+
+
+@server.tool()
+def get_journal_stats(days: int = 0, strategy: str = "") -> dict[str, Any]:
+    """Performance metrics from the trade journal.
+
+    Reports win rate, profit factor, expectancy, R-multiples and drawdown, plus
+    an analysis of how well stops and targets were actually placed.
+
+    That last part is the one worth reading. Win rate tells you whether the
+    trades made money; MAE and MFE tell you whether the stop and target
+    placement was sane, which is the thing most likely to be wrong and the only
+    thing here that can show it.
+
+    Args:
+        days: Only include trades closed in the last N days. 0 means all time.
+        strategy: Only include trades tagged with this strategy. Empty means all.
+    """
+    since = datetime.now(UTC) - timedelta(days=days) if days > 0 else None
+    trades = _session.journal.closed_trades(
+        since=since, strategy=strategy or None
+    )
+    report = build_report(trades)
+
+    return {
+        "filters": {"days": days or "all time", "strategy": strategy or "all"},
+        "summary": {
+            "trade_count": report.overall.trade_count,
+            "win_rate": round(report.overall.win_rate, 4),
+            "profit_factor": (
+                round(report.overall.profit_factor, 3)
+                if report.overall.profit_factor is not None
+                else None
+            ),
+            "expectancy_usd": round(report.overall.expectancy_usd, 2),
+            "expectancy_r": (
+                round(report.overall.expectancy_r, 3)
+                if report.overall.expectancy_r is not None
+                else None
+            ),
+            "total_pnl_usd": round(report.overall.total_pnl_usd, 2),
+            "max_drawdown_usd": round(report.overall.max_drawdown_usd, 2),
+            "health": report.overall.health,
+            "sample_is_thin": report.overall.sample_is_thin,
+        },
+        "stops_and_targets": {
+            "sampled_trades": report.excursions.sampled_trades,
+            "capture_ratio": (
+                round(report.excursions.capture_ratio, 3)
+                if report.excursions.capture_ratio is not None
+                else None
+            ),
+            "mae_to_risk_ratio": (
+                round(report.excursions.mae_to_risk_ratio, 3)
+                if report.excursions.mae_to_risk_ratio is not None
+                else None
+            ),
+            "target_verdict": report.excursions.target_verdict,
+            "stop_verdict": report.excursions.stop_verdict,
+        },
+        "by_strategy": {
+            name: {
+                "trades": s.trade_count,
+                "win_rate": round(s.win_rate, 3),
+                "total_pnl_usd": round(s.total_pnl_usd, 2),
+            }
+            for name, s in report.by_strategy.items()
+        },
+        # Rendered lines carry the caveats (thin samples, excursion sampling)
+        # that the raw numbers above do not.
+        "readout": render_summary(report.overall) + render_excursions(report.excursions),
+    }
+
+
+@server.tool()
+def get_trades(limit: int = 25, strategy: str = "") -> list[dict[str, Any]]:
+    """Recent closed trades, newest last, with Claude's rationale on each.
+
+    Args:
+        limit: How many to return (default 25).
+        strategy: Filter to one strategy. Empty means all.
+    """
+    trades = _session.journal.closed_trades(strategy=strategy or None)
+    return [
+        {
+            "symbol": t.symbol,
+            "strategy": t.strategy,
+            "direction": t.direction.value,
+            "qty": t.qty,
+            "entry_price": t.entry_price,
+            "exit_price": t.exit_price,
+            "net_pnl_usd": round(t.net_pnl_usd, 2) if t.net_pnl_usd is not None else None,
+            "r_multiple": round(t.r_multiple, 2) if t.r_multiple is not None else None,
+            "mae_usd": round(t.mae_usd, 2),
+            "mfe_usd": round(t.mfe_usd, 2),
+            "entry_time": t.entry_time.isoformat(),
+            "exit_time": t.exit_time.isoformat() if t.exit_time else None,
+            "rationale": t.rationale,
+        }
+        for t in trades[-limit:]
+    ]
+
+
+@server.tool()
+def get_stand_down_status() -> dict[str, Any]:
+    """Whether a consecutive-loss stand-down is in force, and for how long.
+
+    A stand-down suspends LIVE trading only. Paper trading continues exactly as
+    normal, and closing positions or moving stops is never blocked.
+    """
+    state = _session.journal.get_stand_down()
+    now = datetime.now(UTC)
+    rules = _session.rules.stand_down
+    return {
+        "active": state.is_active(now),
+        "stage": state.stage,
+        "consecutive_losses": state.consecutive_losses,
+        "trigger_at": rules.consecutive_losses_trigger,
+        "loss_threshold_r": rules.loss_threshold_r,
+        "ends_at": state.ends_at.isoformat() if state.ends_at else None,
+        "days_remaining": round(state.days_remaining(now), 2),
+        "summary": describe(state, now),
+    }
 
 
 @server.tool()

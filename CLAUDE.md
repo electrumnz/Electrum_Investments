@@ -152,6 +152,7 @@ src/bot/
   claude_client.py      Anthropic SDK wrapper (1h prompt cache, structured output).
   context.py            Renders market state for Claude.
   audit.py              Append-only JSONL decision log.
+  metrics.py            Win rate, profit factor, expectancy, R, MAE/MFE. Pure functions.
   main.py               CLI: `electrum-bot smoketest`, `electrum-bot loop`.
 audit/                  Append-only JSONL. Gitignored.
 data/journal.db         SQLite journal. Gitignored.
@@ -175,7 +176,7 @@ reference/              Third-party projects we borrow from. See reference/STATU
 ## Running it
 
 ```sh
-.venv/bin/python -m pytest              # full suite (152 tests)
+.venv/bin/python -m pytest              # full suite (182 tests)
 electrum-bot smoketest --mock           # no credentials needed
 electrum-bot smoketest                  # needs Alpaca paper keys
 electrum-bot loop                       # proposes and vets; places nothing

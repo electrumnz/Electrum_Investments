@@ -166,3 +166,85 @@ def test_risk_status_flags_untracked_positions(wired_session):
     assert status["open_risk_is_complete"] is False
     assert status["untracked_positions"] == ["SPY"]
     assert "higher than reported" in status["open_risk_warning"]
+
+
+# ------------------------------------------------------------ journal tools
+
+
+def test_journal_stats_on_empty_journal_is_safe():
+    stats = mcp_server.get_journal_stats()
+    assert stats["summary"]["trade_count"] == 0
+    assert stats["summary"]["profit_factor"] is None
+    assert stats["readout"][0] == "No closed trades yet."
+
+
+def test_journal_stats_reports_a_closed_trade(wired_session):
+    from datetime import timedelta
+
+    from bot.models import Direction, Trade
+
+    entry = INSIDE_SESSION
+    tid = wired_session.journal.record_entry(
+        Trade(
+            symbol="SPY",
+            direction=Direction.BUY,
+            qty=10,
+            entry_time=entry,
+            entry_price=580.0,
+            planned_stop=570.0,  # $100 planned risk
+            planned_target=600.0,
+            rationale="Journalled trade for stats.",
+        )
+    )
+    wired_session.journal.update_excursion(tid, -40.0)
+    wired_session.journal.update_excursion(tid, 300.0)
+    wired_session.journal.record_exit(
+        tid,
+        exit_time=entry + timedelta(hours=1),
+        exit_price=595.0,
+        realised_pnl_usd=150.0,
+    )
+
+    stats = mcp_server.get_journal_stats()
+    assert stats["summary"]["trade_count"] == 1
+    assert stats["summary"]["total_pnl_usd"] == pytest.approx(150.0)
+    assert stats["summary"]["sample_is_thin"] is True
+    # 150 realised against a 300 best-case excursion.
+    assert stats["stops_and_targets"]["capture_ratio"] == pytest.approx(0.5)
+    assert any("sampled once per decision cycle" in line for line in stats["readout"])
+
+
+def test_get_trades_returns_rationale(wired_session):
+    from datetime import timedelta
+
+    from bot.models import Direction, Trade
+
+    tid = wired_session.journal.record_entry(
+        Trade(
+            symbol="SPY",
+            direction=Direction.BUY,
+            qty=10,
+            entry_time=INSIDE_SESSION,
+            entry_price=580.0,
+            planned_stop=570.0,
+            planned_target=600.0,
+            rationale="Reclaimed the prior day high.",
+        )
+    )
+    wired_session.journal.record_exit(
+        tid,
+        exit_time=INSIDE_SESSION + timedelta(hours=1),
+        exit_price=590.0,
+        realised_pnl_usd=100.0,
+    )
+    trades = mcp_server.get_trades()
+    assert len(trades) == 1
+    assert trades[0]["rationale"] == "Reclaimed the prior day high."
+    assert trades[0]["r_multiple"] == pytest.approx(1.0)
+
+
+def test_stand_down_status_when_clear():
+    status = mcp_server.get_stand_down_status()
+    assert status["active"] is False
+    assert status["stage"] == 0
+    assert status["trigger_at"] > 0
