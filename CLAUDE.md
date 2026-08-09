@@ -514,9 +514,12 @@ src/bot/
                         apart from POST /chat, which is off unless
                         DASHBOARD_CHAT_TOKEN is set.
   main.py               CLI: `electrum-bot smoketest`, `electrum-bot loop`.
-deploy/                 VPS provisioning: bootstrap.sh + systemd units. Runs the
-                        loop WITHOUT --execute; src/ and config/ stay root-owned
-                        so the service account cannot edit its own limits.
+deploy/                 VPS provisioning: bootstrap.sh + systemd units. The unit
+                        runs the loop WITHOUT --execute; enabling it is a
+                        drop-in (mudhorn-bot-execute.conf), never an edit to
+                        the unit, which bootstrap.sh would overwrite. src/ and
+                        config/ stay root-owned so the service account cannot
+                        edit its own limits.
                         backup-journal.sh + mudhorn-backup.timer snapshot the
                         journal hourly with sqlite3 .backup, never cp.
 audit/                  Append-only JSONL. Gitignored.

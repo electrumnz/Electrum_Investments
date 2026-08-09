@@ -213,12 +213,40 @@ journal, no broker and no credential. It is not a precedent for this.
 The unit runs `electrum-bot loop` with **no `--execute` flag**. The bot proposes
 orders, runs them through the risk gate, records the outcome, and places nothing.
 
-That is the correct state for a handover. Watch the proposals for a few weeks
-first and see whether you agree with them. Turning execution on means editing
-`ExecStart` in `/etc/systemd/system/mudhorn-bot.service` to append `--execute`,
-then `systemctl daemon-reload && systemctl restart mudhorn-bot`.
+That is the correct state for a handover. Watch the proposals for a while first
+and see whether you agree with them.
 
-It stays paper either way. `ALPACA_PAPER_TRADE=false` is refused by the code.
+Turn it on with the drop-in, **not** by editing the unit:
+
+```sh
+sudo mkdir -p /etc/systemd/system/mudhorn-bot.service.d
+sudo cp /opt/mudhorn/deploy/systemd/mudhorn-bot-execute.conf \
+        /etc/systemd/system/mudhorn-bot.service.d/execute.conf
+sudo systemctl daemon-reload
+sudo systemctl restart mudhorn-bot
+```
+
+Off again is `sudo rm` on that file and the same last two commands. Editing
+`ExecStart` in the unit works too, but the unit is what `bootstrap.sh`
+reinstalls, so the edit is one deploy away from being silently reverted — and
+the direction it reverts in is the one where you believe orders are being
+placed and they are not. A drop-in survives, and `systemctl cat mudhorn-bot`
+shows the effective `ExecStart` either way.
+
+**What changes is only whether an approved proposal reaches the broker.** Same
+context, same model call, same `RiskGate.evaluate` against the same
+`config/rules.yaml`, same audit entry. Anything the gate refuses is still
+refused. So this is not a way to make a trade fit, and it widens nothing.
+
+It stays paper either way. `ALPACA_PAPER_TRADE=false` is refused by the code,
+twice.
+
+What it does buy is a journal with trades in it: fills, slippage against the
+quote, resting stops, and an Analytics page with something to measure. Expect
+early trades to be instructive rather than profitable. The loop wakes 96 times
+a day and Alpha Arena's lesson was that frequency is itself a risk parameter,
+so `journalctl -u mudhorn-bot -f` and the Decisions page are worth watching for
+the first few sessions rather than checked at the end of the week.
 
 ## Do not install the Alpaca CLI here
 
