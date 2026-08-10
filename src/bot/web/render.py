@@ -273,13 +273,17 @@ section.block>h2{margin-bottom:.75rem}
 .tape .cell.shut::after{display:none}
 .tape .cell.shut .sym{border-bottom:none}
 
-.tape .clk{display:flex;align-items:center;gap:.45rem;padding:0 .9rem;
+.tape .clk{display:flex;align-items:center;gap:.4rem;padding:0 .75rem;
   white-space:nowrap;font-family:var(--mono);font-size:.75rem;height:100%;
   border-left:1px solid var(--slate);border-right:1px solid var(--slate);
   background:var(--ink);box-shadow:inset 0 1px 3px rgba(0,0,0,.45)}
-.tape .clk .city{font-size:.5625rem;letter-spacing:.14em;text-transform:uppercase;
-  color:var(--bone);opacity:.75}
-.tape .clk .t{color:var(--bone);font-variant-numeric:tabular-nums}
+.tape .clk .city{font-size:.625rem;letter-spacing:.12em;text-transform:uppercase;
+  color:var(--bone);opacity:.7}
+/* Larger than the instrument prices, deliberately. The hour in four zones
+   is what an operator wants at a glance; a price they will read off the Board.
+   The city abbreviates to three letters to buy the time that width. */
+.tape .clk .t{color:var(--bone);font-variant-numeric:tabular-nums;
+  font-size:.9375rem;letter-spacing:.02em}
 .tape .clk .mkt{font-size:.5625rem;letter-spacing:.1em;padding:.1rem .3rem;
   border:1px solid currentColor;border-radius:2px;opacity:.9}
 /* Open and shut, per exchange. Not the gain/loss pair: this is a state, not a
@@ -2768,7 +2772,7 @@ def _tape_clock(face: ClockFace, local: datetime, now: datetime) -> str:
     return (
         f'<span class="clk{" home" if face.is_market else ""}" '
         f'data-tz="{_e(face.zone)}">'
-        f'<span class="city">{_e(face.label)}</span>'
+        f'<span class="city" title="{_e(face.label)}">{_e(face.code or face.label)}</span>'
         f'<span class="t">{local:%H:%M:%S}</span>{state}</span>'
     )
 

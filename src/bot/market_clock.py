@@ -529,6 +529,9 @@ class ClockFace:
     label: str
     zone: str
     is_market: bool = False
+    #: Three letters, so the TIME gets the width. The full name is not the
+    #: information on a strip that repeats every ninety seconds — the hour is.
+    code: str = ""
     exchange: str = ""
     opens: time | None = None
     closes: time | None = None
@@ -557,18 +560,18 @@ class ClockFace:
 #: Auckland is where the operator is.
 CLOCKS: tuple[ClockFace, ...] = (
     ClockFace(
-        "New York", "America/New_York", is_market=True,
+        "New York", "America/New_York", is_market=True, code="NY",
         exchange="NYSE", opens=REGULAR_START, closes=REGULAR_END,
     ),
     # No exchange on the US west coast. It shows the time and says nothing
     # about a market, rather than borrowing New York's state four hours early.
-    ClockFace("Los Angeles", "America/Los_Angeles"),
+    ClockFace("Los Angeles", "America/Los_Angeles", code="LA"),
     ClockFace(
-        "Sydney", "Australia/Sydney",
+        "Sydney", "Australia/Sydney", code="SYD",
         exchange="ASX", opens=time(10, 0), closes=time(16, 0),
     ),
     ClockFace(
-        "Auckland", "Pacific/Auckland",
+        "Auckland", "Pacific/Auckland", code="AKL",
         exchange="NZX", opens=time(10, 0), closes=time(16, 45),
     ),
 )
