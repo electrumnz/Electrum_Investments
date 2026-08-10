@@ -36,6 +36,8 @@ from pathlib import Path
 
 import structlog
 
+from ..souls import Soul
+
 log = structlog.get_logger(__name__)
 
 # The root-owned wrapper, NOT the Hermes binary itself. The flags are fixed in
@@ -111,7 +113,23 @@ class HermesBridge:
         except OSError:
             return True
 
-    def ask(self, message: str, history: list[tuple[str, str]] | None = None) -> ChatReply:
+    def ask(
+        self,
+        message: str,
+        history: list[tuple[str, str]] | None = None,
+        soul: Soul | None = None,
+    ) -> ChatReply:
+        """One Hermes turn, optionally in character.
+
+        The soul is prepended to the prompt rather than passed as a flag,
+        because the wrapper takes no arguments on purpose: the sudoers rule
+        names `run-chat.sh` with nothing after it, so everything this process
+        wants to say goes down stdin where it cannot be read as an option.
+
+        A missing soul is not an error. `load_soul` returns an absent one, whose
+        prefix is empty, and the agent answers plainly. See `souls.py` for why
+        that is the right failure direction.
+        """
         if not message.strip():
             return ChatReply.failed("empty message")
         if not self.available:
@@ -121,6 +139,8 @@ class HermesBridge:
             )
 
         prompt = _with_history(message, history or [])
+        if soul is not None and soul.found:
+            prompt = f"{soul.prompt_prefix()}\n{prompt}"
 
         # argv list, never a shell string: the message is untrusted input and
         # this process holds the broker credentials. No shell means no quoting

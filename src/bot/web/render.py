@@ -29,6 +29,7 @@ from datetime import UTC, datetime
 
 from ..audit import AuditView, DecisionEntry
 from ..config import DAY_NAMES, Env, Rules
+from ..dreaming import Dream, DreamSummary, DreamVerdict, Hop
 from ..metrics import JournalReport, render_excursions, render_summary
 from ..models import AccountSnapshot, StandDownState, Trade, WorkingOrder
 from ..options import ExpiryAlert
@@ -44,10 +45,21 @@ STYLES = """
      site: patina brightened for a gain, a cold rose for a loss, because a warm
      red on this ground reads as brick. */
   --gain:#5FA795; --loss:#C0707B;
+  /* The projection layer, and nothing else. Every effect below — starfield,
+     deck grid, bracket corners, the hyperspace streaks — is drawn in this and
+     no data ever is. The identity has ONE accent on purpose, so patina keeps
+     chrome, links and focus rings; holo is the medium the interface is
+     projected in, which is why it may be everywhere at once without competing
+     with an accent that has to mean something. If a figure ever picks this up,
+     the rule has been broken. */
+  --holo:#6FD3E8;
+  --holo-faint:rgba(111,211,232,.14);
+  --holo-line:rgba(111,211,232,.30);
   --serif: ui-serif,"Iowan Old Style","Palatino Linotype",Palatino,Georgia,serif;
   --sans: ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,Arial,sans-serif;
   --mono: ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
   --ease: cubic-bezier(.22,1,.36,1);
+  --ease-jump: cubic-bezier(.7,0,.84,0);
 }
 *,*::before,*::after{box-sizing:border-box}
 body{margin:0;background:var(--ink);color:var(--bone);font-family:var(--sans);
@@ -256,6 +268,321 @@ td.thin{color:var(--pewter);font-style:italic}
 footer{padding:2rem 0 3rem;color:var(--pewter);font-size:.75rem;
   border-top:1px solid var(--slate)}
 
+/* ======================================================= 2200 flight deck ==
+   The projection layer: starfield, hyperspace jump, HUD chrome, and panels
+   that materialise rather than simply being there. Decoration, and scoped so
+   it can never become load-bearing.
+
+   Three properties hold it in place and all three are the same idea.
+
+   - **Nothing starts hidden unless the script said so.** Every entry
+     animation keys off `html.fx-ready`, a class SCRIPT adds. JavaScript off,
+     a script that threw, a CSP that blocked it: all render the plain
+     dashboard with every figure visible. The obvious arrangement — hide in
+     CSS, reveal in JS — fails to a BLANK page, on the one surface whose whole
+     job is making problems visible.
+   - **Reduced motion switches this off rather than down.** The block at the
+     bottom of this stylesheet is the backstop; SCRIPT also declines to start
+     the canvas at all, so the work is not merely invisible, it is not done.
+   - **No effect touches a figure.** The starfield sits behind the content, the
+     brackets are borders, the sweep is a clip-path removed on animationend.
+     Nothing here reformats, rounds, hides or delays a number. A dashboard that
+     made you wait to read your open risk would have got the trade backwards.
+
+   Keep backslashes out of here, as everywhere else in STYLES. See the note
+   above `details.step summary::before`. */
+
+/* The fixed layers, back to front. Content sits at 5, the sticky header at 20
+   (declared above), and the jump flash at 60 so it covers both. */
+.fx{position:fixed;inset:0;pointer-events:none;contain:layout paint}
+#fx-stars{z-index:0}
+#fx-stars canvas{display:block;width:100%;height:100%}
+
+/* The deck grid. Masked to the top so it reads as a floor receding under the
+   content rather than as graph paper laid over it. */
+.fx-grid{z-index:1;opacity:.5;
+  background-image:linear-gradient(to right,var(--holo-faint) 1px,transparent 1px),
+    linear-gradient(to bottom,var(--holo-faint) 1px,transparent 1px);
+  background-size:72px 72px;
+  -webkit-mask-image:radial-gradient(ellipse 110% 80% at 50% 0%,#000 5%,transparent 72%);
+  mask-image:radial-gradient(ellipse 110% 80% at 50% 0%,#000 5%,transparent 72%)}
+
+/* Vignette and scanlines, both deliberately near the edge of perception. Heavy
+   scanlines read as a 1985 CRT, which is the opposite of the brief. */
+.fx-vig{z-index:2;background:radial-gradient(ellipse 78% 62% at 50% 42%,
+  transparent 45%,rgba(4,6,9,.62) 100%)}
+.fx-scan{z-index:3;opacity:.5;background:repeating-linear-gradient(to bottom,
+  transparent 0 3px,rgba(3,6,10,.16) 3px 4px)}
+
+header.bar,main,footer{position:relative;z-index:5}
+header.bar{background:rgba(11,14,18,.82)}
+
+/* --------------------------------------------------------------- the jump */
+/* Fired on sign-in and on every navigation. SCRIPT drives the starfield to
+   lightspeed underneath; this is only the white-out at the far end of it. */
+.fx-flash{z-index:60;opacity:0;background:radial-gradient(circle at 50% 50%,
+  #F2FBFF 0%,#A9E2F2 30%,rgba(11,14,18,0) 70%)}
+.fx-flash.out{animation:fx-out 520ms var(--ease-jump) forwards}
+.fx-flash.in{animation:fx-in 720ms var(--ease) forwards}
+@keyframes fx-out{from{opacity:0}to{opacity:1}}
+@keyframes fx-in{from{opacity:.92}to{opacity:0}}
+
+/* The projector beat: one bright line sweeps down the deck on arrival, the way
+   a hologram resolves top to bottom. Once, then it removes itself. */
+.fx-sweep{z-index:59;opacity:0;background:linear-gradient(to bottom,
+  transparent 0%,var(--holo-line) 46%,rgba(210,245,255,.55) 50%,
+  var(--holo-line) 54%,transparent 100%);background-size:100% 220px;
+  background-repeat:no-repeat}
+.fx-sweep.run{animation:fx-sweep 900ms var(--ease) forwards}
+@keyframes fx-sweep{
+  0%{opacity:0;background-position:0 -240px}
+  12%{opacity:.85}
+  85%{opacity:.25}
+  100%{opacity:0;background-position:0 110vh}}
+
+/* -------------------------------------------------- panel materialisation */
+/* Every card, section and table arrives rather than appearing. The stagger is
+   set per element by SCRIPT in --fx-d so a Board of twelve tiles reads as one
+   deck powering up instead of twelve unrelated fades. */
+.fx-ready .fx-panel{opacity:0}
+.fx-ready .fx-panel.fx-in{animation:fx-rise 560ms var(--ease) var(--fx-d,0ms) both}
+/* Removed on animationend, never left applied. `both` retains the final frame,
+   and a retained clip-path makes the element a containing block, which would
+   quietly break every sticky table header on the page. */
+.fx-ready .fx-panel.fx-done{opacity:1;animation:none;clip-path:none;transform:none}
+@keyframes fx-rise{
+  0%{opacity:0;transform:translate3d(0,20px,0);clip-path:inset(0 0 100% 0)}
+  55%{opacity:1}
+  100%{opacity:1;transform:none;clip-path:inset(0 0 -2px 0)}}
+
+/* ---------------------------------------------------------- the HUD chrome */
+/* Bracket corners, targeting-computer style. Two pseudo-elements rather than
+   four: the diagonal pair reads as a frame and costs half the boxes. */
+.card,.curve,.cycle,.scroll,.readout,.banner,.chat .log{position:relative}
+.card::before,.curve::before,.cycle::before,.scroll::before,.readout::before,
+.banner::before,.chat .log::before,
+.card::after,.curve::after,.cycle::after,.scroll::after,.readout::after,
+.banner::after,.chat .log::after{
+  content:"";position:absolute;width:9px;height:9px;pointer-events:none;
+  border:1px solid var(--holo);opacity:.45;transition:opacity .25s var(--ease)}
+.card::before,.curve::before,.cycle::before,.scroll::before,.readout::before,
+.banner::before,.chat .log::before{top:-1px;left:-1px;border-right:0;border-bottom:0}
+.card::after,.curve::after,.cycle::after,.scroll::after,.readout::after,
+.banner::after,.chat .log::after{bottom:-1px;right:-1px;border-left:0;border-top:0}
+.card:hover::before,.card:hover::after,.cycle:hover::before,.cycle:hover::after{opacity:.9}
+
+.card,.curve,.cycle,.readout,.chat .log{
+  background:linear-gradient(180deg,rgba(22,27,34,.88),rgba(17,21,27,.92));
+  backdrop-filter:blur(3px);
+  box-shadow:inset 0 1px 0 rgba(111,211,232,.07),0 12px 30px -18px rgba(0,0,0,.9)}
+
+/* ------------------------------------------------------------------- nav */
+/* A nav link is a jump target, so it gets a charge line that fills before the
+   ship moves. */
+nav a{position:relative;overflow:hidden}
+nav a::after{content:"";position:absolute;left:0;right:0;bottom:0;height:1px;
+  background:var(--holo);transform:scaleX(0);transform-origin:left;
+  transition:transform .28s var(--ease);opacity:.85}
+nav a:hover::after,nav a[aria-current=page]::after{transform:scaleX(1)}
+
+/* The reactor tell. A steady dot says "rendered once"; a breathing one says
+   "this process is up", which is the actual question being asked of it. */
+.live i{box-shadow:0 0 0 0 var(--holo);animation:fx-pulse 2.8s ease-in-out infinite}
+@keyframes fx-pulse{
+  0%,100%{box-shadow:0 0 0 0 rgba(111,211,232,.5);opacity:.75}
+  50%{box-shadow:0 0 0 4px rgba(111,211,232,0);opacity:1}}
+
+/* --------------------------------------------------------------- dreaming */
+/* The dreamer is allowed to be playful and the rest of this stylesheet is not.
+   That contrast is the point: a surface producing speculation should not look
+   like the surface reporting positions, because they carry different weight and
+   a reader must never mix them up. Everything here is warmer, rounder and
+   softer than the Board, and it is the only place in the app that is. */
+.dreamer{width:120px;height:120px;display:block;overflow:visible}
+.dreamer .pad{fill:none;stroke:var(--holo);stroke-width:1;opacity:.35;
+  animation:fx-pad 3.2s ease-in-out infinite}
+.dreamer .floaty{animation:fx-float 3.2s ease-in-out infinite;
+  transform-origin:60px 60px}
+.dreamer .head,.dreamer .ear{fill:rgba(111,211,232,.10);stroke:var(--holo);
+  stroke-width:1.5}
+.dreamer .robe{fill:rgba(78,140,125,.16);stroke:var(--patina);stroke-width:1.5}
+.dreamer .eye{fill:var(--bone);animation:fx-blink 6.4s ease-in-out infinite;
+  transform-origin:center;transform-box:fill-box}
+.dreamer .mouth{fill:none;stroke:var(--holo);stroke-width:1.5;
+  stroke-linecap:round;opacity:.8}
+.dreamer .ear.left{animation:fx-ear-l 5.1s ease-in-out infinite;
+  transform-origin:38px 53px;transform-box:view-box}
+.dreamer .ear.right{animation:fx-ear-r 5.1s ease-in-out infinite;
+  transform-origin:82px 53px;transform-box:view-box}
+@keyframes fx-float{0%,100%{transform:translateY(0)}50%{transform:translateY(-7px)}}
+@keyframes fx-pad{0%,100%{opacity:.35;transform:scale(1)}
+  50%{opacity:.15;transform:scale(.9);transform-origin:60px 106px}}
+@keyframes fx-blink{0%,92%,100%{transform:scaleY(1)}96%{transform:scaleY(.1)}}
+@keyframes fx-ear-l{0%,100%{transform:rotate(-14deg)}50%{transform:rotate(-19deg)}}
+@keyframes fx-ear-r{0%,100%{transform:rotate(14deg)}50%{transform:rotate(19deg)}}
+
+/* Thinking: the pad spins up and the eyes widen. Driven by a class the chat
+   panel adds while a request is in flight, so it means "a call is open" and
+   never "an idea is forming". */
+.dreamer.thinking .pad{animation-duration:1.1s}
+.dreamer.thinking .floaty{animation-duration:1.6s}
+
+.dream-head{display:flex;gap:1.5rem;align-items:center;flex-wrap:wrap;
+  margin-bottom:1.5rem}
+.dream-head .who h1{font-size:1.75rem}
+.dream-head .who p{margin:.35rem 0 0;max-width:52ch}
+
+/* A dream is a card that reads top to bottom as an argument: the spark, then
+   the chain, then what would break it, then what was decided. */
+.dream{border:1px solid var(--slate);border-radius:2px;margin-bottom:1rem;
+  background:linear-gradient(180deg,rgba(22,27,34,.9),rgba(17,21,27,.93));
+  position:relative}
+.dream>.top{display:flex;gap:.75rem;align-items:baseline;flex-wrap:wrap;
+  padding:.875rem 1.125rem;border-bottom:1px solid var(--slate)}
+.dream>.top h3{font-size:1.0625rem;margin:0}
+.dream>.top .when{margin-left:auto;font-family:var(--mono);font-size:.6875rem;
+  color:var(--pewter)}
+.dream .seed{padding:.875rem 1.125rem;border-bottom:1px solid var(--slate);
+  font-family:var(--serif);font-size:.9375rem;color:var(--bone)}
+.dream .seed .from{display:block;margin-top:.4rem;font-family:var(--mono);
+  font-size:.625rem;letter-spacing:.12em;text-transform:uppercase;
+  color:var(--pewter)}
+.dream .body{padding:.875rem 1.125rem}
+
+/* The chain. Each hop is a separate claim and is marked for whether anybody
+   checked it, because a chain whose links cannot be attacked one at a time is a
+   story rather than a hypothesis. */
+.hops{list-style:none;margin:0;padding:0;counter-reset:hop}
+.hops li{position:relative;padding:.5rem 0 .5rem 2.25rem;font-size:.875rem;
+  border-left:1px solid var(--slate);margin-left:.5rem}
+.hops li::before{counter-increment:hop;content:counter(hop);
+  position:absolute;left:-.7rem;top:.55rem;width:1.4rem;height:1.4rem;
+  display:grid;place-items:center;font-family:var(--mono);font-size:.625rem;
+  border:1px solid var(--slate);border-radius:50%;background:var(--ink);
+  color:var(--pewter)}
+.hops li.checked::before{border-color:var(--patina);color:var(--patina)}
+.hops li.open::before{border-color:var(--amber);color:var(--amber)}
+.hops .src{display:block;margin-top:.25rem;font-family:var(--mono);
+  font-size:.6875rem;color:var(--pewter)}
+.hops li.open .src{color:var(--amber)}
+
+.dream .weak{margin:.875rem 0 0;padding:.6rem .75rem;font-size:.8125rem;
+  border:1px solid rgba(192,138,62,.35);border-left-width:3px;border-radius:2px;
+  background:rgba(192,138,62,.07);color:var(--bone)}
+.dream .weak b{font-family:var(--mono);font-size:.625rem;letter-spacing:.14em;
+  text-transform:uppercase;color:var(--amber);display:block;margin-bottom:.2rem}
+.dream .trigger{margin:.75rem 0 0;font-size:.8125rem;color:var(--pewter)}
+.dream .trigger b{color:var(--bone);font-weight:400}
+
+/* The thoughts stream: the working, in order, including the steps where it
+   changed its mind. That is usually the interesting part, which is why this is
+   append-only and why nothing overwrites it. */
+.stream{margin-top:1rem;border-top:1px solid var(--slate);padding-top:.75rem}
+.stream summary{cursor:pointer;list-style:none;font-family:var(--mono);
+  font-size:.625rem;letter-spacing:.14em;text-transform:uppercase;
+  color:var(--pewter)}
+.stream summary::-webkit-details-marker{display:none}
+.stream summary::before{content:"▸ ";color:var(--pewter)}
+.stream[open] summary::before{content:"▾ "}
+.stream summary:hover{color:var(--bone)}
+.stream ol{list-style:none;margin:.75rem 0 0;padding:0}
+.stream li{display:grid;grid-template-columns:5.5rem 1fr;gap:.875rem;
+  padding:.5rem 0;border-bottom:1px dashed var(--slate);font-size:.8125rem}
+.stream li:last-child{border-bottom:0}
+.stream .st{font-family:var(--mono);font-size:.625rem;letter-spacing:.12em;
+  text-transform:uppercase;color:var(--pewter)}
+.stream .st.explore{color:var(--holo)}
+.stream .st.iterate{color:var(--amber)}
+.stream .st.verdict{color:var(--patina)}
+
+.pill.seed{color:var(--pewter)} .pill.explore{color:var(--holo)}
+.pill.iterate{color:var(--amber)} .pill.verdict{color:var(--bone)}
+.pill.keep{color:var(--gain)} .pill.park{color:var(--amber)}
+.pill.drop{color:var(--pewter)}
+.pill.unverified{color:var(--amber)} .pill.partial{color:var(--pewter)}
+.pill.sourced{color:var(--patina)}
+
+/* The illustration on an empty deck. Dashed, so it cannot be mistaken at a
+   glance for a dream the agent actually had. */
+.worked{border:1px dashed var(--slate);border-radius:2px;padding:1.125rem;
+  background:rgba(22,27,34,.5)}
+.worked h3{margin-bottom:.5rem}
+
+/* ------------------------------------------------------------------- gate */
+/* The sign-in screen, and the one the brief actually asked for: this is where
+   the jump starts. It still reveals nothing about the account behind it — see
+   the docstring on `login_page` — so everything dressed up here is chrome. */
+.gate{min-height:calc(100svh - 8rem);display:grid;place-items:center;padding:2rem 0}
+.gate .panel{width:min(100% - 2rem,25rem);position:relative;
+  border:1px solid var(--slate);border-radius:2px;padding:2rem 1.75rem;
+  background:linear-gradient(180deg,rgba(22,27,34,.9),rgba(15,19,25,.94));
+  backdrop-filter:blur(4px);
+  box-shadow:0 0 0 1px rgba(111,211,232,.06),0 30px 70px -40px rgba(0,0,0,1)}
+.gate .panel::before,.gate .panel::after{content:"";position:absolute;
+  width:14px;height:14px;border:1px solid var(--holo);opacity:.6}
+.gate .panel::before{top:-1px;left:-1px;border-right:0;border-bottom:0}
+.gate .panel::after{bottom:-1px;right:-1px;border-left:0;border-top:0}
+.gate .sig{text-align:center;margin-bottom:1.75rem}
+.gate .sig svg{display:block;margin:0 auto .875rem}
+.gate .sig svg path{fill:var(--bone)}
+.gate .sig h1{font-size:1.25rem;letter-spacing:.16em;font-family:var(--serif)}
+.gate .sig h1 span{color:var(--pewter)}
+.gate .sig p{margin:.5rem 0 0;font-family:var(--mono);font-size:.625rem;
+  letter-spacing:.2em;text-transform:uppercase;color:var(--holo);opacity:.8}
+.gate label{display:block;margin-bottom:.5rem}
+.gate input{width:100%;background:var(--ink);color:var(--bone);
+  border:1px solid var(--slate);border-radius:2px;padding:.75rem .875rem;
+  font-family:var(--mono);font-size:.9375rem;letter-spacing:.18em;
+  transition:border-color .25s var(--ease),box-shadow .25s var(--ease)}
+.gate input:focus{border-color:var(--holo);
+  box-shadow:0 0 0 3px rgba(111,211,232,.12);outline:none}
+.gate button{width:100%;margin-top:1rem;background:transparent;color:var(--bone);
+  border:1px solid var(--patina);border-radius:2px;padding:.75rem;
+  font-family:var(--mono);font-size:.6875rem;letter-spacing:.22em;
+  text-transform:uppercase;cursor:pointer;position:relative;overflow:hidden;
+  transition:background .25s var(--ease),border-color .25s var(--ease)}
+.gate button:hover{background:rgba(78,140,125,.16);border-color:var(--holo)}
+.gate .standby{margin:1.25rem 0 0;text-align:center;font-family:var(--mono);
+  font-size:.625rem;letter-spacing:.16em;text-transform:uppercase;
+  color:var(--pewter)}
+.gate .standby i{display:inline-block;width:5px;height:5px;border-radius:50%;
+  background:var(--holo);margin-right:.5rem;vertical-align:middle;
+  animation:fx-pulse 2.8s ease-in-out infinite}
+.gate .err{margin:0 0 1.25rem;padding:.625rem .75rem;font-size:.8125rem;
+  color:var(--loss);border:1px solid rgba(192,112,123,.4);
+  border-left-width:3px;border-radius:2px;background:rgba(192,112,123,.07)}
+
+/* --------------------------------------------------------- the boot readout */
+/* Built by SCRIPT, never present in the markup, so a page without JavaScript
+   cannot end up behind an overlay it has no way to dismiss.
+
+   Every line here names a piece of THIS INTERFACE, never a piece of the
+   account. A boot screen reporting "RISK GATE ARMED" would be inventing a
+   state it has not read, on a dashboard whose entire purpose is that figures
+   are measured rather than plausible. The mode line is the one live fact on
+   it, and it is passed in from the server. */
+.fx-boot{position:fixed;inset:0;z-index:60;background:var(--ink);
+  display:flex;align-items:center;justify-content:center;
+  font-family:var(--mono);font-size:.8125rem;letter-spacing:.06em}
+.fx-boot.done{animation:fx-boot-out 420ms var(--ease) forwards;pointer-events:none}
+@keyframes fx-boot-out{to{opacity:0}}
+.fx-boot .panel{width:min(100% - 3rem,26rem)}
+.fx-boot .sig{font-family:var(--serif);font-size:1.125rem;letter-spacing:.16em;
+  color:var(--bone);margin-bottom:1.25rem;text-align:center}
+.fx-boot .sig span{color:var(--pewter)}
+.fx-boot ul{list-style:none;margin:0;padding:0}
+.fx-boot li{display:flex;gap:.75rem;align-items:baseline;color:var(--pewter);
+  padding:.2rem 0;opacity:0}
+.fx-boot li.on{animation:fx-line 260ms var(--ease) forwards}
+@keyframes fx-line{from{opacity:0;transform:translate3d(-6px,0,0)}
+  to{opacity:1;transform:none}}
+.fx-boot li b{margin-left:auto;font-weight:400;color:var(--holo);font-size:.6875rem;
+  letter-spacing:.14em}
+.fx-boot .rule{height:1px;background:var(--slate);margin:1rem 0}
+.fx-boot .rule i{display:block;height:1px;width:0;background:var(--holo);
+  animation:fx-fill 1150ms var(--ease) forwards}
+@keyframes fx-fill{to{width:100%}}
+
 @media (max-width:760px){
   nav{margin-left:0;width:100%;order:3}
   .live{margin-left:auto;padding-left:0;border-left:0}
@@ -272,7 +599,428 @@ footer{padding:2rem 0 3rem;color:var(--pewter);font-size:.75rem;
   td[data-l]::before{content:attr(data-l);font-family:var(--mono);font-size:.625rem;
     letter-spacing:.12em;text-transform:uppercase;color:var(--pewter);flex:none}
 }
-@media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+/* ----------------------------------------------------- reduced motion honoured */
+/* Off, not slowed down. Someone who has asked their operating system for less
+   motion has not asked for a gentler hyperspace jump, and vestibular triggers
+   are exactly the full-screen, high-contrast, radially-moving things this
+   stylesheet otherwise spends its time on.
+
+   Belt and braces on purpose: SCRIPT reads the same query and never starts the
+   canvas, never adds `fx-ready` and never builds the boot overlay, so the work
+   is not done rather than done invisibly. This block is what catches the case
+   where the preference is switched on after the page has loaded. */
+@media (prefers-reduced-motion:reduce){
+  *{animation:none!important;transition:none!important}
+  #fx-stars,.fx-grid,.fx-scan,.fx-sweep,.fx-flash,.fx-boot{display:none!important}
+  .fx-vig{opacity:.5}
+  .fx-ready .fx-panel{opacity:1!important;clip-path:none!important;transform:none!important}
+}
+"""
+
+SCRIPT = """
+/* The projection layer for the command centre: starfield, hyperspace jump,
+   panel materialisation and the boot readout.
+
+   ## The one rule this file follows
+
+   It is decoration, and it is built so that it cannot stop being decoration.
+   Every visible consequence of this script is additive: it creates its own
+   layers, it adds its own classes, and if it throws on line one the dashboard
+   behind it renders every figure exactly as before. Nothing here is asked to
+   reveal content, because a reveal that fails leaves a blank page — and this
+   is the surface an operator opens to find out whether anything is wrong.
+
+   That is why the entry animations are gated on `html.fx-ready`, which is
+   added HERE rather than served in the markup, and why there is a timer that
+   force-finishes every panel whether or not the observer ever fired.
+
+   ## Reduced motion
+
+   Checked first and answered by doing nothing at all. No canvas, no observer,
+   no overlay, no class. The stylesheet has a matching block, which catches the
+   case where the preference changes after load, but the intent is that a
+   machine asking for less motion never starts this work rather than doing it
+   invisibly. A full-screen radial starfield accelerating to lightspeed is
+   close to a worked example of a vestibular trigger.
+*/
+(function () {
+  'use strict';
+
+  var reduced = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)');
+  if (reduced && reduced.matches) return;
+
+  var doc = document.documentElement;
+  var body = document.body;
+  var store = {
+    get: function (k) { try { return sessionStorage.getItem(k); } catch (e) { return null; } },
+    set: function (k, v) { try { sessionStorage.setItem(k, v); } catch (e) {} },
+    drop: function (k) { try { sessionStorage.removeItem(k); } catch (e) {} }
+  };
+
+  /* --------------------------------------------------------- the layers */
+
+  function layer(cls, id) {
+    var el = document.createElement('div');
+    el.className = cls ? 'fx ' + cls : 'fx';
+    if (id) el.id = id;
+    el.setAttribute('aria-hidden', 'true');
+    body.appendChild(el);
+    return el;
+  }
+
+  var starHost = layer('', 'fx-stars');
+  layer('fx-grid');
+  layer('fx-vig');
+  layer('fx-scan');
+  var sweep = layer('fx-sweep');
+  var flash = layer('fx-flash');
+
+  var canvas = document.createElement('canvas');
+  starHost.appendChild(canvas);
+  var ctx = canvas.getContext('2d');
+
+  /* ------------------------------------------------------- the starfield */
+
+  /* Classic perspective projection: a star is a point in a unit box with a
+     depth, and the screen position is that point divided by the depth. Pulling
+     the depth down moves it outward and accelerating that is the whole trick.
+     Drawing from the PREVIOUS depth to the current one turns a dot into a
+     streak for free, so idle drift and lightspeed are one number apart. */
+
+  var IDLE = 0.0011;      /* ambient. Slow enough to read a table over */
+  var WARP = 0.085;       /* lightspeed */
+  var stars = [];
+  var w = 0, h = 0, cx = 0, cy = 0, dpr = 1;
+  var speed = IDLE, target = IDLE;
+  var running = false, frame = 0;
+
+  function size() {
+    /* Capped at 2. A phone reporting 3 or 4 triples the fill cost of a
+       full-screen canvas for a difference nobody can see on a starfield. */
+    dpr = Math.min(window.devicePixelRatio || 1, 2);
+    w = window.innerWidth;
+    h = window.innerHeight;
+    cx = w / 2;
+    cy = h / 2;
+    canvas.width = Math.round(w * dpr);
+    canvas.height = Math.round(h * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+    /* Density by area rather than a fixed count, so a laptop and a phone get
+       the same look and the phone does a fraction of the work. */
+    var want = Math.max(90, Math.min(420, Math.round((w * h) / 5200)));
+    while (stars.length > want) stars.pop();
+    while (stars.length < want) stars.push(spawn(Math.random()));
+  }
+
+  function spawn(z) {
+    return {
+      x: (Math.random() - 0.5) * 2,
+      y: (Math.random() - 0.5) * 2,
+      z: z <= 0 ? 1 : z,
+      pz: 0,
+      /* A few bright ones. A uniform field reads as noise; a scattering of
+         brighter stars gives the eye something to track through the jump. */
+      m: Math.random() < 0.08 ? 1.9 : 1
+    };
+  }
+
+  function tick() {
+    frame = 0;
+    if (!running) return;
+
+    /* Ease toward the target rather than snapping, so the spool-up on sign-in
+       and the drop-out on arrival are the same code as the idle drift. */
+    speed += (target - speed) * 0.055;
+    var warp = Math.max(0, Math.min(1, (speed - IDLE) / (WARP - IDLE)));
+
+    /* Trails rather than a clear: the fade leaves the previous frame faintly
+       behind, which is what makes streaks look like light and not like lines.
+       Opaque enough at rest that stars do not smear across a still page. */
+    ctx.fillStyle = 'rgba(11,14,18,' + (0.72 - warp * 0.42).toFixed(3) + ')';
+    ctx.fillRect(0, 0, w, h);
+    ctx.lineCap = 'round';
+
+    for (var i = 0; i < stars.length; i++) {
+      var s = stars[i];
+      s.pz = s.z;
+      s.z -= speed;
+      if (s.z <= 0.02) { stars[i] = spawn(1); continue; }
+
+      var k = Math.min(cx, cy) * 1.35;
+      var x = cx + (s.x / s.z) * k;
+      var y = cy + (s.y / s.z) * k;
+      if (x < -60 || x > w + 60 || y < -60 || y > h + 60) { stars[i] = spawn(1); continue; }
+
+      var px = cx + (s.x / s.pz) * k;
+      var py = cy + (s.y / s.pz) * k;
+
+      var depth = 1 - s.z;
+      var alpha = Math.min(1, depth * depth * 1.5) * (0.35 + warp * 0.65) * s.m;
+      var width = Math.max(0.5, depth * 1.7 * s.m);
+
+      /* Toward white at speed, holo-tinted at rest. Blue-shift as a matter of
+         taste rather than physics, but it is the taste the brief asked for. */
+      ctx.strokeStyle = warp > 0.04
+        ? 'rgba(' + Math.round(196 + warp * 59) + ',' +
+                    Math.round(232 + warp * 23) + ',255,' + alpha.toFixed(3) + ')'
+        : 'rgba(150,196,214,' + (alpha * 0.72).toFixed(3) + ')';
+      ctx.lineWidth = width;
+      ctx.beginPath();
+      ctx.moveTo(px, py);
+      /* At rest the streak is sub-pixel, so nudge it to a visible dot. */
+      ctx.lineTo(x, y + (px === x && py === y ? 0.6 : 0));
+      ctx.stroke();
+    }
+
+    frame = window.requestAnimationFrame(tick);
+  }
+
+  function start() {
+    if (running || document.hidden) return;
+    running = true;
+    frame = window.requestAnimationFrame(tick);
+  }
+
+  function stop() {
+    running = false;
+    if (frame) window.cancelAnimationFrame(frame);
+    frame = 0;
+  }
+
+  function warpTo(level) { target = IDLE + (WARP - IDLE) * level; }
+
+  size();
+  start();
+
+  var resizeTimer = 0;
+  window.addEventListener('resize', function () {
+    window.clearTimeout(resizeTimer);
+    resizeTimer = window.setTimeout(size, 150);
+  });
+  /* A background tab burning a rAF loop on a starfield nobody is looking at is
+     the cost this whole layer has to justify, so it does not pay it. */
+  document.addEventListener('visibilitychange', function () {
+    if (document.hidden) stop(); else start();
+  });
+
+  /* ------------------------------------------------- panel materialisation */
+
+  var PANELS = '.page-head,.banner,.card,.curve,.scroll,.cycle,.readout,' +
+               '.chat .log,.empty,section.block > h2';
+
+  function finish(el) {
+    el.classList.remove('fx-in');
+    el.classList.add('fx-done');
+  }
+
+  /* Queries the document rather than trusting a list built earlier. This is
+     the function that guarantees no figure can be left hidden, so it must not
+     depend on any of the code between here and the failure it is catching. */
+  function settleAll() {
+    var all = document.querySelectorAll('.fx-panel');
+    for (var i = 0; i < all.length; i++) finish(all[i]);
+  }
+
+  /* Armed before anything else can throw. Hiding a panel takes BOTH
+     `html.fx-ready` and a per-element `fx-panel` class, added together in one
+     synchronous block below, and this clears them shortly afterwards whatever
+     happened in between. */
+  window.setTimeout(settleAll, 2600);
+
+  function play(list) {
+    for (var i = 0; i < list.length; i++) {
+      var el = list[i];
+      if (el.classList.contains('fx-in') || el.classList.contains('fx-done')) continue;
+      /* Capped stagger. A Decisions page of sixty cycles would otherwise take
+         most of a minute to finish arriving. */
+      el.style.setProperty('--fx-d', Math.min(i * 45, 420) + 'ms');
+      el.classList.add('fx-in');
+      el.addEventListener('animationend', function (e) {
+        if (e.animationName === 'fx-rise') finish(e.currentTarget);
+      }, { once: true });
+    }
+  }
+
+  function materialise() {
+    var panels = Array.prototype.slice.call(document.querySelectorAll(PANELS));
+    if (!panels.length) return;
+
+    /* The whole hiding step, in one synchronous block: mark the elements, set
+       the root flag, and hand every one of them to something that will show it
+       again. Nothing may be added between these lines that can throw. */
+    var above = [], below = [];
+    for (var i = 0; i < panels.length; i++) {
+      panels[i].classList.add('fx-panel');
+      (panels[i].getBoundingClientRect().top < window.innerHeight + 80 ? above : below)
+        .push(panels[i]);
+    }
+    doc.classList.add('fx-ready');
+    play(above);
+
+    if (!below.length) return;
+    if ('IntersectionObserver' in window) {
+      var io = new IntersectionObserver(function (entries) {
+        var batch = [];
+        for (var j = 0; j < entries.length; j++) {
+          if (entries[j].isIntersecting) {
+            batch.push(entries[j].target);
+            io.unobserve(entries[j].target);
+          }
+        }
+        if (batch.length) play(batch);
+      }, { rootMargin: '0px 0px -8% 0px' });
+      for (var k = 0; k < below.length; k++) io.observe(below[k]);
+    } else {
+      play(below);
+    }
+  }
+
+  /* ------------------------------------------------------------ the jump */
+
+  var jumping = false;
+
+  function jump(href) {
+    if (jumping) return;
+    jumping = true;
+    warpTo(1);
+    flash.classList.add('out');
+    store.set('mudhorn.jump', '1');
+    window.setTimeout(function () { window.location.href = href; }, 500);
+    /* If the navigation never happens — a blocked scheme, a download, a
+       back-forward cache restore — the deck comes back rather than sitting
+       behind a white screen at lightspeed forever. */
+    window.setTimeout(function () {
+      jumping = false;
+      warpTo(0);
+      flash.classList.remove('out');
+    }, 2600);
+  }
+
+  function arrive() {
+    var jumped = store.get('mudhorn.jump') === '1';
+    var landed = store.get('mudhorn.spool') === '1' &&
+                 window.location.pathname.indexOf('/login') !== 0;
+    store.drop('mudhorn.jump');
+    store.drop('mudhorn.spool');
+
+    if (jumped || landed) {
+      /* Drop out of lightspeed rather than easing into it: the streaks are
+         already long on the first frame and shorten, which is the arrival half
+         of the jump the previous page started. */
+      speed = WARP;
+      flash.classList.add('in');
+      sweep.classList.add('run');
+    }
+    warpTo(0);
+  }
+
+  /* Same-origin link clicks become jumps. Everything a browser can do with a
+     link other than follow it here is left alone: a new tab, a download, a
+     modified click and an external host all behave exactly as they would
+     without this file loaded. */
+  document.addEventListener('click', function (e) {
+    if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey ||
+        e.shiftKey || e.altKey) return;
+    var a = e.target.closest ? e.target.closest('a') : null;
+    if (!a || !a.href || a.target === '_blank' || a.hasAttribute('download')) return;
+    if (a.origin !== window.location.origin) return;
+    if (a.getAttribute('href').charAt(0) === '#') return;
+    if (a.pathname === window.location.pathname && a.search === window.location.search) return;
+    e.preventDefault();
+    jump(a.href);
+  });
+
+  /* Sign-in is the one the brief actually asked for, so the stars spool up the
+     moment the form is submitted and the Board completes the jump on arrival.
+
+     The submit is NOT intercepted. Holding a login behind an animation means a
+     script error locks the operator out of their own dashboard, and a wrong
+     password would have played a triumphant arrival on the way back to the
+     same form. The flag is read on the NEXT page instead: still on /login
+     means it failed and the arrival is dropped. */
+  var form = document.querySelector('form[action="/login"]');
+  if (form) {
+    form.addEventListener('submit', function () {
+      store.set('mudhorn.spool', '1');
+      warpTo(0.62);
+      flash.classList.add('out');
+    });
+  }
+
+  /* -------------------------------------------------------- boot readout */
+
+  /* Once per browser session. Every line names a piece of THIS INTERFACE. Not
+     one of them reports on the account, the gate or the journal, because a
+     boot screen announcing "RISK GATE ARMED" would be stating a fact it has
+     not read — on a dashboard whose entire argument is that figures are
+     measured rather than plausible. The execution mode is the single live
+     value here and it is rendered by the server into a data attribute. */
+  function boot(then) {
+    if (store.get('mudhorn.booted') === '1') { then(); return; }
+    store.set('mudhorn.booted', '1');
+
+    var mode = body.getAttribute('data-mode') || 'PAPER';
+    var lines = [
+      ['Nav computer', 'READY'],
+      ['Deck projection', 'ONLINE'],
+      ['Render pipeline', 'LOCKED'],
+      ['Execution mode', mode.toUpperCase()]
+    ];
+
+    var el = document.createElement('div');
+    el.className = 'fx-boot';
+    el.setAttribute('aria-hidden', 'true');
+    var items = '';
+    for (var i = 0; i < lines.length; i++) {
+      items += '<li><span>' + lines[i][0] + '</span><b>' + lines[i][1] + '</b></li>';
+    }
+    el.innerHTML = '<div class="panel"><div class="sig">MUDHORN <span>CAPITAL</span></div>' +
+                   '<div class="rule"><i></i></div><ul>' + items + '</ul></div>';
+    body.appendChild(el);
+    warpTo(0.25);
+
+    var li = el.querySelectorAll('li');
+    for (var j = 0; j < li.length; j++) {
+      (function (node, n) {
+        window.setTimeout(function () { node.classList.add('on'); }, 260 + n * 190);
+      })(li[j], j);
+    }
+
+    var closed = false;
+    function close() {
+      if (closed) return;
+      closed = true;
+      el.classList.add('done');
+      speed = WARP * 0.8;
+      flash.classList.add('in');
+      sweep.classList.add('run');
+      window.setTimeout(function () { if (el.parentNode) el.parentNode.removeChild(el); }, 460);
+      then();
+    }
+    /* Skippable. An operator checking open risk for the fourth time today does
+       not want to watch a title sequence, and the flag above means they only
+       see it once a session anyway. */
+    el.addEventListener('click', close);
+    document.addEventListener('keydown', close, { once: true });
+    window.setTimeout(close, 1500);
+  }
+
+  function go() {
+    boot(function () {
+      arrive();
+      materialise();
+    });
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', go);
+  } else {
+    go();
+  }
+
+  window.MUDHORN_FX = { jump: jump, warpTo: warpTo, settle: settleAll };
+})();
 """
 
 MARK = (
@@ -299,9 +1047,33 @@ PAGES: tuple[tuple[str, str], ...] = (
     ("/decisions", "Decisions"),
     ("/trades", "Trades"),
     ("/analytics", "Analytics"),
+    ("/dreaming", "Dreaming"),
     ("/settings", "Settings"),
     ("/chat", "Chat"),
 )
+
+# The dreamer's avatar. Drawn here in primitives rather than shipped as an
+# image: it is six ellipses and two paths, it inherits the palette, it animates
+# in CSS, and it costs no request. A small hooded creature with oversized ears,
+# projected on a hover pad, in the same holo line the rest of the deck is drawn
+# in.
+#
+# `aria-hidden`, because it is a mood and not information. Everything the page
+# actually says is said in text beside it.
+DREAMER = """
+<svg class="dreamer" viewBox="0 0 120 120" aria-hidden="true">
+  <ellipse class="pad" cx="60" cy="106" rx="30" ry="5"/>
+  <g class="floaty">
+    <ellipse class="ear left" cx="23" cy="53" rx="18" ry="8.5"/>
+    <ellipse class="ear right" cx="97" cy="53" rx="18" ry="8.5"/>
+    <path class="robe" d="M35 74c9 7 41 7 50 0l8 26H27Z"/>
+    <path class="head" d="M60 25c17 0 28 12 28 27s-12 27-28 27-28-12-28-27 11-27 28-27Z"/>
+    <ellipse class="eye" cx="49" cy="51" rx="6" ry="7"/>
+    <ellipse class="eye" cx="71" cy="51" rx="6" ry="7"/>
+    <path class="mouth" d="M54 66c4 3 8 3 12 0"/>
+  </g>
+</svg>
+"""
 
 
 # ------------------------------------------------------------------ helpers
@@ -376,7 +1148,8 @@ def shell(
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="robots" content="noindex">
 <link rel="icon" href="{FAVICON}">
-<title>{_e(title)} &middot; Mudhorn Capital</title><style>{STYLES}</style></head><body>
+<title>{_e(title)} &middot; Mudhorn Capital</title><style>{STYLES}</style></head>
+<body data-mode="{_e(mode)}">
 <header class="bar"><div class="wrap">
   <a class="brand" href="/">{MARK} MUDHORN <span class="thin">CAPITAL</span></a>
   <nav>{nav}</nav>
@@ -387,6 +1160,7 @@ def shell(
     " behind a shared password" if exposed else ", bound to the loopback interface"
 }. Paper trading. Private vehicle, not managing anyone else's money. Rendered
 {datetime.now(UTC).strftime('%Y-%m-%d %H:%M')} UTC.</footer>
+<script>{SCRIPT}</script>
 </body></html>"""
 
 
@@ -1413,39 +2187,74 @@ def chat_page(*, enabled: bool, token: str, hermes_available: bool) -> str:
             "process expects it. See <code>docs/HERMES_SETUP.md</code>.</div>"
         )
 
-    suggestions = [
-        "What is my open risk right now, and how close is it to the cap?",
-        "Why was the last proposal rejected?",
-        "Summarise this week's trades and what closed them.",
-        "Is anything expiring soon that needs action?",
-    ]
+    return body + chat_panel(
+        token=token,
+        soul="yoda",
+        who="Yoda",
+        intro="Ask about the account, the journal, open risk or a particular "
+        "decision. I read the same journal this dashboard renders, through the "
+        "MCP tools, and every order path behind me runs the risk gate first.",
+        placeholder="Ask about the account, a trade, or a rejection",
+        suggestions=[
+            "What is my open risk right now, and how close is it to the cap?",
+            "Why was the last proposal rejected?",
+            "Summarise this week's trades and what closed them.",
+            "Is anything expiring soon that needs action?",
+        ],
+        footnote="Turns are replayed for continuity but this is not a long-lived "
+        "session. Hermes keeps its own memory; the dashboard does not.",
+    )
+
+
+def chat_panel(
+    *,
+    token: str,
+    soul: str,
+    who: str,
+    intro: str,
+    placeholder: str,
+    suggestions: list[str],
+    footnote: str,
+    avatar: bool = False,
+) -> str:
+    """One conversation panel, used by both agents.
+
+    Shared rather than copied because the two differ only in which character
+    answers. The transport, the token, the history replay and the error handling
+    are one implementation, so a fix to any of them cannot reach one agent and
+    miss the other.
+
+    `soul` travels in the request body and is the only thing that picks the
+    character. It is validated server-side against a fixed set, so a value typed
+    into the console cannot name an arbitrary file.
+    """
     chips = "".join(
         f'<button type="button" data-q="{_e(q)}">{_e(q)}</button>' for q in suggestions
     )
-
-    return body + f"""
+    return f"""
 <div class="chat" style="margin-top:1.5rem">
   <div class="log" id="log" aria-live="polite" aria-label="Conversation">
-    <div class="turn agent"><span class="who">Hermes</span>
-      <div class="msg">Ask about the account, the journal, open risk or a
-particular decision. I read the same journal this dashboard renders, through
-the MCP tools, and every order path behind me runs the risk gate first.</div></div>
+    <div class="turn agent"><span class="who">{_e(who)}</span>
+      <div class="msg">{_e(intro)}</div></div>
   </div>
   <div class="prompts">{chips}</div>
   <div class="composer">
-    <textarea id="msg" rows="2" placeholder="Ask about the account, a trade, or a rejection"
+    <textarea id="msg" rows="2" placeholder="{_e(placeholder)}"
       aria-label="Message"></textarea>
     <button class="btn" id="send" type="submit">Send</button>
   </div>
-  <p class="note">Turns are replayed for continuity but this is not a long-lived
-  session. Hermes keeps its own memory; the dashboard does not.</p>
+  <p class="note">{_e(footnote)}</p>
 </div>
 <script>
 (function () {{
   var TOKEN = {json.dumps(token)};
+  var SOUL = {json.dumps(soul)};
+  var WHO = {json.dumps(who)};
+  var AVATAR = {json.dumps(bool(avatar))};
   var log = document.getElementById('log');
   var box = document.getElementById('msg');
   var send = document.getElementById('send');
+  var face = AVATAR ? document.querySelector('.dreamer') : null;
   var history = [];
 
   function turn(who, text, cls) {{
@@ -1463,14 +2272,17 @@ the MCP tools, and every order path behind me runs the risk gate first.</div></d
     if (!text) return;
     box.value = '';
     turn('You', text, 'user');
-    var pending = turn('Hermes', 'Thinking. A question that fans out across the '
+    var pending = turn(WHO, 'Thinking. A question that fans out across the '
       + 'MCP tools can take a while.', 'agent');
     send.disabled = true;
+    /* Means "a request is open", never "an idea is forming". The avatar must
+       not imply the agent is doing something it is not. */
+    if (face) face.classList.add('thinking');
 
     fetch('/chat', {{
       method: 'POST',
       headers: {{ 'Content-Type': 'application/json' }},
-      body: JSON.stringify({{ token: TOKEN, message: text, history: history }})
+      body: JSON.stringify({{ token: TOKEN, message: text, history: history, soul: SOUL }})
     }})
       .then(function (r) {{ return r.json(); }})
       .then(function (d) {{
@@ -1479,14 +2291,18 @@ the MCP tools, and every order path behind me runs the risk gate first.</div></d
           history.push({{ user: text, agent: d.text }});
         }} else {{
           pending.parentElement.className = 'turn err';
-          pending.textContent = d.error || 'Hermes returned nothing.';
+          pending.textContent = d.error || (WHO + ' returned nothing.');
         }}
       }})
       .catch(function (e) {{
         pending.parentElement.className = 'turn err';
         pending.textContent = String(e);
       }})
-      .finally(function () {{ send.disabled = false; box.focus(); }});
+      .finally(function () {{
+        send.disabled = false;
+        if (face) face.classList.remove('thinking');
+        box.focus();
+      }});
   }}
 
   send.addEventListener('click', ask);
@@ -1498,6 +2314,247 @@ the MCP tools, and every order path behind me runs the risk gate first.</div></d
   }});
 }})();
 </script>"""
+
+
+# ----------------------------------------------------------------- dreaming
+
+
+def _hop(hop: Hop) -> str:
+    state = "checked" if hop.checked else "open"
+    source = (
+        f'<span class="src">{_e(hop.source)}</span>'
+        if hop.checked and hop.source
+        else '<span class="src">Not checked. Nobody has verified this hop.</span>'
+    )
+    return f'<li class="{state}">{_e(hop.claim)}{source}</li>'
+
+
+def _dream(dream: Dream) -> str:
+    """One mini-project, read top to bottom as an argument.
+
+    The spark, the chain, the hop most likely to break it, then what was
+    decided. Ordering it that way is deliberate: a reader who stops after two
+    sections has read the idea and the reason to doubt it, which is the right
+    pair to have if you only read two.
+    """
+    verdict = (
+        f'<span class="pill {dream.verdict}">{_e(str(dream.verdict))}</span>'
+        if dream.verdict
+        else ""
+    )
+    verification = dream.verification
+    out = (
+        '<article class="dream"><div class="top">'
+        f"<h3>{_e(dream.title)}</h3>"
+        f'<span class="pill {dream.stage}">{_e(str(dream.stage))}</span>'
+        f"{verdict}"
+        f'<span class="pill {verification}">{_e(str(verification))}</span>'
+        f'<span class="when">{_e(_when(dream.updated_at))}</span>'
+        "</div>"
+        f'<div class="seed">{_e(dream.seed)}'
+        + (
+            f'<span class="from">Sparked by {_e(dream.origin)}</span>'
+            if dream.origin
+            else ""
+        )
+        + '</div><div class="body">'
+    )
+
+    if dream.chain:
+        out += '<ol class="hops">' + "".join(_hop(h) for h in dream.chain) + "</ol>"
+    else:
+        out += '<p class="note">No chain recorded yet. Still a spark.</p>'
+
+    # The weakest hop leads the commentary because confidence in a chain is the
+    # minimum across its links rather than the average, and a reader given one
+    # sentence should be given the one that could kill it.
+    if dream.weakest_hop:
+        out += (
+            f'<p class="weak"><b>Weakest hop</b>{_e(dream.weakest_hop)}</p>'
+        )
+    elif dream.chain:
+        out += (
+            '<p class="weak"><b>Weakest hop</b>Not named. A chain without a '
+            "stated weakest link has not been attacked yet.</p>"
+        )
+
+    if dream.trigger:
+        out += f'<p class="trigger"><b>Watching for:</b> {_e(dream.trigger)}</p>'
+    elif dream.verdict in (DreamVerdict.KEEP, DreamVerdict.PARK):
+        # Same rule the Decisions page applies to the loop's own watches: a
+        # watch with no named trigger is not a plan, and rendering it as one
+        # would let the dreamer look like it has a view when it does not.
+        out += (
+            '<p class="trigger"><b>Watching for:</b> <span class="muted">nothing '
+            "named. A kept idea with no trigger is a note, not a watch.</span></p>"
+        )
+
+    if dream.instruments:
+        out += (
+            '<p class="trigger"><b>About:</b> '
+            + _e(", ".join(dream.instruments))
+            + ' <span class="muted">(subject matter, not an instruction)</span></p>'
+        )
+
+    if dream.thoughts:
+        rows = "".join(
+            f'<li><span class="st {t.stage}">{_e(str(t.stage))}</span>'
+            f"<span>{_e(t.text)}</span></li>"
+            for t in dream.thoughts
+        )
+        out += (
+            f'<details class="stream"><summary>The working, '
+            f"{len(dream.thoughts)} step(s)</summary><ol>{rows}</ol></details>"
+        )
+
+    return out + "</div></article>"
+
+
+WORKED_EXAMPLE = """
+<div class="worked">
+  <h3>What a dream looks like</h3>
+  <p class="note" style="margin-top:0">An illustration, not a recorded dream.
+  Nothing below was produced by the agent and nothing below is a suggestion.</p>
+  <ol class="hops" style="margin-top:.875rem">
+    <li class="checked">Periodical cicadas emerge on fixed multi-year broods, and
+      the brood map is published.<span class="src">Checkable against
+      entomological records</span></li>
+    <li class="checked">Sesame production is concentrated in a small number of
+      countries.<span class="src">Checkable against agricultural
+      statistics</span></li>
+    <li class="open">In a given year, two of the three largest producers fall
+      inside overlapping brood ranges and lose harvest in the same
+      season.<span class="src">Not checked. Nobody has verified this
+      hop.</span></li>
+    <li class="checked">Indonesia has no periodical cicadas, so its crop is
+      unaffected.<span class="src">Checkable against the same brood
+      map</span></li>
+  </ol>
+  <p class="weak"><b>Weakest hop</b>Whether the brood overlap and the production
+  concentration actually coincide in any particular year. Everything else is
+  reference data; this is the part that has to be true and is not yet
+  established.</p>
+  <p class="note" style="margin-top:.875rem">That is the whole shape. Each link
+  is a separate physical claim that can be checked on its own, any one of them
+  breaking kills the chain, and the conclusion is the only speculative part. A
+  chain whose links cannot be attacked one at a time is a story rather than a
+  hypothesis, and gets dropped.</p>
+</div>
+"""
+
+
+def dreaming_page(
+    dreams: list[Dream],
+    summary: DreamSummary,
+    *,
+    enabled: bool,
+    token: str,
+    hermes_available: bool,
+    soul_found: bool,
+) -> str:
+    """The dreamer's deck: what it is thinking about, and a way to talk to it.
+
+    The warning at the top is not decoration and is not dismissible. Everything
+    on this page is speculation, produced by a model that is good at sounding
+    certain, on a surface that otherwise reports measured facts about real
+    money. A reader arriving mid-page has to be told which of the two they are
+    looking at, in the same way the public site labels its invented figures.
+    """
+    body = (
+        '<div class="dream-head">'
+        + DREAMER
+        + '<div class="who"><p class="eyebrow">Grogu</p><h1>Dreaming</h1>'
+        "<p class=note>Second-order ideas, thought about in public. It reaches "
+        "for connections nobody asked for, records the chain link by link, "
+        "attacks it, and reaches a verdict.</p></div></div>"
+    )
+
+    # Ahead of everything, including the counts. The single most important fact
+    # about this page is what it is not.
+    body += (
+        '<div class="banner warn"><b>Nothing here is a proposal</b>'
+        "The dreamer has no order path. It produces hypotheses, never trades: "
+        "no quantity, no entry, no stop, no side, and no route to the broker. "
+        "The decision loop proposes and <code>src/bot/risk.py</code> vets what "
+        "it proposes, and this agent is in neither. An idea that matures into "
+        "something worth acting on is read by a person and acted on through the "
+        "ordinary machinery, in their own time.</div>"
+    )
+
+    if not soul_found:
+        body += (
+            '<div class="banner warn"><b>Running without a soul</b>'
+            "<code>souls/grogu.md</code> could not be read, so the agent is "
+            "answering without its character file. It still reaches the same "
+            "tools and is still bound by the same limits; it will simply sound "
+            "like nothing in particular.</div>"
+        )
+
+    body += (
+        '<div class="grid g4" style="margin-top:1.5rem">'
+        + stat("Open", str(summary.open_dreams), "still being thought about")
+        + stat("Kept", str(summary.kept), "chain held, worth watching")
+        + stat("Parked", str(summary.parked), "interesting, not now")
+        + stat("Dropped", str(summary.dropped), "broke on inspection")
+        + "</div>"
+    )
+
+    body += '<section class="block"><h2>Thoughts</h2>'
+    if dreams:
+        if summary.unverified:
+            body += (
+                f'<p class="note" style="margin-bottom:1rem">{summary.unverified} of '
+                f"{summary.total} rest entirely on hops nobody has checked. They are "
+                "marked <span class=\"pill unverified\">unverified</span> and that "
+                "is a statement about evidence, not about how likely they are.</p>"
+            )
+        body += "".join(_dream(d) for d in dreams)
+    else:
+        body += (
+            '<p class="note" style="margin-bottom:1rem">Nothing recorded yet. The '
+            "dreamer writes here as it works; until then, here is the shape one "
+            "takes.</p>" + WORKED_EXAMPLE
+        )
+    body += "</section>"
+
+    body += '<section class="block"><h2>Talk to it</h2>'
+    if not enabled:
+        return body + (
+            '<div class="banner warn"><b>Chat is off</b>'
+            "Set <code>DASHBOARD_CHAT_TOKEN</code> in the environment to enable "
+            "it. The thoughts above are rendered from "
+            "<code>data/dreams.db</code> and do not need it.</div></section>"
+        )
+    if not hermes_available:
+        return body + (
+            '<div class="banner crit"><b>Hermes not found</b>'
+            "The token is set, but the Hermes binary is not installed where this "
+            "process expects it. See <code>docs/HERMES_SETUP.md</code>.</div></section>"
+        )
+
+    return (
+        body
+        + chat_panel(
+            token=token,
+            soul="grogu",
+            who="Grogu",
+            intro="I look two hops away from whatever anyone is watching. Give me "
+            "something to pull on: a headline, an odd trade, a supply chain, a "
+            "season. I will not tell you what to buy, and I will tell you which "
+            "part of a chain I could not check.",
+            placeholder="Give it something to pull on",
+            suggestions=[
+                "What is downstream of a shipping lane closing for a month?",
+                "Something in the journal closed oddly. What might explain it?",
+                "Pick a commodity nobody is talking about and find its second order.",
+                "What would break the last idea you kept?",
+            ],
+            footnote="Ideas here are speculation and are recorded as such. Nothing "
+            "said in this panel reaches the broker, the journal or the risk gate.",
+            avatar=True,
+        )
+        + "</section>"
+    )
 
 
 # -------------------------------------------------------------------- login
@@ -1513,32 +2570,37 @@ def login_page(*, env: Env, error: str = "") -> str:
     lose by putting a friendly summary above the form.
     """
     mode = "paper" if env.alpaca_paper_trade else "LIVE"
-    message = (
-        f'<p class="note" style="color:var(--loss)">{_e(error)}</p>' if error else ""
-    )
+    message = f'<p class="err" role="alert">{_e(error)}</p>' if error else ""
     return f"""<!doctype html>
 <html lang="en-GB"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="robots" content="noindex">
 <link rel="icon" href="{FAVICON}">
-<title>Sign in &middot; Mudhorn Capital</title><style>{STYLES}</style></head><body>
+<title>Sign in &middot; Mudhorn Capital</title><style>{STYLES}</style></head>
+<body data-mode="{_e(mode)}">
 <header class="bar"><div class="wrap">
   <span class="brand">{MARK} MUDHORN <span class="thin">CAPITAL</span></span>
   <span class="live paper"><i></i>{_e(mode)}</span>
 </div></header>
-<main><div class="wrap" style="max-width:26rem;margin-top:4rem">
-  <h1 style="font-size:1.5rem">Operator sign-in</h1>
-  <p class="note">Live command centre for a private paper-trading account.
-  Not a demo.</p>
+<main><div class="wrap"><div class="gate"><div class="panel">
+  <div class="sig">
+    <svg viewBox="0 0 64 64" width="44" height="44" aria-hidden="true">
+      <path fill-rule="evenodd" d="M32 2a30 30 0 1 0 0 60 30 30 0 0 0 0-60Zm0 8a22 22 0 1 1 0 44 22 22 0 0 1 0-44Z"/>
+      <path d="M32 17 47 45h-9.4L32 34.2 26.4 45H17L32 17Z"/>
+    </svg>
+    <h1>MUDHORN <span>CAPITAL</span></h1>
+    <p>Operator sign-in</p>
+  </div>
   {message}
-  <form method="post" action="/login" style="margin-top:1.5rem">
+  <form method="post" action="/login">
     <label for="password" class="eyebrow">Password</label>
     <input id="password" name="password" type="password"
-      autocomplete="current-password" required autofocus
-      style="width:100%;margin-top:.5rem">
-    <button type="submit" style="margin-top:1rem;width:100%">Sign in</button>
+      autocomplete="current-password" required autofocus>
+    <button type="submit">Sign in</button>
   </form>
-</div></main>
+  <p class="standby"><i></i>Nav computer standing by</p>
+</div></div></div></main>
 <footer class="wrap">Paper trading only. Rendered
 {datetime.now(UTC).strftime('%Y-%m-%d %H:%M')} UTC.</footer>
+<script>{SCRIPT}</script>
 </body></html>"""

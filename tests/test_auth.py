@@ -14,6 +14,7 @@ from __future__ import annotations
 import pytest
 
 from bot.config import Env, load_rules
+from bot.dreaming import DreamStore
 from bot.journal import Journal
 from bot.web.app import build_app
 from bot.web.auth import COOKIE_NAME, MAX_ATTEMPTS, SessionStore
@@ -23,7 +24,9 @@ from fastapi.testclient import TestClient
 
 PASSWORD = "correct-horse-battery-staple"
 
-PROTECTED = ["/", "/decisions", "/trades", "/analytics", "/settings", "/chat"]
+PROTECTED = [
+    "/", "/decisions", "/trades", "/analytics", "/dreaming", "/settings", "/chat",
+]
 
 
 def _env(password: str = "") -> Env:
@@ -38,16 +41,28 @@ def journal(tmp_path):
 
 
 @pytest.fixture
-def guarded(journal):
+def dreams(tmp_path):
+    """Never the real store. Same rule as the journal: a test that wrote to
+    data/ would leave a file on the developer's machine that the next run
+    then reads."""
+    return DreamStore(tmp_path / "dreams.db")
+
+
+@pytest.fixture
+def guarded(journal, dreams):
     app = build_app(
-        journal=journal, rules=load_rules(), env=_env(PASSWORD), force_mock=True
+        journal=journal, rules=load_rules(), env=_env(PASSWORD),
+        dreams=dreams, force_mock=True
     )
     return TestClient(app, follow_redirects=False)
 
 
 @pytest.fixture
-def unguarded(journal):
-    app = build_app(journal=journal, rules=load_rules(), env=_env(), force_mock=True)
+def unguarded(journal, dreams):
+    app = build_app(
+        journal=journal, rules=load_rules(), env=_env(),
+        dreams=dreams, force_mock=True
+    )
     return TestClient(app, follow_redirects=False)
 
 

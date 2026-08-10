@@ -18,6 +18,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from bot.config import Env, load_rules
+from bot.dreaming import DreamStore
 from bot.journal import Journal
 from bot.models import (
     Decision,
@@ -33,6 +34,7 @@ from bot.models import (
     SymbolAssessment,
     Trade,
 )
+from bot.souls import Soul
 from bot.web.app import build_app
 
 pytest.importorskip("fastapi")
@@ -51,8 +53,19 @@ def journal(tmp_path):
 
 
 @pytest.fixture
-def client(journal):
-    app = build_app(journal=journal, rules=load_rules(), env=_env(), force_mock=True)
+def dreams(tmp_path):
+    """Never the real store. Same rule as the journal: a test that wrote to
+    data/ would leave a file on the developer's machine that the next run
+    then reads."""
+    return DreamStore(tmp_path / "dreams.db")
+
+
+@pytest.fixture
+def client(journal, dreams):
+    app = build_app(
+        journal=journal, rules=load_rules(), env=_env(),
+        dreams=dreams, force_mock=True
+    )
     return TestClient(app)
 
 
@@ -86,7 +99,7 @@ def _closed_trade(journal: Journal, pnl: float, *, minutes: int = 0,
 # ------------------------------------------------------------------- renders
 
 
-PAGES = ["/", "/decisions", "/trades", "/analytics", "/settings", "/chat"]
+PAGES = ["/", "/decisions", "/trades", "/analytics", "/dreaming", "/settings", "/chat"]
 
 
 @pytest.mark.parametrize("path", PAGES)
@@ -163,7 +176,7 @@ def test_stand_down_is_surfaced(client, journal):
     assert "Paper trading continues" in body
 
 
-def test_untracked_position_warning(client, journal, tmp_path):
+def test_untracked_position_warning(client, journal, tmp_path, dreams):
     """A held position the journal never saw makes open risk understated."""
     from bot.broker import MockBroker
     from bot.models import OrderProposal
@@ -189,7 +202,10 @@ def test_untracked_position_warning(client, journal, tmp_path):
     def _fixed_broker(env, force_mock=False):
         return broker
 
-    app = build_app(journal=journal, rules=load_rules(), env=_env(), force_mock=True)
+    app = build_app(
+        journal=journal, rules=load_rules(), env=_env(),
+        dreams=dreams, force_mock=True
+    )
     original = main_mod.build_broker
     main_mod.build_broker = _fixed_broker
     try:
@@ -234,12 +250,15 @@ def test_chat_is_off_unless_a_token_is_set(client):
     assert client.post("/chat", json={"message": "hello"}).status_code == 404
 
 
-def test_chat_rejects_a_wrong_token(tmp_path, journal):
+def test_chat_rejects_a_wrong_token(tmp_path, journal, dreams):
     from bot.web.app import build_app
 
     env = Env(_env_file=None)  # type: ignore[call-arg]
     env.dashboard_chat_token = "correct-horse"
-    app = build_app(journal=journal, rules=load_rules(), env=env, force_mock=True)
+    app = build_app(
+        journal=journal, rules=load_rules(), env=env,
+        dreams=dreams, force_mock=True
+    )
 
     r = TestClient(app).post("/chat", json={"token": "wrong", "message": "hi"})
     assert r.status_code == 403
@@ -321,12 +340,15 @@ def test_settings_shows_trading_days_beside_the_session_hours(client):
     assert "Mon, Tue, Wed, Thu, Fri" in body
 
 
-def test_settings_never_renders_a_credential(tmp_path, journal):
+def test_settings_never_renders_a_credential(tmp_path, journal, dreams):
     """Loopback-bound is not the same as private. A screenshot travels."""
     env = Env(_env_file=None)  # type: ignore[call-arg]
     env.alpaca_api_key = "PK-SUPER-SECRET-KEY"
     env.finnhub_api_key = "fh-secret"
-    app = build_app(journal=journal, rules=load_rules(), env=env, force_mock=True)
+    app = build_app(
+        journal=journal, rules=load_rules(), env=env,
+        dreams=dreams, force_mock=True
+    )
 
     body = TestClient(app).get("/settings").text
 
@@ -342,12 +364,13 @@ def test_settings_never_renders_a_credential(tmp_path, journal):
 
 
 @pytest.fixture
-def audited(tmp_path, journal):
+def audited(tmp_path, journal, dreams):
     from bot.audit import AuditLog
 
     log = AuditLog(tmp_path / "audit")
     app = build_app(
-        journal=journal, rules=load_rules(), env=_env(), audit_log=log, force_mock=True
+        journal=journal, rules=load_rules(), env=_env(), audit_log=log,
+        dreams=dreams, force_mock=True
     )
     return log, TestClient(app)
 
@@ -621,7 +644,7 @@ def test_a_degraded_calendar_is_not_shown_as_no_announcements(audited):
 # ------------------------------------------------------------ pending orders
 
 
-def test_a_resting_order_is_shown_with_the_distance_to_its_limit(journal):
+def test_a_resting_order_is_shown_with_the_distance_to_its_limit(journal, dreams):
     """A limit order that has not filled leaves no position and no explanation.
 
     The gap is what separates "waiting patiently" from "never going to fill".
@@ -648,7 +671,10 @@ def test_a_resting_order_is_shown_with_the_distance_to_its_limit(journal):
 
     import bot.main as main_mod
 
-    app = build_app(journal=journal, rules=load_rules(), env=_env(), force_mock=True)
+    app = build_app(
+        journal=journal, rules=load_rules(), env=_env(),
+        dreams=dreams, force_mock=True
+    )
     def _fixed(env: object, force_mock: bool = False) -> MockBroker:
         return broker
 
@@ -714,3 +740,164 @@ def test_a_degraded_social_feed_is_not_shown_as_a_quiet_morning(audited):
 
     assert "social feed was DEGRADED" in body
     assert "not that nothing was posted" in body
+
+
+# ------------------------------------------------------------------ dreaming
+
+
+def test_the_dreaming_page_leads_with_what_it_is_not(client):
+    """The most important fact about the page, ahead of any of its contents.
+
+    Everything on it is speculation produced by a model that is good at
+    sounding certain, on a dashboard that otherwise reports measured facts about
+    real money. A reader landing mid-page has to be told which of the two they
+    are looking at, in the same way the public site labels its invented figures.
+    """
+    body = client.get("/dreaming").text
+
+    assert "Nothing here is a proposal" in body
+    assert "no quantity, no entry, no stop, no side" in body
+    assert "risk.py" in body
+
+
+def test_an_empty_deck_shows_a_worked_example_marked_as_one(client):
+    """A fresh box has no dreams, and a blank page teaches nothing.
+
+    The illustration must not be mistakeable for something the agent produced,
+    which is the same rule the public site follows about invented figures.
+    """
+    body = client.get("/dreaming").text
+
+    assert "An illustration, not a recorded dream" in body
+    assert "sesame" in body.lower()
+
+
+def test_a_dream_renders_its_unchecked_hops_as_unchecked(client, dreams):
+    """Missing stays missing. A chain is only as good as its weakest link and a
+    hop nobody verified must not read like one somebody did."""
+    from bot.dreaming import Dream, Hop
+
+    dreams.save(
+        Dream(
+            title="Brood overlap",
+            seed="Two of three producers inside overlapping ranges.",
+            chain=[
+                Hop("broods run on fixed cycles", checked=True, source="brood map"),
+                Hop("the overlap lands this season"),
+            ],
+            weakest_hop="whether the overlap and the concentration coincide",
+        )
+    )
+
+    body = client.get("/dreaming").text
+
+    assert "Brood overlap" in body
+    assert "Not checked. Nobody has verified this hop." in body
+    assert "brood map" in body
+    assert "Weakest hop" in body
+    assert "partial" in body
+
+
+def test_a_chain_with_no_stated_weakest_hop_is_called_out(client, dreams):
+    """Same rule the Decisions page applies to a watch with no trigger.
+
+    A chain nobody has attacked is not a strong chain, and rendering it without
+    comment would let the dreamer look like it has a view when it does not.
+    """
+    from bot.dreaming import Dream, Hop
+
+    dreams.save(Dream(title="Unattacked", seed="s", chain=[Hop("a claim")]))
+
+    body = client.get("/dreaming").text
+
+    assert "has not been attacked yet" in body
+
+
+def test_a_kept_dream_with_no_trigger_is_called_out_as_a_note(client, dreams):
+    from bot.dreaming import Dream, DreamStage, DreamVerdict, Hop
+
+    dreams.save(
+        Dream(
+            title="Kept",
+            seed="s",
+            stage=DreamStage.VERDICT,
+            verdict=DreamVerdict.KEEP,
+            chain=[Hop("a claim", checked=True, source="somewhere")],
+        )
+    )
+
+    body = client.get("/dreaming").text
+
+    assert "a note, not a watch" in body
+
+
+def test_the_dreaming_page_survives_a_store_it_cannot_read(journal, dreams, tmp_path):
+    """A broken speculative-notes table is not a reason to show an error page.
+
+    The dreams store is deliberately a different file from the journal, and the
+    whole point of that separation is that losing it costs notes and nothing
+    else. It must cost the page its contents, not the page.
+    """
+    from bot.dreaming import DreamStore
+
+    broken = DreamStore(tmp_path / "broken.db")
+    (tmp_path / "broken.db").write_text("this is not a database")
+
+    app = build_app(
+        journal=journal, rules=load_rules(), env=_env(),
+        dreams=broken, force_mock=True
+    )
+
+    r = TestClient(app).get("/dreaming")
+
+    assert r.status_code == 200
+    assert "Dreaming" in r.text
+
+
+@pytest.mark.parametrize(
+    "requested,expected",
+    [
+        ("yoda", "yoda"),
+        ("grogu", "grogu"),
+        # Anything else is the account agent, including the shapes that would
+        # matter if this string reached a path join.
+        ("../../../../etc/passwd", "yoda"),
+        ("souls/../../.env", "yoda"),
+        ("", "yoda"),
+        ("GROGU", "grogu"),  # case is normalised, not rejected
+    ],
+)
+def test_the_soul_name_from_a_request_body_cannot_name_an_arbitrary_file(
+    journal, dreams, monkeypatch, requested, expected
+):
+    """`load_soul` builds a filesystem path out of this string.
+
+    An unvalidated value from a request body reaching a path join is a traversal
+    waiting to happen, so the route checks it against a fixed set first. An
+    unknown name falls back to the account agent rather than erroring: the worst
+    case of getting it wrong is the wrong voice, and refusing to answer would be
+    a larger failure than answering plainly.
+    """
+    from bot.web import app as app_module
+
+    seen: list[str] = []
+
+    def _spy(name, **kw):
+        seen.append(name)
+        return Soul.absent(name)
+
+    monkeypatch.setattr(app_module, "load_soul", _spy)
+
+    env = Env(_env_file=None)  # type: ignore[call-arg]
+    env.dashboard_chat_token = "tok"
+    app = build_app(
+        journal=journal, rules=load_rules(), env=env,
+        dreams=dreams, force_mock=True
+    )
+
+    TestClient(app).post(
+        "/chat", json={"token": "tok", "message": "hi", "soul": requested}
+    )
+
+    assert seen, "the route did not consult the soul loader at all"
+    assert seen[-1] == expected

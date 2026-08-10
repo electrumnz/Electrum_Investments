@@ -29,6 +29,7 @@ privileges and should not be granted by one secret.
 from __future__ import annotations
 
 import argparse
+import sqlite3
 from datetime import UTC, datetime
 from typing import Any
 
@@ -43,10 +44,12 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Resp
 
 from ..audit import AuditLog
 from ..config import Env, Rules, load_rules
+from ..dreaming import DreamStore, DreamSummary
 from ..journal import Journal
 from ..metrics import build_report
 from ..models import AccountSnapshot, WorkingOrder
 from ..options import alerts_for_positions
+from ..souls import GROGU, YODA, load_soul
 from ..tailnet import read as read_tailnet_status
 from . import render
 from .auth import COOKIE_NAME, SESSION_TTL_SECONDS, SessionStore
@@ -59,6 +62,7 @@ def build_app(
     rules: Rules | None = None,
     env: Env | None = None,
     audit_log: AuditLog | None = None,
+    dreams: DreamStore | None = None,
     force_mock: bool = False,
 ) -> Any:
     """Construct the FastAPI app. Dependencies are injectable so tests never
@@ -92,6 +96,7 @@ def build_app(
     resolved_rules = rules or load_rules()
     resolved_journal = journal or Journal()
     audit = audit_log or AuditLog()
+    resolved_dreams = dreams or DreamStore()
 
     def _account_orders_prices() -> tuple[AccountSnapshot, list[WorkingOrder], dict[str, float]]:
         """One broker session for everything the Board needs.
@@ -243,6 +248,35 @@ def build_app(
         report = build_report(resolved_journal.closed_trades())
         return _page("Analytics", "/analytics", render.analytics_page(report))
 
+    @app.get("/dreaming", response_class=HTMLResponse)
+    def dreaming() -> str:
+        """The dreamer's deck.
+
+        Read-only, like every other GET here, and its store is a different file
+        from the journal on purpose: a hypothesis and a position must never be
+        reachable by the same query. A store that cannot be opened costs the
+        page its contents and nothing else, so it degrades to an empty deck
+        rather than a 500 — this is the surface an operator opens to browse,
+        and a broken speculative-notes table is not a reason to show them an
+        error page.
+        """
+        try:
+            recent = resolved_dreams.recent(limit=25)
+        except sqlite3.Error:
+            recent = []
+        return _page(
+            "Dreaming",
+            "/dreaming",
+            render.dreaming_page(
+                recent,
+                DreamSummary.of(recent),
+                enabled=bool(resolved_env.dashboard_chat_token),
+                token=resolved_env.dashboard_chat_token,
+                hermes_available=bridge.available,
+                soul_found=load_soul(GROGU).found,
+            ),
+        )
+
     @app.get("/settings", response_class=HTMLResponse)
     def settings() -> str:
         return _page(
@@ -311,7 +345,18 @@ def build_app(
             (str(t.get("user", "")), str(t.get("agent", "")))
             for t in payload.get("history") or []
         ]
-        reply = bridge.ask(str(payload.get("message", "")), history)
+
+        # Which character answers. Validated against a fixed set rather than
+        # used as a filename: `load_soul` builds a path from this string, and an
+        # unvalidated value from a request body reaching a path join is a
+        # traversal waiting to happen. An unknown name falls back to the
+        # account agent rather than erroring, because the worst case of getting
+        # this wrong is the wrong voice, and refusing the question would be a
+        # larger failure than answering it plainly.
+        requested = str(payload.get("soul", YODA)).lower()
+        soul = load_soul(requested if requested in {YODA, GROGU} else YODA)
+
+        reply = bridge.ask(str(payload.get("message", "")), history, soul=soul)
         return {"ok": reply.ok, "text": reply.text, "error": reply.error}
 
     @app.get("/healthz")
