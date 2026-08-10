@@ -160,7 +160,7 @@ import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from pathlib import Path
 from typing import Any
@@ -740,6 +740,51 @@ def _symbols(values: object) -> list[str]:
     return out
 
 
+def _to_adoption(row: sqlite3.Row) -> Adoption | None:
+    """One adoption row, or `None` if it will not parse.
+
+    Forgiving in the same way every other read here is, and for a sharper
+    reason: this table is what `granted_symbols` counts, and a raise from a bad
+    row would put an exception into the path that answers "what may be traded".
+    Skipping it is the fail-closed direction — one unreadable grant permits
+    nothing rather than everything.
+    """
+    try:
+        symbols = _symbols(json.loads(row["symbols_granted"] or "[]"))
+    except (json.JSONDecodeError, TypeError) as exc:
+        log.warning("adoption_unreadable", adoption_id=row["id"], error=str(exc))
+        return None
+    returned = row["returned_at"]
+    expires = row["expires_at"]
+    return Adoption(
+        id=int(row["id"]),
+        dream_id=int(row["dream_id"]),
+        adopted_at=_dt(row["adopted_at"]),
+        symbols_granted=symbols,
+        asset_class=str(row["asset_class"] or ""),
+        returned_at=_dt(returned) if returned else None,
+        return_reason=str(row["return_reason"] or ""),
+        expires_at=_dt(expires) if expires else None,
+    )
+
+
+def _default_wisp(dream: Dream, symbols: list[str], at: datetime) -> str:
+    """The trace the dreamer is left with when a dream is taken.
+
+    Deliberately thin — a title, a date and what was granted. It is not a
+    summary of the chain and must not become one: the point of a wisp is that
+    the dreamer stops carrying the whole thing around, and a wisp that restated
+    the argument would leave it carrying the whole thing around in fewer words.
+
+    None of the dream is destroyed to produce this. See the module docstring.
+    """
+    named = ", ".join(symbols) if symbols else "no symbols"
+    return _trim(
+        f"Taken by the trading agent on {at:%d %b %Y} — {dream.title} ({named}). "
+        "The chain is in the vault; what is left here is the shape of it."
+    )
+
+
 @dataclass(frozen=True)
 class VaultCaps:
     """How many dreams each vault will hold.
@@ -1039,6 +1084,7 @@ class DreamStore:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as conn:
             conn.executescript(SCHEMA)
+            _add_vault_columns(conn)
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
@@ -1051,7 +1097,15 @@ class DreamStore:
             conn.close()
 
     def save(self, dream: Dream) -> int:
-        """Insert or update. Returns the row id."""
+        """Insert or update. Returns the row id.
+
+        Note what this does NOT do: it does not move a dream between vaults.
+        `vault` and `vault_entered_at` are written from whatever the object
+        carries, so a caller that mutated `dream.vault` by hand and saved would
+        bypass every actor and cap check in `move`. That is why the movement
+        rules live on the store and why `move` is the only thing that sets the
+        clock — a save is for the contents of a dream, not for where it lives.
+        """
         payload = (
             dream.title,
             dream.seed,
@@ -1065,13 +1119,20 @@ class DreamStore:
             json.dumps(dream.instruments),
             dream.created_at.isoformat(),
             dream.updated_at.isoformat(),
+            str(dream.vault),
+            dream.vault_entered_at.isoformat(),
+            json.dumps([c.to_row() for c in dream.conditions]),
+            json.dumps(_symbols(dream.symbols)),
+            dream.asset_class_key,
+            _trim(dream.wisp),
         )
         with self._connect() as conn:
             if dream.id is None:
                 cursor = conn.execute(
                     "INSERT INTO dreams (title, seed, stage, verdict, weakest_hop,"
                     " trigger_note, origin, chain, thoughts, instruments, created_at,"
-                    " updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                    " updated_at, vault, vault_entered_at, conditions, symbols,"
+                    " asset_class_key, wisp) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     payload,
                 )
                 dream.id = int(cursor.lastrowid or 0)
@@ -1079,7 +1140,9 @@ class DreamStore:
                 conn.execute(
                     "UPDATE dreams SET title=?, seed=?, stage=?, verdict=?,"
                     " weakest_hop=?, trigger_note=?, origin=?, chain=?, thoughts=?,"
-                    " instruments=?, created_at=?, updated_at=? WHERE id=?",
+                    " instruments=?, created_at=?, updated_at=?, vault=?,"
+                    " vault_entered_at=?, conditions=?, symbols=?, asset_class_key=?,"
+                    " wisp=? WHERE id=?",
                     (*payload, dream.id),
                 )
         return dream.id or 0
@@ -1102,11 +1165,32 @@ class DreamStore:
         return self._to_dream(row) if row else None
 
     @staticmethod
-    def _to_dream(row: sqlite3.Row) -> Dream | None:
+    def _col(row: sqlite3.Row, name: str, default: object = "") -> object:
+        """Read a column that may not be there yet.
+
+        `sqlite3.Row` raises `IndexError` on an unknown key, so a store opened
+        against a file some other process is still migrating would take a page
+        down over a column rather than over data. The migration runs on every
+        open and this should never fire; it costs one `try` and removes a class
+        of failure whose symptom would be indistinguishable from corruption.
+        """
+        try:
+            value = row[name]
+        except IndexError:
+            return default
+        return default if value is None else value
+
+    @classmethod
+    def _to_dream(cls, row: sqlite3.Row) -> Dream | None:
         try:
             chain = [Hop.from_row(h) for h in json.loads(row["chain"] or "[]")]
             thoughts = [Thought.from_row(t) for t in json.loads(row["thoughts"] or "[]")]
             instruments = [str(i) for i in json.loads(row["instruments"] or "[]")]
+            conditions = [
+                DreamCondition.from_row(c)
+                for c in json.loads(str(cls._col(row, "conditions", "[]")) or "[]")
+            ]
+            symbols = _symbols(json.loads(str(cls._col(row, "symbols", "[]")) or "[]"))
         except (json.JSONDecodeError, TypeError, AttributeError) as exc:
             # Counted rather than raised, for the reason on the class. One bad
             # row must not take the page down.
@@ -1119,6 +1203,10 @@ class DreamStore:
         except ValueError:
             verdict = None
 
+        # A row migrated from before the vaults has an empty clock only if the
+        # backfill could not find an `updated_at` either, in which case the row
+        # time is the best available reading and is what `_dt` returns.
+        entered = cls._col(row, "vault_entered_at", "")
         return Dream(
             id=int(row["id"]),
             title=str(row["title"]),
@@ -1133,7 +1221,651 @@ class DreamStore:
             instruments=instruments,
             created_at=_dt(row["created_at"]),
             updated_at=_dt(row["updated_at"]),
+            vault=_vault(cls._col(row, "vault", str(Vault.WORKBENCH))),
+            vault_entered_at=_dt(entered if entered else row["updated_at"]),
+            conditions=conditions,
+            symbols=symbols,
+            asset_class_key=str(cls._col(row, "asset_class_key", "")),
+            wisp=str(cls._col(row, "wisp", "")),
         )
+
+    # ------------------------------------------------------------- the vaults
+
+    def in_vault(self, vault: Vault, limit: int = 50) -> list[Dream]:
+        """Everything on one shelf, newest first."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM dreams WHERE vault=? ORDER BY updated_at DESC LIMIT ?",
+                (str(vault), limit),
+            ).fetchall()
+        return [d for d in (self._to_dream(r) for r in rows) if d is not None]
+
+    def counts_by_vault(self) -> dict[Vault, int]:
+        """How many dreams are on each shelf.
+
+        **Every vault is a key, including the empty ones.** A missing key reads
+        as "no data" to a renderer and a zero reads as a stated fact, and the
+        difference matters most for ADOPTED: a page showing nothing where the
+        adopted count should be looks the same whether nothing is adopted or the
+        query failed. Same reason `stop_watch` puts a breach count of zero on
+        every `cycle_complete` line instead of staying quiet.
+        """
+        counts = dict.fromkeys(Vault, 0)
+        with self._connect() as conn:
+            for row in conn.execute("SELECT vault, COUNT(*) n FROM dreams GROUP BY vault"):
+                counts[_vault(row["vault"])] += int(row["n"])
+        return counts
+
+    def move(
+        self,
+        dream_id: int,
+        to: Vault,
+        *,
+        by: str,
+        reason: str = "",
+        at: datetime | None = None,
+        caps: VaultCaps | None = None,
+    ) -> MoveResult:
+        """Move a dream between vaults, enforcing who may do what.
+
+        The actor rules, which are the point of this method existing at all
+        rather than callers setting `dream.vault` and saving:
+
+        - **The dreamer** may move freely between WORKBENCH, PROPHECY, VAULT and
+          ARCHIVE. It may not move anything into ADOPTED — adoption is the
+          trading agent taking something, and a dreamer that could adopt on the
+          agent's behalf would be granting itself a symbol permission. It may
+          not move anything OUT of ADOPTED either: once taken, the dreamer holds
+          a wisp, and pulling a dream back out from under a live grant would
+          leave the permission pointing at a row nobody is watching.
+        - **The trading agent** may do exactly two things, and both are their own
+          method: `adopt` (VAULT → ADOPTED) and `return_to_vault` (ADOPTED →
+          VAULT, with a reason). It may never delete and may never move a dream
+          anywhere else. Calling this directly as the trader is refused with
+          `FORBIDDEN_ACTOR`, which points at the two methods that are allowed.
+        - **Anyone else**, including the operator and any unrecognised name, is
+          refused. Failing open on an authorisation question is how a rule that
+          is the entire reason for the method stops applying, and the operator
+          already has the file and the CLI.
+
+        Refusals are collected rather than short-circuited and nothing raises.
+        See `MoveResult`.
+
+        A move to the vault a dream is already in is refused rather than
+        silently succeeding, because the alternative is a caller with a refresh
+        loop resetting `vault_entered_at` on every pass and nothing ever ageing
+        out.
+        """
+        stamp = at or datetime.now(UTC)
+        limits = caps or DEFAULT_CAPS
+
+        dream = self.get(dream_id)
+        if dream is None:
+            return _refused(
+                dream_id,
+                [MoveRefusal.NOT_FOUND],
+                [f"No dream with id {dream_id}."],
+                moved_to=to,
+            )
+
+        refusals: list[MoveRefusal] = []
+        details: list[str] = []
+
+        if by == TRADER:
+            refusals.append(MoveRefusal.FORBIDDEN_ACTOR)
+            details.append(
+                "The trading agent moves dreams with adopt() and "
+                "return_to_vault(), not with move(). It may take a dream out of "
+                "the vault and hand it back with a reason; nothing else."
+            )
+        elif by != DREAMER:
+            refusals.append(MoveRefusal.FORBIDDEN_ACTOR)
+            details.append(
+                f"'{by}' is not a mover this store recognises. Only the dreamer "
+                "moves dreams between shelves."
+            )
+        else:
+            if dream.vault not in DREAMER_VAULTS:
+                refusals.append(MoveRefusal.FORBIDDEN_ACTOR)
+                details.append(
+                    f"This dream is in {dream.vault}, which the dreamer does not "
+                    "hold. The trading agent has it; it comes back with "
+                    "return_to_vault()."
+                )
+            if to not in DREAMER_VAULTS:
+                refusals.append(MoveRefusal.FORBIDDEN_ACTOR)
+                details.append(
+                    f"The dreamer cannot move a dream into {to}. Adoption is the "
+                    "trading agent taking something, not the dreamer offering it."
+                )
+
+        if dream.vault is to:
+            refusals.append(MoveRefusal.ALREADY_THERE)
+            details.append(
+                f"Already in {to}, so nothing moved and the expiry clock was not "
+                "reset."
+            )
+
+        full = self._is_full(to, limits, exclude=dream_id)
+        if full is not None:
+            refusals.append(MoveRefusal.FULL)
+            details.append(full)
+
+        if refusals:
+            return _refused(
+                dream_id, refusals, details, moved_from=dream.vault, moved_to=to
+            )
+
+        return self._commit_move(dream, to, at=stamp, reason=reason)
+
+    def _is_full(
+        self, to: Vault, caps: VaultCaps, *, exclude: int | None = None
+    ) -> str | None:
+        """The sentence to report if `to` has no room, else `None`.
+
+        `exclude` keeps a dream from counting against the vault it is moving
+        into, which cannot happen through `move` — it refuses a move to the
+        vault a dream is already in — but would be a nasty off-by-one if some
+        later caller retried a partially-applied move.
+        """
+        limit = caps.limit_for(to)
+        if limit is None:
+            return None
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) n FROM dreams WHERE vault=? AND id IS NOT ?",
+                (str(to), exclude),
+            ).fetchone()
+        held = int(row["n"])
+        if held < limit:
+            return None
+        return (
+            f"{to} is full: {held} of {limit}. Archive or retire something "
+            "there first — the cap is about what a person can hold in their "
+            "head, not about risk."
+        )
+
+    def _commit_move(
+        self, dream: Dream, to: Vault, *, at: datetime, reason: str
+    ) -> MoveResult:
+        """Write the move. No checking here; every caller has done its own."""
+        was = dream.vault
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE dreams SET vault=?, vault_entered_at=?, updated_at=? WHERE id=?",
+                (str(to), at.isoformat(), at.isoformat(), dream.id),
+            )
+        log.info(
+            "dream_moved",
+            dream_id=dream.id,
+            moved_from=str(was),
+            moved_to=str(to),
+            reason=_trim(reason),
+        )
+        return MoveResult(
+            ok=True,
+            dream_id=int(dream.id or 0),
+            moved_from=was,
+            moved_to=to,
+            detail=_trim(reason),
+        )
+
+    def delete(self, dream_id: int, *, by: str) -> MoveResult:
+        """Remove a dream and everything hanging off it.
+
+        Refused for the trading agent, always. Deleting is how a record of a
+        disagreement disappears, and the agent with a route to the broker is the
+        one that must not be able to do that — the same asymmetry as the whole
+        move table above.
+
+        Refused for an ADOPTED dream whoever asks, because a live grant whose
+        dream has been deleted is a symbol permission nobody can explain.
+        `granted_symbols` joins back to `dreams` as a second lock on that, but
+        the first lock is not creating the state at all.
+
+        The messages and adoption rows go with it. An adoption row with no dream
+        behind it is a record of a permission that cannot be read, which is
+        worse than not keeping it — and the dream being deleted is, by the rule
+        above, one that was never taken while it mattered.
+        """
+        if by == TRADER:
+            return _refused(
+                dream_id,
+                [MoveRefusal.FORBIDDEN_ACTOR],
+                [
+                    "The trading agent cannot delete a dream. Hand it back to "
+                    "the vault with a reason instead; the dreamer decides what "
+                    "is retired."
+                ],
+            )
+        if by != DREAMER and by != OPERATOR:
+            return _refused(
+                dream_id,
+                [MoveRefusal.FORBIDDEN_ACTOR],
+                [f"'{by}' is not allowed to delete dreams."],
+            )
+
+        dream = self.get(dream_id)
+        if dream is None:
+            return _refused(
+                dream_id, [MoveRefusal.NOT_FOUND], [f"No dream with id {dream_id}."]
+            )
+        if dream.vault is Vault.ADOPTED:
+            return _refused(
+                dream_id,
+                [MoveRefusal.FORBIDDEN_ACTOR],
+                [
+                    "This dream has been adopted, so a live symbol grant points "
+                    "at it. It has to come back to the vault before it can be "
+                    "retired."
+                ],
+                moved_from=dream.vault,
+            )
+
+        with self._connect() as conn:
+            conn.execute("DELETE FROM dream_messages WHERE dream_id=?", (dream_id,))
+            conn.execute("DELETE FROM adoptions WHERE dream_id=?", (dream_id,))
+            conn.execute("DELETE FROM dreams WHERE id=?", (dream_id,))
+        log.info("dream_deleted", dream_id=dream_id, by=by, vault=str(dream.vault))
+        return MoveResult(ok=True, dream_id=dream_id, moved_from=dream.vault)
+
+    # ------------------------------------------------------------- the talking
+
+    def add_message(
+        self,
+        dream_id: int,
+        *,
+        speaker: str,
+        text: str,
+        kind: str = "note",
+        at: datetime | None = None,
+    ) -> DreamMessage:
+        """Append one turn of the conversation. Never overwrites.
+
+        Append-only for the audit log's reason: the interesting part of a
+        negotiation is where somebody changed their mind. Prose is trimmed
+        rather than rejected, because a message that would not store is a turn
+        of the conversation lost to a character count.
+
+        Not validated against `MESSAGE_KINDS` or the known speakers. An
+        unfamiliar kind costs a page a badge; refusing it would lose the turn.
+        """
+        stamp = at or datetime.now(UTC)
+        message = DreamMessage(
+            dream_id=dream_id,
+            at=stamp,
+            speaker=speaker,
+            text=_trim(text),
+            kind=kind,
+        )
+        with self._connect() as conn:
+            cursor = conn.execute(
+                "INSERT INTO dream_messages (dream_id, at, speaker, kind, text)"
+                " VALUES (?,?,?,?,?)",
+                (dream_id, stamp.isoformat(), speaker, kind, message.text),
+            )
+        return DreamMessage(
+            dream_id=message.dream_id,
+            at=message.at,
+            speaker=message.speaker,
+            text=message.text,
+            kind=message.kind,
+            id=int(cursor.lastrowid or 0),
+        )
+
+    def messages(self, dream_id: int, limit: int = 200) -> list[DreamMessage]:
+        """The conversation on one dream, oldest first.
+
+        Oldest first because this is a transcript rather than a feed: a
+        negotiation read newest-first is a negotiation read backwards.
+        """
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM dream_messages WHERE dream_id=? ORDER BY at, id LIMIT ?",
+                (dream_id, limit),
+            ).fetchall()
+        return [
+            DreamMessage(
+                id=int(r["id"]),
+                dream_id=int(r["dream_id"]),
+                at=_dt(r["at"]),
+                speaker=str(r["speaker"]),
+                kind=str(r["kind"] or "note"),
+                text=str(r["text"] or ""),
+            )
+            for r in rows
+        ]
+
+    # ------------------------------------------------------------- the handover
+
+    def adopt(
+        self,
+        dream_id: int,
+        *,
+        symbols: list[str] | None = None,
+        asset_class: str = "",
+        at: datetime | None = None,
+        ttl_days: int | None = None,
+        wisp: str = "",
+        caps: VaultCaps | None = None,
+    ) -> MoveResult:
+        """The trading agent takes a dream out of the vault.
+
+        Writes the `adoptions` row, moves the dream to ADOPTED and leaves the
+        dreamer a wisp. One call, because the three are one event: an adoption
+        row with the dream still sitting in the vault would be a grant nobody
+        could see, and a dream in ADOPTED with no row would be a grant that
+        grants nothing.
+
+        `symbols` and `asset_class` default to the dream's own claim, which is
+        the offer as it was made. They are then **copied onto the adoption row
+        and never read back off the dream**, because the dream can be edited
+        afterwards and a permission has to be a fixed record of what was agreed.
+        Same reasoning as the journal recording the proposal rather than
+        re-deriving it later.
+
+        Refused when the dream is not in VAULT — the only shelf the trading
+        agent can see — when it names no symbols, when its class is unresolved,
+        and when the adopted vault is full. The last of those matters more than
+        it looks: `VaultCaps.adopted` is set to match `max_concurrent_positions`,
+        so a fourth adoption would be a promise the account has no slot to keep.
+
+        An empty `asset_class` is refused here rather than allowed through to
+        `granted_symbols`, which drops it. Both checks are deliberate and the
+        second is the lock that matters — the same arrangement as `mode=ro` plus
+        the statement guard in `insight.py`, where the first check is the useful
+        error message and the second is the guarantee.
+        """
+        stamp = at or datetime.now(UTC)
+        limits = caps or DEFAULT_CAPS
+
+        dream = self.get(dream_id)
+        if dream is None:
+            return _refused(
+                dream_id,
+                [MoveRefusal.NOT_FOUND],
+                [f"No dream with id {dream_id}."],
+                moved_to=Vault.ADOPTED,
+            )
+
+        refusals: list[MoveRefusal] = []
+        details: list[str] = []
+
+        if dream.vault is not Vault.VAULT:
+            refusals.append(MoveRefusal.WRONG_VAULT)
+            details.append(
+                f"Only a dream in {Vault.VAULT} can be adopted; this one is in "
+                f"{dream.vault}. The vault is the only shelf the trading agent "
+                "can see."
+            )
+
+        granted = _symbols(symbols if symbols is not None else dream.symbols)
+        if not granted:
+            refusals.append(MoveRefusal.NEEDS_SYMBOLS)
+            details.append(
+                "An adoption with no symbols is a permission that permits "
+                "nothing, and it would read on the page as a grant. Name the "
+                "symbols or leave the dream in the vault."
+            )
+
+        resolved_class = (asset_class or dream.asset_class_key).strip()
+        if not resolved_class:
+            refusals.append(MoveRefusal.NEEDS_ASSET_CLASS)
+            details.append(
+                "The instrument class is unresolved, so nothing can say which "
+                "limits apply to these symbols. Set it to a key from the "
+                "instruments block of config/rules.yaml."
+            )
+
+        full = self._is_full(Vault.ADOPTED, limits, exclude=dream_id)
+        if full is not None:
+            refusals.append(MoveRefusal.FULL)
+            details.append(full)
+
+        if refusals:
+            return _refused(
+                dream_id,
+                refusals,
+                details,
+                moved_from=dream.vault,
+                moved_to=Vault.ADOPTED,
+            )
+
+        days = ttl_days if ttl_days is not None else DEFAULT_TTLS.adopted
+        expires = stamp + timedelta(days=days)
+        trace = _trim(wisp) or _default_wisp(dream, granted, stamp)
+
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT INTO adoptions (dream_id, adopted_at, symbols_granted,"
+                " asset_class, expires_at) VALUES (?,?,?,?,?)",
+                (
+                    dream_id,
+                    stamp.isoformat(),
+                    json.dumps(granted),
+                    resolved_class,
+                    expires.isoformat(),
+                ),
+            )
+            conn.execute(
+                "UPDATE dreams SET wisp=? WHERE id=?",
+                (trace, dream_id),
+            )
+
+        # Written by the store rather than left to the caller, so the transcript
+        # is complete even when neither agent thought to narrate the handover.
+        self.add_message(
+            dream_id,
+            speaker=TRADER,
+            kind="accept",
+            text=(
+                f"Adopted {', '.join(granted)} ({resolved_class}) until "
+                f"{expires:%d %b %Y}."
+            ),
+            at=stamp,
+        )
+        result = self._commit_move(dream, Vault.ADOPTED, at=stamp, reason="adopted")
+        log.info(
+            "dream_adopted",
+            dream_id=dream_id,
+            symbols=granted,
+            asset_class=resolved_class,
+            expires_at=expires.isoformat(),
+        )
+        return result
+
+    def return_to_vault(
+        self, dream_id: int, *, reason: str, at: datetime | None = None
+    ) -> MoveResult:
+        """The trading agent hands an adopted dream back, saying why.
+
+        **A blank reason is refused**, and that is the only thing standing
+        between this and a silent drop. An adoption is an argument the dreamer
+        won; giving it back without a word is the argument being reversed with
+        no record, and the record is most of what the Dreaming page is for. It
+        does not have to be a good reason — nothing here judges it — it has to
+        exist.
+
+        Closes the live adoption rather than deleting it, so the history of what
+        was granted and for how long stays readable, and clears the wisp,
+        because the dream is the dreamer's again and a trace of something it now
+        holds whole would be misleading.
+        """
+        stamp = at or datetime.now(UTC)
+        clean = _trim(reason)
+
+        dream = self.get(dream_id)
+        if dream is None:
+            return _refused(
+                dream_id,
+                [MoveRefusal.NOT_FOUND],
+                [f"No dream with id {dream_id}."],
+                moved_to=Vault.VAULT,
+            )
+
+        refusals: list[MoveRefusal] = []
+        details: list[str] = []
+        if not clean:
+            refusals.append(MoveRefusal.NEEDS_REASON)
+            details.append(
+                "Handing a dream back needs a stated reason. It does not have to "
+                "be a good one, but a return with no record is an argument "
+                "reversed silently."
+            )
+        if dream.vault is not Vault.ADOPTED:
+            refusals.append(MoveRefusal.WRONG_VAULT)
+            details.append(
+                f"This dream is in {dream.vault}, not {Vault.ADOPTED}, so there "
+                "is nothing to hand back."
+            )
+        if refusals:
+            return _refused(
+                dream_id, refusals, details, moved_from=dream.vault, moved_to=Vault.VAULT
+            )
+
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE adoptions SET returned_at=?, return_reason=? WHERE dream_id=?"
+                " AND returned_at IS NULL",
+                (stamp.isoformat(), clean, dream_id),
+            )
+            conn.execute("UPDATE dreams SET wisp='' WHERE id=?", (dream_id,))
+
+        self.add_message(
+            dream_id, speaker=TRADER, kind="return", text=clean, at=stamp
+        )
+        log.info("dream_returned", dream_id=dream_id, reason=clean)
+        return self._commit_move(dream, Vault.VAULT, at=stamp, reason=clean)
+
+    def adoptions(self, dream_id: int | None = None) -> list[Adoption]:
+        """Every adoption, or every adoption of one dream. Newest first."""
+        sql = "SELECT * FROM adoptions"
+        params: tuple[object, ...] = ()
+        if dream_id is not None:
+            sql += " WHERE dream_id=?"
+            params = (dream_id,)
+        sql += " ORDER BY adopted_at DESC, id DESC"
+        with self._connect() as conn:
+            rows = conn.execute(sql, params).fetchall()
+        out: list[Adoption] = []
+        for row in rows:
+            parsed = _to_adoption(row)
+            if parsed is not None:
+                out.append(parsed)
+        return out
+
+    def granted_symbols(self, now: datetime) -> dict[str, str]:
+        """Which symbols are permitted right now, and under which class key.
+
+        **Written for the risk path that will consume it.** Read this before
+        wiring it to anything that decides what may be traded:
+
+        - **Deterministic given `now`.** No clock of its own, no network, no
+          cache. Two calls with the same `now` over the same file return the
+          same mapping — the same property `RiskGate` is built around, for the
+          same reason.
+        - **Live only.** An adoption that has been handed back, or whose grant
+          has expired, is excluded. Both are computed from the row rather than
+          read from a stored flag, because a third fact about the same thing is
+          a third fact that can disagree with the other two.
+        - **An unresolved class grants nothing.** An adoption with an empty
+          `asset_class` is dropped, because a symbol whose class is unknown is a
+          symbol whose limits are unknown, and defaulting it would be choosing
+          which risk cap applies by accident.
+        - **A symbol claimed by two live grants with different classes is
+          dropped**, not resolved. There is no correct answer to which cap
+          applies, and picking one would be a plausible wrong figure, which is
+          the failure this repository exists to prevent.
+        - **A failure to resolve yields an EMPTY mapping, so the caller fails
+          closed.** A database error, a torn row, anything: the answer is "no
+          symbols are granted", never a partial mapping presented as complete
+          and never an exception into a decision path. Erring towards granting
+          nothing is the only safe direction here; the account carries on
+          trading exactly what `config/rules.yaml` already allows.
+        - **This function does not talk to the gate and must not learn how.**
+          It answers a question about the dream store. The caller is what maps
+          the answer onto whatever `RiskGate` is given, and keeping that seam
+          means nothing in this module ever imports the risk path — which is the
+          same structural argument as `Dream` carrying no order fields.
+        """
+        granted: dict[str, str] = {}
+        conflicted: set[str] = set()
+        try:
+            with self._connect() as conn:
+                rows = conn.execute(
+                    "SELECT a.symbols_granted AS symbols_granted,"
+                    " a.asset_class AS asset_class, a.dream_id AS dream_id"
+                    " FROM adoptions a"
+                    # Joined to `dreams` so an adoption whose dream is gone can
+                    # never grant anything. `delete` already refuses an adopted
+                    # dream; this is the lock that does not depend on that
+                    # having been got right.
+                    " JOIN dreams d ON d.id = a.dream_id"
+                    " WHERE a.returned_at IS NULL"
+                    "   AND (a.expires_at IS NULL OR a.expires_at > ?)",
+                    (now.isoformat(),),
+                ).fetchall()
+        except sqlite3.Error as exc:
+            log.warning("granted_symbols_unavailable", error=str(exc))
+            return {}
+
+        for row in rows:
+            asset_class = str(row["asset_class"] or "").strip()
+            if not asset_class:
+                log.warning("adoption_without_asset_class", dream_id=row["dream_id"])
+                continue
+            try:
+                symbols = _symbols(json.loads(row["symbols_granted"] or "[]"))
+            except (json.JSONDecodeError, TypeError) as exc:
+                log.warning(
+                    "adoption_symbols_unreadable",
+                    dream_id=row["dream_id"],
+                    error=str(exc),
+                )
+                continue
+            for symbol in symbols:
+                held = granted.get(symbol)
+                if held is not None and held != asset_class:
+                    conflicted.add(symbol)
+                    continue
+                granted[symbol] = asset_class
+
+        for symbol in conflicted:
+            log.warning("adoption_class_conflict", symbol=symbol)
+            granted.pop(symbol, None)
+        return granted
+
+    def expired(
+        self, now: datetime, ttls: VaultTTLs | None = None
+    ) -> list[Dream]:
+        """Dreams that have outstayed their vault's TTL at `now`.
+
+        **Expiry marks; it never deletes.** Nothing is removed, nothing is
+        moved, and no state is written — this is a pure read, and what to do
+        about the answer is the caller's. Same shape as `stop_watch`, which
+        reports a breached stop and does not close the position: an automatic
+        action nobody watched is a different proposition from a loud report, and
+        the second is the honest intermediate. A function here that quietly
+        archived a chain somebody was halfway through would be the worse of the
+        two.
+
+        Measured from `vault_entered_at`, so a dream pulled back for another
+        pass gets a fresh clock rather than inheriting a nearly-dead one. See
+        the module docstring.
+
+        A vault with a `None` TTL — the archive — never expires. The archive IS
+        the retirement state, so an expiry on it would be an expiry on an
+        expiry.
+        """
+        windows = ttls or DEFAULT_TTLS
+        out: list[Dream] = []
+        for dream in self.recent(limit=10_000):
+            days = windows.days_for(dream.vault)
+            if days is None:
+                continue
+            if now - dream.vault_entered_at > timedelta(days=days):
+                out.append(dream)
+        return out
 
 
 # Below this many resolved dreams, every rate here is noise. Same reasoning and
@@ -1169,6 +1901,21 @@ class DreamLedger:
     median_hops: float | None
     untriggered_keeps: int
     unattacked: int
+
+    # A prophecy is a claim that the world will do something. One with no
+    # condition attached is a claim nobody can ever settle, which is the
+    # `untriggered_keeps` failure wearing the new costume: it reads as a view
+    # while committing to nothing.
+    #
+    # Optional with a default, like every field added after the fact, so a
+    # caller constructing this positionally from before the vaults still works.
+    conditionless_prophecies: int = 0
+
+    # Prophecies whose conditions are ALL met and which are still sitting in the
+    # prophecy vault. Not a failure — the dreamer may have good reason not to
+    # offer it — but it is the queue worth looking at, and nothing else on the
+    # page would show it.
+    fulfilled_not_offered: int = 0
 
     @property
     def sample_is_thin(self) -> bool:
@@ -1211,6 +1958,14 @@ class DreamLedger:
                 1 for d in dreams if d.verdict is DreamVerdict.KEEP and not d.trigger
             ),
             unattacked=sum(1 for d in dreams if d.chain and not d.weakest_hop),
+            conditionless_prophecies=sum(
+                1
+                for d in dreams
+                if d.vault is Vault.PROPHECY and not d.has_conditions
+            ),
+            fulfilled_not_offered=sum(
+                1 for d in dreams if d.vault is Vault.PROPHECY and d.all_conditions_met
+            ),
         )
 
 
@@ -1225,8 +1980,46 @@ class DreamSummary:
     dropped: int
     unverified: int
 
+    # How many dreams sit on each shelf, over the same list every other count
+    # here is taken from.
+    #
+    # **Every vault is a key, including the empty ones**, so a renderer that
+    # loops over this shows a zero rather than skipping a shelf. A missing row
+    # reads as "no data" and a zero reads as a stated fact; on ADOPTED the two
+    # are very different claims. Same rule as `DreamStore.counts_by_vault`,
+    # which answers over the whole store rather than over a page's worth.
+    #
+    # Added after the fact, so it carries a default: this is constructed by
+    # `.of` in one place today, and a field with no default would break any
+    # caller that had built one positionally.
+    by_vault: dict[Vault, int] = field(default_factory=dict)
+
+    @property
+    def workbench(self) -> int:
+        return self.by_vault.get(Vault.WORKBENCH, 0)
+
+    @property
+    def prophecies(self) -> int:
+        return self.by_vault.get(Vault.PROPHECY, 0)
+
+    @property
+    def vaulted(self) -> int:
+        """In the dream vault: fulfilled, offered, visible to the trading agent."""
+        return self.by_vault.get(Vault.VAULT, 0)
+
+    @property
+    def adopted(self) -> int:
+        return self.by_vault.get(Vault.ADOPTED, 0)
+
+    @property
+    def archived(self) -> int:
+        return self.by_vault.get(Vault.ARCHIVE, 0)
+
     @classmethod
     def of(cls, dreams: list[Dream]) -> DreamSummary:
+        by_vault = dict.fromkeys(Vault, 0)
+        for dream in dreams:
+            by_vault[dream.vault] += 1
         return cls(
             total=len(dreams),
             open_dreams=sum(1 for d in dreams if d.is_open),
@@ -1236,4 +2029,5 @@ class DreamSummary:
             unverified=sum(
                 1 for d in dreams if d.verification is Verification.UNVERIFIED
             ),
+            by_vault=by_vault,
         )

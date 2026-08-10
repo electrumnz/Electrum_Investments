@@ -1,0 +1,83 @@
+# The three checks this project already requires of every change, run where a
+# green local suite cannot be mistaken for a green repository.
+#
+# That distinction is the whole reason this file exists. `tests/test_packaging.py`
+# was written after three modules under `src/bot/data/` were never committed —
+# a bare `data/` pattern in `.gitignore` matched at every depth — while the
+# suite passed, `mypy` passed and `git status` was clean, because ignored files
+# are not reported. It surfaced on the deployed box as `No module named
+# bot.data.finnhub`. A checkout that only has what was actually pushed is the
+# one place that class of fault cannot hide.
+#
+# No credentials are needed and none are provided. Tests use `MockBroker` and
+# may not touch the network or a real account, and a session-scoped fixture in
+# `tests/conftest.py` fails the suite if anything writes to `data/` or `audit/`.
+# If a job here ever needs a secret, something has been wired the wrong way
+# round — fix the test, do not add the secret.
+
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  # So a red main can be re-checked after a fix lands elsewhere, without an
+  # empty commit.
+  workflow_dispatch:
+
+# A second push supersedes the first. The interesting answer is about the tip
+# of the branch, not about a commit already replaced.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    # Well clear of the ~15s the suite takes, tight enough that a hang is
+    # reported rather than left to burn twenty minutes of runner time.
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          # pyproject requires >=3.11 and the droplet runs Ubuntu 24.04, which
+          # ships 3.12. Pinned to the floor rather than to "latest": the floor
+          # is the version a claim of >=3.11 has to be true on, and it is the
+          # one nothing else would test.
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      # Ordered cheapest-first, and every check runs even when an earlier one
+      # failed. That is `if: always()` on each step after the first, and it is
+      # deliberate rather than tidy: a run that stops at the first failure tells
+      # you one thing is wrong, and you fix it, push, and wait to be told the
+      # next. `RiskGate.evaluate` collects every failure reason rather than
+      # short-circuiting precisely so a rejected proposal explains everything
+      # wrong with it at once. Same idea, applied to the build.
+      #
+      # The job still fails if any of them is red — running is not passing.
+      - name: ruff
+        run: ruff check .
+
+      - name: mypy --strict
+        # `files = ["src", "tests", "deploy"]` in pyproject, so the one Python
+        # script under deploy/ is type-checked too. A script nobody checks
+        # because it lives outside src/ is exactly the kind of thing that fails
+        # on the box rather than here.
+        if: always()
+        run: mypy
+
+      - name: pytest
+        if: always()
+        run: python -m pytest

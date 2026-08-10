@@ -210,6 +210,64 @@ A dream with NO conditions must not read as "all conditions met". That is
 different fact from conditions satisfied, and only one of them should promote a
 dream into the vault.
 
+### What reaches the Board, and what must not
+
+The Board is live account state — journal, broker, audit — and the thing it is
+for is answering "is anything wrong, and is there anything I have to do". So
+the dream work reaches it as a small, fixed vocabulary of TAGS, each with a
+stated rule for when it appears. The Board must not become a second Dreaming
+page.
+
+**A dream tag on a position is PROVENANCE, never endorsement.** It says where
+the permission to hold that symbol came from. It must not read as "a prophecy
+backs this trade" — the chain that produced it is speculative by construction,
+and a badge that implies otherwise would put the dreamer's confidence next to a
+real figure, which is the one thing `brand/` is kept separate to avoid.
+
+**Every tag is derived from STORED state, never recomputed by a model.** The
+source is the adoption record and a `dream_id` on the trade. A tag a model
+decides to apply is a tag that can be argued into existence.
+
+The vocabulary:
+
+- **`dream`** — on a position or trade row: opened under an adopted dream, with
+  the dream named on hover. This is the one that carries the visual treatment
+  the operator asked for — a wisp, orbs drifting round the row. Decoration, and
+  therefore subject to the projection layer's rule: it must FAIL TO VISIBLE.
+  Script off, script threw, `prefers-reduced-motion` — the row still renders
+  with its tag as plain text. Never hide the row and reveal it in JS.
+- **`dream-expired-holding`** — the edge case that matters most, and the one to
+  build first. A position is open under a dream whose permission has EXPIRED.
+  Expiry withdraws the right to open, and it must **never force-close**:
+  closing is deliberately outside the gated path, and an unattended auto-close
+  at 3am is a new execution path nobody chose. So the position stands and the
+  Board says exactly that — permission gone, no new entries in this symbol,
+  existing position untouched and still yours to manage. Silence here would be
+  a position sitting under a permission that no longer exists with nothing on
+  screen to say so.
+- **`dream-expiring`** — an adoption inside its final stretch. Warn early, for
+  the same reason the Tailscale banner warns at ten days: the failure is notice
+  followed by a loss of capability, and the notice period is the only time it
+  can be acted on.
+- **`prophecy-fired`** — conditions met, moved to the vault, waiting for the
+  trading agent. A count and a link, not the reasoning.
+- **`awaiting-trader`** — dreams sitting in the vault unactioned, WITH AN AGE.
+  An offer nobody answered is a different fact from no offer, and the age is
+  what separates them.
+- **`a2a`** — unread agent-to-agent messages since the operator's last sitting.
+  `seen.py` already answers "what changed since I last looked" and must be the
+  source; do not build a second marker.
+- **`adopted N/3`** — slots used against the cap.
+- **`unexplained-move`** — the inverse tag, and the one that makes item 4 real:
+  a position whose stop or quantity changed at the broker with **no recorded
+  reason**. The whole point of storing the reasoning is that its absence is
+  visible; a feature that only shows the moves it managed to capture would hide
+  its own failures.
+
+Deliberately NOT on the Board: dream chains and reasoning (that is the Dreaming
+page), and `DreamLedger` rates (reasoning-quality statistics, which belong
+beside `metrics.py` on Analytics and reach the operator, never the model).
+
 ### Still to decide
 
 - Whether an adopted dream's reasoning should reach the trading model's
@@ -608,11 +666,23 @@ this is a deliberate change to that rule rather than an addition beside it.
   winter, opening 03:00 New York instead of 04:00. Harmless in the direction it
   errs — the extra hour is the overnight session, which Alpaca will also take —
   but nothing in the code can detect it. Diary entry, twice a year.
-- **The `mudhorn-capital` Vercel project could not be read** through the Vercel
-  connector: `prj_LpUzEDhsQz5duCKFzhL3FxKgbMSA` returns 404 and does not appear
-  in `list_projects` for the team the bot's own comments are posted under. Six
-  other projects list fine. Probably connector token scope rather than anything
-  real, but it was never confirmed, so the deploy cannot be inspected from here.
+- **`LivePoller` fills `open_risk_usd` and not the two new per-symbol fields.**
+  `apply_journal_state` now derives three figures from one `open_trades()` read
+  — the total, `open_risk_by_symbol` and `symbols_with_unknown_risk` — and
+  `src/bot/web/live.py` still populates only the total, leaving the other two
+  at their defaults. Nothing there gates and no cap is affected, so this is not
+  a live fault. It becomes one the moment a surface renders per-class risk: an
+  empty breakdown reads as "this class risks nothing", which is the missing-vs-
+  zero rule again. Any Board tag showing a class's risk needs the poller moved
+  onto the same three-figure read first.
+- **The `mudhorn-capital` Vercel project is real and deploying — the CONNECTOR
+  is what could not see it.** Previously recorded as a 404 with the cause
+  unconfirmed. Settled from the other direction: the Vercel bot posted a Ready
+  deployment for `prj_LpUzEDhsQz5duCKFzhL3FxKgbMSA` on this branch's PR, with a
+  working preview URL. So the project exists, `brand/` still redeploys on every
+  push, and the 404 through `list_projects` is connector token scope and
+  nothing about the deployment. The practical limit stands: the deploy cannot
+  be inspected from a session, only from the PR comment or the Vercel UI.
 - **Multi-agent dreaming.** Several dreamers working a topic independently and
   debating it out before a verdict. `Thought.by` already carries the
   attribution, and the A2A message store from item 2 is most of the transcript
