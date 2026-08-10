@@ -888,6 +888,18 @@ The safe pattern is to **stage and commit by explicit path**, never `git add
 -A`, and to verify the committed slice by checking out a clean copy elsewhere
 rather than by emptying the working tree.
 
+**A RED suite is not evidence either, if an agent is writing.** Observed: 30
+failures across the suite, re-run immediately, 1101 passing — same tree, and
+the first reading was simply taken part-way through a file being written. That
+is the `.backup`-not-`cp` rule in a new place: a snapshot taken between two
+writes is internally inconsistent and looks exactly like corruption. Verify
+twice before believing a red tree, and never start debugging one on a single
+reading.
+
+**Do not run a repo-wide autofix while agents are writing either.** `ruff
+check --fix .` rewrites their files underneath them, which is the same hazard
+as the stash with a friendlier name. Fix only the paths you own.
+
 **And do not trust a green suite run against a tree that holds another agent's
 half-finished work.** A commit assembled from a subset of it has never been
 tested as a unit — that is how `grants.py` reached the repository while the
