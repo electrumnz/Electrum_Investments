@@ -1625,6 +1625,21 @@ for a while and agree with them.
   covering each limit: what it is, why it sits there, and the goal it serves.
   Settings has no edit control today and `tests/test_web.py` enforces that, so
   this is a deliberate change to that rule rather than an addition beside it.
+- **An exit review, grading the PLAN and never the profit.** Nothing currently
+  records *why* a position closed: `record_exit` takes a price, a time and a
+  realised figure, and stop-hit, target-hit, closed-by-hand and expiry are
+  indistinguishable afterwards. Classifying it would answer the one question
+  worth asking on a close — "did this end the way it was designed to?" — and
+  the interesting bucket is **closed by hand before either level**, because
+  that is the plan being abandoned, which is discipline rather than luck.
+  It belongs beside `triggers.py` and `DreamLedger` rather than beside
+  `metrics.py`: those grade plan-following and reasoning quality, which are
+  true regardless of how a trade went and have no outcome sample to overfit to.
+  **The P&L half stays out.** "Review the trade so it can learn" is the
+  reasonable-sounding request that this repository exists to refuse — forty
+  trades is noise, a model shown three losses will confidently change approach,
+  and that is the Alpha Arena failure arriving as a feature request. The
+  operator learns from the track record; the model learns from nothing.
 - **Multi-agent dreaming.** Several dreamers working a topic independently and
   then debating it out before a verdict. `Thought.by` already carries the
   attribution that needs.
