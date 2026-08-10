@@ -474,3 +474,99 @@ def test_a_thought_can_say_who_had_it():
     # A row written before the field existed still loads.
     old_row = {"stage": "explore", "text": "older thought", "at": ENTRY.isoformat()}
     assert Thought.from_row(old_row).by == ""
+
+
+# ------------------------------------------------------------- the schedule
+
+
+def test_the_schedule_is_read_from_the_unit_rather_than_hardcoded(tmp_path):
+    """A Settings screen holding its own copy of a cadence keeps announcing the
+    old one forever after somebody edits the timer on the box."""
+    from bot.dreamer import read_schedule
+
+    unit = tmp_path / "mudhorn-dream.timer"
+    unit.write_text(
+        "[Timer]\n# a comment\nOnCalendar=*-*-* 07:00:00 Pacific/Auckland\n"
+        "Persistent=true\n"
+    )
+
+    schedule = read_schedule(installed=unit, repo=tmp_path / "nope.timer")
+
+    assert schedule.calendar == "*-*-* 07:00:00 Pacific/Auckland"
+    assert schedule.installed is True
+    assert schedule.state == "installed"
+
+
+def test_a_repo_only_unit_is_not_reported_as_installed(tmp_path):
+    """A unit in the checkout is an intention, not a running schedule.
+
+    Collapsing the two would put a confident "daily at 07:00" on the page for a
+    box where the timer was never installed.
+    """
+    from bot.dreamer import read_schedule
+
+    repo = tmp_path / "repo.timer"
+    repo.write_text("[Timer]\nOnCalendar=*-*-* 07:00:00 Pacific/Auckland\n")
+
+    schedule = read_schedule(installed=tmp_path / "absent.timer", repo=repo)
+
+    assert schedule.found is True
+    assert schedule.installed is False
+    assert schedule.state == "in the repo, not installed"
+
+
+def test_no_unit_anywhere_says_so_rather_than_guessing(tmp_path):
+    from bot.dreamer import read_schedule
+
+    schedule = read_schedule(installed=tmp_path / "a", repo=tmp_path / "b")
+
+    assert schedule.found is False
+    assert schedule.calendar == ""
+    assert schedule.state == "no timer unit found"
+
+
+def test_an_unreadable_unit_does_not_raise(tmp_path):
+    """This is called while rendering Settings. A permissions problem on a
+    deploy file must cost the card its contents, not the page."""
+    from bot.dreamer import read_schedule
+
+    directory = tmp_path / "a-directory.timer"
+    directory.mkdir()
+
+    schedule = read_schedule(installed=directory, repo=tmp_path / "absent")
+
+    assert schedule.found is False
+
+
+def test_the_shipped_timer_is_in_new_zealand_time():
+    """Named zone, never a converted UTC hour.
+
+    New Zealand observes daylight saving, so a hardcoded UTC time drifts by an
+    hour twice a year and drifts silently. The suffix makes systemd do the
+    arithmetic on every elapse.
+    """
+    from pathlib import Path
+
+    from bot.dreamer import read_schedule
+
+    schedule = read_schedule(
+        installed=Path("does-not-exist"),
+        repo=Path("deploy/systemd/mudhorn-dream.timer"),
+    )
+
+    assert "Pacific/Auckland" in schedule.calendar
+
+
+def test_the_cost_estimate_reflects_the_tier():
+    """Haiku has no thinking pass, so it is far cheaper and far shallower."""
+    from bot.config import ClaudeTier
+    from bot.dreamer import estimated_cost_usd
+
+    haiku_run, haiku_year = estimated_cost_usd(ClaudeTier.HAIKU)
+    sonnet_run, sonnet_year = estimated_cost_usd(ClaudeTier.SONNET)
+    opus_run, _ = estimated_cost_usd(ClaudeTier.OPUS)
+
+    assert haiku_run < sonnet_run < opus_run
+    assert haiku_year == pytest.approx(haiku_run * 365)
+    # A year of daily dreaming stays in double digits on the shipped tier.
+    assert sonnet_year < 100

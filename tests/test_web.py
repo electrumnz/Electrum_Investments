@@ -1038,3 +1038,33 @@ def test_no_stylesheet_rule_collides_with_a_state_badge():
         "these rules restyle a state badge as a side effect: "
         f"{offenders}. Scope by element role, not by a word that is also a state."
     )
+
+
+def test_settings_shows_the_dream_schedule_without_claiming_it_is_running(client):
+    """The cadence is read from the timer unit rather than quoted from a
+    constant, and the page is careful about what a file on disk proves.
+
+    A unit existing is not a timer running, and this process cannot tell the
+    difference. Saying "daily at 07:00" on a box where nobody enabled it would
+    be the confident-partial-answer failure in a new place.
+    """
+    body = client.get("/settings").text
+
+    # The section heading, not the bare word: "Dreaming" is in the nav on every
+    # page, so asserting it alone would pass with the card entirely absent.
+    assert "<h2>Dreaming</h2>" in body
+    assert "Pacific/Auckland" in body
+    assert "not visible from this process" in body
+    assert "systemctl list-timers" in body
+    # The tier and the cache decision are both surfaced, since both are
+    # counter-intuitive enough to be worth stating.
+    assert "Prompt cache" in body
+    assert "runs daily, so it would miss every time" in body
+
+
+def test_settings_still_offers_no_way_to_change_anything(client):
+    """The dreaming card is display only, like every other card here."""
+    body = client.get("/settings").text.lower()
+
+    for control in ("<form", "<input", "<select", "contenteditable", "<button"):
+        assert control not in body, f"settings page carries a {control}"

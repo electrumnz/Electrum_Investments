@@ -41,6 +41,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 import anthropic
@@ -48,7 +49,7 @@ import structlog
 from pydantic import BaseModel, Field
 
 from .claude_client import CallUsage, ClaudeClient
-from .config import Env, Rules
+from .config import CLAUDE_PRICING_USD_PER_MTOK, ClaudeTier, Env, Rules
 from .dreaming import Dream, DreamStage, DreamStore, DreamVerdict, Hop
 from .journal import Journal
 from .souls import GROGU, load_soul
@@ -257,6 +258,85 @@ class DreamerResult:
     dream: Dream
     usage: CallUsage | None
     advanced: bool
+
+
+# Where the timer unit lives once bootstrap has installed it, and the repo copy
+# it was installed from.
+INSTALLED_TIMER = Path("/etc/systemd/system/mudhorn-dream.timer")
+REPO_TIMER = Path("deploy/systemd/mudhorn-dream.timer")
+
+
+@dataclass(frozen=True)
+class Schedule:
+    """What the timer unit says, and how much of that is actually true here.
+
+    Three states, and collapsing them would be the usual mistake:
+
+    - **installed** — a unit exists in /etc/systemd/system. What it says is what
+      systemd would use.
+    - **repo only** — the unit exists in the checkout but was never installed, so
+      the schedule below is an intention rather than a fact.
+    - **absent** — no unit anywhere.
+
+    Note what none of these tells you: whether the timer is **enabled**. Nothing
+    readable from inside this process answers that, and a card claiming a daily
+    dream because a file exists would be exactly the confident-partial-answer
+    failure this repository keeps guarding against. So the page says which of
+    the three it found and names the command that answers the rest.
+    """
+
+    calendar: str
+    installed: bool
+    found: bool
+
+    @property
+    def state(self) -> str:
+        if not self.found:
+            return "no timer unit found"
+        return "installed" if self.installed else "in the repo, not installed"
+
+
+def read_schedule(
+    *, installed: Path | None = None, repo: Path | None = None
+) -> Schedule:
+    """Read `OnCalendar=` out of the timer unit. Never raises.
+
+    Parsed rather than hardcoded so the page cannot drift from the unit: an
+    operator who edits the schedule on the box should see the edit here, and a
+    Settings screen quoting a cadence from a constant would keep saying the old
+    one forever.
+    """
+    for path, is_installed in ((installed or INSTALLED_TIMER, True), (repo or REPO_TIMER, False)):
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        for line in text.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("OnCalendar="):
+                return Schedule(
+                    calendar=stripped.split("=", 1)[1].strip(),
+                    installed=is_installed,
+                    found=True,
+                )
+        return Schedule(calendar="", installed=is_installed, found=True)
+    return Schedule(calendar="", installed=False, found=False)
+
+
+def estimated_cost_usd(tier: ClaudeTier) -> tuple[float, float]:
+    """Rough cost of one run, and of a year of daily runs.
+
+    Measured against the real prompt rather than guessed: about 3,600 input
+    tokens with a few chains open, and a few hundred output on top of the
+    thinking pass. Thinking bills as output, and Haiku has none.
+
+    Presented as an estimate and labelled as one on the page. The exact figure
+    for a run that actually happened is logged with it as `cost_usd`.
+    """
+    input_price, output_price, _ = CLAUDE_PRICING_USD_PER_MTOK[tier]
+    thinking = 0 if tier is ClaudeTier.HAIKU else 4_000
+    per_run = (3_600 * input_price + (thinking + 700) * output_price) / 1_000_000
+    return per_run, per_run * 365
 
 
 class Dreamer:

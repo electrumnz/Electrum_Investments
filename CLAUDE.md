@@ -692,6 +692,27 @@ about the **reasoning**, true regardless of how any trade went, with no outcome
 sample to overfit to. It reaches the operator on the Dreaming page and stops
 there, exactly as `metrics.py` reaches Analytics and stops there.
 
+**The dream timer is in New Zealand time, by NAME rather than by conversion.**
+`OnCalendar=*-*-* 07:00:00 Pacific/Auckland`. New Zealand observes daylight
+saving, so a hardcoded UTC hour drifts by one twice a year and drifts silently;
+naming the zone makes systemd redo the arithmetic on every elapse. The suffix
+needs systemd 252 or newer and Ubuntu 24.04 ships 255, verified with
+`systemd-analyze calendar`. On anything older the unit fails to parse and the
+timer simply never fires.
+
+**Do not set the box timezone to Pacific/Auckland instead.** Everything else
+here reasons in UTC deliberately — `sessions_utc`, every journal timestamp,
+every figure the dashboard renders — and moving the system clock would silently
+reinterpret all of it. The suffix changes one timer and nothing else.
+
+The Settings page reads `OnCalendar=` out of the unit rather than quoting a
+constant, so an edit on the box shows up there. It also distinguishes three
+states a file check can actually establish — installed, in the repo only, absent
+— and says plainly that **whether the timer is ENABLED is not visible from that
+process**, naming `systemctl list-timers` instead of guessing. A card announcing
+a daily dream because a file exists would be the confident-partial-answer
+failure in a new place.
+
 **The dreamer runs on its own command, not on the loop.** `electrum-bot dream`
 is one Claude call producing one step: a new chain, or the next step on one it
 already started. Separate from `cmd_loop` for two reasons, and the second is the

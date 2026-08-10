@@ -29,6 +29,7 @@ from datetime import UTC, datetime
 
 from ..audit import AuditView, DecisionEntry
 from ..config import DAY_NAMES, Env, Rules
+from ..dreamer import estimated_cost_usd, read_schedule
 from ..dreaming import (
     THIN_LEDGER_THRESHOLD,
     Dream,
@@ -2181,6 +2182,78 @@ def settings_page(rules: Rules, env: Env, *, chat_enabled: bool) -> str:
         + _row("Dashboard chat", "on" if chat_enabled else "off")
         + '</dl><p class="source">Presence only. No key is rendered on this page, '
         "on any surface, at any time.</p></div></div></section>"
+    )
+
+    # The dreamer is scheduled outside this process, so what it says here is
+    # read from the unit rather than quoted from a constant. A Settings screen
+    # holding its own copy of a cadence keeps announcing the old one forever
+    # after somebody edits the timer on the box.
+    schedule = read_schedule()
+    per_run, per_year = estimated_cost_usd(env.dream_tier)
+    body += (
+        '<section class="block"><h2>Dreaming</h2><div class="grid g2">'
+        '<div class="card"><h3>Schedule</h3><dl class="kv">'
+        + _row(
+            "Timer",
+            _e(schedule.calendar) if schedule.calendar else "no OnCalendar line",
+            "New Zealand time, named rather than converted, so the hour does "
+            "not drift when daylight saving starts and ends.",
+        )
+        + _row(
+            "Unit",
+            schedule.state,
+            # The distinction that matters and the one a file check cannot make.
+            "Whether the timer is ENABLED is not visible from this process. "
+            "A unit on disk is not a running schedule; check "
+            "systemctl list-timers.",
+        )
+        + _row(
+            "Next thought",
+            "not scheduled from here",
+            "The loop and the dreamer are separate units on purpose: one wakes "
+            "every few minutes, the other once a day.",
+        )
+        + '</dl><p class="source">Owned by '
+        "<code>deploy/systemd/mudhorn-dream.timer</code>.</p></div>"
+        '<div class="card"><h3>The call</h3><dl class="kv">'
+        + _row(
+            "Model tier",
+            env.dream_tier.value,
+            "Set by DREAM_CLAUDE_TIER. It deliberately does not follow "
+            "CLAUDE_TIER, because that defaults to a tier with no extended "
+            "thinking and thinking is how a dream gets past its first hop.",
+        )
+        + _row(
+            "Bought",
+            "deep, not fast",
+            "High effort, a large thinking budget and a 900s timeout. Nothing "
+            "waits on this call and depth is the whole product.",
+        )
+        + _row(
+            "Prompt cache",
+            "off",
+            "Deliberate. A 1h cache write bills at twice base input and this "
+            "runs daily, so it would miss every time and pay double. The "
+            "decision loop caches because it wakes every fifteen minutes.",
+        )
+        + _row(
+            "Estimated cost",
+            f"~${per_run:.3f} a run, ~${per_year:.0f} a year",
+            "An estimate from the tier and a typical prompt. The real figure "
+            "for a run that happened is logged with it.",
+        )
+        + _row(
+            "Anthropic key",
+            "configured" if env.anthropic_api_key else "not configured",
+            (
+                ""
+                if env.anthropic_api_key
+                else "Without it the command exits non-zero and writes nothing."
+            ),
+        )
+        + '</dl><p class="source">Nothing here reaches the broker. A dream '
+        "carries no quantity, entry, stop or side, so it cannot describe an "
+        "order at all.</p></div></div></section>"
     )
     return body
 
