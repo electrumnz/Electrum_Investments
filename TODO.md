@@ -45,6 +45,33 @@ gitignored, so **there is no journal, no dreams store and no audit log**, and
 - the stop leg's trigger price cannot be fetched,
 - journal row 1 cannot be inspected — only the code that writes it can.
 
+**`ANTHROPIC_API_KEY` is absent too, and that is the one that blocks the agent
+work.** Checked directly: there is no `.env` in the container and no key in the
+environment. So none of the following can be done from here, and none of them
+should be reported as done:
+
+- **running the three agents live** — no model call can be made, so a soul
+  cannot be observed answering, a breach attempt cannot be pushed at one, and
+  "the Armorer pushed back and then complied" cannot be demonstrated, only
+  asserted about the file;
+- **a real dream cycle** (`electrum-bot dream`) or a real A2A conference, both
+  of which are one model call per step;
+- **anything that would prove the prompt changes reach the model** rather than
+  reaching the string that is passed to it.
+
+The dashboard's Chat page on the droplet *does* run the agents, but driving it
+needs `DASHBOARD_CHAT_TOKEN`, which lives in the box's environment and is not
+readable from here. The password alone is not enough — viewing an account and
+driving an agent that can reach the broker are deliberately separate
+privileges.
+
+**What CAN be established from here is the offline half, and it is worth
+having:** that each soul carries its rails, that the tools an agent must not
+hold are structurally absent, that a consideration cannot become a permission,
+and that the prompt says what it is supposed to say. That is assertion about
+shape rather than observation of behaviour, and the difference must be stated
+whenever these are reported.
+
 Anything in this file phrased as "verify on the box" means exactly that: it
 needs a session with the credentials, or the operator at a shell on the droplet.
 Do not report these as done from a container that cannot see them.
