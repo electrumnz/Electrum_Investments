@@ -49,8 +49,11 @@ That assumption is load-bearing and worth stating plainly, because it is why:
 - non-permissive licences in `reference/` are not a constraint — the Commons
   Clause triggers on selling, AGPL's network clause on conveying to other users,
   and neither happens here
-- there is no auth, no multi-tenancy, and no compliance surface beyond personal tax
-- the dashboard and settings page bind to `127.0.0.1` with no login
+- there is no multi-tenancy and no compliance surface beyond personal tax
+- the dashboard has ONE shared password rather than accounts (`src/bot/web/auth.py`).
+  That is proportionate to a paper account and would not be proportionate to a
+  live one; if this ever fronts real money, replace that file rather than
+  extending it
 
 If that ever stops being true, re-read `reference/STATUS.md` first — the licence
 groupings there become real obligations rather than a record.
@@ -98,19 +101,27 @@ expectancy, R-multiples, drawdown, and an MAE/MFE analysis that judges whether
 the model's own stop and target placement was sane.
 
 **An audit log** (`audit/<date>.jsonl`) recording every proposal, verdict,
-execution, and the token cost of every Claude call.
+execution, the feeds the model was shown, and the token cost of every Claude
+call. It is the only record of a REJECTED proposal, it is backed up hourly
+alongside the journal, and `src/bot/insight.py` indexes it into rebuildable
+SQLite so the whole history is queryable rather than only a recent window.
 
-**A read-only dashboard** (`src/bot/web/`) rendering equity, open positions,
-realised P&L, the metrics and the rules. Binds `127.0.0.1`, no auth by design.
+**An operator command centre** (`src/bot/web/`) — Board, Decisions, Trades,
+Analytics, Settings and Chat — rendering equity, open positions, realised P&L,
+the metrics, the rules and every rejected proposal with the gate's reasoning.
+Read-only apart from `POST /chat`. It binds `127.0.0.1` and is reached over
+Tailscale, or published with a Funnel behind `DASHBOARD_PASSWORD`.
 
-**Two data feeds** (`src/bot/data/`). Marketaux supplies headlines for context.
-Finnhub supplies the earnings calendar the news blackout reads — which means
-that rule fires now, where before it had no windows and never once did.
+**Three data feeds** (`src/bot/data/`). Marketaux supplies headlines for
+context. Finnhub supplies the earnings calendar the news blackout reads — which
+means that rule fires now, where before it had no windows and never once did.
+The X feed supplies posts from watched accounts, and is off unless both
+`social.enabled` and `X_BEARER_TOKEN` are set. Only Finnhub gates anything.
 
 **A reference library** (`reference/`) tracking fourteen agent, backtesting and LLM-trading projects with pinned
 commits and detected licences, so upstream drift shows up as a git diff.
 
-**219 tests**, `ruff` clean, `mypy --strict` clean.
+**569 tests**, `ruff` clean, `mypy --strict` clean.
 
 ---
 
@@ -128,8 +139,9 @@ name), and it should need a track record you actually believe.
 **A backtesting harness.** Right now you can only evaluate forward, which is slow.
 This is probably the highest-value thing to build next.
 
-**A chat surface.** Hermes is the runtime and it runs from the CLI; Buzz or
-Discord is deferred because Telegram, WhatsApp and Signal all want a phone
+**A messaging surface.** The dashboard now has a Chat page driving Hermes
+through the MCP tools, so the CLI is no longer the only way in. Buzz and
+Discord stay deferred because Telegram, WhatsApp and Signal all want a phone
 number. See `docs/HERMES_SETUP.md`.
 
 **Whale-tracking.** Headlines, the earnings calendar and posts from watched
