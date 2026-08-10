@@ -410,6 +410,36 @@ class InstrumentRules(BaseModel):
     max_risk_per_trade_pct: float | None = Field(default=None, gt=0, le=10)
     max_position_pct: float | None = Field(default=None, gt=0, le=200)
 
+    # This class's TOTAL open risk, summed across every position in it, as a
+    # percentage of equity. The per-class counterpart to `max_total_risk_pct`,
+    # and a different question from the two limits above: `max_risk_per_trade_pct`
+    # bounds one trade, this bounds the class. A class allowed 0.5% per trade
+    # with no total is a class that can quietly hold four of them.
+    #
+    # Same doctrine as the fields above. **A value here OVERRIDES the portfolio
+    # limit for this class, in either direction**, and is deliberately not
+    # floored back with a `min`: a file saying 3% while the gate quietly applied
+    # 2% would be a limit nobody could read off the config, which is worse than
+    # either number on its own. Arguing the case for a looser one is the
+    # settings agent's job, not a validator's.
+    #
+    # Measured on PLANNED risk — `|entry - stop| x qty`, taken from the journal
+    # — so **unrealised profit does not offset it**. A position being up today
+    # does not change what its stop costs if it fills, and netting a paper gain
+    # against a real stop distance would make the cap loosest exactly when the
+    # class had run furthest. The consequence is deliberate: at the cap, an
+    # existing position in the class has to be closed before another opens.
+    #
+    # Worth knowing rather than guarded against, exactly as with the per-trade
+    # override: `max_total_risk_pct` is still portfolio-wide, so a class total
+    # above it can never fill — the portfolio total-risk gate refuses the trade
+    # that would breach it first. Raising a class total past the portfolio one
+    # does nothing until the portfolio one moves too.
+    #
+    # `None` means "no opinion": the class is bounded by the portfolio-wide
+    # total alone. Absent is not zero.
+    max_class_total_risk_pct: float | None = Field(default=None, gt=0, le=10)
+
     # Counted WITHIN this class rather than across the account. Two open crypto
     # positions plus three equity ones is five against the global cap and two
     # against this one, which is the point: a class that gets loud should not

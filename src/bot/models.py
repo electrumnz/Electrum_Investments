@@ -199,6 +199,38 @@ class AccountSnapshot(BaseModel):
     # nothing to count, so keep them wired together.
     open_risk_usd: float = Field(default=0.0, ge=0)
 
+    # The same figure broken out per symbol, from the same journal read. A
+    # per-class risk cap has to know which part of the open risk belongs to
+    # which class, and one portfolio total cannot answer that.
+    #
+    # Planned risk, so a position sitting in unrealised PROFIT still contributes
+    # the full `|entry - stop| x qty`. Being up today does not change what the
+    # stop costs if it fills, and the cap this feeds is a statement about that
+    # cost rather than about the mark.
+    open_risk_by_symbol: dict[str, float] = Field(default_factory=dict)
+
+    # Held positions the journal has never seen. Their planned stop is
+    # unknowable, so their risk is MISSING rather than zero — an empty entry in
+    # `open_risk_by_symbol` would read as "risks nothing", which is the
+    # confident wrong figure this repository exists to refuse.
+    #
+    # Named the same way `reconcile.ReconcileResult` names it, because it is the
+    # same fact travelling further: `untracked_positions` there, and
+    # `risk_is_understated` below is deliberately the same property under the
+    # same name rather than a second vocabulary for one idea.
+    symbols_with_unknown_risk: list[str] = Field(default_factory=list)
+
+    @property
+    def risk_is_understated(self) -> bool:
+        """True when positions exist whose planned risk cannot be known.
+
+        Identical in meaning to `ReconcileResult.risk_is_understated`: any
+        untracked position means every risk figure here counts less than is
+        actually at risk. `RiskGate._class_total_risk` refuses rather than
+        approving against an understated total.
+        """
+        return bool(self.symbols_with_unknown_risk)
+
     @property
     def gross_exposure_usd(self) -> float:
         """Current market value of all open positions."""

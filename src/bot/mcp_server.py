@@ -31,7 +31,7 @@ from .news_history import NewsItem
 from .news_history import recall as recall_news
 from .news_history import render as render_news
 from .options import alerts_for_positions, parse_occ_symbol, render_alerts
-from .reconcile import record_fill
+from .reconcile import apply_journal_state, record_fill
 from .risk import RiskGate
 from .stand_down import describe
 from .triggers import render as render_watches
@@ -140,12 +140,17 @@ class _Session:
 
         The broker cannot supply open risk — Alpaca keeps stop-losses as
         separate orders — so every read goes through here rather than calling
-        `broker.get_account()` directly, or the total-risk cap would have
-        nothing to count.
+        `broker.get_account()` directly, or the risk caps would have nothing to
+        count.
+
+        Delegates to `apply_journal_state` rather than keeping its own copy of
+        the enrichment. This used to mirror it by hand, which was one line while
+        there was one figure to fill in; it is three now — the total, the
+        per-symbol breakdown the class caps read, and the positions whose risk
+        is unknowable — and a hand-kept mirror is how one path quietly stops
+        populating something the gate depends on.
         """
-        snapshot = self.broker.get_account()
-        snapshot.open_risk_usd = self.journal.open_risk_usd()
-        return snapshot
+        return apply_journal_state(self.broker.get_account(), self.journal)
 
     def reset(self) -> None:
         """Start a new trading session: re-baseline equity and clear the kill switch."""

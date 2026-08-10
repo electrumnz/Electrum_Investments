@@ -903,6 +903,278 @@ def test_strategy_label_resolves_per_class(rules):
     assert enabled.strategy_for("BTC/USD") == "momentum"
 
 
+# ------------------------------------------------- per-class TOTAL risk cap
+#
+# The operator's rule: "if crypto is enabled, crypto shall not consume more
+# than 0.5% of equity in risk. Shall not hold more than 0.5% of risk in
+# positions. Current positions in profit do not count towards offsetting this.
+# Position must be closed if another wants to be taken if outside of risk
+# profile."
+
+
+def _crypto_class_total(rules: Rules) -> Rules:
+    """Crypto enabled with only the class total-risk cap left in the way.
+
+    The concurrent-position and capital caps are widened deliberately. Crypto
+    ships with one position and a 15% capital cap, and both would fire on a
+    second position long before the total-risk cap was reached — so a rejection
+    would prove nothing about the rule under test. The cap itself is left at
+    the shipped 0.5%, because that figure is the operator's rule and a test
+    that set its own would stop guarding the config.
+    """
+    enabled = _with_crypto(rules, cap=100.0)
+    enabled.instruments["crypto"].max_concurrent_positions = 5
+    return enabled
+
+
+def _btc_position(
+    *, qty: float = 0.2, current_price: float = 65_000.0, pnl_usd: float = 0.0
+) -> Position:
+    return Position(
+        symbol="BTC/USD",
+        asset_class=AssetClass.CRYPTO,
+        direction=Direction.BUY,
+        qty=qty,
+        entry_price=65_000.0,
+        opened_at=INSIDE_SESSION,
+        current_price=current_price,
+        unrealised_pnl_usd=pnl_usd,
+    )
+
+
+def _account_with_class_risk(
+    *,
+    positions: list[Position] | None = None,
+    open_risk_by_symbol: dict[str, float] | None = None,
+    symbols_with_unknown_risk: list[str] | None = None,
+) -> AccountSnapshot:
+    by_symbol = open_risk_by_symbol or {}
+    return AccountSnapshot(
+        equity_usd=PAPER_EQUITY,
+        cash_usd=PAPER_EQUITY,
+        buying_power_usd=PAPER_EQUITY,
+        open_positions=positions or [],
+        open_risk_usd=sum(by_symbol.values()),
+        open_risk_by_symbol=by_symbol,
+        symbols_with_unknown_risk=symbols_with_unknown_risk or [],
+    )
+
+
+def test_the_shipped_config_caps_crypto_total_risk_at_half_a_percent(rules):
+    """The rule is only as good as the file. Guard the number, not just the gate."""
+    assert rules.instruments["crypto"].max_class_total_risk_pct == 0.5
+    # Per-trade and class total at the same figure is what makes crypto one
+    # full-size position at a time, which is the intent rather than a
+    # coincidence of two numbers.
+    assert rules.instruments["crypto"].max_risk_per_trade_pct == 0.5
+
+
+def test_rejects_a_crypto_trade_that_breaches_the_class_total(rules):
+    """$400 already at risk in the class, plus $400 more, against a $500 cap."""
+    enabled = _crypto_class_total(rules)
+    account = _account_with_class_risk(
+        positions=[_btc_position()],
+        open_risk_by_symbol={"BTC/USD": 400.0},
+    )
+
+    verdict = _gate(enabled).evaluate(
+        # 0.2 BTC with the stop $2,000 away is $400 of risk.
+        _btc(0.2, "Second crypto position; the class would hold 0.8% of risk."),
+        account=account,
+        tick=_btc_tick(INSIDE_SESSION),
+    )
+
+    assert not verdict.approved
+    assert _reasons_mention(verdict, "open risk would reach")
+    assert _reasons_mention(verdict, "800.00")
+    assert _reasons_mention(verdict, "0.50% of equity")
+
+
+def test_unrealised_profit_does_not_offset_open_crypto_risk(rules):
+    """The clause most likely to be "simplified" away later, so it is pinned.
+
+    Risk is `|entry - stop| x qty` — what the position loses if the stop fills.
+    A position being up $8,000 has not reduced that by a cent, and netting the
+    mark against it would make the cap loosest exactly when the class had run
+    furthest. Two accounts identical but for the profit must produce identical
+    verdicts.
+    """
+    enabled = _crypto_class_total(rules)
+    proposal = _btc(0.2, "Second crypto position while the first is well ahead.")
+
+    flat = _account_with_class_risk(
+        positions=[_btc_position()],
+        open_risk_by_symbol={"BTC/USD": 400.0},
+    )
+    in_profit = _account_with_class_risk(
+        # Up $8,000: 0.2 BTC bought at 65,000 and marked at 105,000.
+        positions=[_btc_position(current_price=105_000.0, pnl_usd=8_000.0)],
+        open_risk_by_symbol={"BTC/USD": 400.0},
+    )
+
+    flat_verdict = _gate(enabled).evaluate(
+        proposal, account=flat, tick=_btc_tick(INSIDE_SESSION)
+    )
+    profit_verdict = _gate(enabled).evaluate(
+        proposal, account=in_profit, tick=_btc_tick(INSIDE_SESSION)
+    )
+
+    assert not profit_verdict.approved
+    assert _reasons_mention(profit_verdict, "unrealised profit does not offset")
+    # The figures are the same, not merely the outcome: the profit changed
+    # nothing about what the class has at risk.
+    assert [r for r in profit_verdict.reasons if "open risk would reach" in r] == [
+        r for r in flat_verdict.reasons if "open risk would reach" in r
+    ]
+
+
+def test_a_held_position_with_unknown_risk_refuses_the_class(rules):
+    """Fails CLOSED. An unknown is missing, never zero.
+
+    Without this the held position contributes 0.0 to the class total and the
+    trade sails through — a cap counting a position it cannot see as risking
+    nothing, which is how a limit silently stops binding. `reconcile` already
+    calls this `risk_is_understated` and warns; here it is a refusal, because
+    this gate is what the figure exists for.
+    """
+    enabled = _crypto_class_total(rules)
+    account = _account_with_class_risk(
+        positions=[_btc_position()],
+        open_risk_by_symbol={},            # nothing known about it
+        symbols_with_unknown_risk=["BTC/USD"],
+    )
+    assert account.risk_is_understated
+
+    verdict = _gate(enabled).evaluate(
+        _btc(0.05, "Small crypto add while an untracked position is held."),
+        account=account,
+        tick=_btc_tick(INSIDE_SESSION),
+    )
+
+    assert not verdict.approved
+    assert _reasons_mention(verdict, "cannot be established")
+    assert _reasons_mention(verdict, "no journal row")
+    assert _reasons_mention(verdict, "BTC/USD")
+
+
+def test_a_crypto_trade_inside_the_class_total_is_approved(rules):
+    """$400 already at risk plus $100 is $500, exactly the cap — not over it."""
+    enabled = _crypto_class_total(rules)
+    account = _account_with_class_risk(
+        positions=[_btc_position()],
+        open_risk_by_symbol={"BTC/USD": 400.0},
+    )
+
+    verdict = _gate(enabled).evaluate(
+        _btc(0.05, "Adds $100 of risk, bringing the class to exactly 0.5%."),
+        account=account,
+        tick=_btc_tick(INSIDE_SESSION),
+    )
+
+    assert verdict.approved, verdict.reasons
+
+
+def test_the_class_total_counts_only_that_class(rules):
+    """Equity risk is not crypto risk. Membership is by `allowed_symbols`.
+
+    $1,900 of equity risk on the books and a crypto trade proposed: the class
+    total sees none of it, because the class is defined by the symbols in its
+    own block rather than by anything on the position.
+    """
+    enabled = _crypto_class_total(rules)
+    account = _account_with_class_risk(
+        positions=[
+            Position(
+                symbol="SPY",
+                direction=Direction.BUY,
+                qty=3,
+                entry_price=580.0,
+                opened_at=INSIDE_SESSION,
+                current_price=580.0,
+            )
+        ],
+        open_risk_by_symbol={"SPY": 1_900.0},
+    )
+
+    verdict = _gate(enabled).evaluate(
+        _btc(0.02, "Crypto trade beside an equity book that is nearly full."),
+        account=account,
+        tick=_btc_tick(INSIDE_SESSION),
+    )
+
+    # The portfolio-wide 2% cap still binds — $1,900 plus $40 is under $2,000 —
+    # and the class cap sees only the $40 this trade brings.
+    assert verdict.approved, verdict.reasons
+
+
+def test_a_class_with_no_total_risk_cap_is_unaffected(rules, spy_tick, buy_proposal):
+    """us_equity configures none, so it must behave exactly as it did before."""
+    assert rules.instruments["us_equity"].max_class_total_risk_pct is None
+
+    account = _account_with_class_risk(open_risk_by_symbol={"SPY": 900.0})
+    account.open_positions = [
+        Position(
+            symbol="SPY",
+            direction=Direction.BUY,
+            qty=3,
+            entry_price=580.0,
+            opened_at=INSIDE_SESSION,
+            current_price=580.0,
+        )
+    ]
+
+    verdict = _gate(rules).evaluate(buy_proposal, account=account, tick=spy_tick)
+
+    # $900 of SPY risk is nine times what a 0.5% class cap would allow, and
+    # nothing refuses it: the equity class has no opinion, so only the
+    # portfolio limits apply.
+    assert verdict.approved, verdict.reasons
+
+
+def test_the_class_total_rejection_says_to_close_a_position(rules):
+    """The operator asked for the CONSEQUENCE, not a number.
+
+    "Position must be closed if another wants to be taken if outside of risk
+    profile" is the instruction. A bare figure would leave a reader looking for
+    a limit to widen, which is the one response this repository refuses.
+    """
+    enabled = _crypto_class_total(rules)
+    account = _account_with_class_risk(
+        positions=[_btc_position()],
+        open_risk_by_symbol={"BTC/USD": 400.0},
+    )
+
+    verdict = _gate(enabled).evaluate(
+        _btc(0.2, "Breaches the class total; the message must say what to do."),
+        account=account,
+        tick=_btc_tick(INSIDE_SESSION),
+    )
+
+    assert not verdict.approved
+    assert _reasons_mention(verdict, "close an existing")
+    assert _reasons_mention(verdict, "before opening another")
+
+
+def test_the_class_total_still_collects_other_failures(rules):
+    """The gate reports everything wrong at once; this rule must not short-circuit."""
+    enabled = _with_crypto(rules, cap=1.0)   # a 1% capital cap, also breached
+    account = _account_with_class_risk(
+        positions=[_btc_position()],
+        open_risk_by_symbol={"BTC/USD": 400.0},
+    )
+
+    verdict = _gate(enabled).evaluate(
+        _btc(0.2, "Breaches the class total, the capital cap and the slot count."),
+        account=account,
+        tick=_btc_tick(INSIDE_SESSION),
+    )
+
+    assert not verdict.approved
+    assert _reasons_mention(verdict, "open risk would reach")     # this rule
+    assert _reasons_mention(verdict, "allocation would reach")    # capital cap
+    assert _reasons_mention(verdict, "for this instrument class")  # slot count
+
+
 # ------------------------------------------------------------------- config
 
 

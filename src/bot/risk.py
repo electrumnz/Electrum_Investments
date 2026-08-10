@@ -115,6 +115,7 @@ class RiskGate:
             self._per_trade_risk(proposal, account, instrument),
             self._position_size(proposal, account, instrument),
             self._total_risk(proposal, account),
+            self._class_total_risk(proposal, account, instrument),
             self._buying_power(proposal, account),
             self._gross_notional(proposal, account),
             self._trades_per_day(activity),
@@ -405,6 +406,83 @@ class RiskGate:
             return (
                 f"total risk would reach {pct_after:.2f}% of equity "
                 f"(max {cap:.2f}%)"
+            )
+        return None
+
+    def _class_total_risk(
+        self,
+        proposal: OrderProposal,
+        account: AccountSnapshot,
+        instrument: InstrumentRules | None,
+    ) -> str | None:
+        """Cap the combined open risk held by ONE instrument class.
+
+        `_total_risk` bounds the portfolio and `_per_trade_risk` bounds a single
+        trade. Neither can say "this class may hold no more than X at once", and
+        a class allowed 0.5% per trade with nothing else in the way is a class
+        that can quietly accumulate four of them.
+
+        **Unrealised profit does not offset open risk.** That is the operator's
+        rule stated outright, and it follows from the unit the rest of this file
+        rests on: risk is `|entry - stop| * qty`, what the position loses if the
+        stop fills as planned. A position being up today does not change what
+        its stop costs tomorrow. Netting a paper gain against a real stop
+        distance would make the cap loosest exactly when the class had run
+        furthest — and a mark is the one input here that can reverse before
+        anything is acted on.
+
+        So the consequence is deliberate rather than incidental: at the cap, an
+        existing position in the class has to be **closed** before another can
+        be opened. The gate will not size the new trade down to fit and will not
+        let a winner count for less. The rejection says so, because a bare
+        number would leave an operator looking for a limit to widen.
+
+        **An unknown fails CLOSED.** A held position with no journal row has an
+        unknowable planned stop, so the class total cannot be computed at all —
+        and computing it without that position would report a figure lower than
+        reality. `reconcile` already calls that `risk_is_understated` and warns;
+        here it is a rejection, because this gate is what the figure is for and
+        approving against an understated total is how a cap silently stops
+        binding.
+
+        Membership is by the class's own `allowed_symbols` rather than the
+        position's `asset_class` enum, exactly as in `_concurrent_positions` and
+        `_instrument_capital_cap`: one source answers the question, so the two
+        cannot drift into different answers.
+        """
+        if instrument is None or instrument.max_class_total_risk_pct is None:
+            return None
+        if account.equity_usd <= 0:
+            return None
+
+        pct = instrument.max_class_total_risk_pct
+        label = proposal_class_label(instrument)
+        symbols = set(instrument.allowed_symbols)
+        held_symbols = [p.symbol for p in account.open_positions if p.symbol in symbols]
+
+        unknown = sorted(set(held_symbols) & set(account.symbols_with_unknown_risk))
+        if unknown:
+            return (
+                f"{label} open risk cannot be established, so the "
+                f"{pct:.2f}%-of-equity class cap cannot be enforced. Held with no "
+                f"journal row: {', '.join(unknown)}. A position the journal has "
+                f"never seen has an unknowable planned stop, so its risk is "
+                f"missing rather than zero. Close or journal it before opening "
+                f"another {label} position."
+            )
+
+        held = sum(account.open_risk_by_symbol.get(s, 0.0) for s in held_symbols)
+        after = held + proposal.risk_usd
+        cap = account.equity_usd * pct / 100
+        if after > cap:
+            return (
+                f"{label} open risk would reach {after:,.2f} against the class cap "
+                f"{cap:,.2f} ({pct:.2f}% of equity): {held:,.2f} already at risk in "
+                f"this class plus {proposal.risk_usd:,.2f} for this trade. "
+                f"Unrealised profit does not offset open risk — risk is "
+                f"|entry - stop| x qty, which is what an open stop still costs if "
+                f"it fills. Close an existing {label} position before opening "
+                f"another."
             )
         return None
 

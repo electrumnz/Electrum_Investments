@@ -119,7 +119,6 @@ def reconcile(
 
     held = {p.symbol: p for p in snapshot.open_positions}
     open_trades = journal.open_trades()
-    journalled = {t.symbol for t in open_trades}
 
     # 1. Anything the journal thinks is open but the broker no longer holds has
     #    closed: by us, by a stop, or by Alpaca itself at an option expiry.
@@ -156,9 +155,7 @@ def reconcile(
 
     # 3. Positions we have no record of. Their planned stop is unknowable, so
     #    their risk cannot be counted — say so rather than guess.
-    for symbol in held:
-        if symbol not in journalled:
-            result.untracked_positions.append(symbol)
+    result.untracked_positions.extend(untracked_positions(snapshot, open_trades))
 
     if result.untracked_positions:
         log.warning(
@@ -189,16 +186,47 @@ def reconcile(
     return result
 
 
+def untracked_positions(
+    snapshot: AccountSnapshot, open_trades: list[Trade]
+) -> list[str]:
+    """Held symbols the journal has no open row for. One definition, two callers.
+
+    `reconcile` reports these so an operator knows the total-risk figure is
+    understated; `apply_journal_state` carries them onto the snapshot so
+    `RiskGate._class_total_risk` can refuse rather than count an unknown as
+    zero. Both are the same fact and it is computed once, because two
+    implementations of "untracked" would eventually disagree about which
+    positions the caps are blind to.
+    """
+    journalled = {t.symbol for t in open_trades}
+    return [p.symbol for p in snapshot.open_positions if p.symbol not in journalled]
+
+
 def apply_journal_state(
     snapshot: AccountSnapshot, journal: Journal
 ) -> AccountSnapshot:
     """Fill in the open risk the broker cannot report.
 
-    Mirrors `_Session.account()` in `mcp_server.py`. Every path that feeds an
-    account snapshot to the risk gate must go through one of the two, or the
-    total-risk cap silently has nothing to count.
+    The single place this happens: `_Session.account()` in `mcp_server.py` calls
+    straight through to here rather than keeping its own copy. Every path that
+    feeds an account snapshot to the risk gate must go through it, or the caps
+    silently have nothing to count.
+
+    **One journal read supplies all three figures.** The portfolio total, the
+    per-symbol breakdown the class caps need, and the list of positions whose
+    risk is unknowable all describe the same set of open trades, so reading the
+    journal once is what keeps them from describing different ones.
     """
-    snapshot.open_risk_usd = journal.open_risk_usd()
+    open_trades = journal.open_trades()
+
+    by_symbol: dict[str, float] = {}
+    for trade in open_trades:
+        by_symbol[trade.symbol] = by_symbol.get(trade.symbol, 0.0) + trade.planned_risk_usd
+
+    snapshot.open_risk_usd = sum(by_symbol.values())
+    snapshot.open_risk_by_symbol = by_symbol
+    # Missing, never zero. An empty entry above would read as "risks nothing".
+    snapshot.symbols_with_unknown_risk = untracked_positions(snapshot, open_trades)
     return snapshot
 
 

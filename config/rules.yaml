@@ -301,6 +301,39 @@ instruments:
     max_position_pct: 15.0
     max_concurrent_positions: 1
 
+    # The operator's rule, and it is TWO limits rather than one restated:
+    # crypto shall not consume more than 0.5% of equity in risk on a trade
+    # (above), and shall not HOLD more than 0.5% of risk across every open
+    # position in the class (here). The second is what stops the first being
+    # applied four times over.
+    #
+    # Two clauses are easy to lose and are the whole point:
+    #
+    #   UNREALISED PROFIT DOES NOT OFFSET THIS. A position that is up is still
+    #   risking |entry - stop| x qty if the stop fills, so a winner buys no room
+    #   for a second position. The gate measures planned risk out of the journal
+    #   and never nets a paper gain against it — a mark can reverse before
+    #   anything is acted on, and the stop distance cannot.
+    #
+    #   A POSITION MUST BE CLOSED TO OPEN ANOTHER outside the profile. At the
+    #   cap the gate refuses, and closing what is already on is the only way
+    #   through. It will not size the new trade down to fit, and it will not
+    #   count a profitable position for less. The rejection message says this
+    #   out loud rather than quoting a number and leaving somebody hunting for
+    #   a limit to widen.
+    #
+    # With the per-trade cap also at 0.5% this makes crypto ONE full-size
+    # position at a time. That is intended rather than an accident of the two
+    # figures matching: it is max_concurrent_positions: 1 arrived at from the
+    # other direction, so the two agree instead of one silently overriding the
+    # other. Two half-size crypto positions are allowed by this arithmetic and
+    # refused by the position count; one full-size position is allowed by both.
+    # Loosening either one alone therefore changes nothing.
+    #
+    # Nothing global is overridden: max_total_risk_pct (2%) stays portfolio-wide
+    # and binds first whenever the equity book is already loaded up.
+    max_class_total_risk_pct: 0.5
+
     # Deliberately absent: refuse_premarket. A 24/7 market has no pre-market,
     # and the phases that rule reads are the US equity ones — switched on here
     # it would refuse every hour of every day.
