@@ -30,7 +30,7 @@ from zoneinfo import ZoneInfo
 
 from ..audit import AuditView, DecisionEntry
 from ..broker import is_crypto_symbol
-from ..config import DAY_NAMES, Env, Rules
+from ..config import DAY_NAMES, Env, InstrumentRules, Rules
 from ..dreamer import estimated_cost_usd, read_schedule
 from ..dreaming import (
     THIN_LEDGER_THRESHOLD,
@@ -2460,6 +2460,14 @@ def since_last_visit(summary: SinceLastVisit) -> str:
     )
 
 
+def _is_continuous(inst: InstrumentRules) -> bool:
+    """A market with no closed hours at all: every day, midnight to midnight."""
+    by_day = inst.windows_by_day
+    return len(by_day) == 7 and all(
+        windows == [(0, 24)] for windows in by_day.values()
+    )
+
+
 def _countdown(seconds: float) -> str:
     """A duration a person can act on. Never negative, never bare seconds.
 
@@ -3573,6 +3581,11 @@ def settings_page(rules: Rules, env: Env, *, chat_enabled: bool) -> str:
                 "Pre-market",
                 "refused (04:00-09:30 New York)"
                 if inst.refuse_premarket
+                # A 24/7 market has no pre-market, so "permitted" would be
+                # answering a question that does not apply — and reads as a
+                # gap in the rules rather than as an absent concept.
+                else "not applicable (24/7 market)"
+                if _is_continuous(inst)
                 else "permitted by these hours",
             )
             + (
@@ -3580,7 +3593,42 @@ def settings_page(rules: Rules, env: Env, *, chat_enabled: bool) -> str:
                 if inst.capital_cap_pct is not None
                 else ""
             )
-            + "</dl></div>"
+            # This class's own limits, beside the portfolio ones rather than
+            # instead of them. A per-instrument limit may only tighten a
+            # portfolio limit — the config refuses a looser one at startup —
+            # so showing both is showing which is actually binding.
+            #
+            # "portfolio limit" rather than a blank where a class has no
+            # opinion: an empty cell reads as "no limit", which is the exact
+            # opposite of what an absent override means.
+            + _row(
+                "Risk per trade",
+                f"{inst.max_risk_per_trade_pct:.2f}% (this class)"
+                if inst.max_risk_per_trade_pct is not None
+                else f"{rules.account.max_risk_per_trade_pct:.2f}% (portfolio limit)",
+            )
+            + _row(
+                "Max position",
+                f"{inst.max_position_pct:.1f}% (this class)"
+                if inst.max_position_pct is not None
+                else f"{rules.account.max_position_pct:.1f}% (portfolio limit)",
+            )
+            + _row(
+                "Concurrent positions",
+                f"{inst.max_concurrent_positions} (this class)"
+                if inst.max_concurrent_positions is not None
+                else f"{rules.account.max_concurrent_positions} (portfolio limit)",
+            )
+            + "</dl>"
+            + (
+                '<p class="source">Disabled. Its symbols are refused by the gate '
+                "and marked watch-only on the tape. These limits are configured "
+                "and ready, so enabling it is a one-word edit rather than a "
+                "design decision taken at whatever hour it becomes urgent.</p>"
+                if not inst.enabled
+                else ""
+            )
+            + "</div>"
         )
     open_now = rules.classes_in_session(datetime.now(UTC))
     skip = rules.loop.skip_model_call_when_all_markets_closed

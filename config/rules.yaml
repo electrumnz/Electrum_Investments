@@ -230,14 +230,62 @@ instruments:
     # passes. See the note in RiskGate._within_session.
     session_days_utc: [0, 1, 2, 3, 4]
 
+    # This class's own limits. Set to the portfolio values rather than left
+    # out, so the equity book states what it is working to instead of leaving
+    # a reader to go and find `account:` and assume nothing overrides it.
+    #
+    # A per-class limit may only ever TIGHTEN a portfolio one. A looser value
+    # fails the config at startup, naming both figures — see
+    # Rules._per_class_limits_only_tighten. That is what makes it safe for
+    # limits to live in two places: `account:` is the ceiling on the whole
+    # account and nothing further down this file can raise it.
+    max_risk_per_trade_pct: 1.0
+    max_position_pct: 50.0
+    max_concurrent_positions: 3
+
   crypto:
-    # Disabled until the equity core is proven on paper.
+    # OFF, and the settings page shows it as off rather than omitting it.
+    #
+    # Kept fully configured while disabled on purpose. The moment to enable
+    # this is a moment when nothing else is open — a weekend, or the small
+    # hours — which is the worst possible moment to be deciding what a crypto
+    # position should be allowed to risk. The numbers below were chosen with
+    # the market shut and nothing riding on them; enabling is then a one-word
+    # edit rather than a design exercise under time pressure.
+    #
+    # `Rules.allowed_symbols` is derived from the ENABLED classes, so while
+    # this is false the gate refuses every symbol here and the tape marks them
+    # watch-only. Flipping it to true is the whole change.
     enabled: false
 
     strategy: momentum
 
     allowed_symbols: []
     # When enabling, set e.g. [BTC/USD, ETH/USD]
+
+    # Crypto's own limits, and they are TIGHTER than the equity book's at
+    # every point. Not caution for its own sake — three specific differences:
+    #
+    #   It trades while nobody is awake. An equity stop that gaps does so at an
+    #   open somebody can watch; a crypto stop can gap at 04:00 local with the
+    #   operator asleep and no session boundary to stop the move.
+    #
+    #   It moves harder. A 2% daily range is a notable equity day and an
+    #   ordinary crypto one, so the same 1% risk budget buys a position that
+    #   swings several times as far before the stop is even approached.
+    #
+    #   There is no circuit breaker. US equities halt on a large move; there is
+    #   nothing equivalent here.
+    #
+    # Half the per-trade risk, a third of the concentration, and one position
+    # at a time.
+    max_risk_per_trade_pct: 0.5
+    max_position_pct: 15.0
+    max_concurrent_positions: 1
+
+    # Deliberately absent: refuse_premarket. A 24/7 market has no pre-market,
+    # and the phases that rule reads are the US equity ones — switched on here
+    # it would refuse every hour of every day.
 
     # 24/7. This is the setting that was wrong under the old global sessions
     # block, and the reason instruments are configured separately at all.

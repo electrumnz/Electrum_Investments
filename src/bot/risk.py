@@ -108,12 +108,12 @@ class RiskGate:
             self._within_session(instrument),
             self._premarket(instrument),
             self._news_blackout(proposal.symbol, news_windows or []),
-            self._concurrent_positions(account),
+            self._concurrent_positions(account, instrument),
             self._daily_loss(account),
             self._limit_price_sane(proposal, tick),
             self._stops_on_correct_side(proposal),
-            self._per_trade_risk(proposal, account),
-            self._position_size(proposal, account),
+            self._per_trade_risk(proposal, account, instrument),
+            self._position_size(proposal, account, instrument),
             self._total_risk(proposal, account),
             self._buying_power(proposal, account),
             self._gross_notional(proposal, account),
@@ -255,10 +255,36 @@ class RiskGate:
                 return f"inside news blackout window around {w.timestamp.isoformat()}"
         return None
 
-    def _concurrent_positions(self, account: AccountSnapshot) -> str | None:
+    def _concurrent_positions(
+        self, account: AccountSnapshot, instrument: InstrumentRules | None = None
+    ) -> str | None:
+        """The portfolio cap always, and this class's own cap if it has one.
+
+        Both, not either. The portfolio limit bounds the account and a class
+        limit bounds the class, so a class that gets loud cannot fill every
+        slot the portfolio has — which is the failure a single global count
+        cannot express.
+        """
         cap = self._rules.account.max_concurrent_positions
         if len(account.open_positions) >= cap:
             return f"already holding {len(account.open_positions)} positions (max {cap})"
+
+        if instrument is None or instrument.max_concurrent_positions is None:
+            return None
+        # Counted WITHIN the class, so the two caps measure different things.
+        # By SYMBOL membership rather than by the position's `asset_class`: the
+        # instrument block's own `allowed_symbols` is what defines the class
+        # here, and reading the enum instead would ask two different sources
+        # the same question and eventually get two answers.
+        symbols = set(instrument.allowed_symbols)
+        held = sum(1 for p in account.open_positions if p.symbol in symbols)
+        class_cap = instrument.max_concurrent_positions
+        if held >= class_cap:
+            label = proposal_class_label(instrument)
+            return (
+                f"already holding {held} {label} position(s) "
+                f"(max {class_cap} for this instrument class)"
+            )
         return None
 
     def _daily_loss(self, account: AccountSnapshot) -> str | None:
@@ -304,26 +330,48 @@ class RiskGate:
                 return f"sell take-profit {proposal.take_profit_price} is not below entry {entry}"
         return None
 
-    def _per_trade_risk(self, proposal: OrderProposal, account: AccountSnapshot) -> str | None:
-        """Loss if the stop fills must stay within max_risk_per_trade_pct of equity.
+    def _per_trade_risk(
+        self,
+        proposal: OrderProposal,
+        account: AccountSnapshot,
+        instrument: InstrumentRules | None = None,
+    ) -> str | None:
+        """Loss if the stop fills must stay within the per-trade cap.
 
         Shares and coin units are 1:1 with price, so this is exact — unlike the
         FX version this replaces, which had to approximate contract sizes.
+
+        The cap is the TIGHTER of the portfolio limit and this class's own, and
+        `min` is safe here rather than merely defensive: the config validator
+        already refuses a class limit looser than the portfolio one, so this
+        can only ever be picking up a genuine narrowing. Doing it with `min`
+        anyway means a bug in one guard cannot widen the other.
         """
+        pct = self._rules.account.max_risk_per_trade_pct
+        if instrument is not None and instrument.max_risk_per_trade_pct is not None:
+            pct = min(pct, instrument.max_risk_per_trade_pct)
+
         risk_usd = abs(proposal.limit_price - proposal.stop_loss_price) * proposal.qty
-        cap_usd = account.equity_usd * self._rules.account.max_risk_per_trade_pct / 100
+        cap_usd = account.equity_usd * pct / 100
         if risk_usd > cap_usd:
             return (
                 f"risk {risk_usd:,.2f} exceeds the per-trade cap {cap_usd:,.2f} "
-                f"({self._rules.account.max_risk_per_trade_pct:.2f}% of equity)"
+                f"({pct:.2f}% of equity)"
             )
         return None
 
-    def _position_size(self, proposal: OrderProposal, account: AccountSnapshot) -> str | None:
+    def _position_size(
+        self,
+        proposal: OrderProposal,
+        account: AccountSnapshot,
+        instrument: InstrumentRules | None = None,
+    ) -> str | None:
         if account.equity_usd <= 0:
             return "account equity is zero or negative"
         pct = proposal.notional_usd / account.equity_usd * 100
         cap = self._rules.account.max_position_pct
+        if instrument is not None and instrument.max_position_pct is not None:
+            cap = min(cap, instrument.max_position_pct)
         if pct > cap:
             return (
                 f"position {proposal.notional_usd:,.2f} is {pct:.1f}% of equity "

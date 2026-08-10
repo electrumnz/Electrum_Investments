@@ -384,6 +384,32 @@ class InstrumentRules(BaseModel):
     # portfolio. Used to keep a volatile class from quietly dominating.
     capital_cap_pct: float | None = Field(default=None, ge=0, le=100)
 
+    # ------------------------------------------------------ per-class limits
+    #
+    # Each instrument class may carry its own risk limits. Crypto moves harder
+    # than the equity book and trades while nobody is awake, so it has no
+    # business borrowing the same per-trade budget.
+    #
+    # **They may only ever TIGHTEN the portfolio limits, never loosen them.**
+    # That is enforced by `Rules._per_class_limits_only_tighten` at load time,
+    # not left as a convention, and it is the whole reason this is safe to add.
+    # The operator's four rules are a ceiling on the account; if a class could
+    # raise its own per-trade cap, then "max 1% of equity at risk per trade"
+    # would mean "1%, unless some block further down the file says otherwise",
+    # which is not a limit. A looser value fails the config at startup with the
+    # two numbers named, rather than being silently clamped — a clamp would let
+    # somebody write 3% and believe it.
+    #
+    # `None` means "no opinion, use the portfolio limit". Absent is not zero.
+    max_risk_per_trade_pct: float | None = Field(default=None, gt=0, le=10)
+    max_position_pct: float | None = Field(default=None, gt=0, le=200)
+
+    # Counted WITHIN this class rather than across the account. Two open crypto
+    # positions plus three equity ones is five against the global cap and two
+    # against this one, which is the point: a class that gets loud should not
+    # be able to fill every slot the portfolio has.
+    max_concurrent_positions: int | None = Field(default=None, gt=0)
+
     @model_validator(mode="after")
     def _enabled_classes_must_be_usable(self) -> Self:
         if isinstance(self.sessions_utc, dict):
@@ -576,6 +602,58 @@ class Rules(BaseModel):
 
     # Keyed by AssetClass value: "us_equity", "crypto".
     instruments: dict[str, InstrumentRules] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _per_class_limits_only_tighten(self) -> Self:
+        """A class may narrow a portfolio limit. It may never widen one.
+
+        This is what makes per-instrument limits safe to have at all. The
+        operator's four rules are a ceiling on the ACCOUNT; if an instrument
+        block could raise its own per-trade cap then "max 1% of equity at risk
+        per trade" would really mean "1%, unless a block further down the file
+        disagrees", and a limit with an escape hatch in the same file is not a
+        limit.
+
+        It **raises** rather than clamping, deliberately. Silently clamping 3%
+        back to 1% leaves somebody believing they configured 3% and reading a
+        number off the page that the gate is not using. Failing at startup with
+        both figures named is the only outcome where the file and the behaviour
+        cannot disagree.
+
+        Runs on every load, including for classes that are disabled: a limit
+        edited while a class is switched off must not become a surprise on the
+        day somebody enables it.
+        """
+        checks: list[tuple[str, float | int | None, float | int]] = []
+        for name, instrument in self.instruments.items():
+            checks.extend(
+                [
+                    (
+                        f"{name}.max_risk_per_trade_pct",
+                        instrument.max_risk_per_trade_pct,
+                        self.account.max_risk_per_trade_pct,
+                    ),
+                    (
+                        f"{name}.max_position_pct",
+                        instrument.max_position_pct,
+                        self.account.max_position_pct,
+                    ),
+                    (
+                        f"{name}.max_concurrent_positions",
+                        instrument.max_concurrent_positions,
+                        self.account.max_concurrent_positions,
+                    ),
+                ]
+            )
+        for label, value, ceiling in checks:
+            if value is not None and value > ceiling:
+                raise ValueError(
+                    f"{label} is {value}, which is looser than the portfolio "
+                    f"limit of {ceiling}. A per-instrument limit may only "
+                    f"tighten a portfolio limit, never widen one — change "
+                    f"`account:` if the portfolio limit itself should move."
+                )
+        return self
 
     @classmethod
     def load(cls, path: Path) -> Rules:

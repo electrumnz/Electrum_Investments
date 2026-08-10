@@ -11,7 +11,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from bot.config import Rules
+from bot.config import Rules, load_rules
 from bot.models import (
     AccountSnapshot,
     AssetClass,
@@ -90,6 +90,82 @@ def test_rejects_outside_session(rules, account, spy_tick, buy_proposal):
     verdict = _gate(rules, now=night).evaluate(buy_proposal, account=account, tick=spy_tick)
     assert not verdict.approved
     assert _reasons_mention(verdict, "outside the trading sessions")
+
+
+def test_a_class_limit_may_tighten_the_portfolio_limit(
+    rules, account, spy_tick, buy_proposal
+):
+    """Each instrument class carries its own limits, and the gate takes the
+    tighter of the two."""
+    # The proposal risks $15 against $100k of equity, so the class limit has to
+    # be below 0.015% to bite. That it takes a figure this small is the point:
+    # the portfolio limit of 1% is nowhere near binding here, so a rejection can
+    # only have come from the class.
+    rules.instruments["us_equity"].max_risk_per_trade_pct = 0.01
+
+    verdict = _gate(rules).evaluate(buy_proposal, account=account, tick=spy_tick)
+
+    assert not verdict.approved
+    assert _reasons_mention(verdict, "per-trade cap")
+    # The message quotes the limit actually applied, not the portfolio one, or
+    # an operator would go looking in the wrong block for the number.
+    assert _reasons_mention(verdict, "0.01%")
+    assert not _reasons_mention(verdict, "1.00%")
+
+
+def test_a_class_limit_can_never_loosen_the_portfolio_limit():
+    """This is what makes per-instrument limits safe to have at all.
+
+    The operator's four rules are a ceiling on the ACCOUNT. If an instrument
+    block could raise its own per-trade cap, then "max 1% of equity at risk per
+    trade" would mean "1%, unless a block further down the file disagrees" —
+    and a limit with an escape hatch in the same file is not a limit.
+
+    It must RAISE rather than clamp. Silently clamping 3% back to 1% leaves
+    somebody believing they configured 3%, reading it off the settings page,
+    and being wrong about what the gate is doing.
+    """
+    raw = load_rules().model_dump()
+    raw["instruments"]["us_equity"]["max_risk_per_trade_pct"] = 3.0
+
+    with pytest.raises(ValueError, match="looser than the portfolio limit"):
+        Rules.model_validate(raw)
+
+
+def test_the_tightening_guard_covers_disabled_classes_too():
+    """A limit edited while a class is switched off must not become a surprise
+    on the day somebody enables it — which, for crypto, is a weekend or the
+    small hours, the worst moment to discover a config error."""
+    raw = load_rules().model_dump()
+    assert raw["instruments"]["crypto"]["enabled"] is False
+    raw["instruments"]["crypto"]["max_concurrent_positions"] = 99
+
+    with pytest.raises(ValueError, match="looser than the portfolio limit"):
+        Rules.model_validate(raw)
+
+
+def test_a_class_position_cap_counts_only_that_class(rules, account, spy_tick, buy_proposal):
+    """Both caps apply, and they measure different things. A class that gets
+    loud must not be able to fill every slot the portfolio has."""
+    rules.instruments["us_equity"].max_concurrent_positions = 1
+    account.open_positions = [
+        Position(
+            symbol="SPY",
+            direction=Direction.BUY,
+            qty=1,
+            entry_price=580.0,
+            opened_at=INSIDE_SESSION,
+            current_price=580.0,
+        )
+    ]
+
+    verdict = _gate(rules).evaluate(buy_proposal, account=account, tick=spy_tick)
+
+    assert not verdict.approved
+    assert _reasons_mention(verdict, "for this instrument class")
+    # The portfolio cap is 3 and only one position is held, so this rejection
+    # can only have come from the class cap.
+    assert not _reasons_mention(verdict, "already holding 1 positions")
 
 
 def test_rejects_the_pre_market_the_utc_window_would_have_let_through(

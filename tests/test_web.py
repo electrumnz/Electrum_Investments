@@ -1490,6 +1490,36 @@ def test_the_tape_sits_above_the_projection_planes():
     assert "z-index:19}" in render.STYLES
 
 
+def test_settings_shows_a_disabled_class_rather_than_omitting_it(client):
+    """Crypto is off, and the page has to say so.
+
+    The moment to enable it is a moment when nothing else is open — a weekend
+    or the small hours — which is the worst possible moment to be deciding what
+    a crypto position should be allowed to risk. So the limits are configured
+    while it is off, and visible, and enabling is a one-word edit rather than a
+    design exercise under time pressure.
+    """
+    body = client.get("/settings").text
+
+    assert "crypto" in body
+    assert "0.50% (this class)" in body      # its own per-trade limit
+    assert "Disabled." in body
+
+    # A 24/7 market has no pre-market, so "permitted" would answer a question
+    # that does not apply and read as a gap in the rules.
+    assert "not applicable (24/7 market)" in body
+
+
+def test_settings_names_which_limit_is_binding_per_class(client):
+    """A class with no opinion shows the portfolio limit rather than a blank.
+    An empty cell reads as "no limit", which is the opposite of what an absent
+    override means."""
+    body = client.get("/settings").text
+
+    assert "(portfolio limit)" in body or "(this class)" in body
+    assert "1.00% (this class)" in body      # us_equity states its own
+
+
 def test_the_watchlist_is_not_a_trading_permission():
     """Growing the tape by extending `allowed_symbols` would quietly grant the
     bot nine new instruments to open positions in — a change to what may be
