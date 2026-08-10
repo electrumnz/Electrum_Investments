@@ -392,6 +392,42 @@ A backup on the same droplet survives a bad restore, not a dead droplet. Copying
 `backups/daily` off the box is deliberately not automated, because it needs a
 destination and a credential that should not live on the trading box.
 
+**The audit log is snapshotted by the same script, and `cp` is correct there.**
+That inverts the rule above, so it is worth being explicit rather than letting
+someone pattern-match. The `.backup` reasoning is about SQLite specifically: a
+WAL and an shm mean state is spread across three files, so a copy taken between
+two writes is internally inconsistent. An audit file is append-only UTF-8 text,
+one JSON object per line. There is no second file, nothing lands half-written
+except a truncated final line, and `audit._parse` already tolerates exactly
+that. `gzip -t` is the counterpart to the integrity check — a backup nobody has
+opened is still a hope.
+
+Three properties there:
+
+- **The audit block runs BEFORE the journal's preconditions.** Everything in
+  the journal half can `die` — `sqlite3` missing, the database gone — and a
+  `die` above the audit snapshot would mean the record of every rejection
+  quietly stopped being backed up because of a problem with a different file.
+  The audit half needs only `gzip`, so it must not be able to fail for the
+  other half's reasons. The non-zero exit for a failed audit file sits at the
+  very end for the mirror-image reason.
+- **Only files that changed are re-compressed.** A dated file is finished when
+  the UTC day rolls over and never changes again, so after the first pass this
+  touches today's file alone.
+- **Audit snapshots are never pruned, unlike the hourly journal copies.** Those
+  are successive copies of one database and the newest supersedes the rest;
+  these are each a different day, and that day exists nowhere else. Measured at
+  roughly 500 KiB/day uncompressed — well under 100 MB a year gzipped — so
+  keeping everything is cheap, and a retention rule on the only record of a
+  rejection is how that record quietly stops reaching as far back as anyone
+  assumes.
+
+**Disk growth and read speed were both measured and are not problems.** ~180
+MiB/year raw for the audit log; `AuditLog.read()` is ~27 ms for the 24-hour
+news window and ~126 ms across seven days of a 14-day corpus. Neither justifies
+pruning history or moving the log into SQLite — and moving it would reintroduce
+a schema to migrate, which append-only JSONL exists to avoid.
+
 ### The warning about losing the dashboard is shown on the dashboard
 
 That reads backwards and is correct. Tailscale node keys expire — this tailnet
@@ -843,7 +879,10 @@ deploy/                 VPS provisioning: bootstrap.sh + systemd units. The unit
                         config/ stay root-owned so the service account cannot
                         edit its own limits.
                         backup-journal.sh + mudhorn-backup.timer snapshot the
-                        journal hourly with sqlite3 .backup, never cp.
+                        journal hourly with sqlite3 .backup, never cp — and the
+                        audit log with plain gzip, which IS correct for
+                        append-only text. Audit runs first so a journal problem
+                        cannot stop it.
                         check-tailscale.sh + mudhorn-tailnet.timer watch the key
                         expiry that would otherwise take the dashboard away
                         silently.

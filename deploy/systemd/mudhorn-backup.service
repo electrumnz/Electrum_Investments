@@ -1,5 +1,5 @@
 [Unit]
-Description=Snapshot the Mudhorn Capital trade journal
+Description=Snapshot the Mudhorn Capital trade journal and audit log
 Documentation=https://github.com/electrumnz/Electrum_Investments/blob/main/deploy/README.md
 
 # Before the bot has ever run there is no journal, and a timer that failed
@@ -21,6 +21,11 @@ ExecStart=/opt/mudhorn/deploy/backup-journal.sh
 # The source is only read, but SQLite still writes the WAL and shm alongside the
 # database to take its read lock, so data/ has to be writable. Same reason
 # mudhorn-web.service carries it.
+#
+# audit/ is deliberately NOT listed. The script only reads it — the snapshots
+# land under backups/ — and ProtectSystem=strict already leaves the rest of the
+# filesystem readable. Adding it here would hand this unit write access to the
+# one append-only record the bot keeps, for no gain.
 NoNewPrivileges=true
 PrivateTmp=true
 PrivateNetwork=true

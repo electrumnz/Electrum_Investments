@@ -1,5 +1,5 @@
 [Unit]
-Description=Hourly snapshot of the Mudhorn Capital trade journal
+Description=Hourly snapshot of the Mudhorn Capital trade journal and audit log
 Documentation=https://github.com/electrumnz/Electrum_Investments/blob/main/deploy/README.md
 
 [Timer]
