@@ -477,6 +477,66 @@ its binding constraint is a monthly cap on posts retrieved rather than a daily
 request count, and because caching a market-moving post for half an hour would
 defeat the point of fetching it.
 
+### The chat surface reads the news back; it must never fetch it
+
+Asked "what's the latest news", the Chat page's agent answered that it had no
+news feed connected, only a trading bot. That was **true and correctly
+refused** — it declined to fabricate, which is the behaviour this project wants
+— but it was a plumbing gap rather than a limitation: the loop reads three
+feeds every fifteen minutes, and nothing exposed any of them.
+
+Two things were missing and both are fixed:
+
+- The MCP server had twelve tools and not one touched news. `get_recent_news`
+  is now the thirteenth.
+- `get_recent_decisions` read **only today's dated file** and returned `[]`
+  when it did not exist. So the agent's recall of every rejection reset at UTC
+  midnight, was empty every Monday morning, and was empty after any restart,
+  with months of history on disk unread. It goes through `AuditLog.read()` now,
+  which walks dated files and reports what it could not parse.
+
+**The fix is `src/bot/news_history.py`, and the reason it reads rather than
+fetches is a quota, not a preference.** Marketaux's free tier is 100 requests a
+day against a loop that wakes 96 times — the allowance is already spent. A live
+news tool on the chat surface would spend the *loop's* budget, and would fail in
+the worst available direction: the trading cycle reasoning with no headlines, on
+the exact day somebody was asking about the news. The X feed's monthly post cap
+fails the same way. So the store is the source, `MarketInputs` in the audit log
+is the store, and everything in that module is a pure function over an
+`AuditView` with no network in it.
+
+Three properties there are load-bearing:
+
+- **A recording is not a search, and the age has to travel with the item.** A
+  headline first seen six hours ago presented as "the latest news" is the
+  confident partial answer this repository exists to prevent, arriving through
+  the chat surface instead of the model. Every item carries `first_seen`,
+  `last_seen` and an age; the tool description tells the agent to quote them.
+- **No cycles recorded is not "no news".** The `FinnhubCalendar.is_degraded`
+  lesson in a third costume. An empty window means the loop was stopped,
+  restarting, or the market was shut — never that the world was quiet.
+  `has_cycles` is deliberately a separate question from "are the lists empty",
+  the MCP payload names it as `loop_recorded_nothing_in_window`, and the
+  readout says it in a sentence, because a caller handed only empty lists
+  reaches for the wrong reading every time.
+- **Cycles written before `MarketInputs` existed are counted and named.** The
+  audit log is append-only and never migrated, so a window can hold decisions
+  with no `inputs` at all. Those are cycles whose feeds are not on file, which
+  is not the same as cycles that saw nothing.
+
+Items are ordered by when they were **first** seen, not last. A story sitting
+in the 30-minute cache since this morning is not newer than one that broke ten
+minutes ago, and sorting on `last_seen` would claim it was.
+
+The degraded flags are `any` across the window rather than the newest cycle's,
+because the claim being made is that the list is complete over the whole span,
+and one failed fetch anywhere in it makes that false.
+
+**Do not add a live-fetch news tool to make this feel fresher.** If the chat
+surface genuinely needs live news, the prerequisite is a paid tier with its own
+quota, kept separate from the loop's — not a second consumer of the same 100
+requests.
+
 ### A bare `.gitignore` directory pattern matches at every depth
 
 `.gitignore` once carried a bare `data/`, meant for the SQLite journal at the
@@ -749,7 +809,8 @@ src/bot/
   intraday.py           Five-minute bars: did price CLOSE beyond a level or only wick
                         through it, on what volume, and was it reclaimed. The
                         distinction trend_break turns on.
-  mcp_server.py         MCP tools: check_order, place_order, get_risk_status, ...
+  mcp_server.py         MCP tools: check_order, place_order, get_risk_status,
+                        get_recent_news, get_recent_decisions, ...
   models.py             Domain models. Quantities are shares/coin units, never "lots".
   config.py             Typed env + rules loader. Validators reject incoherent limits.
   claude_client.py      Anthropic SDK wrapper (1h prompt cache, structured output).
@@ -762,6 +823,10 @@ src/bot/
   audit.py              Append-only JSONL decision log, and the reader the
                         Decisions page renders. The only record of a REJECTED
                         proposal.
+  news_history.py       What the loop was SHOWN, recalled out of the audit log
+                        and deduped across cycles. Reads rather than fetches,
+                        because the Marketaux quota belongs to the loop. Pure
+                        functions; no network.
   metrics.py            Win rate, profit factor, expectancy, R, MAE/MFE. Pure functions.
   tailnet.py            Is the Tailscale link still going to be there next week.
                         Warns at ten days, and says "unknown" rather than "fine"
@@ -804,7 +869,7 @@ reference/              Third-party projects we borrow from. See reference/STATU
 ## Running it
 
 ```sh
-.venv/bin/python -m pytest              # full suite (477 tests)
+.venv/bin/python -m pytest              # full suite (501 tests)
 electrum-bot smoketest --mock           # no credentials needed
 electrum-bot smoketest                  # needs Alpaca paper keys
 electrum-bot loop                       # proposes and vets; places nothing

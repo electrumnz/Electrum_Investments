@@ -252,6 +252,33 @@ def test_chat_page_says_why_it_is_off_rather_than_rendering_nothing(client):
     assert "risks action rather than" in body
 
 
+def test_chat_page_says_what_its_news_actually_is():
+    """The operator asked for news and got a refusal, which read as a fault.
+
+    It was neither: Hermes has no web access on purpose, and what it can read
+    is the loop's own recording. The page has to say so, and has to say the age
+    matters — a recorded headline offered as current is the confident partial
+    answer this project exists to avoid.
+
+    Rendered directly rather than fetched, because the live panel only appears
+    once Hermes is installed and this asserts on the copy, not the wiring.
+    """
+    import re
+
+    from bot.web.render import chat_page
+
+    # Collapsed, because the copy is hard-wrapped in the template and a phrase
+    # split across two source lines is the same sentence to a reader.
+    body = re.sub(r"\s+", " ", chat_page(enabled=True, token="tok", hermes_available=True))
+
+    assert "recording, not a search" in body
+    assert "no web access" in body
+    assert "age of each attached" in body
+    # The quota is the reason it cannot simply fetch, and it belongs on the page
+    # rather than only in a docstring somebody would have to go looking for.
+    assert "100 requests a day" in body
+
+
 def test_settings_shows_the_limits_without_offering_to_change_them(client):
     """A settings screen that could widen a limit would be used to widen one
     during a losing run, which is exactly when the limit is doing its job."""

@@ -13,9 +13,7 @@ and let `place_order` here be the only write path.
 
 from __future__ import annotations
 
-import json
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 from typing import Any
 
 from mcp.server.mcpserver import MCPServer
@@ -26,6 +24,9 @@ from .config import Env, Rules, load_rules
 from .journal import Journal
 from .metrics import build_report, render_excursions, render_summary
 from .models import AccountSnapshot, AssetClass, Direction, OrderProposal
+from .news_history import NewsItem
+from .news_history import recall as recall_news
+from .news_history import render as render_news
 from .options import alerts_for_positions, parse_occ_symbol, render_alerts
 from .risk import RiskGate
 from .stand_down import describe
@@ -36,7 +37,14 @@ server = MCPServer(
         "Risk gate and paper-trading controls for the Electrum trading bot. "
         "Always call check_order before proposing a trade to the user, and use "
         "place_order rather than any other order tool — it is the only path that "
-        "enforces config/rules.yaml."
+        "enforces config/rules.yaml.\n\n"
+        "This server also carries the market information the bot reads. "
+        "get_recent_news returns the headlines, watched-account posts and "
+        "earnings windows the loop was actually shown, recorded with the time "
+        "it saw each one. It is a recording rather than a live news search, so "
+        "quote the ages and never present a six-hour-old headline as current — "
+        "but do not answer 'I have no access to news' either, because this is "
+        "the news this bot trades on."
     ),
 )
 
@@ -539,26 +547,133 @@ def get_stand_down_status() -> dict[str, Any]:
 
 
 @server.tool()
-def get_recent_decisions(limit: int = 20) -> list[dict[str, Any]]:
-    """Return the most recent entries from today's audit log, newest last.
+def get_recent_news(hours: float = 24.0, limit: int = 40) -> dict[str, Any]:
+    """Headlines, watched-account posts and earnings windows the bot has seen.
+
+    **This is a recording, not a live news search.** It returns what the
+    trading loop was actually shown and wrote into the audit log, with the age
+    of each item attached. Nothing is fetched to answer the question, and the
+    reason is a quota rather than a preference: Marketaux's free tier allows
+    100 requests a day against a loop that already wakes 96 times, so a live
+    fetch here would spend the loop's own allowance and leave it reasoning
+    without headlines.
+
+    Report the ages. An item first seen six hours ago is not "the latest news",
+    and presenting it as current is the failure this tool has to avoid.
+
+    If `cycles_read` is 0 the loop recorded nothing in the window — it was
+    stopped, restarting, or the market was shut. That is NOT the same as there
+    being no news, and it must not be reported as a quiet market. Read
+    `readout` before summarising: it carries the caveats the lists do not.
+
+    Args:
+        hours: How far back to look (default 24).
+        limit: Maximum items per feed (default 40).
+    """
+    now = datetime.now(UTC)
+
+    # Read enough cycles to actually cover the window. The loop wakes every 15
+    # minutes by default, but the interval is configurable, so this budgets for
+    # a 5-minute one and pads. Reading too few would silently truncate the
+    # window to its newest slice and report the rest as absent.
+    cycle_budget = min(1000, max(64, int(hours * 12) + 16))
+    day_budget = max(1, int(hours // 24) + 2)
+    view = _session.audit.read(limit=cycle_budget, days=day_budget)
+    result = recall_news(view, hours=hours, limit=limit, now=now)
+
+    def _items(items: list[NewsItem]) -> list[dict[str, Any]]:
+        return [
+            {
+                "text": i.text,
+                "age_minutes": round(i.age_minutes(now), 1),
+                "first_seen": i.first_seen.isoformat(timespec="minutes"),
+                "last_seen": i.last_seen.isoformat(timespec="minutes"),
+                "seen_in_cycles": i.cycles,
+            }
+            for i in items
+        ]
+
+    latest_age = result.latest_cycle_age_minutes(now)
+    return {
+        "source": (
+            "The audit log — what the trading loop was shown on each cycle. "
+            "Not a live news search, and not fetched just now."
+        ),
+        "window_hours": hours,
+        "cycles_read": result.cycles_read,
+        "cycles_without_inputs": result.cycles_without_inputs,
+        "latest_cycle_at": (
+            result.latest_cycle_at.isoformat(timespec="minutes")
+            if result.latest_cycle_at
+            else None
+        ),
+        "latest_cycle_age_minutes": (
+            round(latest_age, 1) if latest_age is not None else None
+        ),
+        "reading_is_stale": result.is_stale(now),
+        # Named rather than inferred from empty lists. A caller that reads
+        # "no headlines" off an empty list when the loop never ran has invented
+        # a quiet market out of a stopped process.
+        "loop_recorded_nothing_in_window": not result.has_cycles,
+        "headlines": _items(result.headlines),
+        "social_posts": _items(result.social_posts),
+        "news_windows": _items(result.news_windows),
+        "feeds_degraded": {
+            "social": result.social_degraded,
+            "calendar": result.calendar_degraded,
+            "note": (
+                "A degraded feed returns an empty list that looks exactly like "
+                "a quiet window. Say the record is incomplete rather than "
+                "implying nothing happened."
+            ),
+        },
+        "readout": render_news(result, now=now),
+    }
+
+
+@server.tool()
+def get_recent_decisions(limit: int = 20, days: int = 7) -> dict[str, Any]:
+    """Recent entries from the audit log, newest first, spanning several days.
+
+    This is the only record of a REJECTED proposal: one the gate refused never
+    becomes a trade, so it reaches neither the journal nor the broker.
+
+    Reads across dated files rather than only today's. Today's file does not
+    exist until the loop writes its first cycle, so a tool scoped to it
+    reported "no decisions" every UTC midnight, on a Monday morning, and after
+    any restart — with months of history sitting on disk unread.
 
     Args:
         limit: How many entries to return (default 20).
+        days: How many dated files back to read (default 7).
     """
-    path = Path("audit") / f"{datetime.now(UTC).date().isoformat()}.jsonl"
-    if not path.exists():
-        return []
-    entries: list[dict[str, Any]] = []
-    with path.open(encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                entries.append(json.loads(line))
-            except json.JSONDecodeError:
-                continue
-    return entries[-limit:]
+    view = _session.audit.read(limit=limit, days=max(1, days))
+    return {
+        "decisions": [
+            {
+                "timestamp": e.timestamp.isoformat(timespec="seconds"),
+                "outcome": e.outcome,
+                "approved": e.approved,
+                "rejected": e.rejected,
+                "decision": e.decision.model_dump(mode="json"),
+            }
+            for e in view.decisions
+        ],
+        "events": [
+            {
+                "kind": e.kind,
+                "timestamp": e.timestamp.isoformat(timespec="seconds"),
+                "payload": e.payload,
+            }
+            for e in view.events
+        ],
+        "days_read": max(1, days),
+        # Counted, not swallowed. A log that quietly drops records is worse
+        # than one that admits it lost some.
+        "malformed_lines": view.malformed,
+        "unreadable_files": view.unreadable_files,
+        "record_is_incomplete": view.is_degraded,
+    }
 
 
 @server.tool()

@@ -1416,6 +1416,7 @@ def chat_page(*, enabled: bool, token: str, hermes_available: bool) -> str:
     suggestions = [
         "What is my open risk right now, and how close is it to the cap?",
         "Why was the last proposal rejected?",
+        "What news has the bot seen today, and how old is it?",
         "Summarise this week's trades and what closed them.",
         "Is anything expiring soon that needs action?",
     ]
@@ -1427,18 +1428,25 @@ def chat_page(*, enabled: bool, token: str, hermes_available: bool) -> str:
 <div class="chat" style="margin-top:1.5rem">
   <div class="log" id="log" aria-live="polite" aria-label="Conversation">
     <div class="turn agent"><span class="who">Hermes</span>
-      <div class="msg">Ask about the account, the journal, open risk or a
-particular decision. I read the same journal this dashboard renders, through
-the MCP tools, and every order path behind me runs the risk gate first.</div></div>
+      <div class="msg">Ask about the account, the journal, open risk, a
+particular decision, or the news the bot has read. I reach the same journal and
+audit log this dashboard renders, through the MCP tools, and every order path
+behind me runs the risk gate first.</div></div>
   </div>
   <div class="prompts">{chips}</div>
   <div class="composer">
-    <textarea id="msg" rows="2" placeholder="Ask about the account, a trade, or a rejection"
+    <textarea id="msg" rows="2" placeholder="Ask about the account, a trade, a rejection, or the news"
       aria-label="Message"></textarea>
     <button class="btn" id="send" type="submit">Send</button>
   </div>
   <p class="note">Turns are replayed for continuity but this is not a long-lived
   session. Hermes keeps its own memory; the dashboard does not.</p>
+  <p class="note"><b>News here is a recording, not a search.</b> Hermes has no
+  web access, deliberately. What it can read is what the trading loop was shown
+  and wrote down each cycle &mdash; headlines, posts from watched accounts and
+  earnings windows &mdash; with the age of each attached. Asking does not fetch
+  anything: the Marketaux free tier is 100 requests a day against a loop that
+  wakes 96 times, so that quota belongs to the loop.</p>
 </div>
 <script>
 (function () {{
