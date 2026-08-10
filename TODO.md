@@ -254,6 +254,14 @@ conference candidates zero.** The model named the problem itself, unprompted:
 while instructing it to read the level off the figures and write it down.
 Measured on a fresh prompt — the only digit runs present are the timestamp.
 
+**CONFIRMED against a working schema.** The first measurement was taken while
+the dreamer's model call was broken, so it could have been an artefact of the
+fallback transport. It was not: re-run on the fixed path, six real steps
+produced **0 checkable conditions out of 6** — same result, different
+transport. `symbols` filled on every step (`AA`, `CENX`, `WST`, `BDX`, `LNG`)
+and the judge found no invented statistic anywhere, so the dreamer is working
+well and still cannot reach the shelf.
+
 Two directions, and this is a design decision rather than a patch:
 
 - **Widen what a condition may be measured against**, so a supply-chain claim
