@@ -1,0 +1,33 @@
+[Unit]
+Description=Dream once a day
+Documentation=file:/opt/mudhorn/CLAUDE.md
+
+[Timer]
+# Daily, and the cadence is a reading decision rather than a cost one.
+#
+# Cost is not the constraint at any plausible rate. Measured on the real prompt
+# with four open chains and a news day, a run is roughly 3,600 input tokens and
+# a few thousand output including the thinking pass. On Sonnet that is about 5p
+# a run: some tens of dollars a year daily, and still under a hundred at every
+# six hours. See docs/COSTS.md.
+#
+# What daily buys is a page worth opening. A chain needs four to six steps to go
+# seed, explore, iterate, verdict, so at this rate one resolves in under a week
+# and an operator checking in on Sunday finds two or three that actually moved.
+# Every six hours would produce twenty-eight steps a week, which is more than
+# anyone reads, and the model is told to prefer advancing an existing chain, so
+# the extra runs would mostly re-litigate the same four.
+#
+# 06:20 UTC: before the US session, after the overnight wires have landed, and
+# well clear of the hourly journal backup.
+OnCalendar=*-*-* 06:20:00
+# A box that was asleep still dreams. Without this a laptop or a rebooted
+# droplet silently skips days, and the page would look like the dreamer had
+# stopped having ideas rather than like it had not been asked.
+Persistent=true
+# The model call is not rate-limit sensitive at this cadence, but a fleet of
+# boxes all firing at 06:20 is impolite and pointless.
+RandomizedDelaySec=600
+
+[Install]
+WantedBy=timers.target

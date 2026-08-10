@@ -286,7 +286,18 @@ class Dreamer:
         system = SYSTEM_PROMPT
         if soul.found:
             system = f"{soul.prompt_prefix()}\n{SYSTEM_PROMPT}"
-        self._client = client or ClaudeClient(env, system)
+        self._client = client or ClaudeClient(
+            env,
+            system,
+            # Its own tier, because Haiku cannot think and thinking is how a
+            # dream gets past its first hop.
+            tier=env.dream_tier,
+            # NOT cached. A 1h cache write bills at 2x input and a read at 0.1x,
+            # so a caller running once a day misses every time and pays double
+            # the system block on every call. The loop caches because it wakes
+            # every fifteen minutes; this is the opposite case.
+            cache_system=False,
+        )
 
     def run_once(
         self,

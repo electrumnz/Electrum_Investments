@@ -141,3 +141,53 @@ this page stops being worth reading.
 Every Claude call's cost is recorded in `audit/<date>.jsonl` as
 `estimated_cost_usd`, so the API side can be checked rather than trusted. The
 VPS is not in there — it is a fixed monthly line on someone's card.
+
+
+---
+
+## The dreamer
+
+`electrum-bot dream` is a different shape of call from the decision loop and is
+priced the opposite way round: bought **deep** rather than cheap, and run rarely
+enough that the depth costs almost nothing.
+
+Measured on the real prompt with four open chains and a news day: about 2,360
+system tokens, 1,270 user tokens, and a few hundred output tokens on top of the
+thinking pass. Thinking bills as output.
+
+| Tier | Thinking | Per run | Daily | Every 6h |
+| --- | --- | --- | --- | --- |
+| Haiku | none | $0.0071 | $2.60/yr | $10.40/yr |
+| **Sonnet** | ~4,000 | **$0.054** | **$19.80/yr** | $79.21/yr |
+| Opus | ~4,000 | $0.136 | $49.50/yr | $198.02/yr |
+
+Sonnet daily is the shipped default. Haiku is listed for completeness and is the
+wrong choice here: it has no extended thinking at all, and thinking is the entire
+mechanism by which a dream gets past its first hop.
+
+### The 1-hour cache is a PENALTY here, not an optimisation
+
+This is the counter-intuitive part and it is worth stating plainly.
+
+A 1-hour cache write bills at **2x base input** and a read at **0.1x**. The
+decision loop wakes every fifteen minutes, so it gets roughly four reads per
+write and the cache pays for itself several times over. The dreamer runs once a
+day, so the cache has **always expired** by the time it is next asked: every
+single call pays the 2x write and never once collects a read.
+
+On the dreamer's system block that is $0.0095 a run against $0.0071 uncached — a
+third more, for a feature sold as a saving. So `ClaudeClient` takes
+`cache_system`, and the dreamer sets it to False.
+
+The general rule: **cache only when the call interval is shorter than the TTL.**
+Anything slower is strictly worse off caching than not.
+
+### Why daily rather than more often
+
+Cost is not the constraint at any plausible cadence; even Opus every six hours is
+under $200 a year. What daily buys is a page worth opening. A chain needs four to
+six steps to move through seed, explore, iterate and verdict, so at this rate one
+resolves inside a week and an operator checking in on Sunday finds two or three
+that actually moved. Every six hours would produce twenty-eight steps a week,
+which is more than anyone reads, and the model is told to prefer advancing an
+existing chain, so most of the extra runs would re-litigate the same four.

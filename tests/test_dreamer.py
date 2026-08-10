@@ -358,3 +358,119 @@ def test_the_dream_command_refuses_without_an_api_key(tmp_path):
     env.anthropic_api_key = ""
 
     assert main_mod.cmd_dream(env, Rules.load(Path("config/rules.yaml"))) == 1
+
+
+# --------------------------------------------------------------- the tuning
+
+
+def test_the_dreamer_does_not_cache_its_system_prompt(monkeypatch):
+    """The 1h cache is a PENALTY at a daily cadence, not an optimisation.
+
+    A cache write bills at 2x base input and a read at 0.1x, so a caller that
+    always misses pays double the system block every single call. The loop wakes
+    every fifteen minutes and gets roughly four reads per write, so it caches.
+    The dreamer runs once a day, misses every time, and must not.
+
+    Measured on the real ~2,400-token system block: $0.0095 a run cached-and-
+    missing against $0.0071 uncached.
+    """
+    from bot.claude_client import ClaudeClient
+
+    captured: dict[str, object] = {}
+
+    class _Messages:
+        def parse(self, **kw):
+            captured.update(kw)
+            raise RuntimeError("stop here; we only wanted the kwargs")
+
+    class _Inner:
+        messages = _Messages()
+
+        def with_options(self, **kw):
+            captured["options"] = kw
+            return self
+
+    client = ClaudeClient(_env(), "system text", cache_system=False)
+    monkeypatch.setattr(client, "_client", _Inner())
+
+    with pytest.raises(RuntimeError):
+        client.dream("a prompt")
+
+    system = captured["system"]
+    assert isinstance(system, list)
+    assert "cache_control" not in system[0], "the dreamer must not pay a cache write"
+
+
+def test_the_dream_call_is_bought_deep_rather_than_fast(monkeypatch):
+    """Nothing waits on this call, and depth is the entire product.
+
+    High effort, a large budget that the thinking pass counts against, and a
+    timeout that outlasts it. A proposal-sized budget would truncate the chain
+    the thinking was spent producing.
+    """
+    from bot.claude_client import DREAM_MAX_TOKENS, DREAM_TIMEOUT_SECONDS, ClaudeClient
+    from bot.config import ClaudeTier
+
+    captured: dict[str, object] = {}
+
+    class _Messages:
+        def parse(self, **kw):
+            captured.update(kw)
+            raise RuntimeError("stop")
+
+    class _Inner:
+        messages = _Messages()
+
+        def with_options(self, **kw):
+            captured["options"] = kw
+            return self
+
+    client = ClaudeClient(_env(), "system", tier=ClaudeTier.SONNET, cache_system=False)
+    monkeypatch.setattr(client, "_client", _Inner())
+
+    with pytest.raises(RuntimeError):
+        client.dream("a prompt")
+
+    assert captured["max_tokens"] == DREAM_MAX_TOKENS
+    assert captured["output_config"] == {"effort": "high"}
+    assert captured["thinking"] == {"type": "adaptive"}
+    assert captured["options"] == {"timeout": DREAM_TIMEOUT_SECONDS}
+
+
+def test_the_dreamer_does_not_inherit_a_tier_that_cannot_think():
+    """Haiku has no extended thinking, and thinking is how a dream gets past its
+    first hop. So the dreamer's tier does NOT fall back to CLAUDE_TIER."""
+    from bot.config import ClaudeTier
+
+    env = Env(_env_file=None)  # type: ignore[call-arg]
+    env.claude_tier = ClaudeTier.HAIKU
+
+    assert env.dream_tier is ClaudeTier.SONNET
+
+
+def test_an_explicit_dream_tier_is_honoured():
+    from bot.config import ClaudeTier
+
+    env = Env(_env_file=None)  # type: ignore[call-arg]
+    env.dream_claude_tier = ClaudeTier.OPUS
+
+    assert env.dream_tier is ClaudeTier.OPUS
+
+
+def test_a_thought_can_say_who_had_it():
+    """Empty today, because there is one dreamer. It exists now because several
+    dreamers arguing a topic out is the intended direction, and a debate whose
+    transcript cannot say who said what is not a transcript.
+
+    The store is append-only and never migrated, so the field has to arrive with
+    a default or every row written before it would stop loading.
+    """
+    from bot.dreaming import Dream, DreamStage, Thought
+
+    dream = Dream(title="t", seed="s")
+    dream.add_thought(DreamStage.EXPLORE, "who is downstream", by="grogu")
+
+    assert dream.thoughts[0].by == "grogu"
+    # A row written before the field existed still loads.
+    old_row = {"stage": "explore", "text": "older thought", "at": ENTRY.isoformat()}
+    assert Thought.from_row(old_row).by == ""

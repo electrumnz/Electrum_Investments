@@ -176,9 +176,25 @@ class Thought:
     stage: DreamStage
     text: str
     at: datetime
+    # WHO thought it. Empty today, because there is one dreamer.
+    #
+    # It exists now rather than later because the intended direction is several
+    # dreamers working a topic independently and then arguing it out, and a
+    # debate whose transcript cannot say who said what is not a transcript. The
+    # field is optional with a default for the same reason every field on
+    # `Decision` is: this store is append-only and never migrated, so a reader
+    # that rejected yesterday's rows would throw away the history it exists to
+    # keep. Adding it now costs one line; adding it after a year of dreams costs
+    # a migration and the attribution is unrecoverable anyway.
+    by: str = ""
 
     def to_row(self) -> dict[str, Any]:
-        return {"stage": str(self.stage), "text": self.text, "at": self.at.isoformat()}
+        return {
+            "stage": str(self.stage),
+            "text": self.text,
+            "at": self.at.isoformat(),
+            "by": self.by,
+        }
 
     @classmethod
     def from_row(cls, row: dict[str, Any]) -> Thought:
@@ -186,6 +202,7 @@ class Thought:
             stage=_stage(row.get("stage")),
             text=str(row.get("text", "")),
             at=_dt(row.get("at")),
+            by=str(row.get("by", "")),
         )
 
 
@@ -242,9 +259,16 @@ class Dream:
     def is_open(self) -> bool:
         return self.stage is not DreamStage.VERDICT
 
-    def add_thought(self, stage: DreamStage, text: str, *, at: datetime | None = None) -> None:
+    def add_thought(
+        self,
+        stage: DreamStage,
+        text: str,
+        *,
+        at: datetime | None = None,
+        by: str = "",
+    ) -> None:
         self.thoughts.append(
-            Thought(stage=stage, text=_trim(text), at=at or datetime.now(UTC))
+            Thought(stage=stage, text=_trim(text), at=at or datetime.now(UTC), by=by)
         )
         self.stage = stage
         self.updated_at = at or datetime.now(UTC)

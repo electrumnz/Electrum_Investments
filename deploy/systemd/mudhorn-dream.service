@@ -1,0 +1,44 @@
+[Unit]
+# One lateral-thinking step: a new causal chain, or the next step on one already
+# running. Writes to data/dreams.db and shows up on the Dreaming page.
+#
+# Deliberately NOT part of mudhorn-bot.service. The decision loop wakes every
+# fifteen minutes because a price moves that fast; a second-order supply-chain
+# idea does not, and one lateral thought per cycle would buy ninety-six shallow
+# ones a day. Keeping them in separate units also keeps them in separate
+# processes, so no future refactor quietly connects a dream to the code that
+# places orders.
+Description=Mudhorn Capital: one dream step
+Documentation=file:/opt/mudhorn/CLAUDE.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=mudhorn
+Group=mudhorn
+WorkingDirectory=/opt/mudhorn
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=/opt/mudhorn/.env
+ExecStart=/opt/mudhorn/.venv/bin/electrum-bot dream
+
+# A dream is bought deep rather than fast: high effort, a large thinking budget
+# and a 900-second client timeout. This has to outlast that, or systemd kills
+# the call the moment it starts being worth having.
+TimeoutStartSec=1200
+
+# This one places nothing and reaches no broker, so it can be sandboxed harder
+# than the units that do. It needs the network for the model call and the feeds,
+# and write access to data/ for the store, and nothing else.
+NoNewPrivileges=true
+RestrictSUIDSGID=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/mudhorn/data
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target

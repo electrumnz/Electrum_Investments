@@ -79,6 +79,33 @@ class Env(BaseSettings):
     x_bearer_token: str = Field(default="", alias="X_BEARER_TOKEN")
 
     claude_tier: ClaudeTier = Field(default=ClaudeTier.HAIKU, alias="CLAUDE_TIER")
+
+    # The dreamer's tier, separately settable. Unset, it follows CLAUDE_TIER.
+    #
+    # They are different problems bought at different rates. The decision loop
+    # runs 96 times a day reading precise figures for six symbols, so the tier
+    # is a real running cost and Haiku is the sensible default. The dreamer runs
+    # once a day doing the one thing in this system that genuinely rewards a
+    # bigger model — following a causal chain two hops out and then attacking
+    # it — and at that cadence the whole year costs single-digit dollars on any
+    # tier. Measured: $2.60/yr on Haiku against $13.00/yr on Opus.
+    #
+    # So this exists to let the cheap thing stay cheap without making the
+    # thoughtful thing stupid.
+    #
+    # It deliberately DOES NOT fall back to CLAUDE_TIER. The default there is
+    # Haiku, which has no extended thinking at all, and thinking is the entire
+    # mechanism by which a dream gets past its first hop. A dreamer on Haiku
+    # produces "AI is big so buy chips": one hop, already priced. Sonnet is the
+    # floor rather than the ceiling here — the work wants a model that can think
+    # for a while, not the largest one available.
+    dream_claude_tier: ClaudeTier = Field(
+        default=ClaudeTier.SONNET, alias="DREAM_CLAUDE_TIER"
+    )
+
+    @property
+    def dream_tier(self) -> ClaudeTier:
+        return self.dream_claude_tier
     decision_interval_seconds: int = Field(default=900, alias="DECISION_INTERVAL_SECONDS")
 
     @property
