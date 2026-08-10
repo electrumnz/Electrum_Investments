@@ -2775,7 +2775,11 @@ def _tape_cell(quote: TickerQuote, *, venue: VenueState, kind: str) -> str:
 
 
 def _tape_clock(
-    face: ClockFace, local: datetime, now: datetime, phase: MarketPhase | None
+    face: ClockFace,
+    local: datetime,
+    now: datetime,
+    phase: MarketPhase | None,
+    trades_today: bool | None = None,
 ) -> str:
     """One clock: the EXCHANGE symbol, its state, and the time.
 
@@ -2793,7 +2797,15 @@ def _tape_clock(
     case — the operator asked for US east and west, and there is no exchange on
     the west coast, so it makes no claim rather than borrowing New York's.
     """
-    state = face.state(now, phase if face.is_market else None)
+    # The calendar is Alpaca's US equity one, so it speaks for New York and
+    # for nothing else. Handing it to Sydney would assert that ASX keeps the
+    # NYSE holiday calendar, which is a confident wrong answer rather than an
+    # absent one.
+    state = face.state(
+        now,
+        phase if face.is_market else None,
+        trades_today=trades_today if face.is_market else None,
+    )
     label = face.exchange or face.code or face.label
     # `mkt-live`, never `mkt live`. A bare state word as a modifier is what
     # the stylesheet collision guard exists to catch, and it caught this twice
@@ -2801,11 +2813,19 @@ def _tape_clock(
     # compound class cannot be restyled by an unrelated rule that happens to
     # use the same word.
     cls = f"mkt mkt-{state.value}" if state is not None else "mkt mkt-bare"
-    title = (
-        f"{face.label} — {VENUE_TITLES[state]}"
-        if state is not None
-        else f"{face.label} — no exchange in this zone"
-    )
+    # The limit travels with the badge. An exchange whose holidays nobody
+    # tracks must say so on the thing making the claim, or a reader takes
+    # "closed" and "open" as equally well founded when only one of them is.
+    if state is None:
+        title = f"{face.label} — no exchange in this zone"
+    else:
+        caveat = (
+            ""
+            if face.tracks_holidays
+            else " (regular weekday hours; public holidays not tracked "
+            "for this exchange)"
+        )
+        title = f"{face.label} — {VENUE_TITLES[state]}{caveat}"
     return (
         f'<span class="clk" data-tz="{_e(face.zone)}" title="{_e(title)}">'
         f'<span class="{cls}">{_e(label)}</span>'
@@ -2872,7 +2892,7 @@ def ticker_tape(
 
     groups: list[str] = []
     for index, (face, local) in enumerate(faces):
-        groups.append(_tape_clock(face, local, state.now, state.phase))
+        groups.append(_tape_clock(face, local, state.now, state.phase, trades_today))
         chunk = quotes[index * PER_GROUP : (index + 1) * PER_GROUP]
         groups.extend(
             cell(q) for q in chunk

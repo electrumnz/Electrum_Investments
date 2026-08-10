@@ -302,3 +302,76 @@ def test_is_continuous_recognises_only_a_genuinely_unbroken_week():
     # Six days of 24 hours is not a 24/7 market, and the missing day is exactly
     # the one somebody would trade into.
     assert is_continuous({d: [(0, 24)] for d in range(6)}) is False
+
+
+# ------------------------------------------------ daylight saving and holidays
+
+
+def test_every_exchange_opens_at_its_own_local_hour_across_daylight_saving():
+    """The property the whole module exists for, applied to four exchanges.
+
+    Sessions are declared in each exchange's LOCAL time and converted, never
+    stored as fixed UTC hours — so the southern hemisphere's daylight saving,
+    which runs opposite to the northern one, needs no diary entry either. This
+    is exactly what `sessions_utc` in `config/rules.yaml` cannot do, and why
+    that field is an hour out for half the year.
+    """
+    from bot.market_clock import CLOCKS
+
+    face = {f.code: f for f in CLOCKS}
+
+    # ASX at 10:00 Sydney: August is AEST (UTC+10), January is AEDT (UTC+11).
+    assert face["SYD"].is_open(datetime(2026, 8, 11, 0, 0, tzinfo=UTC)) is True
+    assert face["SYD"].is_open(datetime(2026, 1, 13, 23, 0, tzinfo=UTC)) is True
+
+    # NYSE at 09:35 New York: August is EDT (UTC-4), January is EST (UTC-5).
+    assert face["NY"].is_open(datetime(2026, 8, 11, 13, 35, tzinfo=UTC)) is True
+    assert face["NY"].is_open(datetime(2026, 1, 13, 14, 35, tzinfo=UTC)) is True
+
+    # Japan observes no daylight saving at all, so JST is UTC+9 year round.
+    assert face["TYO"].is_open(datetime(2026, 8, 11, 1, 0, tzinfo=UTC)) is True
+    assert face["TYO"].is_open(datetime(2026, 1, 13, 1, 0, tzinfo=UTC)) is True
+
+
+def test_a_holiday_shuts_the_new_york_badge_despite_the_clock():
+    """Christmas Day 2026 is a Friday and `_phase_at` reads it as an ordinary
+    trading day. Without the calendar the badge says NYSE is trading on 25
+    December, which is the plausible-wrong-figure failure on the one strip
+    whose only job is orientation."""
+    from bot.market_clock import CLOCKS, MarketPhase, VenueState
+
+    ny = next(f for f in CLOCKS if f.code == "NY")
+    xmas = datetime(2026, 12, 25, 15, 0, tzinfo=UTC)     # 10:00 New York
+
+    assert ny.is_open(xmas) is True                       # the clock alone
+    assert ny.state(xmas, MarketPhase.OPEN) is VenueState.LIVE
+    # With the calendar's answer, the holiday wins.
+    assert (
+        ny.state(xmas, MarketPhase.OPEN, trades_today=False) is VenueState.CLOSED
+    )
+
+
+def test_an_unknown_calendar_falls_through_rather_than_reading_as_a_holiday():
+    """`None` means "could not say". Same three-valued rule as everywhere else:
+    an unavailable check must not become the pessimistic answer any more than
+    it becomes the cheerful one."""
+    from bot.market_clock import CLOCKS, MarketPhase, VenueState
+
+    ny = next(f for f in CLOCKS if f.code == "NY")
+    ordinary = datetime(2026, 8, 11, 15, 0, tzinfo=UTC)
+
+    assert ny.state(ordinary, MarketPhase.OPEN, trades_today=None) is VenueState.LIVE
+
+
+def test_only_new_york_claims_to_track_holidays():
+    """`session_calendar` is Alpaca's US equity calendar and speaks for nothing
+    else. Handing it to Sydney would assert the ASX keeps NYSE's holidays.
+
+    Hardcoding three more lists is the tempting alternative and is worse: it
+    goes stale in silence, and a stale list still looks answered.
+    """
+    from bot.market_clock import CLOCKS
+
+    tracked = {f.code for f in CLOCKS if f.tracks_holidays}
+
+    assert tracked == {"NY"}

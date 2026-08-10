@@ -546,7 +546,24 @@ class ClockFace:
     def at(self, now: datetime) -> datetime:
         return now.astimezone(ZoneInfo(self.zone))
 
-    def state(self, now: datetime, phase: MarketPhase | None = None) -> VenueState | None:
+    @property
+    def tracks_holidays(self) -> bool:
+        """Whether anything in this repository knows this exchange's calendar.
+
+        True for New York only, and via `session_calendar`, which is Alpaca's
+        US equity calendar. There is no feed here for TSE, ASX or NZX holidays,
+        and hardcoding three lists would go stale in silence — which is worse
+        than a limit that is stated, because a stale list still looks answered.
+        """
+        return self.is_market
+
+    def state(
+        self,
+        now: datetime,
+        phase: MarketPhase | None = None,
+        *,
+        trades_today: bool | None = None,
+    ) -> VenueState | None:
         """Open, out of hours, or shut — for THIS exchange.
 
         `phase` is supplied only for the market clock, where Alpaca's five US
@@ -556,6 +573,13 @@ class ClockFace:
         painting them amber at 09:50 Sydney would be a state nobody computed.
         Reporting the coarser truth beats inventing the finer one.
         """
+        # A holiday beats the clock. `_phase_at` reads Christmas Day as an
+        # ordinary Friday, so without this the badge says NYSE is trading on
+        # 25 December. Three-valued on purpose: `None` means the calendar could
+        # not say, and that must fall through to the computed phase rather than
+        # read as a holiday.
+        if trades_today is False:
+            return VenueState.CLOSED
         if phase is not None:
             if phase is MarketPhase.OPEN:
                 return VenueState.LIVE
