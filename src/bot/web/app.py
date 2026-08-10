@@ -116,7 +116,13 @@ def build_app(
     live.install(app, resolved_poller)
 
     def _account_orders_prices() -> (
-        tuple[AccountSnapshot | None, list[WorkingOrder], dict[str, float]]
+        tuple[
+            AccountSnapshot | None,
+            list[WorkingOrder],
+            dict[str, float],
+            datetime | None,
+            bool,
+        ]
     ):
         """What the Board renders, taken from the poller and NEVER blocking.
 
@@ -137,6 +143,15 @@ def build_app(
         the poller: stop-losses are separate orders and Alpaca cannot report
         the aggregate, so any path handing out an `AccountSnapshot` has to do
         this or the total-risk cap silently counts nothing.
+
+        **When the reading was taken comes back with it, and so does whether
+        it is too old to present as current.** The poller idle-stops once
+        nobody is watching and keeps its last reading, so the first load of a
+        morning is served an overnight snapshot. Handing back the figures
+        without their age let the page stamp them `as at <now>` and assert
+        expiries and untracked positions off them, all in the present tense.
+        A reading is only as good as the moment it was taken, so the moment
+        travels with it.
         """
         # NOT `ensure_running()`. That schedules an asyncio task and this runs
         # in FastAPI's threadpool, where there is no loop to schedule onto. The
@@ -145,8 +160,14 @@ def build_app(
         # broker every five seconds all night.
         snapshot = resolved_poller.latest()
         if snapshot is None:
-            return None, [], {}
-        return snapshot.account, snapshot.orders, snapshot.prices
+            return None, [], {}, None, False
+        return (
+            snapshot.account,
+            snapshot.orders,
+            snapshot.prices,
+            snapshot.taken_at,
+            resolved_poller.reading_is_stale(),
+        )
 
     def _page(title: str, active: str, body: str) -> str:
         return render.shell(
@@ -223,7 +244,7 @@ def build_app(
             **seen.cookie_for(visit, secure=request.url.scheme == "https")
         )
 
-        account, orders, prices = _account_orders_prices()
+        account, orders, prices, read_at, reading_stale = _account_orders_prices()
         open_trades = resolved_journal.open_trades()
 
         if account is None:
@@ -275,6 +296,7 @@ def build_app(
             # than a false all-clear. A box without the timer installed should
             # not be told its link is healthy.
             tailnet=read_tailnet_status(),
+            reading_stale=reading_stale,
         ) + render.board(
             account,
             resolved_rules,
@@ -287,6 +309,8 @@ def build_app(
             orders,
             prices,
             env=resolved_env,
+            read_at=read_at,
+            stale=reading_stale,
         )
         return _page("Board", "/", body)
 

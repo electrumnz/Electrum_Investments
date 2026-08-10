@@ -29,6 +29,30 @@ PROTECTED = [
     "/", "/decisions", "/trades", "/analytics", "/dreaming", "/settings", "/chat",
 ]
 
+# Everything that is not a page but must still be refused.
+#
+# `/live` serves equity, cash, buying power, every open position and every
+# resting order as JSON, and it was missing from this file entirely. That is
+# the shape of the miss worth naming: it is not a *page*, so it never came up
+# when somebody wrote "every page is refused". Moving it into `OPEN_PATHS`
+# would have published the account with the whole suite green.
+#
+# A SEPARATE list rather than more entries in PROTECTED, because the loopback
+# test below asserts a 200 body: `/live` is an endless event stream that never
+# returns, and `/logout` and `/openapi.json` are not pages. The refusal tests
+# are safe on all three precisely because the middleware answers before the
+# route runs.
+REFUSED = [*PROTECTED, "/live", "/logout", "/openapi.json"]
+
+# The only routes an unauthenticated request may reach, each for a stated
+# reason. `test_no_route_escapes_the_lists` is what makes this file complete
+# rather than merely long: a route added later belongs to one of these two
+# lists, and until somebody says which, the suite fails.
+OPEN_BY_DESIGN = {
+    "/login",    # the gate itself. Reveals nothing; asserted below.
+    "/healthz",  # liveness for a monitor. Trade counts, never positions or money.
+}
+
 
 def _env(password: str = "") -> Env:
     env = Env(_env_file=None)  # type: ignore[call-arg]
@@ -79,7 +103,7 @@ def unguarded(journal, dreams, poller):
 # ------------------------------------------------------- nothing gets through
 
 
-@pytest.mark.parametrize("path", PROTECTED)
+@pytest.mark.parametrize("path", REFUSED)
 def test_every_page_is_refused_without_a_session(guarded, path):
     """The whole point. A public URL plus a missing check is the account on show."""
     r = guarded.get(path, headers={"accept": "text/html"})
@@ -88,13 +112,39 @@ def test_every_page_is_refused_without_a_session(guarded, path):
     assert r.headers["location"] == "/login"
 
 
-@pytest.mark.parametrize("path", PROTECTED)
+@pytest.mark.parametrize("path", REFUSED)
 def test_no_account_data_leaks_in_the_refusal(guarded, path):
     """A redirect that still rendered the body would defeat the entire gate."""
     body = guarded.get(path, headers={"accept": "text/html"}).text
 
     for leak in ("Equity", "equity_usd", "Open risk", "100,000"):
         assert leak not in body, f"{path} leaked {leak!r} before authenticating"
+
+
+def test_no_route_escapes_the_lists(guarded):
+    """The lists above are only as good as their completeness.
+
+    `/live` was absent from this file for its whole life, and no test could
+    notice: every assertion here iterates a list that did not mention it. A
+    hand-maintained list of what must be protected fails exactly the way the
+    middleware was chosen over per-route dependencies to avoid — silently, on
+    the route somebody forgot.
+
+    So the routes are enumerated from the application instead. A new one has to
+    be classified as refused or as deliberately open before this passes, which
+    is a decision somebody makes rather than one that gets made by omission.
+    """
+    paths = {
+        r.path
+        for r in guarded.app.routes
+        if isinstance(getattr(r, "path", None), str) and r.path.startswith("/")
+    }
+    unclassified = paths - set(REFUSED) - OPEN_BY_DESIGN
+
+    assert not unclassified, (
+        f"{sorted(unclassified)} is neither refused nor deliberately open. "
+        "Add it to REFUSED, or to OPEN_BY_DESIGN with a reason."
+    )
 
 
 def test_a_non_browser_client_gets_401_rather_than_html(guarded):

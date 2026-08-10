@@ -58,6 +58,22 @@ DEFAULT_INTRADAY_LOOKBACK = 160
 
 @runtime_checkable
 class Broker(Protocol):
+    @property
+    def orders_degraded(self) -> bool:
+        """True when the last `get_open_orders` failed and returned nothing.
+
+        Same rule as `FinnhubCalendar.is_degraded`, and it exists for the same
+        reason: an empty order list from a refused API call is indistinguishable
+        from an account with nothing resting. `get_open_orders` catches its own
+        failures — it must, because it feeds a display beside positions and risk
+        and an SDK error should not take those down with it — and that catch was
+        silently making "we could not ask" look like "there is nothing there".
+
+        A caller that ignores this is asserting there are no working orders,
+        which is not what a failed fetch established.
+        """
+        ...
+
     def connect(self) -> None: ...
     def disconnect(self) -> None: ...
     def get_account(self) -> AccountSnapshot: ...
@@ -91,6 +107,16 @@ class MockBroker:
         self._bars: dict[str, list[Bar]] = {}
         self._intraday: dict[str, list[Bar]] = {}
         self._open_orders: list[WorkingOrder] = []
+        self._orders_degraded = False
+
+    @property
+    def orders_degraded(self) -> bool:
+        return self._orders_degraded
+
+    def set_orders_degraded(self, degraded: bool) -> None:
+        """Test hook. Nothing in memory can fail, so the flag has to be set by
+        hand for a caller's degraded path to be exercisable at all."""
+        self._orders_degraded = degraded
 
     def connect(self) -> None:
         self._connected = True
@@ -259,6 +285,11 @@ class AlpacaBroker:
             api_key=env.alpaca_api_key, secret_key=env.alpaca_secret_key
         )
         self._connected = False
+        self._orders_degraded = False
+
+    @property
+    def orders_degraded(self) -> bool:
+        return self._orders_degraded
 
     def connect(self) -> None:
         # Alpaca is stateless HTTP; "connecting" means proving the keys work.
@@ -458,9 +489,17 @@ class AlpacaBroker:
             # Same reasoning as the feed fetches: this feeds a display, and an
             # SDK error here must not take down a caller that also renders
             # positions and risk.
+            #
+            # But an empty list is what an account with nothing resting looks
+            # like too, so swallowing the failure quietly turned "we could not
+            # ask" into "there is nothing there". The flag is the difference,
+            # and it is the `FinnhubCalendar.is_degraded` lesson in a third
+            # place: report the weaker fact rather than imply the stronger one.
+            self._orders_degraded = True
             log.warning("open_orders_fetch_failed", error=f"{type(exc).__name__}: {exc}")
             return []
 
+        self._orders_degraded = False
         orders: list[WorkingOrder] = []
         for o in raw:
             qty = float(getattr(o, "qty", 0) or 0)

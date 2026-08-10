@@ -1357,11 +1357,49 @@ SCRIPT = """
 
   var SIGNED = { unrealised_pnl_usd: true, realised_pnl_today_usd: true };
 
+  /* The stamp under the page title describes the READING, so the stream owns
+     it the same way it owns the figures. Left alone it would keep saying what
+     the server said at render time — which is right until the reading moves
+     under it, and after that it is a timestamp attached to figures it no
+     longer describes, standing for as long as the tab is open. */
+  var MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+                'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+  function pad(n) { return n < 10 ? '0' + n : '' + n; }
+
+  function whenUTC(d) {
+    /* Matches `render._when` character for character, for the same reason
+       `money` matches `_money`: the same instant formatted two ways on one
+       page eventually disagrees, and it is the copy nobody watches that
+       drifts. */
+    return pad(d.getUTCDate()) + ' ' + MONTHS[d.getUTCMonth()] + ' ' +
+      d.getUTCFullYear() + ', ' + pad(d.getUTCHours()) + ':' +
+      pad(d.getUTCMinutes()) + ' UTC';
+  }
+
+  function paintStamp(data) {
+    var el = document.querySelector('[data-live-read]');
+    if (!el) return;
+    if (!data.as_of) { el.textContent = 'read time unknown'; return; }
+    var when = new Date(data.as_of);
+    if (isNaN(when.getTime())) return;
+    el.textContent = data.stale
+      ? 'last read ' + whenUTC(when) + ' — not refreshed since'
+      : 'read ' + whenUTC(when);
+    el.classList.toggle('stale', !!data.stale);
+  }
+
   function paint(data) {
     if (!data) return;
 
+    /* Four states, and they must not collapse into two. `slow` used to fall
+       through to the `else` and paint green, which said "live" while a read
+       was outstanding and the figures on screen were the previous ones —
+       precisely the reading the state exists to distinguish. */
     if (data.status === 'failing') {
       setLink('retry', 'broker');
+    } else if (data.status === 'slow') {
+      setLink('retry', 'broker slow');
     } else if (data.stale) {
       setLink('retry', 'stale');
     } else if (data.status === 'starting') {
@@ -1369,6 +1407,8 @@ SCRIPT = """
     } else {
       setLink('live', '');
     }
+
+    paintStamp(data);
 
     var account = data.account;
     if (!account) return;
@@ -1871,11 +1911,20 @@ def greeting(env: Env, *, now: datetime | None = None) -> str:
     return f"{word}, {name}"
 
 
-def head(eyebrow: str, title: str, asof: str = "", lede: str = "") -> str:
+def head(
+    eyebrow: str, title: str, asof: str = "", lede: str = "", asof_live: bool = False
+) -> str:
+    """`asof_live` marks the stamp for the stream to rewrite.
+
+    Only the Board sets it, and only because the Board is the one page whose
+    stamp describes a reading rather than the render. Left off, the stamp is
+    whatever the server said and stays that way, which is right for a page
+    built from files on disk."""
+    mark = ' data-live-read=""' if asof_live else ""
     return (
         f'<div class="page-head"><div><p class="eyebrow">{_e(eyebrow)}</p>'
         f"<h1>{_e(title)}</h1></div>"
-        + (f'<p class="asof">{_e(asof)}</p>' if asof else "")
+        + (f'<p class="asof"{mark}>{_e(asof)}</p>' if asof else "")
         + "</div>"
         + (f'<p class="note" style="max-width:68ch">{_e(lede)}</p>' if lede else "")
     )
@@ -1892,14 +1941,33 @@ def banners(
     stale: list[str] | None = None,
     audit: AuditView | None = None,
     tailnet: TailnetStatus | None = None,
+    reading_stale: bool = False,
 ) -> str:
     """Anything needing attention, ahead of the numbers.
 
     Ordered by consequence rather than by section: an option expiry resolves
     itself automatically and irreversibly if nobody is watching, so it leads.
+
+    **`reading_stale` goes first of all, because it qualifies the rest.** Every
+    banner below it is a claim about a broker reading — this position expires
+    on Friday, this symbol is held but not journalled — and an old reading makes
+    each of them a claim about how the account stood some hours ago. The
+    expiries still lead among the banners that assert something; this one is
+    ahead of them because it says how much to trust the assertion.
     """
     out: list[str] = []
     now = datetime.now(UTC)
+
+    if reading_stale:
+        out.append(
+            '<div class="banner warn"><b>These figures are not current</b>'
+            "The last successful broker read is older than this page expects, so "
+            "everything below — the positions, the expiries, the risk against the "
+            "caps — describes that reading rather than the account as it stands "
+            "now. Nothing has failed: the poller stops reading when nobody is "
+            "watching, and the live stream refreshes this within a few seconds of "
+            "the page opening.</div>"
+        )
 
     # Deliberately on the surface that is about to disappear. It reads backwards
     # — a warning about losing the dashboard, shown on the dashboard — and it is
@@ -2049,6 +2117,8 @@ def board(
     orders: list[WorkingOrder] | None = None,
     prices: dict[str, float] | None = None,
     env: Env | None = None,
+    read_at: datetime | None = None,
+    stale: bool = False,
 ) -> str:
     """The account at a glance.
 
@@ -2063,6 +2133,21 @@ def board(
     number on screen that the page has no way to walk back — and 0.00 equity is
     exactly the sort of plausible wrong figure this repository is built to
     refuse.
+
+    **`read_at` is when the BROKER was read, and the stamp must never be the
+    clock.** This page used to print `as at <now>`, which is true of the render
+    and says nothing about the figures beneath it. The poller idle-stops when
+    nobody is watching and keeps its last reading, so the first load of a
+    morning served an overnight snapshot under the current time — every figure
+    stale, nothing on screen saying so, and the stamp the one element a reader
+    checks to find out. That is the confident-partial-answer failure this
+    repository exists to prevent, arriving through the furniture.
+
+    So the stamp names the reading, `stale` says when the reading is older than
+    the stream expects, and the whole thing carries `data-live-read` so the
+    stream corrects it rather than leaving a false timestamp standing for as
+    long as the tab is open. Omitted, it reads as unknown: a caller that cannot
+    say when the figures were read must not be given a timestamp by default.
     """
     if account is None:
         return _board_waiting(env)
@@ -2137,8 +2222,20 @@ def board(
         "parameter here, not a performance one.</p></div>"
     )
 
+    if read_at is None:
+        stamp = "read time unknown"
+    elif stale:
+        stamp = f"last read {_when(read_at)} — not refreshed since"
+    else:
+        stamp = f"read {_when(read_at)}"
+
     return (
-        head(greeting(env) if env else "Account", "Board", f"as at {_when(datetime.now(UTC))}")
+        head(
+            greeting(env) if env else "Account",
+            "Board",
+            stamp,
+            asof_live=True,
+        )
         + f'<div class="grid g4">{tiles}</div>'
         + '<section class="block"><h2>Equity</h2>'
         + _curve(curve)

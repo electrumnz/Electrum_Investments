@@ -450,6 +450,10 @@ class LivePoller:
         self._task: asyncio.Task[None] | None = None
         self._subscribers: set[asyncio.Queue[None]] = set()
         self._last_subscriber_at = clock()
+        # Set by `stop()` and never cleared. A stopped poller stays stopped:
+        # restarting one would mean re-authenticating during shutdown, and the
+        # application that owned it is going away.
+        self._closed = False
 
     # ------------------------------------------------------------- reading
 
@@ -471,7 +475,26 @@ class LivePoller:
         return self._state.snapshot
 
     def payload(self, *, now: datetime | None = None) -> dict[str, Any]:
-        return self._state.payload(now=now)
+        """Defaults to THIS poller's clock, not the module's.
+
+        `LiveState` falls back to the wall clock because it is a plain value
+        object with no clock of its own. That is fine until somebody injects
+        one here: snapshots are then stamped with the injected clock while
+        their ages are measured against the real one, so a test that moves time
+        forward gets ages in the millions of seconds and every reading reports
+        stale. Half-honouring an injectable clock is worse than not offering
+        one, because the figures it produces look like measurements.
+        """
+        return self._state.payload(now=now or self._clock())
+
+    def reading_is_stale(self, *, now: datetime | None = None) -> bool:
+        """Whether the held reading is too old to present as current.
+
+        On this class rather than read off `state()` by the caller, for the
+        clock reason above — and because a page asking "can I show this as the
+        account right now" should not have to know that the answer involves a
+        clock at all."""
+        return self._state.is_stale(now=now or self._clock())
 
     def poll_once(self) -> LiveState:
         """Read the broker once and fold the result into the state.
@@ -556,6 +579,15 @@ class LivePoller:
         except Exception as exc:
             orders_unavailable = True
             log.warning("live_orders_fetch_failed", error=f"{type(exc).__name__}: {exc}")
+        else:
+            # The `except` above is a backstop, not the path that fires.
+            # `AlpacaBroker.get_open_orders` catches its own SDK errors and
+            # returns `[]` — it has to, because it feeds a display beside
+            # positions and risk — so this flag was dead for the only broker
+            # that can actually fail, and an outage rendered as "no working
+            # orders". The broker reports the degradation itself now and this
+            # reads it. Same shape as `calendar_degraded` in the loop.
+            orders_unavailable = broker.orders_degraded
 
         prices: dict[str, float] = {}
         quotes_unavailable: list[str] = []
@@ -582,11 +614,27 @@ class LivePoller:
         rather than a socket. Rebuilding only after a failure keeps the steady
         state cheap and still recovers from a session that has genuinely gone.
         """
+        if self._closed:
+            # A poll already handed to a worker thread outlives the cancel that
+            # `stop()` issues, so this can be reached after shutdown began. Once
+            # closed, the poller must not authenticate afresh: the failure is
+            # caught by `poll_once` and recorded on a state nothing will render,
+            # whereas a new session opened during shutdown is one nobody is left
+            # to close.
+            raise RuntimeError("poller is stopped")
         if self._broker is None:
             broker = self._broker_factory()
             broker.connect()
             self._broker = broker
         return self._broker
+
+    def _release_broker(self) -> None:
+        """Drop the session, best effort. Safe to call twice, and from either
+        the loop thread or a worker."""
+        broker, self._broker = self._broker, None
+        if broker is not None:
+            with suppress(Exception):
+                broker.disconnect()
 
     # ----------------------------------------------------------- the loop
 
@@ -599,7 +647,14 @@ class LivePoller:
         `starting` and fills in a moment later, which is the honest thing for it
         to do. Call it from a startup hook instead if a permanently warm poller
         is wanted; it is safe to call from both.
+
+        A stopped poller stays stopped. A stream that opened during shutdown
+        would otherwise start the loop again behind `stop()`, which is a
+        background task and a broker session outliving the application that
+        owned them.
         """
+        if self._closed:
+            return
         if self._task is None or self._task.done():
             self._task = asyncio.create_task(self._run(), name="live-poller")
 
@@ -618,7 +673,14 @@ class LivePoller:
                 self._publish()
                 await asyncio.sleep(self._interval_seconds)
                 if self._idle_long_enough():
+                    # Released here rather than left dangling. Nothing is in
+                    # flight at this point — the sleep just returned — so this
+                    # is the one clean moment to let the session go, and the
+                    # idle stop exists precisely so a box nobody is watching
+                    # holds nothing open. `disconnect` is a flag flip on both
+                    # brokers, so no I/O happens on the loop thread.
                     log.info("live_poller_idle_stop")
+                    self._release_broker()
                     return
         finally:
             # Cleared here rather than by whoever cancelled, so `ensure_running`
@@ -635,20 +697,36 @@ class LivePoller:
     async def stop(self) -> None:
         """Cancel the background read. Safe to call when it is not running.
 
-        Wired to application shutdown by `install`. A read already handed to a
-        worker thread finishes on its own and its result is discarded, which is
-        harmless: the process is going away.
+        Wired to application shutdown by `install`.
+
+        **Cancelling the await does not stop the thread.** `asyncio.to_thread`
+        hands the poll to an executor and cancellation only abandons the future;
+        the worker runs to completion regardless. So a naive stop had a window
+        where the abandoned poll called `_connected_broker`, built and
+        authenticated a NEW session, and stored it after this method had already
+        cleared and disconnected the old one — leaving a connected broker with
+        nobody left to close it.
+
+        The flag is set FIRST, so a poll still running finds the poller closed
+        and raises instead of authenticating. `poll_once` catches that and
+        records it on a state nothing will ever render. The release then runs
+        twice, either side of the await, because the thread may finish between
+        them and the second sweep is what catches a session opened in the
+        remaining sliver before the flag was seen.
+
+        A poll that cannot be joined is accepted rather than engineered around:
+        this runs at shutdown, and building a handshake to wait out a call that
+        is already abandoned would add machinery to the lifecycle for a case
+        where the process is going away.
         """
+        self._closed = True
+        self._release_broker()
         task = self._task
         if task is not None:
             task.cancel()
             with suppress(asyncio.CancelledError):
                 await task
-        broker = self._broker
-        self._broker = None
-        if broker is not None:
-            with suppress(Exception):
-                broker.disconnect()
+        self._release_broker()
 
     # ---------------------------------------------------------- subscribers
 
@@ -750,8 +828,13 @@ def build_poller(
     env: Env,
     force_mock: bool = False,
     interval_seconds: float = POLL_INTERVAL_SECONDS,
+    clock: Callable[[], datetime] = _now,
 ) -> LivePoller:
-    """The wiring `build_app` uses. The journal is not optional here either."""
+    """The wiring `build_app` uses. The journal is not optional here either.
+
+    `clock` is passed through so a test can age a reading without sleeping —
+    the staleness path is otherwise only reachable by waiting out
+    `STALE_AFTER_SECONDS` in real time, which is how it went untested."""
 
     def factory() -> Broker:
         # Deferred exactly as in `_account_orders_prices`: `..main` pulls in the
@@ -765,6 +848,7 @@ def build_poller(
         broker_factory=factory,
         open_risk_usd=journal.open_risk_usd,
         interval_seconds=interval_seconds,
+        clock=clock,
     )
 
 

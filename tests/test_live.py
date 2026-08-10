@@ -55,6 +55,7 @@ class _StubBroker(MockBroker):
         super().__init__(**kwargs)
         self.account_reads = 0
         self.connects = 0
+        self.disconnects = 0
         self.fail_account_with: Exception | None = None
         self.fail_orders_with: Exception | None = None
         self.block_for_seconds = 0.0
@@ -62,6 +63,10 @@ class _StubBroker(MockBroker):
     def connect(self) -> None:
         self.connects += 1
         super().connect()
+
+    def disconnect(self) -> None:
+        self.disconnects += 1
+        super().disconnect()
 
     def set_position(self, position: Position) -> None:
         """`MockBroker` builds positions from fills and has no public setter.
@@ -444,6 +449,42 @@ def test_a_readable_but_empty_order_book_is_not_flagged(broker):
     assert poller.payload()["orders_unavailable"] is False
 
 
+def test_a_broker_that_swallows_its_own_order_failure_still_reports_degraded(broker):
+    """The test above pinned a path the real broker never takes.
+
+    `_StubBroker.fail_orders_with` raises, and the poller's `except` catches it
+    — so the flag looked exercised. `AlpacaBroker.get_open_orders` does not
+    raise: it catches its own SDK errors and returns `[]`, because it feeds a
+    display beside positions and risk. So on the only broker that can genuinely
+    fail, `orders_unavailable` was unreachable and an outage rendered as an
+    account with nothing resting.
+
+    The broker reports the degradation on itself now, the same way
+    `FinnhubCalendar` does, and this is the shape that actually happens in
+    production: an empty list AND a flag.
+    """
+    broker.set_orders_degraded(True)
+    poller = _poller(broker)
+    poller.poll_once()
+
+    payload = poller.payload()
+    assert payload["orders"] == []
+    assert payload["orders_unavailable"] is True
+
+
+def test_the_degraded_flag_clears_once_the_orders_come_back(broker):
+    """A flag that only ever goes up would leave the page claiming an outage
+    for the rest of the process's life."""
+    broker.set_orders_degraded(True)
+    poller = _poller(broker)
+    poller.poll_once()
+    assert poller.payload()["orders_unavailable"] is True
+
+    broker.set_orders_degraded(False)
+    poller.poll_once()
+    assert poller.payload()["orders_unavailable"] is False
+
+
 def test_a_missing_quote_is_named_and_its_distance_stays_unknown(broker):
     """No quote means the distance to fill is unknown. Zero would read as
     "already there", which is the opposite of the truth."""
@@ -605,8 +646,86 @@ async def test_the_poller_stops_when_nobody_is_watching(broker):
 
 
 @pytest.mark.asyncio
+async def test_the_idle_stop_lets_the_broker_session_go(broker):
+    """Stopping the reads but keeping the session open is half an idle stop.
+
+    The point of the idle stop is that a box nobody is watching holds nothing
+    open. It used to return out of the loop with `self._broker` still set and
+    connected, so the reads stopped and the session did not.
+    """
+    poller = _poller(broker, interval_seconds=0.0, idle_stop_after_seconds=0.0)
+    poller.ensure_running()
+    await asyncio.sleep(0.05)
+
+    assert broker.connects == 1
+    assert broker.disconnects == 1
+
+
+@pytest.mark.asyncio
+async def test_a_stopped_poller_cannot_authenticate_again(broker):
+    """`stop()` cancels an await, and cancelling an await does not stop a thread.
+
+    `asyncio.to_thread` hands the poll to an executor; cancellation abandons the
+    future while the worker runs on. So an abandoned poll could reach
+    `_connected_broker`, build and authenticate a NEW session, and store it
+    after `stop()` had already cleared and disconnected the old one — a
+    connected broker with nobody left to close it.
+
+    Driven here by calling `poll_once` directly after `stop()`, which is exactly
+    what that abandoned worker does.
+    """
+    poller = _poller(broker)
+    poller.poll_once()
+    assert broker.connects == 1
+
+    await poller.stop()
+    assert broker.disconnects == 1
+
+    poller.poll_once()
+
+    # Refused rather than reconnected, and recorded rather than raised: the
+    # poll is caught by `poll_once` and lands on a state nothing will render.
+    assert broker.connects == 1
+    assert "poller is stopped" in poller.state().error
+
+
+@pytest.mark.asyncio
+async def test_a_stopped_poller_does_not_start_itself_again(broker):
+    """A stream opening during shutdown would otherwise put the loop back,
+    behind `stop()`: a background task and a broker session outliving the
+    application that owned them."""
+    poller = _poller(broker, interval_seconds=0.0, idle_stop_after_seconds=None)
+    await poller.stop()
+
+    poller.ensure_running()
+    await asyncio.sleep(0.02)
+
+    assert broker.account_reads == 0
+
+
+@pytest.mark.asyncio
 async def test_stop_is_safe_when_nothing_is_running(broker):
     await _poller(broker).stop()
+
+
+def test_an_injected_clock_is_used_for_ages_not_only_for_stamps(broker):
+    """Half-honouring an injectable clock is worse than not offering one.
+
+    `LiveState` falls back to the wall clock because it is a value object with
+    no clock of its own. That was fine until the poller took one: readings were
+    stamped with the injected clock and their ages measured against the real
+    one, so a test that set the clock to last year got an age in the tens of
+    millions of seconds and every reading reported stale. Figures that look
+    like measurements and are not are the thing this repository refuses.
+    """
+    moment = datetime(2026, 3, 1, 12, 0, tzinfo=UTC)
+    poller = _poller(broker, clock=lambda: moment)
+    poller.poll_once()
+
+    payload = poller.payload()
+    assert payload["age_seconds"] == pytest.approx(0.0, abs=0.001)
+    assert payload["stale"] is False
+    assert poller.reading_is_stale() is False
 
 
 # ------------------------------------------------------------ the SSE frame

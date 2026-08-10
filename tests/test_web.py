@@ -35,7 +35,7 @@ from bot.models import (
     Trade,
 )
 from bot.souls import Soul
-from bot.web import live
+from bot.web import live, render
 from bot.web.app import build_app
 
 pytest.importorskip("fastapi")
@@ -1268,6 +1268,96 @@ def test_only_a_page_with_live_figures_opens_the_stream():
     from bot.web.render import SCRIPT
 
     assert "if (!document.querySelector('[data-live]')) return;" in SCRIPT
+
+
+def _aged_client(journal, dreams, hours: float):
+    """A Board whose reading is `hours` old, without waiting `hours`.
+
+    The poller's clock is injectable, so the reading is taken at one moment and
+    the page rendered at a later one. Reaching this path by sleeping would mean
+    a test that takes minutes, which is how it went untested in the first place.
+    """
+    moment = [datetime(2026, 8, 10, 0, 0, tzinfo=UTC)]
+    p = live.build_poller(
+        journal=journal, env=_env(), force_mock=True, clock=lambda: moment[0]
+    )
+    p.poll_once()
+    moment[0] += timedelta(hours=hours)
+    app = build_app(
+        journal=journal, rules=load_rules(), env=_env(),
+        dreams=dreams, poller=p, force_mock=True
+    )
+    return TestClient(app)
+
+
+def test_an_old_reading_is_never_stamped_with_the_current_time(journal, dreams):
+    """The Board used to print `as at <now>` over figures read hours earlier.
+
+    The poller idle-stops once nobody is watching and keeps its last reading, so
+    the first load of a morning is served an overnight snapshot. Stamping it
+    with the render clock made every figure on the page a present-tense claim
+    about an account nobody had read since the night before — and the stamp is
+    the one element a reader checks to find out. Confident, plausible, wrong,
+    and delivered by the furniture rather than the model.
+
+    The stamp names the READING now. The whole suite was green while it did not.
+    """
+    client = _aged_client(journal, dreams, hours=8)
+    body = client.get("/").text
+
+    assert '<p class="asof" data-live-read="">last read 10 Aug 2026, 00:00 UTC' in body
+    # The regression itself: the render clock must not appear as a stamp. Named
+    # rather than grepped for "as at", which also matches "canvas at all" in
+    # the inlined script and passes for the wrong reason.
+    assert render._when(datetime.now(UTC)) not in body
+
+
+def test_an_old_reading_says_so_ahead_of_everything_it_qualifies(journal, dreams):
+    """The banner leads because every other banner is a claim about a reading.
+
+    An expiry alert or an untracked-position warning derived from an eight-hour
+    -old snapshot is still worth showing — erring towards warning is the safe
+    direction — but a reader has to be told which account state they describe.
+    """
+    client = _aged_client(journal, dreams, hours=8)
+    body = client.get("/").text
+
+    assert "These figures are not current" in body
+    assert "not refreshed since" in body
+    # Ahead of the page head, so it is read before any figure it qualifies.
+    assert body.index("These figures are not current") < body.index("<h1>Board</h1>")
+
+
+def test_a_fresh_reading_carries_no_staleness_warning(journal, dreams, client):
+    """The other half. A warning that showed on every load would be furniture
+    rather than a signal, and the next real one would be ignored."""
+    body = client.get("/").text
+
+    assert "These figures are not current" not in body
+    assert "read " in body
+
+
+def test_the_stamp_is_marked_for_the_stream_to_correct(journal, dreams, client):
+    """A server-rendered timestamp is right for exactly one instant.
+
+    The figures beneath it are repainted every few seconds, so a stamp left
+    alone becomes a time attached to a reading it no longer describes — and it
+    stays wrong for as long as the tab is open, which is the failure this whole
+    change is about arriving by a slower route.
+    """
+    assert "data-live-read" in client.get("/").text
+    assert "data.status === 'slow'" in render.SCRIPT
+
+
+def test_the_four_live_states_do_not_collapse_into_two():
+    """`slow` used to fall through to the `else` and paint the link green.
+
+    That said "live" while a read was outstanding and the figures on screen were
+    the previous ones — precisely the distinction the state exists to draw. Four
+    states that render as two are two states with extra names.
+    """
+    for state in ("'failing'", "'slow'", "'starting'"):
+        assert f"data.status === {state}" in render.SCRIPT
 
 
 def test_the_command_console_survives_the_reduced_motion_bail_out():
