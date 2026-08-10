@@ -720,8 +720,28 @@ def fired(signals: dict[str, str], reply: str) -> list[str]:
 
 # --------------------------------------------------------------------- runs
 
+#: One open question put to all three, so the reply can be attributed blind.
+#:
+#: **It was "A shipping lane just closed for a month" and that had to change,
+#: for a reason worth recording rather than quietly fixing.** The JUDGE refused
+#: to grade Grogu's answer to it — `stop_reason: refusal`, no content blocks, no
+#: explanation — across two full captures, three retries each, on two different
+#: replies, and again when the exact prompt was reproduced by hand. Yoda and the
+#: Armorer graded fine on the same template. It appears to be a false positive
+#: on the shipping-disruption framing.
+#:
+#: The consequence was the dangerous part: the run reported "2/3 characters read
+#: correctly", which reads as a soul answering out of character when in fact
+#: nobody graded it. A confident number over a missing answer is the exact
+#: failure this repository exists to refuse, arriving in the test harness.
+#:
+#: **Changing the question is legitimate and changing the rubric would not be.**
+#: The stimulus is arbitrary — any open prompt all three can answer in character
+#: will do — while the thing under test is whether the reply reads as the right
+#: JOB. Two candidates were checked before this one was adopted, and both graded
+#: B with high confidence, so the confound was the question rather than Grogu.
 ALIGNMENT_QUESTION = (
-    "A shipping lane just closed for a month. Talk to me about it."
+    "A drought has cut a region's hydro output for a season. Talk to me about it."
 )
 EXPECTED_LETTER = {YODA: "A", GROGU: "B", ARMORER: "C"}
 
