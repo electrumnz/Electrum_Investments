@@ -11,12 +11,22 @@ Ordered by what is actually blocking, not by size.
 ## 1. Fill an entry OUT OF HOURS — the blocking one
 
 **The operator asked for a position ON in the pre-market and got a resting
-order instead.** That is not a bug in the code; it is a fork nobody was offered.
-See `CLAUDE.md`, "A broker-side stop OR an out-of-hours fill. Never both."
+order instead, which then filled after the 09:30 open.** That is not a bug in
+the code; it is a fork nobody was offered. See `CLAUDE.md`, "A broker-side stop
+OR an out-of-hours fill. Never both."
 
 `place_order` attaches the stop, which makes every entry a bracket or an OTO,
-and **Alpaca refuses `extended_hours` on both**. So an entry that carries a stop
-cannot fill outside the regular session, full stop.
+and **Alpaca's docs say `extended_hours` is not accepted on either**. That half
+is documented rather than tested here — no extended-hours bracket has been sent
+from this codebase to watch it be refused. **The consequence is measured:** 21
+SPY went in at 09:23:47 New York and sat at `filled_qty=0.0` through the
+pre-market, then filled in the regular session.
+
+First thing to do when building this is verify the documented half: send one
+extended-hours bracket and confirm Alpaca rejects it rather than silently
+dropping the flag. If it downgrades instead of rejecting, everything above is
+still true and the failure mode is worse, because a stop would go missing with
+no error.
 
 **What to build:** a second execution path. Plain `LimitOrderRequest` with
 `extended_hours=True` and **no bracket**, gated by a per-instrument
@@ -43,12 +53,19 @@ Windows to test in: after hours 16:00–20:00 New York, pre-market 04:00–09:30
 
 ## 2. Correct trade id 1's entry price
 
-Recorded at **772.84**, which was the *limit*, not the fill. It was journalled
-by hand because the schema migration landed after the order did.
+**The order has filled**, and the journal says 772.84 — which was the *limit*,
+not the fill. It was journalled by hand because the schema migration landed
+after the order did, so nothing has reconciled the two.
 
-`open_risk_usd` counts `|entry − stop| × qty`, so if it filled above 772.84 the
-recorded risk is **overstated** — the safe direction, and still a figure that
-does not match the account. Read the real fill off the position and correct it.
+`open_risk_usd` counts `|entry − stop| × qty`, and that figure is what the 2%
+total-risk cap measures against. The recorded number is therefore wrong by
+however far the open printed from 772.84. Read the real fill off the position
+and correct row 1.
+
+Worth checking at the same time: whether a stop is actually resting at 820. It
+went as an OTO, so Alpaca should have created the stop leg when the entry
+filled. If it did not, rule 3 is true at sizing time and false at the broker,
+and the bracket work is wrong.
 
 ---
 

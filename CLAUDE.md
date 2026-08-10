@@ -375,8 +375,10 @@ individual statement was correct and the CONSEQUENCE was never put to the
 operator as a choice.
 
 `AlpacaBroker.place_order` attaches the stop, which makes every entry a bracket
-or an OTO. **Alpaca refuses `extended_hours` on both**, and refuses outright
-rather than downgrading. So:
+or an OTO. **Alpaca's documentation says `extended_hours` is not accepted on
+either** — and note that this half is DOCUMENTED, not observed: no
+extended-hours bracket has ever been sent from here to watch it be rejected.
+What was observed is the consequence, below. So:
 
 - An entry that carries a stop **cannot fill outside the regular session.** It
   rests and becomes eligible at the next open.
@@ -392,9 +394,15 @@ has been given the other answer to the other question. Ask which they want
 BEFORE submitting — after the order is at the broker the choice has been made
 for them.
 
-Observed live: 21 SPY submitted 09:23:47 New York, `filled_qty=0.0`, resting
-until the open. Correct behaviour, correct explanation, and not what was asked
-for.
+**Observed live, and this half is measured rather than read:** 21 SPY submitted
+09:23:47 New York — inside the pre-market — came back `filled_qty=0.0` and sat
+resting. It filled after 09:30, in the regular session. So an entry carrying a
+stop demonstrably does not trade in the pre-market and does become eligible at
+the open, which is exactly what the model is told.
+
+Correct behaviour, correct explanation, and **not what was asked for.** The
+operator wanted the position on during the pre-market; there is no arrangement
+of a stopped order that does that.
 
 **The unbracketed path is not new ground.** Crypto already takes it — Alpaca
 accepts no bracket there either — so the stop is a journal figure and
