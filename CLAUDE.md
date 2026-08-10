@@ -1447,23 +1447,51 @@ were rejected for failing. **The routes are enumerated from the application
 now**, and a new one must be classified as refused or as deliberately open
 before the suite passes.
 
-### Two agents, two souls, and Hermes only holds one
+### Three agents, three souls, and Hermes only holds one
 
 `souls/yoda.md` answers about the account on `/chat`; `souls/grogu.md` dreams on
-`/dreaming`. Both follow the `SOUL.md` convention down to the headings
-(`## Personality`, `## Style`, `## What to avoid`).
+`/dreaming`; `souls/armorer.md` keeps the limits on `/settings`. All three
+follow the `SOUL.md` convention down to the headings (`## Personality`,
+`## Style`, `## What to avoid`).
+
+**Each one is a different job, not a different accent**, and that is the thing
+to preserve when editing them:
+
+- **Yoda is a teacher.** The operator's trading companion, for asking questions
+  and getting explanations. It answers first and then says what the number
+  *means*, because "0.98% at risk" is a reading and "about half of what you
+  allow yourself across the whole book" is an answer. It had a Style section
+  that *required* inverted syntax; that is pastiche, it was the one thing the
+  character must not be, and it is gone.
+- **Grogu wonders.** The cute, deep, outside-the-box one — the value is that its
+  attention goes to the thing nobody else was watching, and the chain of
+  physical facts underneath is what makes that worth reading rather than a
+  personality.
+- **The Armorer argues.** Asymmetric on purpose: tightening is not an argument,
+  loosening is one and it starts it. **It pushes back; it does not deny** — if
+  it ends up refusing, it has become the config-load validator it was built to
+  replace.
+
+**A soul is a reason to say something SHORTER, never a licence to say more.**
+That clause lives in `souls.py`'s prefix rather than only in the files, because
+the prefix is the one text guaranteed to reach the model when a file has been
+edited on the box. Each file carries a `## How long to be` section and
+`tests/test_souls.py` caps each at 1,600 words — **the fix for a breach is to
+move mechanics back into the system prompts** (`dreamer.py`, `confer.py`,
+`settings_agent.py`), never to raise the cap. Grogu was 2,101 words and most of
+the excess was reciting the stage machine at a model that is already told it.
 
 **Hermes loads exactly one soul, from `$HERMES_HOME/SOUL.md`.** Not the working
 directory, no CLI flag, no environment variable to point at another file, and
 `/personality` is a session overlay rather than a second soul. One instance, one
-character. This repository needs two on one instance chosen per request, so
+character. This repository needs three on one instance chosen per request, so
 `HermesBridge.ask` prepends the selected soul to the prompt **on stdin**, which
 is the only mechanism that can vary per call — and is where it has to go anyway,
 because the sudoers rule permits `run-chat.sh` with no arguments so nothing a
 signed-in user types can be read as a flag.
 
-**Do not install either file as `~/.hermes/SOUL.md`.** It would apply to both
-agents at once, alongside whichever soul the request injected, and the model
+**Do not install any of them as `~/.hermes/SOUL.md`.** It would apply to every
+agent at once, alongside whichever soul the request injected, and the model
 would receive two characters and pick.
 
 **One instance is enough for the souls, and not enough for the tools.** The
@@ -2209,8 +2237,11 @@ src/bot/
                         message and keeps no state of its own.
                         render.STYLES and render.SCRIPT carry the projection
                         layer: starfield, hyperspace jump, panel materialisation.
-souls/                  Character files for the two agents, in the SOUL.md shape.
-                        yoda.md answers about the account; grogu.md dreams.
+souls/                  Character files for the three agents, in the SOUL.md shape.
+                        yoda.md teaches about the account; grogu.md dreams;
+                        armorer.md keeps the limits. tests/test_souls.py
+                        caps each at 1,600 words -- a breach is fixed by
+                        moving mechanics back into the system prompts.
   main.py               CLI: smoketest, loop, dream, reindex.
   grants.py             Turns a live dream adoption into the symbol permission the
                         risk gate is handed. Applies the enabled-class hard block
