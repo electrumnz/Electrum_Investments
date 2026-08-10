@@ -527,7 +527,13 @@ class LivePoller:
             failures = self._state.consecutive_failures + 1
             # Dropped so the next attempt reconnects. The cheapest explanation
             # for a failed read is a session that has gone.
-            self._broker = None
+            #
+            # Released rather than merely unreferenced: a broker whose read
+            # failed is exactly the one most likely to be holding something,
+            # and dropping the last reference to it is not the same as closing
+            # it. `_release_broker` swallows a `disconnect` that also fails,
+            # which is the expected case here.
+            self._release_broker()
             log.warning("live_poll_failed", error=detail, consecutive=failures)
             self._state = replace(
                 self._state,

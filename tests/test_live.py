@@ -360,6 +360,11 @@ def test_the_broker_is_rebuilt_after_a_failure(broker):
     poller.poll_once()
     assert broker.connects == 2
 
+    # And the failed session is CLOSED, not merely unreferenced. Dropping the
+    # last reference to a broker is not the same as closing it, and a broker
+    # whose read just failed is the one most likely to be holding something.
+    assert broker.disconnects == 1
+
 
 # ------------------------------------------------- slow, and stale, and fine
 
