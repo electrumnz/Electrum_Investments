@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -84,6 +85,301 @@ def test_execution_mode_follows_paper_flag():
 def _env(**overrides: Any) -> Env:
     """Build an Env ignoring any developer .env file, so these tests are hermetic."""
     return Env(_env_file=None, **overrides)  # type: ignore[call-arg]
+
+
+# ------------------------------------------------------ which endpoint answers
+
+
+@pytest.fixture
+def no_do_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`_env_file=None` silences the file, not the process environment.
+
+    A developer with DO_INFERENCE_KEY exported would otherwise get a different
+    answer from these tests than CI does, which is the one thing a test about
+    "what is configured" must not do.
+    """
+    monkeypatch.delenv("DO_INFERENCE_KEY", raising=False)
+    monkeypatch.delenv("DO_INFERENCE_BASE_URL", raising=False)
+
+
+def test_the_inference_fields_default_to_empty_and_empty_means_anthropic(no_do_key):
+    """The switch is one variable and its empty value is today's behaviour.
+
+    Same shape as DASHBOARD_CHAT_TOKEN and X_BEARER_TOKEN: a deployment that
+    never heard of this feature is a supported configuration, and rollback is
+    unsetting a variable rather than editing code.
+    """
+    from bot.config import ANTHROPIC
+
+    env = _env()
+
+    assert env.do_inference_key == ""
+    assert env.do_inference_base_url == ""
+
+    provider = env.inference_provider
+    assert provider.name == ANTHROPIC
+    assert provider.usable is True
+    assert not provider.is_digitalocean
+    assert "Anthropic" in provider.detail
+
+
+def test_a_key_alone_selects_digitalocean_at_the_documented_endpoint(no_do_key):
+    """One variable, not two. The base URL exists in exactly one place."""
+    from bot.config import DO_INFERENCE_DEFAULT_BASE_URL
+
+    provider = _env(DO_INFERENCE_KEY="do-model-access-key").inference_provider
+
+    assert provider.is_digitalocean
+    assert provider.usable is True
+    assert provider.base_url == DO_INFERENCE_DEFAULT_BASE_URL
+
+
+def test_a_base_url_with_no_key_is_reported_as_moving_nothing(no_do_key):
+    """Half a configuration must not read as a working one.
+
+    The key is the switch. An operator who set the endpoint and forgot the key
+    would otherwise believe the swap had happened, with nothing afterwards to
+    say it had not — which is the failure this whole arrangement exists to
+    refuse, arriving through a typo instead of through a model.
+    """
+    from bot.config import ANTHROPIC
+
+    provider = _env(DO_INFERENCE_BASE_URL="https://inference.do-ai.run").inference_provider
+
+    assert provider.name == ANTHROPIC
+    assert provider.usable is False
+    assert "nothing has moved" in provider.detail
+
+
+def test_an_unusable_endpoint_is_not_a_quiet_fall_back_to_anthropic(no_do_key):
+    """A key that cannot be used must not report as "Anthropic, all fine".
+
+    Three states rather than two. The third one is what lets a caller refuse
+    loudly instead of proceeding on a provider the operator did not choose, and
+    the sentence says so in as many words so nobody has to infer it.
+    """
+    provider = _env(
+        DO_INFERENCE_KEY="do-model-access-key",
+        DO_INFERENCE_BASE_URL="http://inference.do-ai.run",
+    ).inference_provider
+
+    assert provider.is_digitalocean
+    assert provider.usable is False
+    assert "NOT a fall back to Anthropic" in provider.detail
+
+
+def test_the_banner_never_claims_a_switch_that_has_not_been_thrown(no_do_key):
+    """Phase 1 moves the souls on Hermes and NO Python model call.
+
+    So a key in `.env` today is a declaration, not a route, and the line a
+    startup banner prints has to say that. This test is the thing that makes
+    `PYTHON_MODEL_PATH_USES_DO` a checkable fact rather than a remembered one:
+    flipping it without moving a call site — or moving a call site without
+    flipping it — fails here.
+    """
+    from bot.config import PYTHON_MODEL_PATH_USES_DO
+
+    detail = _env(DO_INFERENCE_KEY="do-model-access-key").inference_provider.detail
+
+    if PYTHON_MODEL_PATH_USES_DO:
+        assert "NOT IN FORCE" not in detail
+    else:
+        assert "NOT IN FORCE" in detail
+        assert "Hermes" in detail
+
+
+def test_the_provider_sentence_never_contains_the_key(no_do_key):
+    """Credentials are reported as configured or not configured, never rendered.
+
+    `detail` is printed at startup, into a journal somebody may paste, so it
+    inherits the Settings page's rule: no value, no prefix, no length.
+    """
+    secret = "do-v1-super-secret-model-access-key"
+
+    for env in (
+        _env(DO_INFERENCE_KEY=secret),
+        _env(DO_INFERENCE_KEY=secret, DO_INFERENCE_BASE_URL="http://nope"),
+    ):
+        assert secret not in env.inference_provider.detail
+
+
+def test_a_misconfigured_endpoint_does_not_stop_the_process_starting(no_do_key):
+    """It reports; it does not raise.
+
+    Refusing to boot over a variable no Python path reads yet would be a denial
+    at the least useful moment, and the thing denied would be the trading loop.
+    The friction belongs where the setting is USED — the Hermes wrappers, which
+    refuse the turn and cost a chat message instead of a session.
+    """
+    env = _env(DO_INFERENCE_KEY="k", DO_INFERENCE_BASE_URL="not-a-url")
+
+    assert env.inference_provider.usable is False  # no exception on the way here
+
+
+# ------------------------------------------ the wrappers that actually switch
+#
+# The souls' endpoint is chosen in `deploy/run-chat.sh` and `deploy/run-dream.sh`
+# rather than in Python, so these RUN the scripts against a stub Hermes. Reading
+# them for a substring would pin the words and not the behaviour, which is the
+# `str()`-on-an-enum trap in a different costume: the shape can look right while
+# every branch misses.
+
+
+def _stub_hermes(tmp_path: Path) -> Path:
+    """A Hermes that reports the environment it was handed and nothing else."""
+    binary = tmp_path / "hermes"
+    binary.write_text(
+        "#!/usr/bin/env bash\n"
+        'echo "base=${ANTHROPIC_BASE_URL:-none} '
+        'model=${ANTHROPIC_MODEL:-none} key=${ANTHROPIC_API_KEY:-none}"\n',
+        encoding="utf-8",
+    )
+    binary.chmod(0o755)
+    return binary
+
+
+def _run_wrapper(script: str, home: Path, tmp_path: Path) -> Any:
+    import subprocess
+
+    home.mkdir(parents=True, exist_ok=True)
+    env = {
+        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+        "HERMES_BIN": str(_stub_hermes(tmp_path)),
+        # Each wrapper names its own home differently, so both are supplied and
+        # each script reads the one it cares about.
+        "HERMES_HOME": str(home),
+        "HERMES_DREAM_HOME": str(home),
+    }
+    return subprocess.run(
+        ["bash", str(REPO_ROOT / "deploy" / script)],
+        input="hello",
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=30,
+        check=False,
+    )
+
+
+WRAPPERS = ["run-chat.sh", "run-dream.sh"]
+
+
+@pytest.mark.parametrize("script", WRAPPERS)
+def test_no_inference_file_means_anthropic_and_a_working_turn(script, tmp_path):
+    """The default path, and the one every existing deployment is on."""
+    done = _run_wrapper(script, tmp_path / "home", tmp_path)
+
+    assert done.returncode == 0, done.stderr
+    assert "base=none" in done.stdout, "an endpoint leaked into a turn nobody configured"
+    assert "Anthropic direct" in done.stderr
+
+
+@pytest.mark.parametrize("script", WRAPPERS)
+def test_a_key_with_no_model_refuses_the_turn_rather_than_using_anthropic(script, tmp_path):
+    """The failure this arrangement exists to prevent, in its likeliest form.
+
+    The serving slug is not the Anthropic model id and is deliberately not
+    guessed, so a key on its own is half a switch. Falling through to Anthropic
+    here would answer the operator normally while they believed the souls had
+    moved — a confident partial answer arriving through the plumbing.
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / "inference.env").write_text("DO_INFERENCE_KEY=fake\n", encoding="utf-8")
+
+    done = _run_wrapper(script, home, tmp_path)
+
+    assert done.returncode != 0
+    assert "DO_INFERENCE_MODEL" in done.stderr
+    assert done.stdout.strip() == "", "the turn ran anyway"
+
+
+@pytest.mark.parametrize("script", WRAPPERS)
+def test_a_router_is_refused_because_nothing_here_could_see_the_downgrade(script, tmp_path):
+    """A router falls back to another model on rate limit, and `hermes -z`
+    returns the response text and nothing else — so which model answered is not
+    observable from this box at all. Removing the mechanism is the only honest
+    answer when the observation is impossible."""
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / "inference.env").write_text(
+        "DO_INFERENCE_KEY=fake\nDO_INFERENCE_MODEL=my-router-fast\n", encoding="utf-8"
+    )
+
+    done = _run_wrapper(script, home, tmp_path)
+
+    assert done.returncode != 0
+    assert "router" in done.stderr
+    assert done.stdout.strip() == ""
+
+
+@pytest.mark.parametrize("script", WRAPPERS)
+def test_a_configured_switch_replaces_the_anthropic_credential(script, tmp_path):
+    """Not merely adds an endpoint beside it.
+
+    Whether Hermes honours ANTHROPIC_BASE_URL is unverified. If it does not, the
+    DigitalOcean key reaches Anthropic and is refused with a 401 — loud, and the
+    right direction. A working Anthropic key left beside a DigitalOcean base URL
+    is the arrangement that could serve the turn from the old provider while the
+    operator believed it had moved.
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / "inference.env").write_text(
+        "DO_INFERENCE_KEY=fake-do-key\nDO_INFERENCE_MODEL=some-slug\n", encoding="utf-8"
+    )
+
+    done = _run_wrapper(script, home, tmp_path)
+
+    assert done.returncode == 0, done.stderr
+    assert "base=https://inference.do-ai.run" in done.stdout
+    assert "model=some-slug" in done.stdout
+    assert "key=fake-do-key" in done.stdout
+    # It says what it ASKED for, never that the swap happened: the wrapper
+    # cannot see which model answered, and a line claiming otherwise would be
+    # the overclaim this repository keeps catching.
+    assert "requesting" in done.stderr
+
+
+@pytest.mark.parametrize("script", WRAPPERS)
+def test_blanking_the_key_leaves_no_endpoint_behind(script, tmp_path):
+    """Rollback is one blank line, so it has to be a COMPLETE rollback.
+
+    A base URL surviving the key would send the turn to DigitalOcean with an
+    Anthropic credential while the wrapper reported "Anthropic direct".
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / "inference.env").write_text(
+        "DO_INFERENCE_KEY=\nDO_INFERENCE_BASE_URL=https://inference.do-ai.run\n",
+        encoding="utf-8",
+    )
+
+    done = _run_wrapper(script, home, tmp_path)
+
+    assert done.returncode == 0, done.stderr
+    assert "base=none" in done.stdout
+    assert "Anthropic direct" in done.stderr
+
+
+@pytest.mark.parametrize("script", WRAPPERS)
+def test_the_souls_key_never_comes_from_the_bots_env_file(script, tmp_path):
+    """`hermes` cannot read /opt/mudhorn/.env, and that is the user split
+    working rather than a problem to route around. Two credentials in two
+    accounts is the answer here, not a duplication to tidy away — it is what
+    keeps the agent's environment free of anything that reaches the broker.
+
+    Comments are stripped first: both files TALK about that file at length,
+    because the reasoning is the thing worth writing down. What must not appear
+    is a line that READS it.
+    """
+    text = (REPO_ROOT / "deploy" / script).read_text(encoding="utf-8")
+    code = "\n".join(
+        line for line in text.splitlines() if line.strip() and not line.lstrip().startswith("#")
+    )
+
+    assert "/opt/mudhorn/.env" not in code
+    assert "inference.env" in code, "the wrapper reads no inference settings at all"
 
 
 def test_paper_mode_is_the_default():

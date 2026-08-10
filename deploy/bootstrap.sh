@@ -156,6 +156,11 @@ echo "    mudhorn-backup.timer started (hourly)"
 echo "    mudhorn-dream.timer installed, NOT started"
 echo "      enable with: systemctl enable --now mudhorn-dream.timer"
 echo "      needs ANTHROPIC_API_KEY in .env. Costs roughly a few pounds a year."
+# Said here because this is the line somebody reads while wondering whether the
+# DigitalOcean key they just created covers it. It does not: this timer runs
+# `electrum-bot dream`, which is the Anthropic SDK in Python, and the
+# DigitalOcean switch moves the Hermes souls and nothing else.
+echo "      DO_INFERENCE_KEY does not change this timer -- it is an Anthropic SDK call."
 
 # The conference timer, on the same footing and for the same reasons: it spends
 # money on model calls and needs the same key. It fires an hour after the dream
@@ -197,6 +202,20 @@ Next, in order:
   4. Reach the dashboard from a phone with Tailscale. It binds to 127.0.0.1 and
      has no login, so do not put it on a public address:
          curl -fsSL https://tailscale.com/install.sh | sh && sudo tailscale up
+
+  5. Optional, and only once Hermes is installed: point the three souls at
+     DigitalOcean Gradient inference instead of Anthropic.
+     The key does NOT go in $APP_DIR/.env. \`hermes\` cannot read that file,
+     which is the user split doing its job, so the souls carry their own
+     credential in their own home — one file per Hermes instance, so the
+     dreamer can run a different model from the account agent:
+         sudo -u hermes touch /home/hermes/inference.env
+         sudo -u hermes chmod 600 /home/hermes/inference.env
+         # then DO_INFERENCE_KEY / DO_INFERENCE_MODEL, one per line
+     Prove the model slug BEFORE the first message. deploy/README.md,
+     "Pointing the souls at DigitalOcean", has the check that reads the served
+     model back. Nothing else moves: the loop and the dreamer's own model call
+     still go to Anthropic.
 
 The loop runs WITHOUT --execute. It proposes and vets orders and places none.
 Read deploy/README.md before changing that.

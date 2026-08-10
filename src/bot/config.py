@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
@@ -54,10 +55,98 @@ CLAUDE_PRICING_USD_PER_MTOK: dict[ClaudeTier, tuple[float, float, float]] = {
 }
 
 
+# ----------------------------------------------------------------- inference
+#
+# DigitalOcean Gradient serverless inference, as an alternative endpoint for
+# the Anthropic Messages API. The research and the reasoning are in
+# `docs/DROPLET_AI.md`; what is wired here is that document's **phase 1 and
+# only phase 1**.
+#
+# The switch is one variable whose EMPTY value is today's behaviour, so
+# rollback is unsetting it rather than editing code — the same shape as
+# `DASHBOARD_CHAT_TOKEN` and `X_BEARER_TOKEN`, and for the same reason: a
+# deployment that has not set it is a supported configuration.
+
+# The documented serverless endpoint. Held here so an operator sets ONE
+# variable rather than two, and so the string exists in exactly one place.
+DO_INFERENCE_DEFAULT_BASE_URL = "https://inference.do-ai.run"
+
+ANTHROPIC = "anthropic"
+DIGITALOCEAN = "digitalocean"
+
+# Whether any PYTHON model call actually goes through DigitalOcean.
+#
+# **It is False, and this exists so that stays checkable rather than
+# remembered.** Phase 1 moves the three souls, which run on Hermes and read
+# their own environment — no Python is involved in that path at all. So a key
+# in `.env` today is a DECLARATION and not yet a route, and
+# `Env.inference_provider` says so in the sentence it hands a startup banner.
+#
+# Phase 2 (`claude.dream`, then `claude.confer`) is what flips this, in its own
+# commit, once the forced tool-call substitute for server-enforced structured
+# output has been proven on the one structured call that cannot lose money.
+#
+# **`claude.propose` is never in scope.** DigitalOcean charges Anthropic's
+# exact list price for Anthropic models, so the swap buys nothing, and it costs
+# a server-enforced schema on the single path that produces order quantities
+# and stop prices. That trade is the wrong way round at any price.
+PYTHON_MODEL_PATH_USES_DO = False
+
+
+@dataclass(frozen=True)
+class InferenceProvider:
+    """Which endpoint model calls are CONFIGURED for, and whether that
+    configuration is coherent.
+
+    **Three states rather than two, and the third is the whole point.** A key
+    that is present but unusable must not read as "Anthropic, all fine": that
+    is the silent fallback this arrangement exists to refuse. `usable` is False
+    and `detail` names what is wrong, so a caller can say so plainly instead of
+    proceeding on a provider the operator did not choose.
+
+    `detail` is a complete sentence and is always safe to print — it never
+    contains the key, in the same way the Settings page reports a credential as
+    configured or not configured and never renders one.
+
+    Nothing here raises. A misconfigured endpoint for a path that has not moved
+    yet must not be able to stop the trading loop booting: refusing at startup
+    is a denial at the least useful moment, and this repository puts that
+    friction where the setting is actually USED. For phase 1 that is
+    `deploy/run-chat.sh` and `deploy/run-dream.sh`, which refuse the turn —
+    costing a chat message rather than a session's trading.
+    """
+
+    name: str
+    base_url: str
+    usable: bool
+    detail: str
+
+    @property
+    def is_digitalocean(self) -> bool:
+        return self.name == DIGITALOCEAN
+
+
 class Env(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
     anthropic_api_key: str = Field(default="", alias="ANTHROPIC_API_KEY")
+
+    # DigitalOcean Gradient serverless inference. Both optional, both empty by
+    # default, and **empty means Anthropic** — see the block above this class.
+    #
+    # A **model access key**, never a DigitalOcean personal access token. A PAT
+    # controls the whole account — droplets, DNS, billing — and this box also
+    # runs an agent with a shell; a model access key is scopable to specific
+    # models. Creating one through the API is retired (`{"id": "gone"}`), so it
+    # is made by hand in the control panel and pasted in. Nothing here may
+    # assume a key can be minted programmatically.
+    do_inference_key: str = Field(default="", alias="DO_INFERENCE_KEY")
+
+    # Optional even when the key is set: blank means the documented endpoint,
+    # so the operator sets one variable rather than two. It is not the switch —
+    # a base URL with no key moves nothing, and `inference_provider` says so
+    # rather than letting half a configuration read as a working one.
+    do_inference_base_url: str = Field(default="", alias="DO_INFERENCE_BASE_URL")
 
     alpaca_api_key: str = Field(default="", alias="ALPACA_API_KEY")
     alpaca_secret_key: str = Field(default="", alias="ALPACA_SECRET_KEY")
@@ -138,6 +227,86 @@ class Env(BaseSettings):
         return self.operator_name.strip()
 
     decision_interval_seconds: int = Field(default=900, alias="DECISION_INTERVAL_SECONDS")
+
+    @property
+    def inference_provider(self) -> InferenceProvider:
+        """Which endpoint this process's model calls are configured for.
+
+        Pure, offline and never raising. `detail` is the line a startup banner
+        prints, for the same reason `electrum-bot-web` announces its auth mode
+        out loud: a provider swap is invisible afterwards, so the moment the
+        process starts is the only moment anyone can be told.
+
+        The sentence is written to be true rather than encouraging. While
+        `PYTHON_MODEL_PATH_USES_DO` is False it says the switch is NOT IN FORCE
+        for any Python model call, because it is not — phase 1 moves Hermes,
+        and a banner claiming otherwise would be exactly the confident partial
+        answer this repository exists to prevent.
+        """
+        key = self.do_inference_key.strip()
+        declared = self.do_inference_base_url.strip()
+
+        if not key:
+            if declared:
+                # Half a configuration. Reported rather than ignored: an
+                # operator who set the endpoint and not the key would otherwise
+                # believe the swap had happened.
+                return InferenceProvider(
+                    name=ANTHROPIC,
+                    base_url="",
+                    usable=False,
+                    detail=(
+                        f"DO_INFERENCE_BASE_URL is set ({declared}) but DO_INFERENCE_KEY "
+                        "is not, so nothing has moved. The key is the switch; a base URL "
+                        "on its own does nothing. Model calls go to Anthropic directly."
+                    ),
+                )
+            return InferenceProvider(
+                name=ANTHROPIC,
+                base_url="",
+                usable=True,
+                detail=(
+                    "Inference provider: Anthropic direct (DO_INFERENCE_KEY is not set). "
+                    "This is the default and a supported configuration."
+                ),
+            )
+
+        base_url = declared or DO_INFERENCE_DEFAULT_BASE_URL
+        if not base_url.startswith("https://"):
+            return InferenceProvider(
+                name=DIGITALOCEAN,
+                base_url=base_url,
+                usable=False,
+                detail=(
+                    f"DO_INFERENCE_KEY is set but DO_INFERENCE_BASE_URL ({base_url}) is "
+                    "not an https:// URL, so the DigitalOcean endpoint is unusable. "
+                    "This is NOT a fall back to Anthropic — fix the value or unset "
+                    "DO_INFERENCE_KEY."
+                ),
+            )
+
+        # The clause that stops this claiming a switch that has not been
+        # thrown. It comes off when phase 2 lands, in the same commit that
+        # flips `PYTHON_MODEL_PATH_USES_DO`, and `tests/test_config.py` fails
+        # until one moves with the other.
+        not_yet = (
+            ""
+            if PYTHON_MODEL_PATH_USES_DO
+            else (
+                " It is NOT IN FORCE for any Python model call: phase 1 moves the three "
+                "souls on Hermes, whose key lives in the hermes user's own environment "
+                "and never in this file. See deploy/README.md."
+            )
+        )
+        return InferenceProvider(
+            name=DIGITALOCEAN,
+            base_url=base_url,
+            usable=True,
+            detail=(
+                f"Inference provider: DigitalOcean serverless at {base_url} "
+                f"(DO_INFERENCE_KEY is set).{not_yet}"
+            ),
+        )
 
     @property
     def alpaca_base_url(self) -> str:

@@ -481,6 +481,172 @@ only the last of each.
 If you skip Hermes, nothing here needs to stay running between sessions and the
 VPS becomes optional.
 
+## Pointing the souls at DigitalOcean
+
+Optional. DigitalOcean's **Gradient serverless inference** speaks the Anthropic
+Messages API on `https://inference.do-ai.run/v1/messages`, so the three souls
+can be pointed at it by exporting two variables — no Python change, no rebuild.
+The research and the arithmetic are in `docs/DROPLET_AI.md`.
+
+**Be exact about what moves.** This is that document's phase 1 and nothing else:
+
+| Path | Moves? | Why |
+|---|---|---|
+| Yoda, Grogu, the Armorer (Hermes) | **Yes** | None of them proposes an order, and three different jobs genuinely want different models |
+| `electrum-bot dream` / `confer` | Not yet | Both use server-enforced structured output, which DigitalOcean does not document. A later decision, on its own evidence |
+| The trading loop (`claude.propose`) | **Never** | DigitalOcean charges Anthropic's *exact list price*, so it saves nothing — and it would trade a server-enforced schema on the one call that produces order quantities and stop prices |
+
+So `DO_INFERENCE_KEY` in `/opt/mudhorn/.env` is a declaration for later. It
+changes no behaviour today and every startup line built from it says
+`NOT IN FORCE`, which is the truth rather than a warning.
+
+### 1. The account, by hand
+
+Serverless inference is **prepaid**. A zero balance takes every agent surface
+dark at once and nothing on this box can see it, so top it up and set a billing
+alert in the same sitting.
+
+Then create a **model access key** in the control panel — AI Platform →
+Serverless Inference → *Create model access key* — and scope it to the models
+you actually intend to use. Two things about that, both measured rather than
+read:
+
+- **Creating one through the API is retired.** `POST /v2/gen-ai/models/api_keys`
+  answers `{"id": "gone", "message": "resource retired: ... Go to manage page in
+  the control panel"}`. Nothing here may assume a key can be minted
+  programmatically; a person makes it in a browser.
+- **Not a personal access token.** A PAT controls droplets, DNS and billing, and
+  this box also runs an agent with a shell.
+
+### 2. Where the key goes, and why not in `.env`
+
+**Not in `/opt/mudhorn/.env`.** That file is owned by `mudhorn` at mode 600 and
+Hermes runs as `hermes`, which cannot read it. That is the user split working,
+not a problem to route around: the souls' key is a *second* credential
+belonging to the account that spends it, so the agent's environment still holds
+nothing that reaches the broker.
+
+One file per Hermes instance — which is what makes per-agent routing real,
+because Grogu can run a different model from Yoda and the Armorer:
+
+```sh
+sudo -u hermes touch /home/hermes/inference.env          # yoda + the armorer
+sudo -u hermes chmod 600 /home/hermes/inference.env
+sudo -u hermes touch /home/hermes/dreamer/inference.env  # grogu, if installed
+sudo -u hermes chmod 600 /home/hermes/dreamer/inference.env
+```
+
+Plain `KEY=value` lines, no `export`:
+
+```
+DO_INFERENCE_KEY=<the model access key>
+DO_INFERENCE_MODEL=<the serving slug — see step 3>
+DO_INFERENCE_BASE_URL=
+```
+
+`run-chat.sh` and `run-dream.sh` read their own instance's file and export
+`ANTHROPIC_BASE_URL`, `ANTHROPIC_API_KEY` and `ANTHROPIC_MODEL` for that turn.
+No key ever reaches this repository.
+
+### 3. Prove the slug before the first message
+
+**The serving slug is not the Anthropic model id, and it is not what the
+catalogue shows you.** The catalogue lists display names and UUIDs; the
+inference endpoint wants a slug, and a wrong one fails at the endpoint
+mid-conversation. So nothing here guesses it — the wrappers **refuse to run**
+with a key and no `DO_INFERENCE_MODEL`, rather than picking a plausible value.
+
+Ask the endpoint, from a laptop rather than the droplet, and read the served
+model back out of the answer:
+
+```sh
+curl -sS https://inference.do-ai.run/v1/messages \
+  -H "x-api-key: $DO_KEY" \
+  -H "anthropic-version: 2023-06-01" \
+  -H "content-type: application/json" \
+  -d '{"model":"<slug>","max_tokens":4,
+       "messages":[{"role":"user","content":"Reply with the single word OK."}]}' \
+  | python3 -c 'import json,sys; r=json.load(sys.stdin); print(r.get("model") or r)'
+```
+
+- A **wrong slug** comes back as an error object, printed whole. That is where a
+  bad slug dies: before any soul has used it.
+- A **bad key** is `401 {"id": "Unauthorized"}`. Note that a 401 short-circuits
+  *before* model lookup, so a 401 proves nothing about the slug — fix the key
+  and ask again.
+- A **good slug** prints the model that actually served the request. If that is
+  not the model you asked for, you are on a router; see below.
+
+Verified live: the endpoint is reachable, `x-api-key` plus
+`anthropic-version: 2023-06-01` are the right headers, and the account's
+catalogue carries **Claude Opus 5, Sonnet 5, Haiku 4.5 and Fable 5** alongside
+the 4.x generation. The model table in `docs/DROPLET_AI.md` predates that and is
+out of date; trust the control panel and this check, not the table.
+
+### 4. Do not point a soul at an inference router
+
+The wrappers refuse a `DO_INFERENCE_MODEL` containing `router`, and the reason
+is this repository's oldest rule wearing new clothes. A router **falls back to
+another model on rate limit**, and `hermes -z` returns the response text and
+nothing else — so which model answered a turn is *not observable from this
+box at all*. A downgrade nobody can see is worse than a failed call, because a
+failure is loud and a downgrade reads exactly like a normal answer.
+
+Pinning a foundation-model slug removes the mechanism rather than watching for
+it, which is the only honest option when the observation is impossible. Say
+what that does and does not buy: a router's fallback is *documented* absent for
+a pinned slug, not *measured* absent.
+
+The same reasoning is why the trading loop is never moving. There, the served
+model would have to be read off the response and recorded in the audit event,
+and a mismatch treated as a failed cycle — and none of that is worth building
+for a provider that charges the same price.
+
+### 5. Confirm it moved, then watch it
+
+**Ask the agent. Do not read a config file.** Same rule as the dropped-toolset
+finding in `CLAUDE.md`: the display path and the effective path are different
+code. Open the Chat page and ask it something; then check the wrapper's own line
+by running one turn by hand, which prints the endpoint it requested on stderr:
+
+```sh
+sudo -u hermes /opt/mudhorn/deploy/run-chat.sh <<< 'Reply with the single word OK.'
+```
+
+Three things that line is careful about, and they are worth understanding
+rather than skipping:
+
+- It says **requesting**, never *in force*. Whether Hermes honours
+  `ANTHROPIC_BASE_URL` is unverified, and a wrapper claiming a swap it cannot
+  confirm would be the confident partial answer this project exists to prevent.
+- If Hermes *ignores* the base URL, the DigitalOcean key reaches Anthropic and
+  is refused with a 401 — loud. That is deliberate: the wrapper replaces the
+  Anthropic credential rather than leaving one beside a DigitalOcean endpoint,
+  because the leftover key is what would let a turn quietly answer from the old
+  provider while you believed it had moved.
+- If Hermes turns out not to honour these at all, the model is set through
+  `hermes model` and `~/.hermes/config.yaml`'s `agent:` block — and that block
+  is changed with `deploy/merge-hermes-config.py`, **never** by appending, for
+  the duplicate-key reason at the top of `deploy/hermes-config.yaml`.
+
+Move one wrapper at a time — chat first, the dreamer a day later — so a problem
+is attributable to one of them.
+
+### Rollback
+
+Blank `DO_INFERENCE_KEY` (or delete the file). The next message picks it up:
+`run-chat.sh` execs a fresh Hermes per turn, so **there is no daemon to
+restart** and telling anyone to restart one sends them chasing a unit that does
+not exist. The wrappers also unset `ANTHROPIC_BASE_URL` on that path, so a
+leftover endpoint cannot outlive the key.
+
+A half-configured switch never falls back quietly. A key with no model, a model
+naming a router, or a base URL that is not `https://` each **refuse the turn**
+with exit 78 and a sentence saying what to fix — which surfaces on the Chat page
+as the error, because `HermesBridge` returns the wrapper's stderr on a non-zero
+exit. Losing one chat message is the right price for never being told a swap
+happened when it did not.
+
 ## Backups
 
 `data/journal.db` is the only irreplaceable file on the box, and until recently
