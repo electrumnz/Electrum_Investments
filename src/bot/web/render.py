@@ -2260,12 +2260,21 @@ PAGES: tuple[tuple[str, str], ...] = (
     ("/decisions", "Decisions"),
     ("/trades", "Trades"),
     ("/analytics", "Analytics"),
-    ("/dreaming", "Dreaming"),
+    # Chat ahead of Dreaming, because Chat is the dominant one. It is the page
+    # an operator opens to ask a question about the account, several times a
+    # day; Dreaming is read when there is time to read it. The pair used to sit
+    # the other way round, which put the speculative surface in front of the
+    # one that answers.
     ("/chat", "Chat"),
+    ("/dreaming", "Dreaming"),
     # Settings last, beside Sign out. The order is a scan path: the pages you
     # open several times a day sit left, and the one you touch when something
     # needs configuring sits at the far end with the other administrative
     # control rather than between two you use constantly.
+    #
+    # That leaves Dreaming between Chat and Settings, which is where it belongs
+    # for the same reason: it is the least frequent of the reading pages, so it
+    # sits at the boundary between what you use and what you administer.
     ("/settings", "Settings"),
 )
 
