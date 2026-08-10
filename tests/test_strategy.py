@@ -149,3 +149,25 @@ def test_a_strategy_with_no_missing_data_omits_the_warning():
     )
 
     assert "DATA YOU DO NOT HAVE" not in complete.render()
+
+
+def test_no_unescaped_brace_reaches_the_prompt_template():
+    """A literal `{` in SYSTEM_PROMPT_TEMPLATE is read by `str.format` first.
+
+    The template is rendered with `.format(rules_summary=...)`, so an example
+    written as `{field: "close"}` raises `KeyError: 'field'` and takes down
+    every cycle — the model call, the smoketest and the loop alike. It is
+    invisible until something builds the prompt, which is exactly the shape of
+    the `render.STYLES` backslash trap.
+
+    Braces meant literally must be doubled. This asserts the template still
+    renders rather than trying to police the source text.
+    """
+    from bot.claude_client import SYSTEM_PROMPT_TEMPLATE, build_system_prompt
+
+    rendered = build_system_prompt(load_rules())
+
+    # The escaped example survives as a single brace in the output.
+    assert '{field: "close", op: "below", value: 641.20}' in rendered
+    # And nothing else in the template is an accidental placeholder.
+    assert SYSTEM_PROMPT_TEMPLATE.format(rules_summary="x")

@@ -313,6 +313,78 @@ class Stance(StrEnum):
     BLOCKED = "blocked"  # would take it, but a rule or missing data forbids
 
 
+class TriggerField(StrEnum):
+    """What a trigger is measured against.
+
+    Deliberately short, and every entry is a figure `indicators.py` already
+    computes in Python. A field the loop cannot produce would be a trigger
+    nobody can check, which is the failure this whole type exists to close.
+    """
+
+    CLOSE = "close"
+    SMA_20 = "sma_20"
+    SMA_200 = "sma_200"
+    ATR_14 = "atr_14"
+    VOLUME_RATIO = "volume_ratio"
+    DISTANCE_FROM_SMA_20_ATR = "distance_from_sma_20_atr"
+    SWING_HIGH = "swing_high"
+    SWING_LOW = "swing_low"
+    HIGHEST_CLOSE = "highest_close"
+    LOWEST_CLOSE = "lowest_close"
+
+
+class TriggerOp(StrEnum):
+    ABOVE = "above"
+    BELOW = "below"
+    AT_OR_ABOVE = "at_or_above"
+    AT_OR_BELOW = "at_or_below"
+
+
+class AssessmentTrigger(BaseModel):
+    """The machine-checkable half of a watch.
+
+    `waiting_for` is prose for a human, and prose cannot be graded. Without
+    this, "SPY closing below 641.20, roughly 1 ATR under the 20-day" is a
+    sentence nobody can later score, so a watch is an opinion with no
+    consequence and the stance means nothing.
+
+    **The threshold is a number, never another field, and that is the design
+    rather than a shortcut.** "Above the 20-day" re-checked next week tests a
+    different level from the one the model was looking at, because the average
+    moved — so it is not the claim that was made. A number pins the claim to
+    the moment it was written, which is the entire point of pre-registering it.
+
+    Evaluated in `triggers.py` by comparison against figures computed in
+    Python. Nothing here is parsed out of prose.
+    """
+
+    field: TriggerField
+    op: TriggerOp
+    value: float = Field(
+        description="The level, as a number read off the indicators supplied."
+    )
+
+    def holds(self, reading: float | None) -> bool | None:
+        """Whether the condition is met. `None` when the figure is unavailable.
+
+        Unknown is not False. A symbol whose bars could not supply the field
+        has not failed the trigger, it simply cannot be scored, and reporting
+        that as "did not fire" would quietly turn missing data into evidence.
+        """
+        if reading is None:
+            return None
+        if self.op is TriggerOp.ABOVE:
+            return reading > self.value
+        if self.op is TriggerOp.BELOW:
+            return reading < self.value
+        if self.op is TriggerOp.AT_OR_ABOVE:
+            return reading >= self.value
+        return reading <= self.value
+
+    def render(self) -> str:
+        return f"{self.field.value} {self.op.value.replace('_', ' ')} {self.value:,.4g}"
+
+
 class SymbolAssessment(BaseModel):
     """One symbol the model considered, whether or not it proposed anything."""
 
@@ -329,6 +401,18 @@ class SymbolAssessment(BaseModel):
         description=(
             "For WATCH: the specific, observable condition that would turn this "
             "into a proposal. Name a level or a figure, not a feeling."
+        ),
+    )
+
+    # Optional with a default, like every field added after the fact: the audit
+    # log is append-only and never migrated, so a record written before this
+    # existed must still parse.
+    trigger: AssessmentTrigger | None = Field(
+        default=None,
+        description=(
+            "For WATCH: the same condition as `waiting_for`, expressed as a "
+            "field, a comparison and a number, so it can be checked later "
+            "without anyone re-reading the sentence."
         ),
     )
 
@@ -371,6 +455,36 @@ class PositionPlan(BaseModel):
     )
 
 
+class IndicatorSnapshot(BaseModel):
+    """The daily figures for one symbol on one cycle, as numbers.
+
+    Every field is optional because every one of them can genuinely be
+    unavailable — `sma_200` needs 200 bars, `volume_ratio` needs an average to
+    divide by — and `None` has to survive the round trip. A stored zero would
+    be read back as a real figure by whoever looks at this next, which is the
+    same reason `indicators.summarise` prints "unavailable" rather than a
+    number it does not have.
+
+    Field names match `TriggerField` so evaluation is a lookup, not a mapping
+    table somebody has to keep in step.
+    """
+
+    close: float | None = None
+    sma_20: float | None = None
+    sma_200: float | None = None
+    atr_14: float | None = None
+    volume_ratio: float | None = None
+    distance_from_sma_20_atr: float | None = None
+    swing_high: float | None = None
+    swing_low: float | None = None
+    highest_close: float | None = None
+    lowest_close: float | None = None
+
+    def get(self, field: TriggerField) -> float | None:
+        value = getattr(self, field.value, None)
+        return value if isinstance(value, (int, float)) else None
+
+
 class MarketInputs(BaseModel):
     """What the model was actually shown, recorded alongside what it decided.
 
@@ -391,6 +505,19 @@ class MarketInputs(BaseModel):
     # before these existed would throw away the history it exists to preserve.
     intraday: dict[str, str] = Field(default_factory=dict)
     symbols_without_intraday: list[str] = Field(default_factory=list)
+
+    # The same daily figures as `indicators`, as numbers rather than as the
+    # rendered line. Both are kept on purpose and neither replaces the other.
+    #
+    # The rendered line is what a person reads when re-opening an old cycle.
+    # These are what a trigger is checked against and what a chart is drawn
+    # from, and they exist because the alternative — parsing the figures back
+    # out of the prose — produces a value nobody can check. That is the failure
+    # `indicators.py` exists to prevent, arriving from the other direction.
+    #
+    # This cannot be backfilled. A cycle recorded before it shipped has no
+    # numbers, and no amount of later cleverness puts them there.
+    readings: dict[str, IndicatorSnapshot] = Field(default_factory=dict)
 
     calendar_degraded: bool = False
     social_degraded: bool = False

@@ -392,6 +392,42 @@ A backup on the same droplet survives a bad restore, not a dead droplet. Copying
 `backups/daily` off the box is deliberately not automated, because it needs a
 destination and a credential that should not live on the trading box.
 
+**The audit log is snapshotted by the same script, and `cp` is correct there.**
+That inverts the rule above, so it is worth being explicit rather than letting
+someone pattern-match. The `.backup` reasoning is about SQLite specifically: a
+WAL and an shm mean state is spread across three files, so a copy taken between
+two writes is internally inconsistent. An audit file is append-only UTF-8 text,
+one JSON object per line. There is no second file, nothing lands half-written
+except a truncated final line, and `audit._parse` already tolerates exactly
+that. `gzip -t` is the counterpart to the integrity check — a backup nobody has
+opened is still a hope.
+
+Three properties there:
+
+- **The audit block runs BEFORE the journal's preconditions.** Everything in
+  the journal half can `die` — `sqlite3` missing, the database gone — and a
+  `die` above the audit snapshot would mean the record of every rejection
+  quietly stopped being backed up because of a problem with a different file.
+  The audit half needs only `gzip`, so it must not be able to fail for the
+  other half's reasons. The non-zero exit for a failed audit file sits at the
+  very end for the mirror-image reason.
+- **Only files that changed are re-compressed.** A dated file is finished when
+  the UTC day rolls over and never changes again, so after the first pass this
+  touches today's file alone.
+- **Audit snapshots are never pruned, unlike the hourly journal copies.** Those
+  are successive copies of one database and the newest supersedes the rest;
+  these are each a different day, and that day exists nowhere else. Measured at
+  roughly 500 KiB/day uncompressed — well under 100 MB a year gzipped — so
+  keeping everything is cheap, and a retention rule on the only record of a
+  rejection is how that record quietly stops reaching as far back as anyone
+  assumes.
+
+**Disk growth and read speed were both measured and are not problems.** ~180
+MiB/year raw for the audit log; `AuditLog.read()` is ~27 ms for the 24-hour
+news window and ~126 ms across seven days of a 14-day corpus. Neither justifies
+pruning history or moving the log into SQLite — and moving it would reintroduce
+a schema to migrate, which append-only JSONL exists to avoid.
+
 ### The warning about losing the dashboard is shown on the dashboard
 
 That reads backwards and is correct. Tailscale node keys expire — this tailnet
@@ -476,6 +512,189 @@ allowance before the session ends. The X cache is shorter (10 minutes) because
 its binding constraint is a monthly cap on posts retrieved rather than a daily
 request count, and because caching a market-moving post for half an hour would
 defeat the point of fetching it.
+
+### The chat surface reads the news back; it must never fetch it
+
+Asked "what's the latest news", the Chat page's agent answered that it had no
+news feed connected, only a trading bot. That was **true and correctly
+refused** — it declined to fabricate, which is the behaviour this project wants
+— but it was a plumbing gap rather than a limitation: the loop reads three
+feeds every fifteen minutes, and nothing exposed any of them.
+
+Two things were missing and both are fixed:
+
+- The MCP server had twelve tools and not one touched news. `get_recent_news`
+  is now the thirteenth.
+- `get_recent_decisions` read **only today's dated file** and returned `[]`
+  when it did not exist. So the agent's recall of every rejection reset at UTC
+  midnight, was empty every Monday morning, and was empty after any restart,
+  with months of history on disk unread. It goes through `AuditLog.read()` now,
+  which walks dated files and reports what it could not parse.
+
+**The fix is `src/bot/news_history.py`, and the reason it reads rather than
+fetches is a quota, not a preference.** Marketaux's free tier is 100 requests a
+day against a loop that wakes 96 times — the allowance is already spent. A live
+news tool on the chat surface would spend the *loop's* budget, and would fail in
+the worst available direction: the trading cycle reasoning with no headlines, on
+the exact day somebody was asking about the news. The X feed's monthly post cap
+fails the same way. So the store is the source, `MarketInputs` in the audit log
+is the store, and everything in that module is a pure function over an
+`AuditView` with no network in it.
+
+Three properties there are load-bearing:
+
+- **A recording is not a search, and the age has to travel with the item.** A
+  headline first seen six hours ago presented as "the latest news" is the
+  confident partial answer this repository exists to prevent, arriving through
+  the chat surface instead of the model. Every item carries `first_seen`,
+  `last_seen` and an age; the tool description tells the agent to quote them.
+- **No cycles recorded is not "no news".** The `FinnhubCalendar.is_degraded`
+  lesson in a third costume. An empty window means the loop was stopped,
+  restarting, or the market was shut — never that the world was quiet.
+  `has_cycles` is deliberately a separate question from "are the lists empty",
+  the MCP payload names it as `loop_recorded_nothing_in_window`, and the
+  readout says it in a sentence, because a caller handed only empty lists
+  reaches for the wrong reading every time.
+- **Cycles written before `MarketInputs` existed are counted and named.** The
+  audit log is append-only and never migrated, so a window can hold decisions
+  with no `inputs` at all. Those are cycles whose feeds are not on file, which
+  is not the same as cycles that saw nothing.
+
+Items are ordered by when they were **first** seen, not last. A story sitting
+in the 30-minute cache since this morning is not newer than one that broke ten
+minutes ago, and sorting on `last_seen` would claim it was.
+
+The degraded flags are `any` across the window rather than the newest cycle's,
+because the claim being made is that the list is complete over the whole span,
+and one failed fetch anywhere in it makes that false.
+
+**Do not add a live-fetch news tool to make this feel fresher.** If the chat
+surface genuinely needs live news, the prerequisite is a paid tier with its own
+quota, kept separate from the loop's — not a second consumer of the same 100
+requests.
+
+### The query index is derived, and that is what makes open SQL safe
+
+`news_history.py` answers "what has it seen lately" by scanning dated files.
+That is right for a window and wrong for a question: "what did we decide about
+AAPL in March", "which rejection reason fires most often", "how many watches
+named no trigger" all mean walking every file and parsing every line, which the
+chat surface cannot do in a turn.
+
+`src/bot/insight.py` builds a SQLite index so those are one query, and
+`query_history` hands the agent read-only SQL over it.
+
+**Nothing in the trading path reads it and nothing in it is authoritative.**
+The JSONL is the record; `insight.db` is a cache of it that can be deleted at
+any moment and rebuilt with `electrum-bot reindex`. Three things follow, and
+they are the design rather than side effects:
+
+- **The schema can change freely.** `SCHEMA_VERSION` is checked on open and a
+  mismatch drops every table and replays the log. This is how you get an
+  evolvable schema without ever migrating the append-only log — which must
+  never be migrated, because a reader that rejected yesterday's format would
+  throw away the history it exists to preserve.
+- **A bug in the index cannot cost a trade.** The risk gate, the loop and the
+  journal neither read nor write it.
+- **It must never be backed up.** `deploy/backup-journal.sh` covers the journal
+  and the audit log because those are irreplaceable. Restoring a stale derived
+  index over a current one makes queries quietly answer from last week, and the
+  script says so where somebody would add it.
+
+**Open SQL is safe here for reasons that would not hold one directory across.**
+The database is derived, rebuildable, holds no credentials and is read by
+nothing that trades, so the worst a bad query does is return a bad answer. The
+connection is opened `mode=ro`, which is the actual guarantee — SQLite refuses
+the write at the file layer. The statement guard on top of it is the second
+lock, and the token it exists for is `ATTACH`: read-only on *this* database
+says nothing about a second one a query brings along. A progress handler bounds
+runtime so a cartesian join returns an error rather than hanging a chat turn.
+
+**Indexing is incremental, and idempotent so the increment cannot corrupt it.**
+
+- **The offset is taken after the last COMPLETE line, never after the last
+  byte.** The log is appended to by a running process, so its final line can be
+  a partial write. Recording the file size would skip the rest of that line
+  forever once the append completed it, and the record would be silently short
+  a cycle with nothing to say so.
+- **Every row uses a natural primary key with `INSERT OR REPLACE`**, so
+  indexing the same line twice changes nothing. That makes the offset an
+  optimisation rather than a correctness requirement. Correctness that depends
+  on bookkeeping being right is correctness waiting to break.
+- **News is stored as raw per-cycle sightings, not as a deduped table with a
+  running count.** A count incremented during indexing would double on a
+  re-read; the `news` view's `GROUP BY` cannot.
+
+Measured on 14 days of 96-cycle days: cold build 169 ms, a no-op refresh 0.9
+ms, a delta 2.5 ms, queries 1–3 ms. That is why the tools refresh on every call
+instead of depending on a timer somebody has to remember to install.
+
+**`readings.summary` is the rendered line, and is deliberately not parsed back
+into numbers.** `MarketInputs` stores what the loop recorded — `"close 580.12,
+sma20 574.30, atr 6.41"` — so it is indexed as searchable text and no figure is
+extracted from it. Reversing prose into numbers would produce a value nobody
+can check, which is the failure `indicators.py` exists to prevent arriving from
+the other direction. If numeric history is wanted, the fix is to record numbers
+in `MarketInputs`, which only starts paying from the day it ships.
+
+**None of this goes into the prompt.** It is an operator surface, reached
+through the dashboard and through chat. Feeding a queryable track record back
+to the model is the thing `metrics.py` is already kept away from, and a
+counterfactual one — "the trigger fired and we did not act" — is noisier still.
+
+### A watch is graded now, so it has to be written in a checkable form
+
+`waiting_for` is prose — "SPY closing below 641.20, roughly 1 ATR under the
+20-day" — and prose cannot be scored. So a watch was an opinion with no
+consequence and the stance meant nothing.
+
+`SymbolAssessment.trigger` carries the same condition as `field`, `op` and
+`value`; `src/bot/triggers.py` grades it against later cycles. Both halves are
+kept: the sentence is what a person reads, the trigger is what code checks.
+
+**The threshold is a number and never the name of another figure.** "Above the
+20-day" re-checked next week tests a level the model never saw, because the
+average moved. A number pins the claim to the moment it was made, which is the
+entire point of pre-registering one.
+
+**This is the piece that could not be backfilled**, and the same is true of
+`MarketInputs.readings` — the daily figures as numbers rather than as the
+rendered line. A cycle recorded before those shipped has prose about figures
+and no figures, and nothing recovers them later. That is why they went in ahead
+of the index, which is fully retroactive.
+
+**What is measured is plan-following, not profit.** No counterfactual P&L is
+computed and none should be added: "you missed $2,400" assumes the fill, the
+size and the intraday path. What makes a trigger worth scoring is that it was
+written down first.
+
+Four verdicts, and the distinctions are the whole value:
+
+- **`unknown` is not `not_fired`.** The figure named was unavailable every time
+  it was checked. `IndicatorSnapshot` keeps `None` rather than a zero for
+  exactly this reason.
+- **`pending` is not `not_fired` either.** The horizon has not elapsed, so
+  nothing is settled. Precedence matters: an unelapsed window is `pending`
+  whether or not a reading has been seen, or "we have not looked yet" becomes
+  "we looked and found nothing".
+- **`followed_through` is three-valued.** A watch that never fired is not a
+  follow-through failure, and reporting it as one would count a correct wait
+  against the bot.
+- **`can_grade_anything` is separate from an empty list**, the same as
+  `has_cycles` in `news_history`. No graded watches because nothing was
+  recorded and no graded watches because every watch was honoured are opposite
+  findings.
+
+A watch with prose but no trigger and a watch naming nothing at all are counted
+apart, and the counter deliberately **does not** claim to know why a trigger is
+missing: a record predating this feature is indistinguishable from a model that
+skipped the field, so it is named for what can be observed.
+
+**Never put an unescaped `{` in `SYSTEM_PROMPT_TEMPLATE`.** It is rendered with
+`.format(rules_summary=...)`, so an example written as `{field: "close"}` is
+read as a placeholder and raises `KeyError: 'field'` — taking down the model
+call, the smoketest and the loop together. Double the braces. Same shape as the
+`render.STYLES` backslash trap, and `tests/test_strategy.py` guards it.
 
 ### A bare `.gitignore` directory pattern matches at every depth
 
@@ -746,10 +965,17 @@ src/bot/
                         resting orders live here.
   indicators.py         Averages, ATR, volume ratio, swing levels. Pure functions over
                         daily bars. Computed in Python so the model never derives them.
+                        `snapshot()` records them as NUMBERS alongside the rendered
+                        line, which is what a stored trigger is graded against.
+  triggers.py           Grades the watch list: did the named condition fire, and
+                        did anything follow. Plan-following, never counterfactual
+                        P&L. Operator surface only — it must not reach the prompt.
   intraday.py           Five-minute bars: did price CLOSE beyond a level or only wick
                         through it, on what volume, and was it reclaimed. The
                         distinction trend_break turns on.
-  mcp_server.py         MCP tools: check_order, place_order, get_risk_status, ...
+  mcp_server.py         MCP tools: check_order, place_order, get_risk_status,
+                        get_recent_news, get_recent_decisions, query_history,
+                        describe_history, search_news, ...
   models.py             Domain models. Quantities are shares/coin units, never "lots".
   config.py             Typed env + rules loader. Validators reject incoherent limits.
   claude_client.py      Anthropic SDK wrapper (1h prompt cache, structured output).
@@ -762,6 +988,15 @@ src/bot/
   audit.py              Append-only JSONL decision log, and the reader the
                         Decisions page renders. The only record of a REJECTED
                         proposal.
+  news_history.py       What the loop was SHOWN, recalled out of the audit log
+                        and deduped across cycles. Reads rather than fetches,
+                        because the Marketaux quota belongs to the loop. Pure
+                        functions; no network.
+  insight.py            Derived SQLite index over audit/*.jsonl, so the whole
+                        history is queryable rather than only a recent window.
+                        Rebuildable, never authoritative, never backed up, and
+                        read by nothing that trades — which is what makes
+                        handing an agent read-only SQL over it reasonable.
   metrics.py            Win rate, profit factor, expectancy, R, MAE/MFE. Pure functions.
   tailnet.py            Is the Tailscale link still going to be there next week.
                         Warns at ten days, and says "unknown" rather than "fine"
@@ -778,7 +1013,10 @@ deploy/                 VPS provisioning: bootstrap.sh + systemd units. The unit
                         config/ stay root-owned so the service account cannot
                         edit its own limits.
                         backup-journal.sh + mudhorn-backup.timer snapshot the
-                        journal hourly with sqlite3 .backup, never cp.
+                        journal hourly with sqlite3 .backup, never cp — and the
+                        audit log with plain gzip, which IS correct for
+                        append-only text. Audit runs first so a journal problem
+                        cannot stop it.
                         check-tailscale.sh + mudhorn-tailnet.timer watch the key
                         expiry that would otherwise take the dashboard away
                         silently.
@@ -804,11 +1042,12 @@ reference/              Third-party projects we borrow from. See reference/STATU
 ## Running it
 
 ```sh
-.venv/bin/python -m pytest              # full suite (477 tests)
+.venv/bin/python -m pytest              # full suite (568 tests)
 electrum-bot smoketest --mock           # no credentials needed
 electrum-bot smoketest                  # needs Alpaca paper keys
 electrum-bot loop                       # proposes and vets; places nothing
 electrum-bot loop --execute             # places approved orders on PAPER
+electrum-bot reindex                    # rebuild the searchable history from audit/
 electrum-bot-mcp                        # MCP server, usually launched by Claude Code
 electrum-bot-web                        # command centre on http://127.0.0.1:8787
 ```
