@@ -420,6 +420,20 @@ def main() -> int:
             current = store.get(dream_id)
             if current is None:
                 break
+            if current.vault is not Vault.VAULT:
+                # An accept takes the dream off the shelf. Hand it back so the
+                # epoch walk can continue, and record that it happened rather
+                # than quietly re-running.
+                back = powers.hand_back(
+                    dream_id,
+                    reason="Audit harness: returned so the epoch walk continues.",
+                    at=stamp,
+                )
+                steps.append({"handed_back_mid_walk": back.ok, "detail": back.detail})
+                stamp += timedelta(minutes=1)
+                current = store.get(dream_id)
+                if current is None:
+                    break
             held = exchanges_in_epoch(current, store.messages(dream_id))
             if held >= MAX_EXCHANGES_PER_EPOCH:
                 break
