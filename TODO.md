@@ -582,7 +582,46 @@ ended the way it was designed to, never what it earned.
 
 ---
 
-## 5. Clear the resting SPY order — BLOCKED on credentials
+## 5. RESOLVED — the "pending order" IS the stop leg. Do not clear it.
+
+Read off the live Board through the Funnel, 2026-08-10 15:56 UTC. There is
+exactly **one** pending order on the account:
+
+    pending   SPY  buy   21    submitted 10 Aug 13:35 UTC
+    position  SPY  sell  21    filled    10 Aug 13:37:40 UTC
+
+The position is SHORT 21 SPY. A BUY 21 is precisely what closes it, and it was
+submitted at 13:35 **with the bracket**, two minutes before the entry filled.
+It is stop leg `952237ac-d7ec-426e-bb5f-5c6ce7294260`, and it is the only thing
+between the short and an unbounded loss.
+
+**Clearing it would leave a $16,240 short position naked.** That is the whole
+of the operator's third rule gone, on the one live position, to tidy a row.
+
+**Why it looked like junk, which is the real defect:** the deployed renderer
+prints `market` in the Limit column and `n/a` in Needs, because `render.py`
+only ever knew about `limit_price`. So the most important resting order on the
+account displays as an unexplained market order with no level and no distance.
+Fixed on this branch — it reads `820.0000 stop` with the gap computed — and
+worth remembering as the lesson: **a badly rendered safety mechanism gets
+mistaken for debris and asked to be removed.**
+
+Cross-checked against the journal and against arithmetic while the Board was
+open, and all four figures reconcile exactly:
+
+| | dashboard | computed |
+|---|---|---|
+| Unrealised | −$16.08 | `(773.324285 − 774.09) × 21` = −16.08 |
+| At risk | $980.19 | `\|773.324285 − 820\| × 21` = 980.19 |
+| % of equity | 0.98% | 0.98% |
+| Stop | 820.0000 | journal `planned_stop` 820 |
+
+**`cancel_order` still does not exist on the `Broker` protocol**, and that
+remains a real gap — an order this repo places can be abandoned but never
+withdrawn. It is left open deliberately rather than built in a hurry, because
+the first thing anyone would reach for it to do is the thing above.
+
+## 5b. Clear the resting SPY order — SUPERSEDED, kept for the reasoning
 
 *"Pending order on SPY still showing, clear this. we have forced the position."*
 

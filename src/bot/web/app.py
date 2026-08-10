@@ -429,7 +429,7 @@ def build_app(
         return _page("Board", "/", body)
 
     @app.get("/decisions", response_class=HTMLResponse)
-    def decisions(page: int = 1) -> str:
+    def decisions(page: str = "1") -> str:
         """The trail, paged.
 
         The reader's window is deliberately wider than one page. It used to be
@@ -442,11 +442,21 @@ def build_app(
         dated files newest first, so the wider window costs a parse of files
         that are on disk anyway — measured at tens of milliseconds — and buys
         several pages of history behind one read.
+
+        `page` is taken as a STRING and coerced here rather than annotated
+        `int`. FastAPI would answer `?page=abc` with a 422 JSON body, which is
+        the same raw-JSON-at-a-person defect the 404 handler below exists to
+        fix, arriving through a typo in a query string. A page number nobody
+        can parse is page one; `render.decisions` clamps the rest.
         """
+        try:
+            wanted = int(page)
+        except ValueError:
+            wanted = 1
         return _page(
             "Decisions",
             "/decisions",
-            render.decisions(audit.read(limit=DECISION_WINDOW), page=page),
+            render.decisions(audit.read(limit=DECISION_WINDOW), page=wanted),
         )
 
     @app.get("/trades", response_class=HTMLResponse)

@@ -16,7 +16,7 @@ from pathlib import Path
 import structlog
 
 from . import stop_watch
-from .audit import AuditLog
+from .audit import AuditLog, AuditView
 from .broker import AlpacaBroker, Broker, MockBroker
 from .claude_client import ClaudeClient, build_system_prompt
 from .config import Env, LiveTradingRefused, Rules
@@ -41,7 +41,8 @@ from .grants import (
 from .grants import SWITCHED_OFF as grants_switched_off
 from .grants import UNAVAILABLE as grants_unavailable
 from .grants import (
-    resolve_grant_dream_ids,
+    GrantBriefing,
+    brief_grants,
     resolve_granted_symbols,
     resolve_grants,
 )
@@ -60,6 +61,7 @@ from .options import alerts_for_positions
 from .reconcile import apply_journal_state, reconcile, record_fill
 from .risk import RiskGate
 from .session_calendar import SessionCalendar
+from .triggers import CycleReadings
 
 log = structlog.get_logger()
 
@@ -280,13 +282,92 @@ def cmd_loop(
     except Exception as exc:
         log.warning("previous_assessment_recall_failed", error=f"{type(exc).__name__}: {exc}")
 
+    # The symbol set the feeds and the earnings calendar were last built for.
+    # Held across cycles so the calendar is rebuilt when a grant appears or
+    # lapses and on no other cycle — see the rebuild below for why it is a
+    # rebuild rather than an assignment to `.symbols`.
+    feed_symbols: tuple[str, ...] = tuple(sorted(rules.allowed_symbols))
+
     try:
         while True:
+            # One `now` for the whole cycle. The grant resolution, the session
+            # check and the figures recorded against the decision all have to
+            # describe the same instant, or a permission can be live for the
+            # gate and expired on the readout of the same pass.
+            now = datetime.now(UTC)
             account = broker.get_account()
             activity = broker.get_activity()
-            ticks = fetch_market_ticks(broker, rules.allowed_symbols)
-            indicators, no_history = fetch_indicators(broker, rules.allowed_symbols)
-            intraday, no_intraday = fetch_intraday(broker, rules.allowed_symbols)
+
+            # **Resolved BEFORE the feeds, and that ordering is the whole
+            # point.** It used to sit after the model context was built, which
+            # made the permission unusable: the ticks, indicators, intraday
+            # bars and headlines had already been fetched over
+            # `rules.allowed_symbols` alone, so a granted symbol had no quote
+            # and no history, and a proposal in one would have been dropped for
+            # want of a tick before it ever reached the gate that would have
+            # allowed it.
+            #
+            # Fails closed on everything: the feature switched off, a store that
+            # would not open, a database error, more grants live than the cap
+            # allows. All of them come back `{}`, which means the account trades
+            # exactly what `config/rules.yaml` already allows. See `grants.py`.
+            granted_symbols: dict[str, str] = {}
+            granted_dream_ids: dict[str, int] = {}
+            briefing = GrantBriefing()
+            # Every state this can be in gets a word, so the heartbeat never
+            # carries an empty list whose cause a reader has to guess.
+            grant_state = no_store_state
+            grants_degraded = grant_state in GRANTS_DEGRADED_STATES
+            if dreams is not None:
+                resolution = resolve_grants(dreams, rules, now=now)
+                granted_symbols = resolution.symbols
+                grant_state = resolution.state
+                grants_degraded = resolution.degraded
+                if granted_symbols:
+                    # The reasoning behind each grant, for the prompt, and the
+                    # provenance for the journal. A second read, so it is only
+                    # paid for when something was actually granted.
+                    briefing = brief_grants(dreams, resolution, now=now)
+                    granted_dream_ids = briefing.dream_ids
+                    log.info(
+                        "symbol_grants_in_force",
+                        symbols=sorted(granted_symbols),
+                        classes=sorted(set(granted_symbols.values())),
+                    )
+
+            # What the model is shown figures for this cycle: the allowlist plus
+            # whatever an adopted dream currently permits. Sorted so two cycles
+            # with the same permissions produce the same log line.
+            symbols_in_play = sorted(set(rules.allowed_symbols) | set(granted_symbols))
+
+            # **Rebuilt, never mutated.** `FinnhubCalendar` caches the windows
+            # it fetched, and those were filtered against the symbol list it was
+            # constructed with — so assigning to `.symbols` would leave a cache
+            # holding pre-filtered results and produce a feed that looks fixed
+            # and behaves inconsistently, which is worse than the open gap. A
+            # fresh instance starts with a fresh cache, and this runs only on
+            # the cycles where the set actually changed rather than every pass.
+            #
+            # Without it the earnings blackout could never fire for a granted
+            # symbol: the gate's logic was fine and its input was narrowed.
+            if tuple(symbols_in_play) != feed_symbols:
+                log.info(
+                    "feed_symbols_changed",
+                    was=list(feed_symbols),
+                    now=symbols_in_play,
+                    detail=(
+                        "Rebuilding the earnings calendar so the news blackout "
+                        "can see the symbols an adopted dream permits."
+                    ),
+                )
+                calendar = build_calendar_feed(
+                    env, rules, extra_symbols=sorted(granted_symbols)
+                )
+                feed_symbols = tuple(symbols_in_play)
+
+            ticks = fetch_market_ticks(broker, symbols_in_play)
+            indicators, no_history = fetch_indicators(broker, symbols_in_play)
+            intraday, no_intraday = fetch_intraday(broker, symbols_in_play)
             news_windows = calendar.upcoming_windows(lookahead_minutes=60)
 
             # Bring the journal in step before anything is evaluated: this is
@@ -373,7 +454,6 @@ def cmd_loop(
             # Logged rather than passed over in silence, on the same principle
             # as the heartbeat: a cycle that deliberately did nothing has to be
             # distinguishable from one that never ran.
-            now = datetime.now(UTC)
             if rules.loop.skip_model_call_when_all_markets_closed and not (
                 rules.any_class_in_session(now)
             ):
@@ -391,47 +471,7 @@ def cmd_loop(
                 time.sleep(env.decision_interval_seconds)
                 continue
 
-            # What an adopted dream permits right now, resolved once for the
-            # whole cycle so every proposal is gated against the same answer.
-            #
-            # Fails closed on everything: the feature switched off, a store that
-            # would not open, a database error, more grants live than the cap
-            # allows. All of them come back `{}`, which means the account trades
-            # exactly what `config/rules.yaml` already allows. See `grants.py`.
-            #
-            # **Nothing here can currently be proposed**, and that is worth
-            # knowing before wondering why a grant never fires: the system
-            # prompt lists `rules.allowed_symbols`, and the tick and indicator
-            # fetches above run over the same list, so the model is never told a
-            # granted symbol exists and a proposal in one would be dropped for
-            # want of a quote. Widening those is the prompt-side half of this
-            # feature and it lives in `context.py` and `claude_client.py`. The
-            # gate side is wired and inert until then, which is the same shape
-            # as crypto being fully configured while disabled.
-            granted_symbols: dict[str, str] = {}
-            granted_dream_ids: dict[str, int] = {}
-            # Every state this can be in gets a word, so the heartbeat never
-            # carries an empty list whose cause a reader has to guess.
-            grant_state = no_store_state
-            grants_degraded = grant_state in GRANTS_DEGRADED_STATES
-            if dreams is not None:
-                resolution = resolve_grants(dreams, rules, now=now)
-                granted_symbols = resolution.symbols
-                grant_state = resolution.state
-                grants_degraded = resolution.degraded
-                if granted_symbols:
-                    # Provenance for the journal, and a second read, so it is
-                    # only paid for when something was actually granted.
-                    granted_dream_ids = resolve_grant_dream_ids(
-                        dreams, granted_symbols, now=now
-                    )
-                    log.info(
-                        "symbol_grants_in_force",
-                        symbols=sorted(granted_symbols),
-                        classes=sorted(set(granted_symbols.values())),
-                    )
-
-            headlines = news.recent_headlines(rules.allowed_symbols)
+            headlines = news.recent_headlines(symbols_in_play)
             posts = [p.render() for p in social.recent_posts()] if social else []
             social_degraded = bool(social and social.is_degraded)
             context = build_market_context(
@@ -463,6 +503,13 @@ def cmd_loop(
                 # one nothing else here can see, because a half-day looks
                 # exactly like an ordinary session until 13:00 passes.
                 calendar=session_calendar,
+                # The symbols an adopted dream permits, with the chain that
+                # argued for each — verification badge and weakest hop adjacent
+                # to the hops, never separated from them. Empty on every cycle
+                # where nothing is adopted, which renders as no section at all
+                # rather than as an empty heading.
+                grants=briefing,
+                now=now,
             )
             # Catches broadly, and for the same reason `fetch_market_ticks`
             # does. This is a network call to a model that returns free text,
@@ -711,7 +758,7 @@ def cmd_dream(env: Env, rules: Rules) -> int:
     unit surfaces through `systemctl --failed`, and a model call that failed is
     worth noticing rather than logging into the void.
     """
-    from .dreamer import Dreamer
+    from .dreamer import Dreamer, promote_dreams
 
     if not env.anthropic_api_key:
         log.error("dream_no_api_key", detail="ANTHROPIC_API_KEY is not set")
@@ -733,14 +780,52 @@ def cmd_dream(env: Env, rules: Rules) -> int:
     posts = [p.render() for p in social.recent_posts()] if social else []
 
     journal = Journal()
-    dreamer = Dreamer(env, rules, DreamStore(), journal)
+    store = DreamStore()
+    dreamer = Dreamer(env, rules, store, journal)
     result = dreamer.run_once(headlines=headlines, posts=posts)
 
     if result is None:
         # Already logged with its reason inside run_once. Nothing was written:
         # a dream that could not be had is not recorded as one that decided
         # nothing.
+        #
+        # The promotion step is skipped with it, deliberately. It is cheap and
+        # would be harmless, but a failed model call is the one moment to change
+        # nothing: the shelves are exactly as the last successful run left them,
+        # and a run that moved dreams while failing to dream would be the harder
+        # thing to read afterwards.
         return 1
+
+    # **The promotion step, and the reason the vault was ever empty.** The
+    # dreamer writes to the workbench and the conference reads only the vault;
+    # until this ran, nothing joined them, so `confer` completed honestly with
+    # `considered: 0` every single day.
+    #
+    # Here rather than in the decision loop, on purpose. The loop wakes every
+    # fifteen minutes and proposes orders; putting a shelf that widens what may
+    # be traded on that pulse would undo the separation this command exists for.
+    #
+    # Graded against what the LOOP recorded, never against a fresh quote. The
+    # figures in the audit log are the ones a decision was actually made on, and
+    # re-fetching would score a condition against a number nobody saw — the same
+    # reason `news_history` reads the record instead of the feed. It also means
+    # this command needs no broker and no market data credentials.
+    readings: list[CycleReadings] = []
+    try:
+        readings = recent_readings(AuditLog().read(limit=CONDITION_CYCLES, days=14))
+    except Exception as exc:
+        # Costs the grading and nothing else. A prophecy that could not be
+        # checked stays a prophecy, which is the direction to fail in: the
+        # alternative would be promoting on an incomplete reading of the record.
+        log.warning(
+            "dream_condition_readings_unavailable",
+            error=f"{type(exc).__name__}: {exc}",
+            detail="Prophecy conditions are not graded this run; nothing is promoted on them.",
+        )
+
+    promotion = promote_dreams(
+        store, readings=readings, caps=rules.dreaming.vault_caps()
+    )
 
     dream = result.dream
     log.info(
@@ -761,8 +846,57 @@ def cmd_dream(env: Env, rules: Rules) -> int:
         posts_seen=len(posts),
         social_degraded=bool(social and social.is_degraded),
         cost_usd=round(result.usage.estimated_cost_usd, 4) if result.usage else None,
+        # On the same line as the dream itself, so one log entry answers both
+        # "did it think" and "did anything move". A zero here beside a healthy
+        # dream is the signature of the bug this closed, and it should be
+        # visible rather than inferred from an empty vault days later.
+        dreams_considered=promotion.considered,
+        dreams_promoted=[f"{i} -> {v}" for i, v in promotion.promoted],
+        conditions_fulfilled=promotion.conditions_fulfilled,
+        cycles_available_to_grade=promotion.cycles_available,
     )
     return 0
+
+
+# How many recorded cycles a prophecy's conditions are checked against.
+#
+# 400 is a little over four days of a 96-cycle day. A prophecy runs for up to a
+# year, so this is not the horizon — `grade_conditions` deliberately has none,
+# and the shelf's own TTL retires a claim that never fires. It is a bound on how
+# much of the audit log one run reads, and the command runs daily, so a
+# condition that fires is seen on the run after it fires.
+CONDITION_CYCLES = 400
+
+
+def recent_readings(view: AuditView) -> list[CycleReadings]:
+    """The numeric figures the loop recorded, oldest first, for grading.
+
+    Pure. `AuditLog.read` hands back the newest decision first and
+    `grade_conditions` needs ascending order, because the FIRST cycle meeting a
+    condition is the one recorded as having fired it — reversed, every condition
+    would be stamped with the most recent moment it held rather than the moment
+    it became true.
+
+    A cycle with no `readings` is skipped rather than contributed as an empty
+    one. `MarketInputs.readings` could not be backfilled: cycles recorded before
+    it shipped carry prose about figures and no figures, and counting those as
+    cycles-with-no-reading would make `can_grade_anything` claim evidence that
+    is not there.
+    """
+    out: list[CycleReadings] = []
+    for entry in view.decisions:
+        inputs = entry.decision.inputs
+        if inputs is None or not inputs.readings:
+            continue
+        out.append(
+            CycleReadings(
+                at=entry.timestamp,
+                readings=dict(inputs.readings),
+                proposed_symbols={p.symbol for p in entry.decision.proposals},
+            )
+        )
+    out.sort(key=lambda c: c.at)
+    return out
 
 
 # The `kind` an expiry mark carries in a dream's transcript.

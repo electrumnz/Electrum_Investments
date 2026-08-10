@@ -168,9 +168,9 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from pathlib import Path
@@ -179,6 +179,7 @@ from typing import Any
 import structlog
 
 from .models import AssessmentTrigger, TriggerField, TriggerOp
+from .triggers import CycleReadings
 
 log = structlog.get_logger(__name__)
 
@@ -335,6 +336,19 @@ class DreamCondition:
     op: TriggerOp | None = None
     value: float | None = None
 
+    # WHOSE figure the triple names. A `field`/`op`/`value` says "close below
+    # 641.20" and says nothing about what closed, so without this the triple is
+    # a comparison with no subject and `grade_conditions` has no reading to
+    # fetch. Deliberately its own field rather than assumed to be one of
+    # `Dream.symbols`: a dream about aluminium may hinge on a power utility it
+    # would never trade, and picking one of the dream's own symbols to check
+    # against would be grading a claim nobody made.
+    #
+    # Empty is legal and means "not gradeable by code", exactly as a missing
+    # triple does. It is counted rather than rejected, for the reason the
+    # docstring gives about prose-only conditions.
+    symbol: str = ""
+
     fulfilled: bool = False
     fulfilled_at: datetime | None = None
     # Why it was marked, or what was seen. Prose, trimmed like all prose here.
@@ -344,6 +358,52 @@ class DreamCondition:
     def is_checkable(self) -> bool:
         """Whether code could ever settle this, as opposed to a person."""
         return self.field is not None and self.op is not None and self.value is not None
+
+    @property
+    def is_gradeable(self) -> bool:
+        """Whether `grade_conditions` can actually settle it against readings.
+
+        Strictly narrower than `is_checkable`, and the two are kept apart on
+        purpose. `is_checkable` asks whether a NUMBER was pre-registered, which
+        is what the promotion rule turns on — a conclusion with a number in it
+        is a different kind of claim from a conclusion without one, whether or
+        not this repository happens to be able to check it today. This asks
+        whether the figure can be looked up, which additionally needs a symbol.
+
+        Collapsing them would silently change what promotes to the prophecy
+        shelf, so a condition naming a real threshold on a symbol the loop does
+        not follow would stop counting as a prophecy at all.
+        """
+        return self.is_checkable and bool(self.symbol.strip())
+
+    @property
+    def key(self) -> tuple[str, str, str, float | None, str]:
+        """What makes this the SAME claim across two steps of one dream.
+
+        A dreamer restating its conditions on a later step must not wipe the
+        grading already done on them — a fulfilled condition that came back
+        unfulfilled would leave a dream stuck below the vault forever, checked
+        and re-checked against readings that already fired. So a rewritten step
+        carries the old verdict forward for any condition that is still the same
+        claim.
+
+        The checkable triple plus the symbol IS the claim, and the prose is only
+        the claim's description, so a reworded sentence over an unchanged
+        threshold keeps its grade. Change the number and it is a NEW claim that
+        starts ungraded, which is the honest half: a threshold moved after the
+        fact is exactly what pre-registering one exists to prevent.
+        """
+        if self.is_checkable:
+            return (
+                self.symbol.strip().upper(),
+                str(self.field),
+                str(self.op),
+                self.value,
+                "",
+            )
+        # Prose-only conditions have no claim to key on, so they key on the
+        # sentence. Two different sentences are two different conditions.
+        return ("", "", "", None, self.text.strip())
 
     def as_trigger(self) -> AssessmentTrigger | None:
         """The structured half as the type `triggers.py` already grades.
@@ -363,6 +423,7 @@ class DreamCondition:
             "field": str(self.field) if self.field else None,
             "op": str(self.op) if self.op else None,
             "value": self.value,
+            "symbol": self.symbol,
             "fulfilled": self.fulfilled,
             "fulfilled_at": self.fulfilled_at.isoformat() if self.fulfilled_at else None,
             "note": self.note,
@@ -395,6 +456,13 @@ class DreamCondition:
             field=trigger_field,
             op=trigger_op,
             value=value,
+            # Absent on every condition written before the field existed, which
+            # reads as "not gradeable" rather than as an error. The store is
+            # JSON in a TEXT column, so this needed no migration — but a row
+            # from before it shipped genuinely does not say which symbol its
+            # threshold belongs to, and inventing one would be the confident
+            # wrong figure this repository refuses.
+            symbol=str(row.get("symbol", "") or ""),
             fulfilled=bool(row.get("fulfilled", False)),
             fulfilled_at=_dt(fulfilled_at) if fulfilled_at else None,
             note=str(row.get("note", "")),
@@ -717,6 +785,275 @@ class Dream:
         self.updated_at = at or datetime.now(UTC)
 
 
+# ------------------------------------------------------------------- promotion
+
+
+# The two shelves a dream can be promoted OFF. Adoption is the trading agent
+# taking something and is not a promotion; the vault is where promotion ends;
+# and the archive is where retired dreams rest, so pulling one back out on an
+# automatic rule would resurrect ideas somebody deliberately put down.
+PROMOTABLE_FROM = frozenset({Vault.WORKBENCH, Vault.PROPHECY})
+
+
+@dataclass(frozen=True)
+class Promotion:
+    """Where a dream belongs now, and why. Computed, never stored.
+
+    Pure, so the rule can be read and tested on its own, without a database and
+    without the caps, the transcript or the clock that `DreamStore.promote`
+    brings with it. `to` is `None` for "stays where it is", which is the answer
+    for most dreams on most steps and is an ordinary outcome rather than a
+    failure — a dream still being worked on belongs on the workbench.
+    """
+
+    to: Vault | None = None
+    reason: str = ""
+
+    @property
+    def moves(self) -> bool:
+        return self.to is not None
+
+
+def promotion_for(dream: Dream) -> Promotion:
+    """The promotion rule: workbench → prophecy → vault.
+
+    Nothing moved a dream off the workbench before this existed. `is_offerable`
+    was defined and never called, `dreamer.py` never moved anything, and
+    `confer.py` reads only `Vault.VAULT` — so the vault was permanently empty
+    and the conference permanently a no-op. Three real dreams were generated
+    against the live model to find that, because every test built the shelf it
+    was testing by hand.
+
+    The rule, and each clause is a decision rather than plumbing:
+
+    - **A `keep` verdict is necessary and not sufficient.** A dream that reached
+      a conclusion is not automatically worth offering; the trading agent's
+      attention is the scarce thing here and `caps.vault` is 12.
+    - **At least one CHECKABLE condition, or it stays put.** A conclusion with
+      no number pre-registered against it is an opinion, and the prophecy shelf
+      exists precisely to hold claims that can be graded. This is `is_checkable`
+      rather than `is_gradeable` on purpose — see that property.
+    - **All conditions met sends it to the VAULT**, the one shelf the trading
+      agent can see. `all_conditions_met` is False on an empty list, which is
+      the whole reason it and `has_conditions` are separate questions: an
+      absence of conditions must never read as conditions satisfied, or every
+      dream with a conclusion and nothing pre-registered would land in front of
+      the agent claiming to have been proven.
+    - **Otherwise the prophecy shelf**, where the conditions are graded against
+      later readings until they fire.
+
+    Note what is NOT here: any view on whether the idea is any good. Same
+    posture as `is_offerable` — the shelf says who is holding a dream, and
+    nothing in this module has an opinion on whether it should be traded.
+    """
+    if dream.vault not in PROMOTABLE_FROM:
+        return Promotion(
+            reason=(
+                f"In {dream.vault}, which promotion does not move. The vault is "
+                "where this ends, adoption is the trading agent's to make, and "
+                "the archive is deliberate."
+            )
+        )
+
+    if dream.verdict is not DreamVerdict.KEEP:
+        reached = str(dream.verdict) if dream.verdict else "no verdict yet"
+        return Promotion(
+            reason=(
+                f"Stays on the workbench: the verdict is {reached}, and only a "
+                "keep is a dream worth offering."
+            )
+        )
+
+    if not any(c.is_checkable for c in dream.conditions):
+        return Promotion(
+            reason=(
+                "Stays on the workbench: a keep with no checkable condition is "
+                "a conclusion nobody can grade. Pre-register a field, an "
+                "operator and a number before this becomes a prophecy."
+            )
+        )
+
+    if dream.all_conditions_met:
+        return Promotion(
+            to=Vault.VAULT,
+            reason=(
+                f"Every one of its {len(dream.conditions)} condition(s) has "
+                "been met, so it is offered to the trading agent."
+            ),
+        )
+
+    if dream.vault is Vault.PROPHECY:
+        # Already on the right shelf. Returning VAULT here would be refused as
+        # ALREADY_THERE, and worse, a caller that retried would reset
+        # `vault_entered_at` on every pass and nothing would ever age out.
+        return Promotion(
+            reason=(
+                f"Already a prophecy, with {len(dream.unmet_conditions)} of "
+                f"{len(dream.conditions)} condition(s) still unmet."
+            )
+        )
+
+    return Promotion(
+        to=Vault.PROPHECY,
+        reason=(
+            f"A keep with {len(dream.conditions)} pre-registered condition(s), "
+            f"{len(dream.unmet_conditions)} still unmet. Tracked as a prophecy "
+            "until they fire."
+        ),
+    )
+
+
+# ---------------------------------------------------------------- grading them
+
+
+@dataclass(frozen=True)
+class ConditionGrading:
+    """One dream's conditions, checked against readings the loop recorded.
+
+    `conditions` is the WHOLE list in its original order, fulfilled or not, so a
+    caller can write it back without reassembling anything. `newly_fulfilled`
+    names only what this pass settled, because "two conditions are met" and
+    "two conditions were met just now" are different facts and the second is the
+    one worth a log line.
+    """
+
+    dream_id: int
+    conditions: tuple[DreamCondition, ...] = ()
+    newly_fulfilled: tuple[str, ...] = ()
+    # Conditions no reading could ever settle: prose with no triple, or a triple
+    # with no symbol. Counted rather than dropped, the same as
+    # `WatchReport.watches_with_prose_only`, because a prophecy nobody can grade
+    # is the interesting failure and an invisible one looks like patience.
+    ungradeable: int = 0
+    cycles_checked: int = 0
+
+    @property
+    def changed(self) -> bool:
+        return bool(self.newly_fulfilled)
+
+    @property
+    def can_grade_anything(self) -> bool:
+        """Whether this rests on any evidence at all.
+
+        Separate from "did anything fire", the same rule as
+        `WatchReport.can_grade_anything` and `news_history.has_cycles`. No
+        conditions fulfilled because no cycle recorded a figure, and none
+        fulfilled because the thresholds genuinely have not been reached, are
+        opposite findings that produce identical empty tuples.
+        """
+        return self.cycles_checked > 0
+
+
+def grade_conditions(
+    dream: Dream, later: Sequence[CycleReadings]
+) -> ConditionGrading:
+    """Settle a dream's conditions against figures the decision loop recorded.
+
+    The counterpart to `triggers.grade_watch`, and it deliberately reuses that
+    module's `CycleReadings` and `AssessmentTrigger.holds` rather than growing a
+    second comparison. `DreamCondition.as_trigger` exists exactly so there is
+    one comparison in this repository instead of two that can drift.
+
+    **There is no horizon here, and that is the difference from a watch.** A
+    watch expires after five days because the reading behind it is gone by then.
+    A prophecy is a long-horizon claim by construction — that is why its TTL is
+    365 days against the vault's 90 — so the condition stands until it fires or
+    the shelf's own expiry retires it. Adding a horizon would quietly make the
+    prophecy shelf a five-day shelf.
+
+    **A fulfilled condition is never un-fulfilled.** The claim was that the
+    figure would reach a level, not that it would stay there, so a reading that
+    fires it settles it for good. Re-opening one on a later reading would make
+    a prophecy that fired in March unfire in April.
+
+    Pure: no I/O and no clock. `later` should be ascending by time; the first
+    cycle that meets a condition is the one recorded as having fired it.
+    """
+    graded: list[DreamCondition] = []
+    fired: list[str] = []
+    ungradeable = 0
+
+    for condition in dream.conditions:
+        if condition.fulfilled:
+            graded.append(condition)
+            continue
+
+        trigger = condition.as_trigger()
+        if trigger is None or not condition.symbol.strip():
+            ungradeable += 1
+            graded.append(condition)
+            continue
+
+        symbol = condition.symbol.strip().upper()
+        settled: DreamCondition | None = None
+        for cycle in later:
+            reading = cycle.readings.get(symbol)
+            value = reading.get(trigger.field) if reading else None
+            # `holds` answers None for a figure the bars could not supply, and
+            # None is not False: a symbol with no 200-day average has not failed
+            # a test against one. Only an explicit True settles anything.
+            if trigger.holds(value) is not True:
+                continue
+            settled = replace(
+                condition,
+                fulfilled=True,
+                fulfilled_at=cycle.at,
+                note=_trim(
+                    f"{symbol} {trigger.render()} — read "
+                    f"{value:,.4g} at {cycle.at.isoformat(timespec='minutes')}."
+                ),
+            )
+            break
+
+        if settled is None:
+            graded.append(condition)
+        else:
+            graded.append(settled)
+            fired.append(settled.text or symbol)
+
+    return ConditionGrading(
+        dream_id=int(dream.id or 0),
+        conditions=tuple(graded),
+        newly_fulfilled=tuple(fired),
+        ungradeable=ungradeable,
+        cycles_checked=len(later),
+    )
+
+
+def carry_forward_grading(
+    existing: Sequence[DreamCondition], incoming: Sequence[DreamCondition]
+) -> list[DreamCondition]:
+    """Keep what has already been graded when a dream restates its conditions.
+
+    A later dream step may return the whole condition list again, and taking it
+    as written would wipe every `fulfilled` flag already earned. That is not a
+    cosmetic loss: the vault is reached by `all_conditions_met`, so a dream
+    whose grading was reset on every step could never be promoted at all, and it
+    would be re-checked forever against readings that had already fired it.
+
+    Matched on `DreamCondition.key`, so a reworded sentence over an unchanged
+    threshold keeps its verdict and a MOVED threshold does not. That asymmetry
+    is the point: a number changed after the fact is a new claim, and letting it
+    inherit the old claim's fulfilment would be back-dating a prediction.
+    """
+    graded = {c.key: c for c in existing if c.fulfilled}
+    out: list[DreamCondition] = []
+    for condition in incoming:
+        was = graded.get(condition.key)
+        if was is None:
+            out.append(condition)
+            continue
+        out.append(
+            replace(
+                condition,
+                fulfilled=True,
+                fulfilled_at=was.fulfilled_at,
+                note=was.note,
+            )
+        )
+    return out
+
+
 def _as_utc(moment: datetime) -> datetime:
     """The same instant, in UTC. A naive stamp is read as UTC rather than local.
 
@@ -961,6 +1298,13 @@ class MoveRefusal(StrEnum):
     # something that is not in the vault, returning something that was never
     # adopted.
     WRONG_VAULT = "wrong_vault"
+    # `promote` looked at the dream and the rule said it stays where it is. The
+    # commonest answer by far — most dreams on most steps are still being worked
+    # on — and an ordinary outcome rather than a fault, which is why `promote`
+    # reports it through the same collected-refusal shape as everything else
+    # instead of raising or returning None. `MoveResult.detail` carries the
+    # sentence from `promotion_for` saying which clause held it back.
+    NOT_PROMOTABLE = "not_promotable"
 
 
 @dataclass(frozen=True)
@@ -1463,6 +1807,120 @@ class DreamStore:
             )
 
         return self._commit_move(dream, to, at=stamp, reason=reason)
+
+    def promote(
+        self,
+        dream_id: int,
+        *,
+        at: datetime | None = None,
+        caps: VaultCaps | None = None,
+    ) -> MoveResult:
+        """Apply `promotion_for` and move the dream if it says to.
+
+        The one thing that was missing between the dreamer and the vault. The
+        rule itself is pure and lives in `promotion_for`; this is the part that
+        needs a database, the caps and a clock, and it is kept thin so that
+        "what promotes a dream" is answerable by reading one function.
+
+        Goes through `move` with `by=DREAMER` rather than writing the row
+        itself, so promotion inherits every actor rule, the cap check and the
+        `vault_entered_at` reset for free. A promotion is the dreamer shelving
+        its own work; it is emphatically NOT adoption, which is the trading
+        agent taking something and stays its own method.
+
+        **A refusal here is ordinary.** A dream still being worked on, a full
+        prophecy shelf, a dream already where it belongs — all come back as
+        `MoveResult.refused` with the reason, and no caller has to treat any of
+        them as an error. Safe to call on every dream on every step: the rule is
+        a pure function of the dream, so re-running it changes nothing.
+        """
+        dream = self.get(dream_id)
+        if dream is None:
+            return _refused(
+                dream_id, [MoveRefusal.NOT_FOUND], [f"No dream with id {dream_id}."]
+            )
+
+        decision = promotion_for(dream)
+        if decision.to is None:
+            return _refused(
+                dream_id,
+                [MoveRefusal.NOT_PROMOTABLE],
+                [decision.reason],
+                moved_from=dream.vault,
+            )
+        return self.move(
+            dream_id,
+            decision.to,
+            by=DREAMER,
+            reason=decision.reason,
+            at=at,
+            caps=caps,
+        )
+
+    def grade(
+        self,
+        dream_id: int,
+        later: Sequence[CycleReadings],
+        *,
+        at: datetime | None = None,
+    ) -> ConditionGrading:
+        """Check a dream's conditions against recorded readings and store what fired.
+
+        Writes only when something actually changed, so a prophecy nobody's
+        figures have reached costs one read and no write. `updated_at` moves
+        when a condition fires and **`vault_entered_at` never does** — the
+        expiry clock belongs to the shelf, and a condition firing is not the
+        dream entering the prophecy shelf again.
+
+        Failures are swallowed to an ungraded result rather than raised. This
+        runs on a scheduled command beside the model call, and a store error
+        here must cost the grading and not the dream that was just written.
+        """
+        dream = self.get(dream_id)
+        if dream is None:
+            return ConditionGrading(dream_id=dream_id)
+
+        grading = grade_conditions(dream, later)
+        if not grading.changed:
+            return grading
+
+        stamp = _iso_utc(at or datetime.now(UTC))
+        try:
+            with self._connect() as conn:
+                conn.execute(
+                    "UPDATE dreams SET conditions=?, updated_at=? WHERE id=?",
+                    (
+                        json.dumps([c.to_row() for c in grading.conditions]),
+                        stamp,
+                        dream_id,
+                    ),
+                )
+        except sqlite3.Error as exc:
+            log.warning(
+                "dream_condition_grading_not_stored",
+                dream_id=dream_id,
+                error=f"{type(exc).__name__}: {exc}",
+                detail=(
+                    "The conditions that fired were not written back, so this "
+                    "dream will be graded again next run. Nothing was promoted "
+                    "on the strength of a grading that is not on disk."
+                ),
+            )
+            return ConditionGrading(
+                dream_id=dream_id,
+                conditions=tuple(dream.conditions),
+                ungradeable=grading.ungradeable,
+                cycles_checked=grading.cycles_checked,
+            )
+
+        log.info(
+            "dream_conditions_fulfilled",
+            dream_id=dream_id,
+            fired=list(grading.newly_fulfilled),
+            still_unmet=sum(1 for c in grading.conditions if not c.fulfilled),
+            cycles_checked=grading.cycles_checked,
+        )
+        return grading
 
     def has_room(
         self, vault: Vault, *, now: datetime, caps: VaultCaps | None = None

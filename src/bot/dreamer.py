@@ -71,10 +71,22 @@ from pydantic import BaseModel, Field
 
 from .claude_client import CallUsage, ClaudeClient
 from .config import CLAUDE_PRICING_USD_PER_MTOK, ClaudeTier, Env, Rules
-from .dreaming import Dream, DreamStage, DreamStore, DreamVerdict, Hop
+from .dreaming import (
+    Dream,
+    DreamCondition,
+    DreamStage,
+    DreamStore,
+    DreamVerdict,
+    Hop,
+    Vault,
+    VaultCaps,
+    carry_forward_grading,
+)
 from .journal import Journal
+from .models import TriggerField, TriggerOp
 from .models import class_key_for_symbol as _class_key_for_symbol
 from .souls import GROGU, load_soul
+from .triggers import CycleReadings
 
 log = structlog.get_logger(__name__)
 
@@ -207,6 +219,52 @@ class DreamHop(BaseModel):
     )
 
 
+class StepCondition(BaseModel):
+    """One pre-registered condition, as the model returns it.
+
+    The same split `SymbolAssessment` and `AssessmentTrigger` already use, and
+    it is here for the same reason: `text` is the sentence a person reads and
+    the triple is what code grades. A condition with prose and no triple is
+    legal and is counted as ungradeable rather than rejected — refusing it would
+    push the dreamer towards inventing a number to satisfy a validator, and an
+    invented threshold is worse than an honest sentence saying it cannot be
+    checked yet.
+    """
+
+    text: str = Field(
+        description="The condition in one sentence, as a person would read it."
+    )
+    symbol: str = Field(
+        default="",
+        description=(
+            "Which LISTED symbol the figure below belongs to. Without it the "
+            "triple is a comparison with no subject and nothing can look the "
+            "reading up. It does not have to be a symbol in `symbols` — a "
+            "condition may hinge on something you would never trade."
+        ),
+    )
+    field: TriggerField | None = Field(
+        default=None,
+        description=(
+            "The figure to check: close, sma_20, sma_200, atr_14, "
+            "volume_ratio, distance_from_sma_20_atr, swing_high, swing_low, "
+            "highest_close, lowest_close. Null when this condition is one only "
+            "a person can settle."
+        ),
+    )
+    op: TriggerOp | None = Field(
+        default=None, description="above, below, at_or_above or at_or_below."
+    )
+    value: float | None = Field(
+        default=None,
+        description=(
+            "The threshold, as a NUMBER and never the name of another figure. "
+            "'Above the 20-day' re-checked next month tests a level nobody ever "
+            "saw, because the average moved."
+        ),
+    )
+
+
 class DreamStep(BaseModel):
     """What one run produces.
 
@@ -257,12 +315,26 @@ class DreamStep(BaseModel):
     symbols: list[str] = Field(
         default_factory=list,
         description=(
-            "Tradeable tickers this dream claims, if any. You MAY name symbols "
-            "that are not on the watch list, as long as they belong to an "
-            "instrument class the prompt says is ENABLED. Anything in a blocked "
-            "class is dropped before storage. Leave empty unless the dream is "
-            "genuinely about something the bot could trade — this is the only "
-            "field here that can ever become a permission."
+            "LISTED tickers this chain reaches, if any, that the broker could "
+            "actually route — a US equity or ETF, or a crypto pair like "
+            "BTC/USD, in an instrument class the prompt marks ENABLED. You MAY "
+            "name symbols that are not on the watch list; that is the point of "
+            "you. You may NOT name a private company, a co-operative, a foreign "
+            "unlisted producer or a bare commodity, because none of those has a "
+            "quote. If the thing your chain is really about is not listed, name "
+            "the listed instrument whose fortunes it moves and put the hop that "
+            "gets you there in `chain`. If there is no such instrument, leave "
+            "this EMPTY — an empty list is a good answer and a weak proxy is "
+            "not. This is the only field here that can become a permission."
+        ),
+    )
+    conditions: list[StepCondition] = Field(
+        default_factory=list,
+        description=(
+            "What would have to be TRUE before this dream is worth offering to "
+            "the trading agent. Required for a keep verdict: a keep with no "
+            "checkable condition stays on the workbench and reaches nobody. "
+            "Each needs a sentence and, where you can, the checkable triple."
         ),
     )
     verdict: DreamVerdict | None = Field(
@@ -331,6 +403,72 @@ Where you may look:
   become a permission, so leave it empty unless the dream really is about
   something the bot could hold.
 
+## symbols: what you may reason about, and what you may NAME
+
+These are two different questions and conflating them is the commonest way to
+get this wrong.
+
+**Your SUBJECT is unrestricted.** Cicada broods, cooling water at a French
+reactor, a sesame co-operative in Indonesia, a privately-held smelter, a
+shipping lane. None of that has to be listed anywhere. It goes in `instruments`
+as free text, and that is exactly where second-order thinking starts.
+
+**A `symbols` entry must be an instrument the broker can actually route.** It
+needs a live quote at Alpaca and it must sit in a class the fence above marks
+ENABLED. A private supplier, a foreign co-operative, a bare commodity with no
+fund behind it and an index with no tradeable vehicle are all things you may
+reason about at length and none of them may appear here.
+
+So when the thing your chain is about is not listed — which is the normal case
+for a good dream — your job is the bridge:
+
+    the unlisted thing you are reasoning about
+      → the LISTED instrument whose fortunes it moves
+      → that ticker in `symbols`
+
+The customer that depends on the supplier. The ETF that holds the sector. The
+listed competitor that gains when the marginal producer stumbles.
+
+**That bridge is a claim, so write it as a HOP like any other.** It is the hop
+most likely to be wrong and the one nobody checks, because it arrives looking
+like bookkeeping rather than an argument: "this matters to that company" needs
+the same evidence as every other link, and if it is a large part of that
+company's revenue, say so and mark the hop unchecked if you were not shown it.
+A ticker that appears in `symbols` with no hop explaining how the chain reaches
+it is an unexplained leap, and it will be read as one.
+
+**If no listed instrument exists, leave `symbols` empty.** That is a good
+answer and a common one. Do NOT reach for a loose proxy to fill the field: a
+weak proxy is worse than nothing, because an empty list reads as "this is not
+tradeable" and a bad ticker reads as a trade. A dream about reactor cooling
+water with no symbol is still a dream worth having.
+
+## conditions: what would have to be true first
+
+A verdict of `keep` says the chain holds. It does not say the moment has come,
+and those are different claims. `conditions` is what would have to happen
+before this is worth putting in front of the trading agent.
+
+- **A keep with no checkable condition goes nowhere.** It stays on the
+  workbench, and reaches nobody, because a conclusion nobody can grade is an
+  opinion. If you want a dream to travel, pre-register something.
+- Each condition needs `text` — the sentence, with the reasoning in it — and,
+  wherever the claim allows, `symbol`, `field`, `op` and `value`.
+- **`value` is a NUMBER, never the name of another figure.** "Above the 20-day"
+  re-checked next month tests a level nobody ever saw, because the average
+  moved in the meantime. Read the level off the figures and write it down. That
+  is what pins the claim to the moment you made it.
+- `symbol` says whose figure it is. It may be something you would never trade —
+  a condition about the marginal producer is fine even when the symbol you
+  claim is its customer.
+- A condition only a person could settle is legal: write the sentence and leave
+  the triple null. It is counted honestly as ungradeable rather than pretended
+  to be checkable. What is NOT acceptable is inventing a number so the field
+  looks filled.
+
+You do not mark your own conditions fulfilled. Code checks them against the
+figures the decision loop recorded, and moves the dream when they fire.
+
 You are shown what the bot watches, recent headlines and posts, and which
 positions recently opened or closed. You are NOT shown profit or loss, and you
 must not ask for it or reason about it. Forty trades is noise; a dreamer that
@@ -369,6 +507,22 @@ def render_class_fence(rules: Rules) -> list[str]:
                 f"  {name} — BLOCKED. Do not name a symbol here and do not build "
                 "a chain that only pays off through one."
             )
+    out.append("")
+    # Stated with the fence rather than left to the system prompt, because this
+    # is the half that decides whether a named symbol survives storage at all.
+    # `scope_symbols` drops anything outside an enabled class, and it derives
+    # the class from `Rules.true_class_key` and the same shape rule the broker
+    # routes on — so a dream naming a private supplier or a bare commodity loses
+    # the symbol silently from the model's point of view.
+    out.append(
+        "A `symbols` entry must be something the broker can route inside an "
+        "ENABLED class above: a listed US ticker or ETF, or a crypto pair such "
+        "as BTC/USD. Anything else — a private company, a co-operative, an "
+        "unlisted foreign producer, a commodity with no fund — is dropped "
+        "before storage. Reason about those freely and name them in "
+        "`instruments`; bridge to a listed instrument in a hop if one exists, "
+        "and leave `symbols` empty if none does."
+    )
     out.append("")
     return out
 
@@ -432,13 +586,157 @@ def build_prompt(
                 out.append(f"      hop {i} ({mark}): {hop.claim}")
             if dream.weakest_hop:
                 out.append(f"      weakest: {dream.weakest_hop}")
+            # The symbols and conditions already on the dream, so an advancing
+            # step edits what is there instead of writing over it blind. A model
+            # shown neither restates both from scratch every time, and a
+            # restated condition is a condition whose grading has to be carried
+            # forward by hand — see `carry_forward_grading`.
+            if dream.symbols:
+                out.append(f"      symbols claimed: {', '.join(dream.symbols)}")
+            for condition in dream.conditions:
+                mark = "MET" if condition.fulfilled else "not yet"
+                trigger = condition.as_trigger()
+                shape = (
+                    f" [{condition.symbol} {trigger.render()}]"
+                    if trigger is not None and condition.symbol
+                    else " [no checkable form]"
+                )
+                out.append(f"      condition ({mark}): {condition.text}{shape}")
         out.append("")
 
     out.append(
         "Produce one step. Advance one of the dreams above if any is worth "
         "advancing, otherwise start a new one."
     )
+    # Asked for explicitly at call time, not only in the output schema's field
+    # descriptions. Three real dreams generated against the live model came
+    # back with `symbols: []` and no conditions at all — nothing was filtered,
+    # the fields were simply never filled — which left the vault permanently
+    # empty and the whole permission path inert.
+    out.append("")
+    out.append(
+        "Two fields decide whether this dream ever reaches anybody, so answer "
+        "them deliberately:"
+    )
+    out.append(
+        "  - `symbols`: the LISTED instrument this chain reaches, inside an "
+        "enabled class. If what you are reasoning about is not listed, bridge "
+        "to one that is and write that bridge as a hop. If there is no honest "
+        "bridge, leave it empty — that is a respectable answer and much better "
+        "than a proxy you would not trade."
+    )
+    out.append(
+        "  - `conditions`: what would have to be true before this is worth "
+        "offering. A keep verdict with no checkable condition never leaves the "
+        "workbench. Give each a sentence, and a symbol/field/op/value wherever "
+        "the claim can carry one. The value is a number you read off the "
+        "figures, never the name of another figure."
+    )
     return "\n".join(out)
+
+
+@dataclass(frozen=True)
+class PromotionRun:
+    """What one pass of `promote_dreams` graded and moved.
+
+    Counts rather than prose, and every one of them says something a zero could
+    not. `considered` separates "nothing was promotable" from "nothing was
+    looked at", which is the `has_cycles` rule again: an empty `promoted` after
+    a run that examined nine dreams and an empty one after a run that examined
+    none are opposite findings.
+    """
+
+    considered: int = 0
+    conditions_fulfilled: int = 0
+    # (dream_id, vault it landed on)
+    promoted: tuple[tuple[int, str], ...] = ()
+    # (dream_id, why it stayed). Includes the ordinary "still being worked on",
+    # which is most of them.
+    held: tuple[tuple[int, str], ...] = ()
+    cycles_available: int = 0
+
+    @property
+    def moved(self) -> int:
+        return len(self.promoted)
+
+
+def promote_dreams(
+    store: DreamStore,
+    *,
+    readings: Sequence[CycleReadings] = (),
+    at: datetime | None = None,
+    caps: VaultCaps | None = None,
+) -> PromotionRun:
+    """Grade every prophecy, then promote whatever the rule says has earned it.
+
+    **This is the step that was missing**, and it is why the vault was
+    permanently empty and `confer` permanently a no-op: `Dream.is_offerable`
+    existed and was never called, nothing moved a dream off the workbench, and
+    the conference reads only `Vault.VAULT`.
+
+    Driven by `electrum-bot dream`, immediately after a step is written, and
+    **never by the decision loop.** The loop wakes every fifteen minutes and
+    proposes orders; a shelf that moved on that pulse would put the dreamer's
+    output on the same clock as the thing that trades, which is precisely the
+    separation `dreamer.py` exists to keep. Once a day is far slower than a
+    price moves, which is the right speed for deciding whether a second-order
+    hypothesis is worth putting in front of the trading agent.
+
+    Grading runs BEFORE promotion, deliberately: a condition that fires on this
+    pass should move the dream on this pass. The other order would hold every
+    prophecy back by a full day for no reason.
+
+    Nothing here raises. A refusal — a full shelf, a dream still being worked
+    on — is an ordinary answer and is recorded in `held`.
+    """
+    stamp = at or datetime.now(UTC)
+    fulfilled = 0
+    promoted: list[tuple[int, str]] = []
+    held: list[tuple[int, str]] = []
+
+    # The two shelves promotion moves off. Read separately rather than through
+    # one query so the order is stable: prophecies first, so a condition firing
+    # today puts its dream in front of the trading agent before a brand-new keep
+    # can take the last slot on the vault.
+    candidates: list[Dream] = [
+        *store.in_vault(Vault.PROPHECY),
+        *store.in_vault(Vault.WORKBENCH),
+    ]
+
+    for dream in candidates:
+        dream_id = int(dream.id or 0)
+        if not dream_id:
+            continue
+        if readings and dream.conditions:
+            grading = store.grade(dream_id, readings, at=stamp)
+            fulfilled += len(grading.newly_fulfilled)
+
+        result = store.promote(dream_id, at=stamp, caps=caps)
+        if result.ok and result.moved_to is not None:
+            promoted.append((dream_id, str(result.moved_to)))
+        else:
+            held.append(
+                (dream_id, result.detail or ", ".join(str(r) for r in result.refusals))
+            )
+
+    run = PromotionRun(
+        considered=len(candidates),
+        conditions_fulfilled=fulfilled,
+        promoted=tuple(promoted),
+        held=tuple(held),
+        cycles_available=len(readings),
+    )
+    log.info(
+        "dream_promotion",
+        considered=run.considered,
+        promoted=[f"{i} -> {v}" for i, v in run.promoted],
+        conditions_fulfilled=run.conditions_fulfilled,
+        # Named for the same reason `calendar_degraded` is: with no recorded
+        # cycles nothing can fire, and that is a fact about the audit log rather
+        # than about the prophecies. A zero here explains an unchanging shelf.
+        cycles_available=run.cycles_available,
+    )
+    return run
 
 
 @dataclass
@@ -683,6 +981,28 @@ class Dreamer:
             dream.trigger = step.trigger
         if step.instruments:
             dream.instruments = step.instruments
+
+        if step.conditions:
+            # **Carried forward rather than taken as written.** An advancing
+            # step may restate the whole condition list, and a condition that
+            # came back unfulfilled after grading had already fired it would
+            # leave the dream stuck below the vault forever — `all_conditions_met`
+            # is what promotes it, so a grading that resets on every step is a
+            # promotion that can never happen. Matched on the claim, so a
+            # reworded sentence keeps its verdict and a moved threshold does not.
+            dream.conditions = carry_forward_grading(
+                dream.conditions,
+                [
+                    DreamCondition(
+                        text=c.text,
+                        symbol=c.symbol.strip().upper(),
+                        field=c.field,
+                        op=c.op,
+                        value=c.value,
+                    )
+                    for c in step.conditions
+                ],
+            )
 
         scope = scope_symbols(step.symbols, self._rules)
         if scope.kept:

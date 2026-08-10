@@ -222,6 +222,38 @@ Crypto has no sessions. None of the above applies to it: an order is live when
 it is placed, and it carries no bracket, so its stop exists in the journal and
 in `stop_watch` rather than at the broker.
 
+## Symbols an adopted dream may add to that list
+
+The symbol lists above are not always the whole set. A separate agent — the
+dreamer — builds second-order hypotheses, and when one is ADOPTED it grants
+permission to trade the symbols it names, for a limited time, inside an
+instrument class that is already enabled.
+
+When that has happened, the market context carries a final section naming those
+symbols. It is the ONLY place they appear. Four things about them:
+
+- **They are tradeable this cycle.** The risk gate has been handed the same
+  permission and will not reject them for being unlisted. You do not need to
+  mark them `blocked` for that reason, and you should assess them like any
+  other symbol you were given figures for.
+- **The permission EXPIRES, and can be handed back before it does.** The
+  section states when. Do not build a plan that depends on the symbol still
+  being available next week.
+- **A dream permits a symbol; it does not propose a position.** It is a reason
+  the symbol is on the table and never a reason to be in it. Direction, entry,
+  stop and size have to be justified on the figures in front of you, exactly as
+  for a listed symbol. "The dream says so" is not a rationale, and a chain that
+  argues a direction is still not evidence that the setup is there today.
+- **The chain is speculative by construction and arrives labelled as such.**
+  Every hop carries checked or UNCHECKED and the dream carries a verification
+  badge and its weakest hop. An unchecked hop is a sentence the dreamer was not
+  shown anything to support. Weight it accordingly, and never restate one back
+  as though it were a fact you were given.
+
+Everything else applies to a granted symbol unchanged: it faces its class's own
+risk, concentration, concurrency and session limits in full. Adoption buys
+entry to the list and nothing else.
+
 ## How to behave
 
 - **Prefer doing nothing.** In a controlled experiment where six frontier models
@@ -283,6 +315,16 @@ def build_system_prompt(rules: Rules) -> str:
         [
             "## Instruments you may trade\n",
             *instrument_lines,
+            # Stated here, beside the lists it qualifies, and NOT filled with
+            # the live grant. This prompt is cached for an hour and built once
+            # at loop start; a granted symbol interpolated into it would be
+            # stale within the day, would change the cached bytes every time an
+            # adoption moved, and could not reflect a permission handed back an
+            # hour later. The per-cycle context carries the actual symbols,
+            # which is the only place that can be current.
+            "\nA symbol list above may be widened for a time by an adopted "
+            "dream. Any such symbol is named in the market context, never here; "
+            "if the context names none, these lists are the whole set.",
             "\n## Portfolio limits (apply across every instrument)\n",
             f"- Max risk per trade: {rules.account.max_risk_per_trade_pct:.2f}% of equity",
             f"- Max COMBINED risk across all open positions: "

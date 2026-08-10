@@ -442,3 +442,16 @@ def test_the_session_probe_carries_nothing_about_the_account(guarded):
 
     for leak in ("equity", "Equity", "SPY", "100,000", "position"):
         assert leak not in body
+
+
+def test_a_junk_page_number_gets_the_trail_rather_than_a_422(unguarded):
+    """`?page=abc` annotated `int` answers a raw 422 JSON body.
+
+    That is the same defect the 404 handler exists to fix — a machine-readable
+    error shown to a person — arriving through a typo in a query string. A page
+    number nobody can parse is page one.
+    """
+    for junk in ("abc", "", "1.5", "-4", "99999"):
+        r = unguarded.get(f"/decisions?page={junk}", headers={"accept": "text/html"})
+        assert r.status_code == 200, junk
+        assert "Decisions" in r.text

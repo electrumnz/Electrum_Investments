@@ -112,6 +112,14 @@ class NewsRecall:
     malformed_lines: int = 0
     unreadable_files: list[str] = field(default_factory=list)
 
+    #: The newest cycle in the window that recorded at least one X post.
+    #:
+    #: Positive evidence that a read worked. Its ABSENCE is not evidence that
+    #: one failed: the loop records a successful-but-empty fetch and no feed at
+    #: all identically, so a watched account that said nothing looks the same as
+    #: a feed that was never built. Anything reporting this has to say so.
+    social_last_seen_at: datetime | None = None
+
     @property
     def has_cycles(self) -> bool:
         """Whether the loop recorded any feeds at all inside the window.

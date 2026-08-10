@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Protocol
 
@@ -43,7 +44,9 @@ class StaticCalendar:
         return [w for w in self._windows if now <= w.timestamp <= cutoff]
 
 
-def build_calendar_feed(env: Env, rules: Rules) -> CalendarFeed:
+def build_calendar_feed(
+    env: Env, rules: Rules, *, extra_symbols: Sequence[str] = ()
+) -> CalendarFeed:
     """Finnhub's earnings calendar when a key is present, otherwise nothing.
 
     Unlike headlines this one feeds a risk rule: with no calendar,
@@ -61,6 +64,17 @@ def build_calendar_feed(env: Env, rules: Rules) -> CalendarFeed:
     `DreamingRules.vault_caps` gives: this module defines the calendar
     PROTOCOL, and every consumer of the protocol should not have to load an
     HTTP adapter it may never call.
+
+    **`extra_symbols` is how a granted symbol gets an earnings blackout.** The
+    feed was built once with `rules.allowed_symbols`, so a symbol an adopted
+    dream permits was never in the set windows were fetched for and
+    `RiskGate._news_blackout` could not fire for it — the rule's logic was fine
+    and its input was narrowed. It is a constructor argument rather than
+    something a caller assigns to `.symbols` afterwards because the feed caches
+    windows it has already filtered against its symbol list: mutating the
+    attribute leaves that cache in place, which looks fixed and behaves
+    inconsistently, and that is worse than the open gap. Callers rebuild the
+    feed when the set changes.
     """
     from .finnhub import FinnhubCalendar
 
@@ -75,5 +89,6 @@ def build_calendar_feed(env: Env, rules: Rules) -> CalendarFeed:
         )
         return EmptyCalendar()
     return FinnhubCalendar(
-        api_key=env.finnhub_api_key, symbols=list(rules.allowed_symbols)
+        api_key=env.finnhub_api_key,
+        symbols=sorted(set(rules.allowed_symbols) | {s for s in extra_symbols if s}),
     )

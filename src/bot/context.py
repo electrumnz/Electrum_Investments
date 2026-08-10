@@ -8,6 +8,8 @@ import structlog
 
 from .broker import Broker
 from .config import InstrumentRules
+from .dreaming import Verification
+from .grants import GrantBriefing
 from .indicators import Indicators, compute
 from .indicators import render as render_indicators
 from .intraday import IntradayView
@@ -49,6 +51,10 @@ def build_market_context(
     instruments: dict[str, InstrumentRules] | None = None,
     broker_clock: BrokerClock | None = None,
     calendar: SessionCalendar | None = None,
+    # What an adopted dream permits beyond `allowed_symbols`, with the chain
+    # that argued for it. Optional and absent on every deployment that does not
+    # use dreams; see `render_grants` for why it is rendered last.
+    grants: GrantBriefing | None = None,
     now: datetime | None = None,
 ) -> str:
     """Render a stable, parseable text blob. Goes AFTER the cached system prompt."""
@@ -319,7 +325,112 @@ def build_market_context(
                 f"affects: {', '.join(sorted(w.affected_symbols))}"
             )
 
+    if grants is not None and grants.has_grants:
+        lines.append("")
+        lines.extend(render_grants(grants, now=now))
+
     return "\n".join(lines)
+
+
+def render_grants(grants: GrantBriefing, *, now: datetime) -> list[str]:
+    """Symbols an adopted dream permits, and the chain that argued for each.
+
+    **Placed last, and that is deliberate.** Everything above is a measurement;
+    this is the one block in the document that is speculative by construction,
+    and a model that reads it first anchors on a story before it has seen a
+    figure. The order says which is which.
+
+    Three properties are load-bearing and none is decoration:
+
+    - **The chain never appears without its badge.** `Verification` and
+      `weakest_hop` are rendered adjacent to the hops they qualify and must not
+      be separated from them. An unqualified causal chain in a prompt reads as
+      established fact, and the entire reason `Hop.checked` exists is that some
+      of those sentences were invented. An UNVERIFIED chain says so on the line
+      above the first hop.
+    - **The expiry travels with the symbol.** A permission rendered without an
+      end reads as permanent, and this one is not.
+    - **It says plainly that a dream permits and does not propose.** The symbol
+      is available; direction, entry, stop and size are still the agent's to
+      justify on its own evidence. A dream is a reason a symbol is on the table,
+      never a reason to be in it.
+    """
+    out = ["## Symbols an adopted dream permits (speculative — read the caveats)"]
+    out.append(
+        "These are tradeable this cycle ONLY because an adopted dream permits "
+        "them. They are not in config/rules.yaml, the permission EXPIRES, and "
+        "it can be handed back at any time."
+    )
+    out.append(
+        "A dream permits a symbol. It does NOT propose a position. Direction, "
+        "entry, stop and size are yours to justify on the evidence above — the "
+        "figures, the session, the spread — exactly as for any listed symbol. "
+        "The risk gate applies this symbol's own instrument-class limits in "
+        "full; adoption buys entry to the allowlist and nothing else."
+    )
+    out.append("")
+
+    for symbol, class_key in sorted(grants.symbols.items()):
+        dream_id = grants.dream_ids.get(symbol)
+        expiry = grants.expires_at.get(dream_id) if dream_id is not None else None
+        if expiry is None:
+            # Never rendered as an absent limit. A permission whose end cannot
+            # be read is the state to be MORE careful about, not less.
+            when = "expiry unknown — treat this permission as ending at any moment"
+        else:
+            days = (expiry - now).total_seconds() / 86_400
+            when = (
+                f"permission ends {expiry.isoformat(timespec='minutes')} "
+                f"({days:.1f} days)"
+            )
+        out.append(f"- {symbol} ({class_key}) — {when}")
+
+    if not grants.chains_available:
+        out.append("")
+        out.append(
+            "The reasoning behind these grants could not be read this cycle, so "
+            "no chain is shown. That is a missing record, NOT an absence of "
+            "speculation: judge the symbols on the figures above and nothing else."
+        )
+        return out
+
+    for dream in grants.dreams:
+        out.append("")
+        # The badge sits on the heading line, so no arrangement of this block
+        # can put a hop on screen without the qualification that governs it.
+        out.append(
+            f"### Dream {dream.id}: {dream.title} "
+            f"[{str(dream.verification).upper()}]"
+        )
+        if dream.verification is not Verification.SOURCED:
+            unchecked = len(dream.unverified_hops)
+            out.append(
+                f"  {unchecked} of {len(dream.chain)} hop(s) below are "
+                "UNCHECKED — the dreamer was not shown anything establishing "
+                "them. Treat those sentences as assertions, not facts."
+            )
+        out.append(f"  spark: {dream.seed}")
+        for i, hop in enumerate(dream.chain, 1):
+            mark = "checked" if hop.checked else "UNCHECKED"
+            source = f" [{hop.source}]" if hop.checked and hop.source else ""
+            out.append(f"  hop {i} ({mark}): {hop.claim}{source}")
+        # Named right under the chain rather than at the end of the block: a
+        # reader with time for one sentence should be given the one that could
+        # kill the whole thing.
+        if dream.weakest_hop:
+            out.append(f"  WEAKEST HOP: {dream.weakest_hop}")
+        else:
+            out.append(
+                "  WEAKEST HOP: not named by the dreamer, which is itself a "
+                "reason for more caution rather than less."
+            )
+        if dream.conditions:
+            met = dream.conditions_met
+            out.append(
+                f"  conditions pre-registered: {met} of "
+                f"{len(dream.conditions)} met"
+            )
+    return out
 
 
 def fetch_market_ticks(broker: Broker, symbols: list[str]) -> dict[str, Tick]:

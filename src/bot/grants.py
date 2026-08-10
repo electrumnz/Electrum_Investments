@@ -89,7 +89,7 @@ from typing import Protocol
 import structlog
 
 from .config import Rules
-from .dreaming import Adoption
+from .dreaming import Adoption, Dream
 
 log = structlog.get_logger(__name__)
 
@@ -151,6 +151,118 @@ class AdoptionSource(Protocol):
     """The provenance half. Separate because the two questions are separate."""
 
     def adoptions(self, dream_id: int | None = None) -> list[Adoption]: ...
+
+
+class BriefingSource(Protocol):
+    """What `brief_grants` needs: the adoption rows and the dreams behind them."""
+
+    def adoptions(self, dream_id: int | None = None) -> list[Adoption]: ...
+
+    def get(self, dream_id: int) -> Dream | None: ...
+
+
+@dataclass(frozen=True)
+class GrantBriefing:
+    """What the MODEL is told about symbols an adopted dream permits.
+
+    A third question, kept apart from the other two for the same reason they are
+    kept apart from each other. `resolve_grants` answers what may be traded and
+    is the only one the gate sees; `resolve_grant_dream_ids` answers which dream
+    a trade should be journalled against; this answers what the reasoner needs
+    read to it, which is prose and is worth nothing to either of the others.
+
+    **The permission never depends on the narrative.** `symbols` is copied from
+    the resolution the gate was handed, so the two cannot disagree, and every
+    failure below leaves the symbols standing and drops only the chain. A
+    granted symbol the model is told about without its reasoning is a smaller
+    loss than a symbol silently missing from the gate's mapping.
+    """
+
+    symbols: dict[str, str] = field(default_factory=dict)
+    # symbol -> the dream that permits it. Absent for a symbol two live
+    # adoptions both claim; see `resolve_grant_dream_ids`.
+    dream_ids: dict[str, int] = field(default_factory=dict)
+    # The adopted dreams themselves, at most `caps.adopted` of them. The FULL
+    # chain reaches the prompt for these and for nothing else, which is the
+    # operator's decision and is what bounds the volume.
+    dreams: tuple[Dream, ...] = ()
+    # dream id -> when its permission lapses. Rendered beside the symbol,
+    # because "you may trade this" without "until" is a permission that reads as
+    # permanent.
+    expires_at: dict[int, datetime] = field(default_factory=dict)
+
+    @property
+    def has_grants(self) -> bool:
+        return bool(self.symbols)
+
+    @property
+    def chains_available(self) -> bool:
+        """Whether any reasoning could be read back for these symbols.
+
+        Separate from `has_grants`, and the distinction is the usual one: a
+        grant whose dream could not be loaded and a grant whose dream has an
+        empty chain both render without a chain, and only the first is a
+        degradation. The renderer says which.
+        """
+        return bool(self.dreams)
+
+
+def brief_grants(
+    store: BriefingSource, resolution: GrantResolution, *, now: datetime
+) -> GrantBriefing:
+    """Attach the reasoning behind each granted symbol, for the prompt.
+
+    Called once per cycle, only when something is actually granted, so an
+    ordinary cycle pays nothing for it.
+
+    **Failing here costs the chain and never the permission.** The symbols are
+    taken from `resolution`, which the gate has already been handed, so a store
+    error leaves the model told which symbols it may trade and not why. That is
+    the right direction: the alternative — dropping a symbol from the prompt
+    because its dream would not load — would leave the gate permitting something
+    the model was never told about, which is the inert state this whole feature
+    exists to leave behind.
+    """
+    if not resolution.symbols:
+        return GrantBriefing()
+
+    symbols = dict(resolution.symbols)
+    try:
+        dream_ids = resolve_grant_dream_ids(store, symbols, now=now)
+        expires: dict[int, datetime] = {}
+        for adoption in store.adoptions():
+            if not adoption.is_live(now) or adoption.expires_at is None:
+                continue
+            # The soonest expiry wins where a dream somehow carries two live
+            # adoptions. Understating how long a permission lasts is the safe
+            # direction; overstating it invites the model to plan around a
+            # window that has already shut.
+            held = expires.get(adoption.dream_id)
+            if held is None or adoption.expires_at < held:
+                expires[adoption.dream_id] = adoption.expires_at
+
+        dreams: list[Dream] = []
+        for dream_id in sorted(set(dream_ids.values())):
+            dream = store.get(dream_id)
+            if dream is not None:
+                dreams.append(dream)
+    except Exception as exc:
+        log.warning(
+            "grant_briefing_unavailable",
+            error=f"{type(exc).__name__}: {exc}",
+            detail=(
+                "The granted symbols still stand — the gate has them — but the "
+                "model is told no reasoning and no expiry for them this cycle."
+            ),
+        )
+        return GrantBriefing(symbols=symbols)
+
+    return GrantBriefing(
+        symbols=symbols,
+        dream_ids=dream_ids,
+        dreams=tuple(dreams),
+        expires_at=expires,
+    )
 
 
 def resolve_grants(

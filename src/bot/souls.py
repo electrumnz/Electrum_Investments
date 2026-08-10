@@ -35,10 +35,22 @@ log = structlog.get_logger(__name__)
 # never depend on a file outside their own tmp_path.
 DEFAULT_SOULS_DIR = Path(__file__).resolve().parents[2] / "souls"
 
-# The two that exist. Named as constants so a typo at a call site is an
+# The three that exist. Named as constants so a typo at a call site is an
 # AttributeError here rather than a silently voiceless agent there.
 YODA = "yoda"
 GROGU = "grogu"
+ARMORER = "armorer"
+
+# The set a request body is checked against before it reaches `load_soul`, which
+# builds a path from the name. One list, here, rather than a literal repeated at
+# every call site: a soul added to `souls/` and forgotten here is a character
+# nobody can select, and a name NOT in this set reaching a path join is a
+# traversal.
+#
+# An unknown name falls back to `YODA` at the call site rather than raising. The
+# worst case of getting it wrong is the wrong voice; refusing the question
+# outright would be the larger failure. See `bot.web.app.chat`.
+KNOWN_SOULS = frozenset({YODA, GROGU, ARMORER})
 
 
 @dataclass(frozen=True)

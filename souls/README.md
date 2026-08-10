@@ -3,12 +3,13 @@
 A soul is the character an agent speaks in. One file per agent, plain Markdown,
 loaded at runtime by `src/bot/souls.py` and prepended to that agent's prompt.
 
-Two exist:
+Three exist:
 
 | File | Agent | Surface | Character |
 | --- | --- | --- | --- |
 | `yoda.md` | The one that answers about the account | `/chat` | Ancient, patient, sparing. Has watched people lose everything by being certain. |
 | `grogu.md` | The one that dreams | `/dreaming` | Small, curious, playful. Reaches for connections nobody asked for. |
+| `armorer.md` | The one that argues about the limits | `/settings` | Keeper of the creed. Equips you, and makes you say what it is for first. |
 
 These follow the `SOUL.md` convention Hermes uses, down to the section headings
 (`## Personality`, `## Style`, `## What to avoid`), so they read the way anyone
@@ -64,9 +65,15 @@ Never section wins every time they disagree.
 
 ## What a soul is not
 
-- **Not a permission.** Neither agent gains a tool by being characterful. The
-  chat agent reaches the bot through the MCP server, where `RiskGate.evaluate`
-  runs on every order path, and the dreamer has no order path at all.
+- **Not a permission.** No agent gains a tool by being characterful. The chat
+  agent reaches the bot through the MCP server, where `RiskGate.evaluate` runs
+  on every order path, and the dreamer has no order path at all.
+- **Not a route to a limit.** The Armorer argues about `config/rules.yaml` and
+  cannot write it. That is not enforced by its Never section: `config/` is
+  root-owned on the box so the service account cannot edit its own limits, and
+  what the settings surface produces is a change request in
+  `data/settings_requests.db` that a person applies as root. The soul makes the
+  argument good; the file ownership is what makes it safe.
 - **Not memory.** Hermes holds its own memory; the dreamer's notes live in
   `data/dreams.db`. A soul is static text and is the same on every call.
 - **Not a strategy.** Nothing in here says what to buy. `config/rules.yaml` and
