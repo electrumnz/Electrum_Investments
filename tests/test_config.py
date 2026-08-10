@@ -529,3 +529,33 @@ def test_a_bare_ticker_filed_under_crypto_has_no_establishable_class():
     rules.instruments["crypto"].allowed_symbols = ["ES"]
 
     assert rules.true_class_key("ES") == ""
+
+
+# ------------------------------------------------- the position-actions block
+
+
+def test_the_loop_may_not_act_on_position_plans_by_default():
+    """A `Rules` built with no `position_actions:` block executes nothing.
+
+    Fails closed, like every other switch here. An older deployment or a test
+    fixture that never heard of this feature does not suddenly gain an
+    unattended execution path because a new field landed.
+    """
+    from bot.config import PositionActionRules
+
+    assert PositionActionRules().enabled is False
+
+
+def test_the_shipped_config_leaves_unattended_execution_off():
+    """Unlike `dreaming.allow_symbol_grants`, the model default and the file
+    AGREE here, because nobody has asked for this one to be on.
+
+    The operator asked for the trading agent to be able to action its own
+    position, and that is satisfied by the MCP tools with a person in the
+    conversation. This flag is the other thing: the fifteen-minute loop moving
+    a stop at 3am with nobody watching. Building the record is not the same
+    decision as arming the trigger.
+    """
+    rules = Rules.load(REPO_ROOT / "config" / "rules.yaml")
+
+    assert rules.position_actions.enabled is False

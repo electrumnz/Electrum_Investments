@@ -65,7 +65,13 @@ from ..models import (
 from ..news_history import NewsItem, NewsRecall, Sightings, sightings
 from ..options import ExpiryAlert
 from ..session_calendar import SessionCalendar
-from ..settings_agent import ChangeRequest, LimitFact, Unit, effective_value
+from ..settings_agent import (
+    ChangeRequest,
+    LimitFact,
+    Unit,
+    effective_value,
+    format_value,
+)
 from ..tailnet import TailnetStatus
 from .live import SessionDayView, TickerQuote
 from .seen import SinceLastVisit
@@ -5016,9 +5022,17 @@ def _social_card(state: FeedState, *, window_hours: float) -> str:
 
 
 def _forge_option(fact: LimitFact, rules: Rules) -> str:
+    """One limit in the picker, quoted in the notation the FILE uses.
+
+    `1.0` rather than `1`, because that is what the line says and what the diff
+    will show. A picker that rendered a prettier number would leave the operator
+    comparing two spellings of the same value and wondering which is real.
+    """
     value, source = effective_value(rules, fact.key)
-    shown = "unset" if value is None else (str(value) if isinstance(value, int) else f"{value:g}")
-    tail = "" if source == "set" else f", {source}"
+    shown = "unset" if value is None else format_value(fact, value)
+    # "unset, unset" is what naming the source unconditionally produced. An
+    # inherited value is worth flagging; an absent one already says so.
+    tail = f", {source}" if source == "portfolio default" else ""
     return (
         f'<option value="{_e(fact.key)}" data-current="{_e(shown)}">'
         f"{_e(fact.label)} — now {_e(shown)}{_e(tail)}</option>"
@@ -5041,9 +5055,13 @@ def _forge_reference(limits: dict[str, LimitFact], rules: Rules) -> str:
         shown = (
             "(a list)"
             if fact.unit is Unit.LIST
-            else ("unset" if value is None else f"{value:g}" if isinstance(value, float) else str(value))
+            else ("unset" if value is None else format_value(fact, value))
         )
-        note = "" if source == "set" else f' <span class="muted">({_e(source)})</span>'
+        note = (
+            f' <span class="muted">({_e(source)})</span>'
+            if source == "portfolio default"
+            else ""
+        )
         rows.append(
             '<details class="step"><summary>'
             f"{_e(fact.label)} — <code>{_e(fact.key)}</code> = {_e(shown)}{note}"

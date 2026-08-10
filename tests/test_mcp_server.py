@@ -990,3 +990,202 @@ def test_adopt_dream_still_takes_the_dreams_own_claim(wired_session):
 
     assert result["ok"] is True, result
     assert result["symbols_in_force"] == {"MP": "us_equity"}
+
+
+# ------------------------------------- the agent's control of its own position
+
+
+def _seed_the_live_position(session: Any) -> None:
+    """Journal row 1 plus its resting stop leg, on the live position's numbers.
+
+    SHORT 21 SPY at 773.324285 with a stop at 820, and the pending BUY 21 that
+    IS that stop leg. See TODO.md CURRENT STATE — and item 5, which is the
+    record of what happens when a safety mechanism renders badly enough to look
+    like debris.
+    """
+    from bot.models import Direction, Position, Trade, WorkingOrder
+
+    session.journal.record_entry(
+        Trade(
+            symbol="SPY",
+            direction=Direction.SELL,
+            strategy="manual",
+            qty=21,
+            entry_time=INSIDE_SESSION,
+            entry_price=773.324285,
+            planned_stop=820.0,
+            planned_target=None,
+            rationale="Placed by hand as an operator test of the order path.",
+        )
+    )
+    session.broker.set_price("SPY", bid=774.08, ask=774.10)
+    session.broker._positions["SPY"] = Position(
+        symbol="SPY",
+        direction=Direction.SELL,
+        qty=21,
+        entry_price=773.324285,
+        opened_at=INSIDE_SESSION,
+        current_price=774.09,
+    )
+    session.broker.set_open_orders(
+        [
+            WorkingOrder(
+                order_id="952237ac-d7ec-426e-bb5f-5c6ce7294260",
+                symbol="SPY",
+                direction=Direction.BUY,
+                qty=21,
+                stop_price=820.0,
+                order_type="stop",
+                broker_status="held",
+            )
+        ]
+    )
+
+
+def test_tighten_stop_moves_the_leg_and_stores_the_reason(wired_session):
+    """The attended path the operator asked for: the agent's own position, its
+    own decision, and the reason on file afterwards."""
+    _seed_the_live_position(wired_session)
+
+    result = mcp_server.tighten_stop(
+        symbol="spy",
+        new_stop_price=800.0,
+        reason="Two sessions without a lower high; taking the room back.",
+    )
+
+    assert result["ok"] is True, result
+    assert result["reached_broker"] is True
+    assert result["risk_before_usd"] == 980.19
+    assert result["risk_after_usd"] == 560.19
+    assert result["risk_reduced_usd"] == 420.0
+
+    # The leg at the broker actually moved, under a NEW id — Alpaca replaces a
+    # leg rather than editing one.
+    legs = [o for o in wired_session.broker.get_open_orders() if o.is_stop]
+    assert [o.stop_price for o in legs] == [800.0]
+    assert legs[0].order_id == result["broker_order_id"]
+
+    # And the record reads back through the tool that exists to read it.
+    readback = mcp_server.get_position_actions(symbol="SPY")
+    assert readback["recorded_moves"] == 1
+    assert "lower high" in readback["actions"][0]["reason"]
+    assert readback["unexplained_moves"] == []
+
+
+def test_tighten_stop_refuses_a_widen_and_leaves_the_position_alone(wired_session):
+    """**The refusal this whole surface exists for.**
+
+    `RiskGate.evaluate` never sees a position move, so nothing else in the
+    system would catch this. Checked on three surfaces: the refusal, the leg
+    still at its original trigger under its original id, and the journal
+    untouched.
+    """
+    _seed_the_live_position(wired_session)
+
+    result = mcp_server.tighten_stop(
+        symbol="SPY",
+        new_stop_price=850.0,
+        reason="Give it room through the CPI print.",
+    )
+
+    assert result["ok"] is False
+    assert any("REFUSED" in r for r in result["reasons"])
+    assert "will not change the answer" in result["note"]
+
+    legs = wired_session.broker.get_open_orders()
+    assert [(o.order_id, o.stop_price) for o in legs] == [
+        ("952237ac-d7ec-426e-bb5f-5c6ce7294260", 820.0)
+    ]
+    assert wired_session.journal.position_actions() == []
+    assert wired_session.journal.open_trade_for("SPY").effective_stop == 820.0
+
+
+@pytest.mark.parametrize("blank", ["", "   "])
+def test_both_reasoned_tools_refuse_a_blank_reason(wired_session, blank):
+    """The reason is the point. A blank one would be an explained move that
+    explains nothing — and it would silence the unexplained-move report."""
+    _seed_the_live_position(wired_session)
+
+    tightened = mcp_server.tighten_stop(
+        symbol="SPY", new_stop_price=800.0, reason=blank
+    )
+    assert tightened["ok"] is False
+    assert any("reason is required" in r for r in tightened["reasons"])
+
+    closed = mcp_server.close_position_with_reason(symbol="SPY", reason=blank)
+    assert closed["ok"] is False
+
+    assert wired_session.journal.position_actions() == []
+    assert wired_session.broker.get_open_orders()[0].stop_price == 820.0
+    assert wired_session.broker.get_account().open_positions != []
+
+
+def test_close_position_with_reason_records_why(wired_session):
+    """`record_exit` stores a price, a time and a realised figure, so afterwards
+    a stop-hit and a deliberate close look identical. This is the part nothing
+    else can reconstruct."""
+    _seed_the_live_position(wired_session)
+
+    result = mcp_server.close_position_with_reason(
+        symbol="SPY", reason="Thesis is done; the gap filled this morning."
+    )
+
+    assert result["ok"] is True, result
+    assert wired_session.broker.get_account().open_positions == []
+
+    actions = wired_session.journal.position_actions()
+    assert len(actions) == 1
+    assert actions[0].action.value == "close"
+    assert "gap filled" in actions[0].reason
+
+
+def test_the_unreasoned_close_still_works_and_says_it_recorded_nothing(wired_session):
+    """Closing must never be harder than opening — a tool that made getting out
+    conditional on writing a sentence would be the stand-down mistake again. So
+    it stays, and it is honest about the gap it leaves."""
+    _seed_the_live_position(wired_session)
+
+    result = mcp_server.close_position("SPY")
+
+    assert result["closed"] is True
+    assert result["reason_recorded"] is False
+    assert "close_position_with_reason" in result["note"]
+    assert wired_session.journal.position_actions() == []
+
+
+def test_get_position_actions_reports_a_move_nobody_recorded(wired_session):
+    """A stop pulled in through Alpaca's web UI shows nowhere else at all. A
+    record that only listed the moves it captured would hide its own
+    failures."""
+    from bot.models import Direction as _Direction
+    from bot.models import WorkingOrder
+
+    _seed_the_live_position(wired_session)
+    wired_session.broker.set_open_orders(
+        [
+            WorkingOrder(
+                order_id="moved-by-hand",
+                symbol="SPY",
+                direction=_Direction.BUY,
+                qty=21,
+                stop_price=805.0,
+                order_type="stop",
+            )
+        ]
+    )
+
+    readback = mcp_server.get_position_actions()
+
+    assert readback["recorded_moves"] == 0
+    assert len(readback["unexplained_moves"]) == 1
+    assert "no recorded action" in readback["unexplained_moves"][0]
+    assert readback["broker_orders_readable"] is True
+
+
+def test_get_position_actions_says_the_loop_is_not_armed(wired_session):
+    """So an agent describing its own powers describes them correctly: it has
+    the two tools, and the unattended loop does not."""
+    readback = mcp_server.get_position_actions()
+
+    assert readback["loop_may_act_unattended"] is False
+    assert "acts on none of them" in readback["loop_execution_note"]

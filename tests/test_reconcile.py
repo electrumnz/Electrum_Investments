@@ -20,7 +20,11 @@ from bot.models import (
     ExecutionMode,
     OrderProposal,
     OrderResult,
+    Position,
+    PositionAction,
+    PositionActionRecord,
     Trade,
+    WorkingOrder,
 )
 from bot.reconcile import apply_journal_state, reconcile, record_fill
 
@@ -387,3 +391,139 @@ def test_a_dream_id_does_not_survive_a_refused_order(journal):
         is None
     )
     assert journal.open_trades() == []
+
+
+# -------------------------------------- the stop in force, and what moved it
+
+
+def test_a_tightened_stop_is_what_the_caps_count_and_the_model_is_shown(journal, broker):
+    """`apply_journal_state` reads the stop IN FORCE, not the sizing stop.
+
+    Two things fall out of that and both matter. The 2% cap is a statement
+    about what the stops would cost if they filled, so a stop pulled in costs
+    less and should free room. And the level handed to the model on the
+    position it manages has to be the one it just moved to — showing it the
+    level it moved away from would make its own action invisible to it on the
+    next cycle.
+    """
+    trade_id = journal.record_entry(
+        Trade(
+            symbol="SPY",
+            direction=Direction.SELL,
+            qty=21,
+            entry_time=NOW,
+            entry_price=773.324285,
+            planned_stop=820.0,
+            rationale="The live position: short 21 SPY with a stop at 820.",
+            execution_mode=ExecutionMode.PAPER,
+        )
+    )
+
+    before = apply_journal_state(broker.get_account(), journal)
+    assert round(before.open_risk_usd, 2) == 980.19
+    assert before.planned_stop_by_symbol["SPY"] == 820.0
+
+    journal.record_stop_move(
+        PositionActionRecord(
+            trade_id=trade_id,
+            symbol="SPY",
+            action=PositionAction.TIGHTEN_STOP,
+            actor="trader",
+            at=NOW + timedelta(hours=1),
+            reason="Two sessions without a lower high.",
+            before_stop=820.0,
+            after_stop=800.0,
+            reached_broker=True,
+        )
+    )
+
+    after = apply_journal_state(broker.get_account(), journal)
+    assert round(after.open_risk_usd, 2) == 560.19
+    assert after.open_risk_by_symbol["SPY"] == pytest.approx(560.19, abs=0.01)
+    assert after.planned_stop_by_symbol["SPY"] == 800.0
+
+    # The SIZING stop is untouched, so R keeps meaning what it meant at entry.
+    assert journal.open_trade_for("SPY").planned_stop == 820.0
+
+
+def test_reconcile_reports_a_stop_that_moved_with_no_reason_on_file(
+    journal, broker, rules
+):
+    """The inverse tag, and the half that makes the record honest.
+
+    A stop pulled in through Alpaca's web UI appears nowhere else in this
+    repository: the journal still says 820 and the Board would render 820 with
+    nothing to say the broker disagrees.
+    """
+    journal.record_entry(
+        Trade(
+            symbol="SPY",
+            direction=Direction.SELL,
+            qty=21,
+            entry_time=NOW,
+            entry_price=773.324285,
+            planned_stop=820.0,
+            rationale="Short with a stop somebody then moved by hand.",
+        )
+    )
+    broker._positions["SPY"] = Position(
+        symbol="SPY",
+        direction=Direction.SELL,
+        qty=21,
+        entry_price=773.324285,
+        opened_at=NOW,
+        current_price=774.09,
+    )
+    broker.set_open_orders(
+        [
+            WorkingOrder(
+                order_id="leg-1",
+                symbol="SPY",
+                direction=Direction.BUY,
+                qty=21,
+                stop_price=805.0,          # not what the journal says
+                order_type="stop",
+            )
+        ]
+    )
+
+    result = reconcile(journal, broker, rules, now=NOW)
+
+    assert [m.kind for m in result.unexplained.moves] == ["stop"]
+    assert result.unexplained.moves[0].journal_value == 820.0
+    assert result.unexplained.moves[0].broker_value == 805.0
+    assert result.unexplained.can_check
+
+
+def test_reconcile_says_it_could_not_check_rather_than_reporting_nothing(
+    journal, broker, rules
+):
+    """`get_open_orders` catches its own failures and returns `[]`, so an
+    outage renders as an account with nothing resting — and therefore nothing
+    wrong. The degraded flag has to travel with the reading or the empty result
+    reads as a clean one."""
+    journal.record_entry(
+        Trade(
+            symbol="SPY",
+            direction=Direction.SELL,
+            qty=21,
+            entry_time=NOW,
+            entry_price=773.324285,
+            planned_stop=820.0,
+            rationale="Short, with the order feed down.",
+        )
+    )
+    broker._positions["SPY"] = Position(
+        symbol="SPY",
+        direction=Direction.SELL,
+        qty=21,
+        entry_price=773.324285,
+        opened_at=NOW,
+    )
+    broker.set_orders_degraded(True)
+
+    result = reconcile(journal, broker, rules, now=NOW)
+
+    assert result.unexplained.moves == []
+    assert result.unexplained.can_check is False
+    assert result.unexplained.anything_to_report

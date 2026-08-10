@@ -235,6 +235,96 @@ def test_a_failed_submit_is_a_rejection_not_an_exception():
     assert "422" in (result.error or "")
 
 
+# ------------------------------------------------------- moving a resting stop
+
+
+def test_replacing_a_stop_sends_only_the_new_trigger():
+    """One server-side replace, carrying nothing but the stop price.
+
+    Cancel-then-place is the same thing with a WINDOW IN IT — between the two
+    calls the position has no stop at all, and a failure on the second leaves it
+    that way. That window is exactly what the operator's third rule exists to
+    close.
+
+    `qty` and `limit_price` are deliberately unset so Alpaca carries them over.
+    A quantity travelling silently with a stop move would be a second,
+    unrecorded change to the position.
+    """
+    class _Replacing:
+        def __init__(self) -> None:
+            self.calls: list[Any] = []
+
+        def replace_order_by_id(self, order_id: Any, order_data: Any) -> Any:
+            self.calls.append((order_id, order_data))
+
+            class _Order:
+                id = "replacement-order-id"
+
+            return _Order()
+
+    trading = _Replacing()
+    result = _alpaca_with(trading).replace_stop("old-leg", stop_price=800.0)
+
+    assert result.accepted
+    # The replacement is a NEW order. Anything holding the old id is holding a
+    # reference to something Alpaca has cancelled.
+    assert result.order_id == "replacement-order-id"
+
+    order_id, request = trading.calls[0]
+    assert order_id == "old-leg"
+    assert request.stop_price == 800.0
+    assert request.qty is None
+    assert request.limit_price is None
+
+
+def test_a_failed_replace_is_a_rejection_and_says_the_old_stop_is_still_there():
+    """The failure direction that matters: the position keeps the stop it had,
+    and the caller must be told so rather than left to assume."""
+    class _Failing:
+        def replace_order_by_id(self, order_id: Any, order_data: Any) -> Any:
+            raise RuntimeError("422 order is not replaceable")
+
+    result = _alpaca_with(_Failing()).replace_stop("old-leg", stop_price=800.0)
+
+    assert not result.accepted
+    assert "422" in (result.error or "")
+    assert "still resting" in (result.error or "")
+
+
+def test_the_mock_replaces_rather_than_edits_in_place():
+    """A double that SUCCEEDS differently from the thing it doubles pins a path
+    production never takes, exactly as one that fails differently does. Alpaca
+    issues a new order id on a replace, so the mock must too."""
+    from bot.broker import MockBroker
+    from bot.models import Direction, WorkingOrder
+
+    broker = MockBroker()
+    broker.set_open_orders(
+        [
+            WorkingOrder(
+                order_id="leg-1",
+                symbol="SPY",
+                direction=Direction.BUY,
+                qty=21,
+                stop_price=820.0,
+                order_type="stop",
+            )
+        ]
+    )
+
+    result = broker.replace_stop("leg-1", stop_price=800.0)
+    assert result.accepted
+
+    resting = broker.get_open_orders()
+    assert len(resting) == 1
+    assert resting[0].stop_price == 800.0
+    assert resting[0].order_id != "leg-1"
+    assert resting[0].order_id == result.order_id
+
+    # And the old id is gone, so a second replace against it cannot succeed.
+    assert not broker.replace_stop("leg-1", stop_price=790.0).accepted
+
+
 # ------------------------------------------------- the half-price quote bug
 
 

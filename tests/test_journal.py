@@ -16,6 +16,8 @@ from bot.models import (
     AssetClass,
     Direction,
     ExecutionMode,
+    PositionAction,
+    PositionActionRecord,
     StandDownState,
     Trade,
     TradeOutcome,
@@ -531,3 +533,190 @@ def test_a_trade_with_no_dream_reads_back_as_none(journal):
     """The ordinary case, and the one that must not become a plausible zero."""
     journal.record_entry(_trade())
     assert journal.open_trades()[0].dream_id is None
+
+
+def test_an_old_journal_is_migrated_to_carry_a_current_stop(tmp_path):
+    """The third time this trap has had to be paid for, on the one file that
+    holds a live position.
+
+    `CREATE TABLE IF NOT EXISTS` does NOTHING to a table that already exists, so
+    adding `current_stop` to `SCHEMA` changes what a fresh journal gets and
+    nothing whatever about `data/journal.db` on the droplet. Every other test
+    here builds its journal from scratch in a `tmp_path` and therefore always
+    gets the new shape, which is precisely why the suite cannot see the gap.
+
+    Without the migration, the first tightened stop would fail on `no such
+    column: current_stop` AFTER the broker had already replaced the leg — a
+    stop moved at Alpaca that the journal has no record of, which is the
+    `14b88c8` shape arriving on the position-management side.
+
+    So this builds the OLD schema by hand, which is the only way to exercise a
+    migration at all, and seeds it with the live position's own row.
+    """
+    import sqlite3
+
+    path = tmp_path / "legacy.db"
+    conn = sqlite3.connect(path)
+    conn.executescript(_schema_without_current_stop())
+    assert "current_stop" not in _columns(conn), (
+        "the hand-built schema still has the column, so this would prove nothing"
+    )
+    conn.execute(
+        "INSERT INTO trades (symbol, asset_class, strategy, direction, qty, "
+        "entry_time, entry_price, planned_stop, planned_target) VALUES "
+        "('SPY','us_equity','manual','sell',21,'2026-08-10T13:37:40+00:00',"
+        "773.324285,820,NULL)"
+    )
+    conn.commit()
+    conn.close()
+
+    journal = Journal(path)          # the migration runs on open
+
+    # The existing row survived, and reads back with its stop unmoved — which
+    # is the truth about every position open before stop moves existed.
+    held = journal.open_trades()
+    assert [t.symbol for t in held] == ["SPY"]
+    assert held[0].current_stop is None
+    assert held[0].effective_stop == 820.0
+    assert round(held[0].current_risk_usd, 2) == 980.19
+
+    # And the column is usable, which is the half the move path depends on.
+    trade_id = held[0].id
+    assert trade_id is not None
+    journal.record_stop_move(
+        PositionActionRecord(
+            trade_id=trade_id,
+            symbol="SPY",
+            action=PositionAction.TIGHTEN_STOP,
+            actor="operator",
+            at=ENTRY + timedelta(hours=3),
+            reason="Pulling the stop in on a journal that predates the column.",
+            before_stop=820.0,
+            after_stop=800.0,
+            reached_broker=True,
+        )
+    )
+    moved = journal.open_trade_for("SPY")
+    assert moved is not None
+    assert moved.current_stop == 800.0
+    assert moved.planned_stop == 820.0          # the sizing figure is untouched
+    assert round(journal.open_risk_usd(), 2) == 560.19
+
+
+def test_the_current_stop_migration_is_idempotent(tmp_path):
+    """It runs on every open, so a database already in the right shape must pay
+    one PRAGMA and stop rather than altering the table again — which SQLite
+    would refuse with `duplicate column name`."""
+    path = tmp_path / "fresh.db"
+    Journal(path)
+    journal = Journal(path)          # second open, already migrated
+
+    journal.record_entry(_trade())
+    assert journal.open_trades()[0].current_stop is None
+
+
+def test_the_action_table_reaches_a_database_that_already_exists(tmp_path):
+    """The counter-case to the trap above, stated so nobody has to work it out.
+
+    `CREATE TABLE IF NOT EXISTS` is a no-op only on a table that ALREADY
+    EXISTS. A brand new table therefore needs no migration — the statement in
+    `SCHEMA` does reach the droplet's database and does create it. This proves
+    it against a journal built from the old shape.
+    """
+    import sqlite3
+
+    path = tmp_path / "legacy.db"
+    conn = sqlite3.connect(path)
+    conn.executescript(_schema_without_current_stop())
+    conn.execute("DROP TABLE IF EXISTS position_actions")
+    conn.commit()
+    conn.close()
+
+    journal = Journal(path)
+    assert journal.position_actions() == []
+
+    journal.record_position_action(
+        PositionActionRecord(
+            symbol="SPY",
+            action=PositionAction.CLOSE,
+            actor="operator",
+            at=ENTRY,
+            reason="Proves the table exists on a database that predates it.",
+            before_qty=21.0,
+            after_qty=0.0,
+        )
+    )
+    assert len(journal.position_actions()) == 1
+
+
+def test_a_stop_move_writes_the_trade_and_the_record_together(journal):
+    """Two writes that must not come apart.
+
+    Updating the trade without the record produces exactly the state this
+    feature exists to expose — a stop that changed with no reason on file — and
+    writing the record without the update leaves the caps counting a stop that
+    is no longer there.
+    """
+    trade_id = journal.record_entry(_trade(stop=575.0))
+
+    journal.record_stop_move(
+        PositionActionRecord(
+            trade_id=trade_id,
+            symbol="SPY",
+            action=PositionAction.TIGHTEN_STOP,
+            actor="trader",
+            at=ENTRY + timedelta(hours=1),
+            reason="Held the level twice; taking the room back.",
+            before_stop=575.0,
+            after_stop=578.0,
+            reached_broker=True,
+        )
+    )
+
+    moved = journal.open_trade_for("SPY")
+    assert moved is not None and moved.current_stop == 578.0
+
+    actions = journal.position_actions(symbol="SPY")
+    assert len(actions) == 1
+    assert actions[0].trade_id == trade_id
+    assert actions[0].reached_broker is True
+
+
+def test_recorded_moves_come_back_newest_first(journal):
+    """The ordering `closed_trades` gets wrong: it sorts ascending before its
+    LIMIT, so a limited call drops the NEWEST rows. A limited read of an action
+    log has to be the most recent moves or it answers a question nobody asked."""
+    for hour, stop in ((1, 578.0), (2, 579.0), (3, 579.5)):
+        journal.record_position_action(
+            PositionActionRecord(
+                symbol="SPY",
+                action=PositionAction.TIGHTEN_STOP,
+                actor="trader",
+                at=ENTRY + timedelta(hours=hour),
+                reason=f"Move number {hour}.",
+                before_stop=575.0,
+                after_stop=stop,
+            )
+        )
+
+    newest = journal.position_actions(limit=2)
+    assert [a.after_stop for a in newest] == [579.5, 579.0]
+
+
+def test_a_blank_reason_is_refused_by_the_journal_as_well_as_the_model(journal):
+    """Two guards on one rule, because the absence of a reason is what the
+    unexplained-move report exists to show. A row with an empty one would
+    silence the report while explaining nothing."""
+    record = PositionActionRecord(
+        symbol="SPY",
+        action=PositionAction.CLOSE,
+        actor="operator",
+        at=ENTRY,
+        reason="real for now",
+    )
+    record.reason = ""                      # assignment skips validation
+    with pytest.raises(ValueError, match="needs a reason"):
+        journal.record_position_action(record)
+    with pytest.raises(ValueError, match="needs a reason"):
+        journal.record_stop_move(record)
+    assert journal.position_actions() == []
