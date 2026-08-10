@@ -246,6 +246,17 @@ section.block>h2{margin-bottom:.75rem}
 .tape .view{flex:1;overflow:hidden;position:relative}
 .tape .track{display:flex;align-items:center;gap:0;height:100%;width:max-content;
   animation:tape-run 90s linear infinite;will-change:transform}
+/* Each copy of the run is its own flex row inside the track, so the translation
+   still lands the second copy exactly where the first began (-50% of two equal
+   children) while the second copy remains a single addressable element. It has
+   to be `flex:none` or the two would shrink to the viewport and the strip would
+   compress rather than scroll.
+   Named `marquee-run` rather than `run`, because `.fx-sweep.run` already uses
+   that word as a STATE — and a bare `.run` layout rule would restyle the sweep
+   element as a side effect. Same shape as the `.pill.seed` collision, and
+   `test_no_stylesheet_rule_collides_with_a_state_badge` catches it. */
+.tape .track > .marquee-run{display:flex;align-items:center;height:100%;
+  flex:none}
 @keyframes tape-run{from{transform:translate3d(0,0,0)}
   to{transform:translate3d(-50%,0,0)}}
 /* Hovering is the gesture for "let me read that one". */
@@ -432,6 +443,10 @@ section.block>h2{margin-bottom:.75rem}
      content stays reachable rather than being withdrawn. */
   .tape .track{animation:none;width:auto}
   .tape .view{overflow-x:auto}
+  /* The second copy exists to make a translation loop seamless. Nothing is
+     translating here, so it is sixteen instruments and four clocks printed
+     again at the end of a strip somebody is scrolling by hand. */
+  .tape .track > .marquee-run.dup{display:none}
   .tape .fixed .dot{animation:none}
   .tape .clk.turning .t,.tape.turning,
   .tape .clk.turn-up .t,.tape .clk.turn-down .t,
@@ -1714,6 +1729,9 @@ SCRIPT = """
 
   var link = document.getElementById('link');
   var lastValues = {};
+  /* One-shot. The cold-start Board reloads once when the first reading lands,
+     and several stream messages can arrive inside the delay before it does. */
+  var coldReloading = false;
 
   function setLink(state, label) {
     if (!link) return;
@@ -1875,6 +1893,40 @@ SCRIPT = """
 
     var account = data.account;
     if (!account) return;
+
+    /* Two server-rendered claims about the reading, retracted the moment the
+       reading they describe is superseded. Both ids are `render.py` constants
+       repeated here as literals — see the note beside them; a test pins the
+       copies together.
+
+       This is not the client revealing a figure. Both banners are statements
+       the SERVER made about its own freshness, and each is provably false once
+       a fresh non-stale reading has landed. Leaving them up is how a page ends
+       up asserting two contradictory things at once: "these figures are not
+       current" printed above four figures repainting every five seconds. */
+    if (!data.stale) {
+      var staleBanner = document.getElementById('reading-stale');
+      if (staleBanner) staleBanner.remove();
+    }
+
+    /* The cold-start Board is the harder half, because the missing part is not
+       a banner — it is every SECTION. `_board_waiting` renders four tiles and
+       nothing else, and the stream can only repaint what is already in the
+       markup, so the positions, the resting orders and the risk meters can
+       never arrive. One reload, once, on the first reading that carries an
+       account.
+
+       It cannot loop: the server builds the Board from the same poller
+       snapshot this payload came from, so a reading good enough to trigger the
+       reload is a reading good enough for the full page, and the reloaded page
+       carries no cold-start banner to trigger it again. `coldReloading` guards
+       the several messages that may arrive inside the delay. */
+    var cold = document.getElementById('cold-start');
+    if (cold && !coldReloading) {
+      coldReloading = true;
+      cold.remove();
+      window.setTimeout(function () { window.location.reload(); }, 400);
+    }
 
     var targets = document.querySelectorAll('[data-live]');
     for (var i = 0; i < targets.length; i++) {
@@ -2038,16 +2090,25 @@ SCRIPT = """
      error is raised, and the strand happens anyway. So the return is CHECKED
      rather than assumed, and the fallback puts focus on the main region the
      way a skip link would. */
+     `preventScroll` on both calls, and it is not a nicety. Focusing an element
+     scrolls it into view by default, and the element focus came FROM is
+     frequently not the element the reader is looking at — the shortcut is
+     global, so the fallback is `main`, and dismissing the palette from
+     anywhere on the Board jumped the page 108px and pushed the header and the
+     tape off screen. With a table focused first it jumped 872px, to the bottom
+     of the document. Measured in Chromium both times.
+
+     Closing a palette is not a request to go anywhere. */
   function restoreFocus() {
     if (lastFocus && lastFocus.focus && lastFocus !== document.body
         && document.contains(lastFocus)) {
-      lastFocus.focus();
+      lastFocus.focus({ preventScroll: true });
       if (document.activeElement === lastFocus) return;
     }
     var main = document.querySelector('main');
     if (!main) return;
     main.setAttribute('tabindex', '-1');
-    main.focus();
+    main.focus({ preventScroll: true });
   }
 
   function renderMatches(list, box) {
@@ -3067,7 +3128,25 @@ def ticker_tape(
         # clocks below are frozen at page-load time.
         '<span class="frozen">not ticking</span>'
         "</div>"
-        f'<div class="view"><div class="track">{run}{run}</div></div>'
+        # The run twice, but the second copy in its own element and marked
+        # `aria-hidden`. Both halves of that matter and they fix different bugs.
+        #
+        # The wrapper is what makes the duplicate REMOVABLE in one CSS rule.
+        # Under `prefers-reduced-motion` the track stops and the strip becomes an
+        # ordinary horizontal scroller, and a reader who scrolls it reached the
+        # end and found the whole watchlist again — 32 cells for 16 instruments,
+        # 8 clocks for 4. Nothing had ever hidden the copy because nothing could
+        # address it.
+        #
+        # `aria-hidden` fixes the older and quieter one: a screen reader has been
+        # reading every instrument and every clock twice in EVERY mode since the
+        # marquee was written. The duplicate exists to make a translation loop
+        # seamless, which is a statement about pixels and about nothing a
+        # non-visual reader is being told.
+        f'<div class="view"><div class="track">'
+        f'<div class="marquee-run">{run}</div>'
+        f'<div class="marquee-run dup" aria-hidden="true">{run}</div>'
+        "</div></div>"
         "</div>"
     )
 

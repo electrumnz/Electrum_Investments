@@ -96,6 +96,8 @@ install -m 644 "$APP_DIR/deploy/systemd/mudhorn-tailnet.service" /etc/systemd/sy
 install -m 644 "$APP_DIR/deploy/systemd/mudhorn-tailnet.timer" /etc/systemd/system/
 install -m 644 "$APP_DIR/deploy/systemd/mudhorn-dream.service" /etc/systemd/system/
 install -m 644 "$APP_DIR/deploy/systemd/mudhorn-dream.timer" /etc/systemd/system/
+install -m 644 "$APP_DIR/deploy/systemd/mudhorn-confer.service" /etc/systemd/system/
+install -m 644 "$APP_DIR/deploy/systemd/mudhorn-confer.timer" /etc/systemd/system/
 # run-mcp.sh, run-chat.sh and run-dream.sh are named in sudoers rules, so they
 # must be executable and — from the chown above — root-owned and not writable by
 # the account the rule grants FROM. A wrapper writable by that account turns its
@@ -128,6 +130,17 @@ echo "    mudhorn-backup.timer started (hourly)"
 echo "    mudhorn-dream.timer installed, NOT started"
 echo "      enable with: systemctl enable --now mudhorn-dream.timer"
 echo "      needs ANTHROPIC_API_KEY in .env. Costs roughly a few pounds a year."
+
+# The conference timer, on the same footing and for the same reasons: it spends
+# money on model calls and needs the same key. It fires an hour after the dream
+# so that a conference always has that morning's dream to talk about, and it is
+# worth nothing without the dream timer — an empty vault means every run is a
+# no-op — so enabling it alone is the odd configuration rather than the useful
+# one. An accept grants a SYMBOL PERMISSION with an expiry; it places nothing,
+# and RiskGate still runs on anything traded under one.
+echo "    mudhorn-confer.timer installed, NOT started"
+echo "      enable with: systemctl enable --now mudhorn-confer.timer"
+echo "      enable the dream timer too, or it has nothing to confer about."
 
 # Started for the same reason. Before Tailscale is installed this reports "not
 # logged in", which is correct rather than noisy: on a box whose dashboard is

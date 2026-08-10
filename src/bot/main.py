@@ -31,7 +31,7 @@ from .data.finnhub import FinnhubCalendar
 from .data.marketaux import MarketauxNews
 from .data.news import EmptyNews, NewsFeed
 from .data.xfeed import XFeed
-from .dreaming import DreamStore
+from .dreaming import Dream, DreamStore, Vault
 from .grants import resolve_grant_dream_ids, resolve_granted_symbols
 from .indicators import snapshot as snapshot_indicators
 from .indicators import summarise as summarise_indicators
@@ -751,6 +751,368 @@ def cmd_dream(env: Env, rules: Rules) -> int:
     return 0
 
 
+# The `kind` an expiry mark carries in a dream's transcript.
+#
+# Not one of `dreaming.MESSAGE_KINDS`, and that is allowed on purpose: the store
+# deliberately does not validate the field, because an unfamiliar kind costs a
+# page a badge while refusing it would lose the turn. It is its own kind rather
+# than a `note` so that `vault-expire` can find its own previous mark and stay
+# idempotent — matching on prose would break the moment the sentence was
+# reworded.
+EXPIRY_MARK_KIND = "expired"
+
+
+# How close to lapsing counts as "expiring soon" on the vault readout.
+#
+# Ten days, the same notice period as the Tailscale banner and for the same
+# reason: the failure is notice followed by a loss of capability, and the notice
+# period is the only stretch in which anything can be done about it.
+#
+# `mcp_server.GRANT_WARNING_DAYS` is the same number for the same reason on the
+# tool surface. Neither module may import the other at module scope — one pulls
+# in the broker SDK and the other the MCP SDK — so if a third caller ever wants
+# it, it belongs in `dreaming.py` beside the TTLs rather than in a third copy.
+GRANT_WARNING_DAYS = 10.0
+
+
+def _symbols_line(granted: dict[str, str]) -> str:
+    """Symbols and their class keys on one line, or an explicit `none`.
+
+    `none` rather than an empty string, for the reason every readout in this
+    repository says a zero out loud: a blank line reads as a rendering fault,
+    and an empty permission set is a fact worth stating plainly.
+    """
+    if not granted:
+        return "none"
+    return ", ".join(f"{s} ({c})" for s, c in sorted(granted.items()))
+
+
+def cmd_vault(rules: Rules) -> int:
+    """Print the dream vaults: what is on each shelf, what is granted, what lapses.
+
+    **Read-only.** It opens the store, prints, and returns. Nothing moves, no
+    dream is marked, no grant is withdrawn and no model is called, so it is safe
+    to run at any moment — including while the loop is trading and while a
+    conference is in progress.
+
+    Takes no `Env` because it needs nothing from one: no broker, no API key, no
+    credentials of any kind. A local SQLite read that demanded Alpaca keys would
+    be a check protecting nothing.
+
+    Printed as well as logged. `cmd_loop` and `cmd_dream` are read out of
+    `journalctl` and log only; this is a command a person types, so the answer
+    goes to the terminal in a shape a person can read and the structured line
+    goes to the log, as every other command here emits one.
+    """
+    now = datetime.now(UTC)
+    store = DreamStore()
+    caps = rules.dreaming.vault_caps()
+    ttls = rules.dreaming.vault_ttls()
+    counts = store.counts_by_vault()
+
+    print(f"Dream vaults as at {now.isoformat(timespec='minutes')}")
+    print()
+
+    for shelf in Vault:
+        cap = caps.limit_for(shelf)
+        ttl = ttls.days_for(shelf)
+        held = counts.get(shelf, 0)
+        cap_text = f"{held}/{cap}" if cap is not None else f"{held} (uncapped)"
+        ttl_text = f"{ttl}d" if ttl is not None else "never expires"
+        print(f"  {shelf!s:<10} {cap_text:<14} ttl {ttl_text}")
+        # Said out loud rather than left as a blank space under the heading. An
+        # empty shelf is an ordinary state, an unreadable store is not, and the
+        # two look identical if nothing at all is printed.
+        if held == 0:
+            print("      (empty)")
+        for dream in store.in_vault(shelf, limit=50):
+            days_here = (now - dream.vault_entered_at).total_seconds() / 86400.0
+            left = f"{ttl - days_here:.0f}d left" if ttl is not None else "no expiry"
+            print(f"      #{dream.id} {dream.title}")
+            print(
+                f"          {dream.stage} · {dream.verification} · "
+                f"{len(dream.chain)} hop(s), {len(dream.unverified_hops)} unchecked · "
+                f"{days_here:.1f}d on this shelf · {left}"
+            )
+            if dream.symbols:
+                klass = dream.asset_class_key or "class unresolved"
+                print(f"          symbols {', '.join(dream.symbols)} ({klass})")
+    print()
+
+    # What the store thinks it granted, and what the rules will actually honour.
+    # The second is a subset of the first — a disabled class grants nothing, an
+    # already-listed symbol is not a grant at all — and printing only one of
+    # them would either overstate the permission or hide a dream asking for
+    # something the account has switched off.
+    claimed = store.granted_symbols(now)
+    in_force = resolve_granted_symbols(store, rules, now=now)
+    print(f"  Claimed by live adoptions: {_symbols_line(claimed)}")
+    print(f"  Actually in force:         {_symbols_line(in_force)}")
+    if not rules.dreaming.allow_symbol_grants:
+        print("  (dreaming.allow_symbol_grants is false, so nothing is in force)")
+
+    expiring: list[tuple[int, list[str], float, datetime]] = []
+    for adoption in store.adoptions():
+        expires = adoption.expires_at
+        if not adoption.is_live(now) or expires is None:
+            continue
+        days = (expires - now).total_seconds() / 86400.0
+        if days <= GRANT_WARNING_DAYS:
+            expiring.append((adoption.dream_id, list(adoption.symbols_granted), days, expires))
+
+    print()
+    if expiring:
+        print(f"  Grants lapsing within {GRANT_WARNING_DAYS:.0f} days:")
+        for dream_id, symbols, days, expires in expiring:
+            named = ", ".join(symbols) or "no symbols"
+            print(
+                f"      dream #{dream_id} {named} in {days:.1f}d "
+                f"({expires.isoformat(timespec='minutes')})"
+            )
+    else:
+        print(f"  No grant lapses within {GRANT_WARNING_DAYS:.0f} days.")
+
+    # Sitting in ADOPTED with nothing live behind it. Named out loud because
+    # this is the `dream-expired-holding` state and silence about it is the
+    # worst available answer: the shelf still shows the dream, its own TTL still
+    # has months to run, and the permission it implies died some time ago. A
+    # reader given only the shelf count would take the grant to be in force.
+    lapsed = [
+        dream
+        for dream in store.in_vault(Vault.ADOPTED, limit=50)
+        if dream.id is not None
+        and not any(a.is_live(now) for a in store.adoptions(dream.id))
+    ]
+    if lapsed:
+        print()
+        print("  Adopted, with a grant that has ALREADY lapsed:")
+        for dream in lapsed:
+            print(f"      #{dream.id} {dream.title}")
+        print("      No new entries are permitted in those symbols. Any position")
+        print("      already open stands. `electrum-bot vault-expire` hands them")
+        print("      back to the vault and records why.")
+
+    expired = store.expired(now, ttls)
+    if expired:
+        print()
+        print(f"  {len(expired)} dream(s) are past their shelf's TTL and nothing has")
+        print("  been marked. `electrum-bot vault-expire` withdraws lapsed grants.")
+
+    log.info(
+        "vault_listed",
+        counts={str(v): counts.get(v, 0) for v in Vault},
+        granted_symbols=sorted(in_force),
+        claimed_symbols=sorted(claimed),
+        grants_expiring_soon=len(expiring),
+        grants_already_lapsed=len(lapsed),
+        past_ttl=len(expired),
+    )
+    return 0
+
+
+def cmd_confer(env: Env, rules: Rules) -> int:
+    """One capped agent-to-agent conference over the dreams in the vault.
+
+    **Deliberately not reachable from `cmd_loop`, and that is a command boundary
+    rather than a comment.** The loop wakes every fifteen minutes and proposes
+    orders; this decides whether a second-order hypothesis is worth a symbol
+    permission. Ninety-six unattended negotiations a day on the same process
+    that places orders is the Alpha Arena failure shape with two models instead
+    of one. It belongs on the dream timer, a day apart, which is far slower than
+    a price moves and about the right speed for the question being asked.
+
+    Every cap lives in `confer.py` — six turns per exchange, two dreams per run,
+    three exchanges per dream for its lifetime, the prose cap, and the change
+    gate that stops the two of them re-litigating an unchanged dream every day
+    forever. Nothing here may raise one.
+
+    Exits non-zero only on a HARD failure: every dream that cost a model call
+    came back `CALL_FAILED`. A quiet run is a success — an empty vault, or two
+    dreams skipped because nothing has changed since the last exchange, is the
+    arrangement working — and reporting that as a failed unit every morning is
+    how an operator learns to ignore `systemctl --failed`.
+    """
+    from .confer import ConferOutcome, run_conference
+
+    if not env.anthropic_api_key:
+        log.error("confer_no_api_key", detail="ANTHROPIC_API_KEY is not set")
+        return 1
+
+    store = DreamStore()
+    report = run_conference(env, rules, store, caps=rules.dreaming.vault_caps())
+
+    failed = [e for e in report.exchanges if e.outcome is ConferOutcome.CALL_FAILED]
+    log.info(
+        "confer_complete",
+        # Separate from `len(exchanges)` on purpose: an empty report because the
+        # vault is empty and an empty report because everything in it was
+        # skipped are opposite findings that produce the same list.
+        considered=report.considered,
+        conferred=report.conferred,
+        skipped=report.skipped,
+        adopted=report.adopted,
+        calls=report.calls,
+        failed=len(failed),
+        cost_usd=round(report.cost_usd, 4),
+    )
+
+    if report.conferred and len(failed) == report.conferred:
+        log.error(
+            "confer_all_calls_failed",
+            conferred=report.conferred,
+            detail=(
+                "Every exchange that reached the model failed. The transcripts "
+                "record it and nothing was adopted. Exiting non-zero so the "
+                "timer surfaces it in systemctl --failed."
+            ),
+        )
+        return 1
+    return 0
+
+
+def cmd_vault_expire(rules: Rules) -> int:
+    """Mark dreams past their shelf's TTL, and withdraw the grants that lapsed.
+
+    **Marks; never deletes.** Nothing is removed and no reasoning is destroyed.
+    An expired dream on the workbench keeps its chain, its thoughts and its
+    transcript and gains one line saying it aged out — the same shape as
+    `stop_watch`, which reports a breached stop and does not close the position.
+    A command that quietly archived a chain somebody was halfway through would
+    be the worse of the two by a distance.
+
+    For an ADOPTED dream it does the one thing with teeth: it hands the dream
+    back to the vault with a stated reason, which closes the adoption row and
+    **withdraws the symbol permission**. That is the point of a time-boxed grant
+    and it is the only write here that changes what may be traded.
+
+    **It never closes a position.** One opened under a grant that has just
+    lapsed stands: expiry withdraws the right to OPEN, and an unattended
+    auto-close at 3am is a new execution path nobody chose. The Board's
+    `dream-expired-holding` tag is what makes that state visible instead.
+
+    Idempotent by design, because this is the kind of command that ends up on a
+    timer. The mark is written once per stay on a shelf — `vault_entered_at` is
+    reset by every move, so a note recorded after it belongs to the current stay
+    — and a second run the same day writes nothing and reports nothing new.
+    """
+    # `CONFERENCE` is the machine narrating itself, and it is the right speaker
+    # for this note rather than `OPERATOR`. An operator note is one of the five
+    # things that makes a dream worth conferring again, so a machine note
+    # wearing the operator's name would trip `has_something_changed` on its own
+    # writing and hand the two agents a fresh exchange about a dream whose only
+    # news is that it got old.
+    from .confer import CONFERENCE
+
+    now = datetime.now(UTC)
+    store = DreamStore()
+    ttls = rules.dreaming.vault_ttls()
+
+    # Two clocks, and both have to be read. `expired` measures a dream against
+    # its shelf's TTL; an adoption carries its own `expires_at`, which is what
+    # `granted_symbols` actually honours. They are set from the same moment
+    # today, so they normally agree — but an adoption taken with a shorter TTL
+    # would lapse while the dream is still inside its shelf's window, and a
+    # grant that is already dead by arithmetic must not leave a dream sitting in
+    # ADOPTED as though it were live.
+    stale: dict[int, Dream] = {}
+    for dream in store.expired(now, ttls):
+        if dream.id is not None:
+            stale[dream.id] = dream
+    for dream in store.in_vault(Vault.ADOPTED, limit=1000):
+        if dream.id is None:
+            continue
+        if not any(a.is_live(now) for a in store.adoptions(dream.id)):
+            stale[dream.id] = dream
+
+    withdrawn: list[tuple[int, list[str]]] = []
+    marked: list[int] = []
+    refused: list[str] = []
+
+    for dream_id, dream in sorted(stale.items()):
+        if dream.vault is Vault.ADOPTED:
+            lost = sorted(
+                {
+                    symbol
+                    for adoption in store.adoptions(dream_id)
+                    if adoption.returned_at is None
+                    for symbol in adoption.symbols_granted
+                }
+            )
+            days = (now - dream.vault_entered_at).total_seconds() / 86400.0
+            result = store.return_to_vault(
+                dream_id,
+                reason=(
+                    f"The adoption expired after {days:.0f} days. The symbol "
+                    "permission is withdrawn; any position still open under it "
+                    "stands and is untouched."
+                ),
+                at=now,
+            )
+            if not result.ok:
+                refused.append(f"#{dream_id}: {result.detail}")
+                continue
+            withdrawn.append((dream_id, lost))
+            log.warning(
+                "dream_grant_expired",
+                dream_id=dream_id,
+                title=dream.title,
+                symbols=lost,
+                days_adopted=round(days, 1),
+                detail=(
+                    "No new entries are permitted in these symbols. An open "
+                    "position is NOT closed by this and remains yours to manage."
+                ),
+            )
+            continue
+
+        # Everything else is marked and left exactly where it is.
+        if any(
+            m.kind == EXPIRY_MARK_KIND and m.at >= dream.vault_entered_at
+            for m in store.messages(dream_id)
+        ):
+            continue
+        days = (now - dream.vault_entered_at).total_seconds() / 86400.0
+        store.add_message(
+            dream_id,
+            speaker=CONFERENCE,
+            kind=EXPIRY_MARK_KIND,
+            text=(
+                f"Past the {ttls.days_for(dream.vault)}-day limit for "
+                f"{dream.vault}: {days:.0f} days on this shelf. Nothing has been "
+                "deleted or moved — the dreamer decides whether to rework it, "
+                "offer it or retire it."
+            ),
+            at=now,
+        )
+        marked.append(dream_id)
+
+    lost_symbols = sorted({s for _, symbols in withdrawn for s in symbols})
+    log.info(
+        "vault_expire_complete",
+        past_ttl=len(stale),
+        grants_withdrawn=len(withdrawn),
+        symbols_no_longer_granted=lost_symbols,
+        newly_marked=len(marked),
+        refused=refused,
+    )
+
+    print(f"{len(stale)} dream(s) past their shelf's TTL.")
+    print(f"{len(marked)} newly marked; nothing was deleted or moved.")
+    if withdrawn:
+        for dream_id, symbols in withdrawn:
+            named = ", ".join(symbols) or "no symbols"
+            print(f"  grant withdrawn: dream #{dream_id} — {named}")
+        print("  Those symbols are no longer granted. Any open position is untouched.")
+    else:
+        print("No grant lapsed.")
+    for problem in refused:
+        print(f"  could not expire {problem}")
+
+    # A refusal is a write this command intended and did not make, which is
+    # exactly what a timer should surface. An ordinary quiet run is still 0.
+    return 1 if refused else 0
+
+
 def cmd_reindex() -> int:
     """Rebuild the searchable history from the audit log.
 
@@ -795,11 +1157,25 @@ def main() -> int:
     parser = argparse.ArgumentParser(prog="electrum-bot")
     parser.add_argument(
         "command",
-        choices=["smoketest", "loop", "dream", "reindex"],
+        choices=[
+            "smoketest",
+            "loop",
+            "dream",
+            "confer",
+            "vault",
+            "vault-expire",
+            "reindex",
+        ],
         help=(
             "smoketest: one-shot connectivity check. loop: run the decision "
             "loop. dream: one lateral-thinking step, written to data/dreams.db "
             "and shown on the Dreaming page, which places nothing ever. "
+            "confer: one capped agent-to-agent conference over the dreams in "
+            "the vault, which can grant a symbol permission and can place "
+            "nothing. vault: print the dream vaults, their caps, the live "
+            "grants and anything expiring — read-only. vault-expire: mark "
+            "dreams past their shelf's TTL and withdraw the grants that "
+            "lapsed; it marks and never deletes, and never closes a position. "
             "reindex: rebuild the searchable history from audit/."
         ),
     )
@@ -839,6 +1215,16 @@ def main() -> int:
         return cmd_smoketest(env, rules, force_mock=args.mock)
     if args.command == "dream":
         return cmd_dream(env, rules)
+    if args.command == "confer":
+        return cmd_confer(env, rules)
+    # Neither of these needs an `Env` at all — no broker, no key, no credential
+    # — but both run after the paper-only check anyway. A box configured for
+    # live trading must refuse everything, and a read of the vaults is not the
+    # place to make the one exception.
+    if args.command == "vault":
+        return cmd_vault(rules)
+    if args.command == "vault-expire":
+        return cmd_vault_expire(rules)
     return cmd_loop(env, rules, execute=args.execute, force_mock=args.mock)
 
 

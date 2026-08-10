@@ -34,6 +34,7 @@ from bot.models import (
     StandDownState,
     SymbolAssessment,
     Trade,
+    WorkingOrder,
 )
 from bot.souls import Soul
 from bot.web import live, render
@@ -2015,3 +2016,416 @@ def test_the_tape_is_a_band_rather_than_the_same_colour_as_the_page():
     assert "background:var(--graphite)" in tape_rule
     assert "background:var(--ink)" not in tape_rule
     assert "border-top" in tape_rule and "border-bottom" in tape_rule
+
+
+# ------------------------------------------- browser-audited UI defects
+#
+# Every test below pins the SHAPE of a fix that was found by driving the deck
+# in a real browser, because none of them was visible from here. A unit test
+# cannot see a scrollbar, cannot watch a banner outlive its cause and cannot
+# tell that an overlay crossfaded across a password field — so what is asserted
+# is the rule or the markup that produced the behaviour, and the behaviour
+# itself was re-measured in Chromium after the change.
+
+
+def _css_blocks(selector_fragment: str) -> list[str]:
+    """Every declaration block whose selector list names this fragment.
+
+    Crude on purpose: `STYLES` is one string, and the alternative is a CSS
+    parser as a test dependency. Good enough for a flat rule, and every rule it
+    is pointed at below is flat.
+    """
+    out: list[str] = []
+    for chunk in render.STYLES.split("}"):
+        if "{" not in chunk:
+            continue
+        selector, _, decls = chunk.partition("{")
+        if selector_fragment in selector:
+            out.append(decls)
+    return out
+
+
+def test_a_scroll_container_has_no_bracket_hanging_past_its_own_edge():
+    """The operator's "weird scrolling stuff", in one declaration.
+
+    `.scroll` is `overflow-x:auto`, which in CSS makes the computed `overflow-y`
+    `auto` as well — the box is a scroll container on BOTH axes. End-direction
+    overflow from an absolutely positioned descendant is scrollable overflow
+    rather than clipped decoration, so the HUD bracket at `bottom:-1px;
+    right:-1px` gave every table on the deck exactly 1px of scroll range each
+    way: two full-length scrollbars per table, six on Analytics, the first notch
+    of any wheel gesture over a table eaten moving it one pixel, and a keyboard
+    tab stop with no `tabindex` — Chrome makes a scroll container focusable when
+    nothing inside it is.
+
+    Measured before: `scrollWidth 1239 / clientWidth 1238`. After: equal.
+    """
+    for fragment in (".scroll::after", ".chat .log::after"):
+        blocks = _css_blocks(fragment)
+        assert blocks, fragment
+        for decls in blocks:
+            assert "bottom:-1px" not in decls, fragment
+            assert "right:-1px" not in decls, fragment
+        assert any("bottom:0" in d and "right:0" in d for d in blocks), fragment
+
+    # The start-direction pair moves with it. `top:-1px` adds no scrollable
+    # overflow — start overflow is clipped — but it IS clipped, so leaving it
+    # would draw one corner of the same box a pixel short of the other.
+    for fragment in (".scroll::before", ".chat .log::before"):
+        for decls in _css_blocks(fragment):
+            assert "top:-1px" not in decls, fragment
+
+    # The other members of the shared rule are NOT scroll containers and keep
+    # the bracket overhanging the border, which is what it is drawn for.
+    assert any("bottom:-1px" in d for d in _css_blocks(".card::after"))
+
+
+def test_the_fix_is_not_to_stop_a_wide_table_scrolling_sideways():
+    """A table wider than the deck genuinely needs `overflow-x`. Removing it
+    would answer the phantom scrollbars by making a real one impossible."""
+    assert any("overflow-x:auto" in d for d in _css_blocks(".scroll"))
+
+
+def test_a_table_header_does_not_claim_a_stickiness_it_cannot_have():
+    """`th{position:sticky;top:0}` could never once have fired.
+
+    Sticky resolves against the nearest SCROLLPORT, which is `.scroll` rather
+    than the viewport, and `.scroll` is sized by its content — so there is no
+    vertical range to stick within. Measured in Chromium: the header's offset
+    from its wrapper stayed at exactly 1px through a full page scroll.
+
+    Making it work needs a `max-height` on `.scroll`, which puts an inner scroll
+    region back on every table. A property that cannot work reads like a feature
+    to the next person, so it goes rather than staying as decoration.
+    """
+    styles = render.STYLES
+    start = styles.index("\nth{text-align:left")
+    rule = styles[start : styles.index("}", start)]
+
+    assert "position:sticky" not in rule
+    assert "top:0" not in rule
+    # The header ground stays: it is what separates the labels from the rows.
+    assert "background:var(--graphite)" in rule
+
+
+def test_the_tapes_second_run_is_addressable_and_hidden_from_a_screen_reader():
+    """The marquee emits the run twice so the loop is seamless. Two bugs.
+
+    Under `prefers-reduced-motion` the strip becomes a manual scroller and the
+    duplicate is simply exposed — 32 cells for 16 instruments, 8 clocks for 4 —
+    and nothing could hide it because nothing could address it. And in EVERY
+    mode a screen reader has been reading the whole watchlist twice, for a
+    duplicate that exists to make a translation loop seamless.
+    """
+    from bot.market_clock import market_state
+
+    body = render.ticker_tape(
+        market_state(datetime(2026, 8, 10, 15, 0, tzinfo=UTC)),
+        [_quote("SPY", last=580.0, prev=574.0)],
+    )
+
+    assert body.count('<div class="marquee-run">') == 1
+    assert body.count('<div class="marquee-run dup" aria-hidden="true">') == 1
+    # Still twice, or the marquee snaps back at every loop.
+    assert body.count('data-tick="SPY"') == 2
+
+    # -50% still lands the second copy where the first began, which needs the
+    # two wrappers to be equal-width flex rows rather than shrinking items.
+    # Named `marquee-run`, not `run`: `.fx-sweep.run` already uses that word as
+    # a state, so a bare `.run` layout rule would restyle the sweep element too.
+    assert any(
+        "flex:none" in d for d in _css_blocks(".tape .track > .marquee-run")
+    )
+
+    opener = "@media (prefers-reduced-motion:reduce){"
+    block = render.STYLES[render.STYLES.index(opener) :]
+    block = block[: block.index("\n}")]
+    assert ".tape .track > .marquee-run.dup{display:none}" in block
+
+
+def _order(
+    *,
+    direction: Direction = Direction.BUY,
+    qty: float = 21,
+    limit_price: float | None = None,
+    stop_price: float | None = None,
+    order_type: str = "",
+    filled_qty: float = 0.0,
+) -> WorkingOrder:
+    from bot.models import OrderStatus
+
+    return WorkingOrder(
+        order_id="o-1",
+        symbol="SPY",
+        direction=direction,
+        qty=qty,
+        limit_price=limit_price,
+        stop_price=stop_price,
+        order_type=order_type,
+        status=OrderStatus.NEW,
+        submitted_at=ENTRY,
+        filled_qty=filled_qty,
+    )
+
+
+def _rows(body: str) -> str:
+    return body.split("<tbody>")[1]
+
+
+def test_a_resting_stop_leg_shows_its_trigger_and_is_never_called_market():
+    """The operator's third rule, made visible.
+
+    Every entry is a GTC bracket now, so the stop leg protecting a live position
+    rests at the broker for as long as the position is open. It has no
+    `limit_price`, and the price cell branched on `limit_price` alone — so the
+    live SPY stop at 820 rendered as **market**, and 820 appeared nowhere on the
+    deck. A stop is not a market order; it becomes one only if it triggers.
+    """
+    body = render._working_orders(
+        [_order(stop_price=820.0, order_type="stop")], {"SPY": 773.10}
+    )
+    rows = _rows(body)
+
+    assert "820.0000" in rows
+    assert "stop" in rows
+    # "Market" survives as a column label; the lowercase word was the lie.
+    assert "market" not in rows
+
+
+def test_a_readable_stop_and_an_unreadable_one_do_not_render_identically():
+    """`WorkingOrder` carries `order_type` beside `stop_price` precisely so
+    "this is a limit order and correctly has no stop" can be told from "this is
+    the leg rule 3 depends on and nobody can read its level". Both used to print
+    the same word."""
+    prices = {"SPY": 773.10}
+    known = render._working_orders(
+        [_order(stop_price=820.0, order_type="stop")], prices
+    )
+    unknown = render._working_orders([_order(order_type="stop")], prices)
+
+    assert known != unknown
+    # Loud, not muted: this is a value that should exist and does not.
+    assert '<span class="alert">unknown</span>' in _rows(unknown)
+    assert '<span class="alert">' not in _rows(known)
+    assert "market" not in _rows(unknown)
+
+
+def test_a_stop_with_no_type_reported_is_still_not_called_market():
+    """An order with no limit and no stated type is a gap in what was read
+    back. Printing "market" would be a confident answer to a question nobody
+    asked the broker."""
+    rows = _rows(render._working_orders([_order()], {"SPY": 773.10}))
+
+    assert "market" not in rows
+    assert "unknown" in rows
+
+
+def test_market_is_still_said_when_the_broker_actually_says_market():
+    rows = _rows(
+        render._working_orders([_order(order_type="market")], {"SPY": 773.10})
+    )
+
+    assert "market" in rows
+
+
+def test_the_distance_to_a_stop_is_the_mirror_of_the_distance_to_a_limit():
+    """A buy limit rests BELOW the market and a buy stop triggers ABOVE it.
+
+    Reusing `distance_to_fill` for a stop leg would report the right magnitude
+    with the wrong sign, and a stop 6% away from firing would read as one that
+    should already have gone. "Needs" said `n/a` for every stop leg before this.
+    """
+    buy_stop = render._order_gap(_order(order_type="stop", stop_price=820.0), 773.10)
+    sell_stop = render._order_gap(
+        _order(direction=Direction.SELL, order_type="stop", stop_price=700.0),
+        773.10,
+    )
+    limit = render._order_gap(_order(limit_price=641.20), 648.02)
+
+    assert buy_stop is not None and buy_stop > 0
+    assert sell_stop is not None and sell_stop > 0
+    assert limit is not None and limit > 0
+
+    # Through the trigger is the `stop_watch` case and must not be muted away.
+    through = render._working_orders(
+        [_order(order_type="stop", stop_price=770.0)], {"SPY": 773.10}
+    )
+    assert "through the trigger" in through
+    assert "alert" in _rows(through)
+
+
+def test_the_pending_orders_caption_no_longer_claims_limit_orders_only():
+    """It was true when nothing sent a stop to the broker. Every entry is a
+    bracket now, so a stop leg always rests there."""
+    body = render._working_orders([_order(limit_price=641.20)], {"SPY": 648.02})
+    caption = body[body.index("<caption>") : body.index("</caption>")]
+
+    assert "stop leg" in caption
+    assert "limit orders only" not in (render._working_orders.__doc__ or "")
+
+
+def test_a_value_and_its_qualifier_travel_inside_one_element():
+    """Under 760px each `td` is a `space-between` flex row with the label
+    injected as `::before`, so a bare "21" and a bare "(2 filled)" are two flex
+    items and land at opposite ends of the card with the label between them —
+    one figure rendered as two fields."""
+    body = render._working_orders(
+        [_order(limit_price=641.20, filled_qty=2)], {"SPY": 648.02}
+    )
+
+    assert '<td data-l="Qty" class="r num"><span>21' in body
+    assert "(2 filled)</span></span></td>" in body
+    # The rule that makes it matter, so this test fails if the layout changes
+    # underneath it rather than passing for the wrong reason.
+    assert "justify-content:space-between" in render.STYLES
+
+
+def test_a_position_row_keeps_its_risk_and_its_percentage_together():
+    from bot.models import AccountSnapshot, Position
+
+    account = AccountSnapshot(
+        equity_usd=100_000.0,
+        cash_usd=100_000.0,
+        buying_power_usd=200_000.0,
+        open_positions=[
+            Position(
+                symbol="SPY",
+                direction=Direction.SELL,
+                qty=21,
+                entry_price=773.324285,
+                opened_at=ENTRY,
+                current_price=773.10,
+            )
+        ],
+    )
+
+    body = render._positions(account, [], 100_000.0)
+
+    assert '<td data-l="At risk" class="r num"><span>' in body
+    assert "</span></span></td>" in body
+
+
+def test_the_not_current_banner_can_be_taken_away_by_the_stream(journal, dreams):
+    """It never cleared. Measured: forty-five seconds and eleven stream messages
+    later the page still said its figures were not current, while the four tiles
+    above the sentence repainted every five seconds.
+
+    A warning that outlives its cause teaches an operator to ignore the next
+    one — the same reasoning that put `RECHECK_COMMAND` on the tailnet banner.
+    """
+    body = _aged_client(journal, dreams, hours=8).get("/").text
+
+    assert f'id="{render.STALE_BANNER_ID}"' in body
+    assert "These figures are not current" in body
+    assert f"getElementById('{render.STALE_BANNER_ID}')" in render.SCRIPT
+    assert "staleBanner.remove()" in render.SCRIPT
+    # Only on a reading that is provably fresh. The stream must not retract a
+    # warning it has not disproved.
+    assert "if (!data.stale) {" in render.SCRIPT
+
+
+def test_the_banner_ids_the_script_uses_are_the_ids_the_server_writes():
+    """`SCRIPT` is a plain string and interpolating into it is how the
+    `{field: "close"}` trap got into `SYSTEM_PROMPT_TEMPLATE`. So the ids are
+    repeated as literals, and this is what keeps the two copies together."""
+    for banner_id in (render.STALE_BANNER_ID, render.COLD_START_BANNER_ID):
+        assert f"getElementById('{banner_id}')" in render.SCRIPT
+
+
+def test_the_cold_start_board_stamp_is_live_and_the_page_fetches_the_rest():
+    """One screen said three separate times that it had no figures, directly
+    above four of them.
+
+    `_board_waiting` passed no `asof_live`, so the stamp carried no
+    `data-live-read`, `paintStamp` returned on its first line, and "not read
+    yet" stood there while the tiles repainted with real equity and real open
+    risk. And a cold-start Board renders NO sections — the stream can only
+    repaint what the server already rendered, so the positions, the resting
+    orders and the risk meters could never arrive at all.
+    """
+    body = render.board(None, load_rules(), [], [], StandDownState(), 0)
+
+    assert "not read yet" in body
+    assert "data-live-read" in body
+    assert f'id="{render.COLD_START_BANNER_ID}"' in body
+    # The sections are genuinely absent, which is why a reload is the fix
+    # rather than a nicety.
+    assert "Open positions" not in body
+    assert "window.location.reload()" in render.SCRIPT
+    # One-shot, or every message inside the delay queues another reload.
+    assert "coldReloading" in render.SCRIPT
+
+
+def test_a_cold_start_still_renders_unknown_rather_than_zero():
+    """The half that was already right, pinned so the reload cannot take it
+    away. `0.00` equity would be a plausible wrong figure."""
+    body = render.board(None, load_rules(), [], [], StandDownState(), 0)
+
+    assert 'class="pending"' in body
+    assert "it is unknown" in body
+
+
+def test_the_palette_hands_focus_back_without_scrolling_the_page():
+    """Focusing an element scrolls it into view, and the element focus came
+    from is frequently not the one the reader is looking at. Measured: Escape
+    from the palette jumped the Board 108px, pushing the header and the tape off
+    screen — 872px with a table focused first. Closing a palette is not a
+    request to go anywhere."""
+    assert "lastFocus.focus({ preventScroll: true })" in render.SCRIPT
+    assert "main.focus({ preventScroll: true })" in render.SCRIPT
+
+
+def test_the_sign_in_panel_is_part_of_the_projection_layer():
+    """It was the only content on any page the boot overlay crossfaded ON TOP
+    of rather than into: an opaque z-60 overlay printing four status lines and a
+    second wordmark straight across "OPERATOR SIGN-IN", the password label and
+    the input. It already carries the same bracket rules as every other member
+    of the set, so it was plainly meant to be one."""
+    assert ".signin .panel" in render.SCRIPT
+
+
+def test_hiding_the_sign_in_panel_still_needs_the_script_to_have_said_so():
+    """Fail-to-visible, unchanged. Hiding takes BOTH `html.fx-ready` and the
+    per-element class, added together in one synchronous block, so a throw or a
+    blocked file leaves a fully usable form. The obvious arrangement — hide in
+    CSS, reveal in JS — fails to a blank sign-in page."""
+    blocks = _css_blocks(".fx-panel")
+    assert blocks
+    for chunk in render.STYLES.split("}"):
+        selector, _, decls = chunk.partition("{")
+        if ".fx-panel" in selector and "opacity:0" in decls:
+            assert "fx-ready" in selector
+
+
+def test_a_count_agrees_with_its_noun():
+    """"1 qualifying loss(es) in a row", "only 1 trades so treat as noise",
+    "Median chain 1 — hops". `(s)` is the same shrug written down. This deck's
+    whole argument is that its figures are careful, and a reader who catches it
+    being sloppy about a word cannot know it is not sloppy about a number."""
+    assert render._count(1, "qualifying loss", "qualifying losses") == (
+        "1 qualifying loss"
+    )
+    assert render._count(3, "qualifying loss", "qualifying losses") == (
+        "3 qualifying losses"
+    )
+    assert render._count(0, "position") == "0 positions"
+    assert render._count(1, "position") == "1 position"
+    assert render._word(1, "hop") == "hop"
+    assert render._word(2.5, "hop") == "hops"
+
+
+def test_no_rendered_string_still_carries_the_bracketed_plural():
+    """The helper exists so this can be asserted once rather than string by
+    string."""
+    from bot.metrics import PerformanceSummary
+
+    body = render.board(None, load_rules(), [], [], StandDownState(), 1)
+    assert "(s)" not in body
+    assert "(es)" not in body
+
+    assert "1 trade so treat as noise" in PerformanceSummary(
+        trade_count=1, profit_factor=1.2
+    ).health
+    assert "across 1 trade" in PerformanceSummary(
+        trade_count=1, profit_factor=None
+    ).health

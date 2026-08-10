@@ -16,7 +16,18 @@ local machine is deleting two systemd units. Nothing below is a one-way door.
 | `mudhorn-bot` | The decision loop. Proposes, vets, reconciles the journal | nothing |
 | `mudhorn-web` | The read-only dashboard | `127.0.0.1:8787` |
 | `mudhorn-backup.timer` | Hourly snapshot of the journal | nothing |
+| `mudhorn-dream.timer` | One dream step, 07:00 New Zealand. Installed, NOT started | nothing |
+| `mudhorn-confer.timer` | One dream-vault conference, 08:00 New Zealand. Installed, NOT started | nothing |
 | Hermes gateway | Chat, if you want it. Installed separately, see below | nothing |
+
+The last two spend money on model calls every time they fire, so `bootstrap.sh`
+installs them and leaves them off — the same reasoning as `--execute` and the
+chat token. The conference runs an hour after the dream so it always has that
+morning's dream to talk about, and it grants at most a **symbol permission with
+an expiry**: it reaches no broker, and `RiskGate` still runs on anything traded
+under a grant. Both are scheduled by NAMED timezone rather than a converted UTC
+hour, because New Zealand observes daylight saving and the drift would be
+silent.
 
 CPU is idle almost all the time at a 15-minute cadence. **Buy RAM, not cores** —
 the box runs five processes once Hermes and its MCP children are up. 2 GB is

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import MutableMapping
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
@@ -25,8 +26,9 @@ from pydantic import ValidationError
 import bot.main as main_mod
 from bot.audit import AuditLog
 from bot.claude_client import CallUsage, ClaudeDecision
+from bot.confer import CONFERENCE
 from bot.config import Env, Rules, load_rules
-from bot.dreaming import DreamStore
+from bot.dreaming import DreamStore, Vault
 from bot.journal import Journal
 
 
@@ -440,3 +442,241 @@ def test_grants_switched_off_never_open_the_store(monkeypatch, tmp_path):
 
     assert opened == []
     assert _heartbeat(logs)["granted_symbols"] == []
+
+
+# ------------------------------------------------------- the vault commands
+#
+# `vault` is read-only, `vault-expire` marks and never deletes, and `confer` is
+# deliberately unreachable from `cmd_loop`. All three are exercised without a
+# network: `run_conference` is stubbed, and every store is a tmp_path.
+
+
+def _dream_store(monkeypatch, tmp_path) -> DreamStore:
+    """A dream store in tmp_path, wired where `main` resolves the name.
+
+    Patched on `main` rather than on `bot.dreaming`, because the commands share
+    the module-level name the decision loop resolves grants through — and the
+    symptom of getting it wrong is a real `data/dreams.db` written beside the
+    production journal, which the conftest guard catches exactly once.
+    """
+    store = DreamStore(tmp_path / "dreams.db")
+    monkeypatch.setattr(main_mod, "DreamStore", lambda *a, **kw: store)
+    return store
+
+
+def _vaulted(store: DreamStore, **overrides) -> int:
+    from bot.dreaming import DREAMER, Dream, Hop, Vault
+
+    fields: dict[str, Any] = {
+        "title": "Cicada broods and the marginal sesame supplier",
+        "seed": "Two of the three largest producers sit inside overlapping broods",
+        "chain": [Hop(claim="Broods emerge on fixed cycles", checked=True, source="USDA")],
+        "symbols": ["SESM"],
+        "asset_class_key": "us_equity",
+    }
+    fields.update(overrides)
+    dream_id = store.save(Dream(**fields))
+    assert store.move(dream_id, Vault.VAULT, by=DREAMER).ok
+    return dream_id
+
+
+def test_vault_prints_every_shelf_and_changes_nothing(monkeypatch, tmp_path, capsys):
+    """Read-only, and an empty shelf says so out loud.
+
+    A blank space under a heading is what an unreadable store would also look
+    like, so "(empty)" is printed rather than inferred — the same rule as the
+    zero on every `cycle_complete` line.
+    """
+    store = _dream_store(monkeypatch, tmp_path)
+    dream_id = _vaulted(store)
+    before = store.get(dream_id)
+
+    rules = load_rules()
+    assert main_mod.cmd_vault(rules) == 0
+
+    out = capsys.readouterr().out
+    for shelf in ("workbench", "prophecy", "vault", "adopted", "archive"):
+        assert shelf in out
+    assert "(empty)" in out
+    assert "Cicada broods" in out
+    assert "Actually in force:         none" in out
+
+    after = store.get(dream_id)
+    assert after is not None and before is not None
+    # Nothing moved, and the expiry clock was not touched.
+    assert after.vault is before.vault
+    assert after.vault_entered_at == before.vault_entered_at
+
+
+def test_vault_separates_what_is_claimed_from_what_is_in_force(
+    monkeypatch, tmp_path, capsys
+):
+    """Crypto is configured while disabled, so a dream naming it grants nothing.
+
+    Printing only the store's answer would overstate the permission; printing
+    only the resolved one would hide a dream asking for something the account
+    has switched off.
+    """
+    store = _dream_store(monkeypatch, tmp_path)
+    dream_id = _vaulted(store, symbols=["DOGE/USD"], asset_class_key="crypto")
+    assert store.adopt(dream_id).ok
+
+    assert main_mod.cmd_vault(load_rules()) == 0
+
+    out = capsys.readouterr().out
+    assert "Claimed by live adoptions: DOGE/USD (crypto)" in out
+    assert "Actually in force:         none" in out
+
+
+def test_vault_expire_withdraws_a_lapsed_grant_and_deletes_nothing(
+    monkeypatch, tmp_path, capsys
+):
+    """Expiry has teeth on an adopted dream and only on that.
+
+    The grant goes, the dream comes back to the vault with a stated reason, and
+    every hop, thought and message stays exactly where it was. Nothing is
+    closed: a position opened under the lapsed grant is untouched, because
+    expiry withdraws the right to OPEN and an unattended auto-close is an
+    execution path nobody chose.
+    """
+    store = _dream_store(monkeypatch, tmp_path)
+    dream_id = _vaulted(store)
+    # Adopted with a one-day grant, backdated so it has already lapsed.
+    assert store.adopt(
+        dream_id, at=datetime.now(UTC) - timedelta(days=3), ttl_days=1
+    ).ok
+    assert store.granted_symbols(datetime.now(UTC)) == {}  # dead by arithmetic
+
+    rules = load_rules()
+    assert main_mod.cmd_vault_expire(rules) == 0
+
+    dream = store.get(dream_id)
+    assert dream is not None
+    assert dream.vault is Vault.VAULT
+    assert dream.chain  # the reasoning survives, in full
+    out = capsys.readouterr().out
+    assert "grant withdrawn" in out
+    assert "SESM" in out
+    assert store.granted_symbols(datetime.now(UTC)) == {}
+    assert [a.returned_at is not None for a in store.adoptions(dream_id)] == [True]
+
+
+def test_vault_expire_marks_an_old_dream_once_per_stay(monkeypatch, tmp_path, capsys):
+    """Idempotent, because this is the kind of command that ends up on a timer.
+
+    The mark is written once per stay on a shelf. A second run the same day
+    writes nothing and reports nothing new, so a daily timer does not fill the
+    transcript a human reads with the same sentence a hundred times.
+    """
+    from bot.dreaming import Dream
+
+    store = _dream_store(monkeypatch, tmp_path)
+    stale = datetime.now(UTC) - timedelta(days=400)
+    dream_id = store.save(
+        Dream(title="an abandoned chain", seed="...", vault_entered_at=stale)
+    )
+
+    rules = load_rules()
+    assert main_mod.cmd_vault_expire(rules) == 0
+    first = store.messages(dream_id)
+    assert [m.kind for m in first] == [main_mod.EXPIRY_MARK_KIND]
+    # The machine narrating itself, never wearing the operator's name: an
+    # operator note is one of the things that makes a dream worth conferring
+    # again, and a mark that tripped the change gate would hand the two agents
+    # a fresh exchange about a dream whose only news is that it got old.
+    assert first[0].speaker == CONFERENCE
+
+    assert main_mod.cmd_vault_expire(rules) == 0
+    assert len(store.messages(dream_id)) == 1
+    # Still there. Marks; never deletes.
+    assert store.get(dream_id) is not None
+
+
+def test_confer_refuses_without_an_api_key(monkeypatch, tmp_path):
+    """Fail closed and say why, rather than a stack trace out of the SDK."""
+    _dream_store(monkeypatch, tmp_path)
+    env = Env(_env_file=None)  # type: ignore[call-arg]
+    env.anthropic_api_key = ""
+
+    assert main_mod.cmd_confer(env, load_rules()) == 1
+
+
+def test_confer_reports_the_run_and_exits_zero_on_a_quiet_one(
+    monkeypatch, tmp_path
+):
+    """A quiet run is a success.
+
+    An empty vault, or two dreams skipped because nothing has changed since the
+    last exchange, is the arrangement working exactly as designed. Reporting
+    that as a failed unit every morning is how an operator learns to ignore
+    `systemctl --failed`.
+    """
+    import bot.confer as confer_mod
+
+    _dream_store(monkeypatch, tmp_path)
+    report = confer_mod.ConferenceReport(
+        exchanges=(
+            confer_mod.ExchangeResult(
+                dream_id=1, outcome=confer_mod.ConferOutcome.NOTHING_NEW
+            ),
+        ),
+        considered=1,
+    )
+    monkeypatch.setattr(confer_mod, "run_conference", lambda *a, **kw: report)
+
+    env = Env(_env_file=None)  # type: ignore[call-arg]
+    env.anthropic_api_key = "test-key"
+
+    with structlog.testing.capture_logs() as logs:
+        assert main_mod.cmd_confer(env, load_rules()) == 0
+
+    line = next(e for e in logs if e["event"] == "confer_complete")
+    assert line["conferred"] == 0
+    assert line["skipped"] == 1
+    assert line["adopted"] == 0
+    assert line["calls"] == 0
+    assert line["cost_usd"] == 0.0
+
+
+def test_confer_exits_non_zero_when_every_call_failed(monkeypatch, tmp_path):
+    """A report full of CALL_FAILED is the one hard failure worth a timer's
+    attention: the model could not be reached at all, so nothing was decided
+    and nothing will be until somebody looks."""
+    import bot.confer as confer_mod
+
+    _dream_store(monkeypatch, tmp_path)
+    report = confer_mod.ConferenceReport(
+        exchanges=(
+            confer_mod.ExchangeResult(
+                dream_id=1, outcome=confer_mod.ConferOutcome.CALL_FAILED
+            ),
+            confer_mod.ExchangeResult(
+                dream_id=2, outcome=confer_mod.ConferOutcome.CALL_FAILED
+            ),
+        ),
+        considered=2,
+    )
+    monkeypatch.setattr(confer_mod, "run_conference", lambda *a, **kw: report)
+
+    env = Env(_env_file=None)  # type: ignore[call-arg]
+    env.anthropic_api_key = "test-key"
+
+    assert main_mod.cmd_confer(env, load_rules()) == 1
+
+
+def test_the_loop_never_confers(monkeypatch, tmp_path):
+    """The separation is a command boundary, and this is what holds it there.
+
+    Ninety-six unattended negotiations a day, on the same process that places
+    orders, is the Alpha Arena failure shape with two models instead of one. A
+    later refactor that reached for a conference from inside the cycle would
+    pass every other test in this file.
+    """
+    import ast
+    import inspect
+    import textwrap
+
+    tree = ast.parse(textwrap.dedent(inspect.getsource(main_mod.cmd_loop)))
+    used = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
+    used |= {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)}
+    assert not used & {"run_conference", "Conference", "cmd_confer", "confer"}
