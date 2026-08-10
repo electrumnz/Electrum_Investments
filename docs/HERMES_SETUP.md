@@ -360,6 +360,18 @@ comes from `agent/agent_init.py`, which does pass it. **Verify by asking the
 agent to run `ls` and confirming it has no tool for it**, never by reading
 `/tools`.
 
+**Verified on the droplet on 2026-08-10**, through the dashboard chat panel,
+which is the first time this was checkable on the box rather than only against
+the Hermes source. Asked to run `ls /opt/mudhorn`, the agent replied:
+
+> NO SHELL TOOL. The tools I have are: clarify, memory, session_search,
+> skill_manage, skill_view, skills_list, todo, tool_search, tool_describe,
+> tool_call (plus the electrum-bot trading tools reachable via tool_call —
+> none of which execute shell commands).
+
+Worth re-running after any Hermes upgrade. The denylist admits whatever a new
+release adds, and this is the only check that would notice.
+
 **Never put a `hermes-*` bundle name in `disabled_toolsets`.** Those bundles
 are defined as the shared core tools plus platform extras, so Hermes
 deliberately subtracts only the non-core delta to avoid emptying the tool list.
