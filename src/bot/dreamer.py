@@ -261,6 +261,18 @@ class StepCondition(BaseModel):
             "condition may hinge on something you would never trade."
         ),
     )
+    settles_hops: list[int] = Field(
+        default_factory=list,
+        description=(
+            "Which hop number(s) of the chain this condition would settle, "
+            "using the `hop 1`, `hop 2` numbering shown above. A prophecy is a "
+            "dream parked awaiting the link that could KILL it, so at least one "
+            "checkable condition must settle the hop you named as weakest — a "
+            "threshold on a link nobody doubted grades cleanly and settles "
+            "nothing. List more than one hop where the condition honestly bears "
+            "on more than one."
+        ),
+    )
     field: TriggerField | None = Field(
         default=None,
         description=(
@@ -314,6 +326,16 @@ class DreamStep(BaseModel):
         description=(
             "The hop most likely to break the whole thing. Name it every time a "
             "chain exists. Confidence is the minimum across links, not the average."
+        ),
+    )
+    weakest_hop_index: int | None = Field(
+        default=None,
+        description=(
+            "WHICH hop that is, as a number, counting the chain above from 1. "
+            "The sentence is what a person reads and this is what code can act "
+            "on, and code will not guess: a paraphrase that matches no hop "
+            "leaves the dream on the workbench, because nothing can then be "
+            "shown to settle the link the chain rests on."
         ),
     )
     trigger: str = Field(
@@ -483,12 +505,25 @@ before this is worth putting in front of the trading agent.
 - **A keep with no checkable condition goes nowhere.** It stays on the
   workbench, and reaches nobody, because a conclusion nobody can grade is an
   opinion. If you want a dream to travel, pre-register something.
+- **A prophecy is a claim about the WEAKEST LINK, and that is what the shelf is
+  for: a dream parked awaiting the thing that would settle it.** So name the
+  weakest hop, give its number in `weakest_hop_index`, and make sure at least
+  one checkable condition names that same number in `settles_hops`. A
+  pre-registered threshold on a link nobody doubted grades cleanly, promotes
+  cleanly and settles nothing — it turns the shelf into a filing decision. If
+  the hop that could kill your chain cannot be settled by any number, say so
+  and let the dream stay on the workbench; that is a real answer.
+- One condition may settle several hops, and several conditions may settle the
+  same hop. Pin what the condition honestly bears on and nothing more.
 - Each condition needs `text` — the sentence, with the reasoning in it — and,
-  wherever the claim allows, `symbol`, `field`, `op` and `value`.
+  wherever the claim allows, `symbol`, `field`, `op`, `value` and
+  `settles_hops`.
 - **`value` is a NUMBER, never the name of another figure.** "Above the 20-day"
   re-checked next month tests a level nobody ever saw, because the average
   moved in the meantime. Read the level off the figures and write it down. That
-  is what pins the claim to the moment you made it.
+  is what pins the claim to the moment you made it. This holds hardest for the
+  condition carrying your weakest hop: it is the one that has to still mean
+  something months later, which a moving figure cannot.
 - `symbol` says whose figure it is. It may be something you would never trade —
   a condition about the marginal producer is fine even when the symbol you
   claim is its customer.
@@ -683,8 +718,18 @@ def build_prompt(
             for i, hop in enumerate(dream.chain, 1):
                 mark = "checked" if hop.checked else "UNCHECKED"
                 out.append(f"      hop {i} ({mark}): {hop.claim}")
-            if dream.weakest_hop:
-                out.append(f"      weakest: {dream.weakest_hop}")
+            if dream.weakest_hop or dream.weakest_hop_index is not None:
+                # The hop NUMBER travels with the sentence, and says plainly
+                # when it could not be established. A dream held back for an
+                # unresolvable weakest hop would otherwise look identical on the
+                # next run to one held back for anything else, and the model
+                # would rewrite the sentence forever instead of giving a number.
+                pinned = dream.resolved_weakest_hop
+                where = f"hop {pinned}" if pinned is not None else "WHICH HOP NOT ESTABLISHED"
+                out.append(
+                    f"      weakest ({where}): "
+                    f"{dream.weakest_hop or 'named by number only'}"
+                )
             # The symbols and conditions already on the dream, so an advancing
             # step edits what is there instead of writing over it blind. A model
             # shown neither restates both from scratch every time, and a
@@ -700,7 +745,15 @@ def build_prompt(
                     if trigger is not None and condition.symbol
                     else " [no checkable form]"
                 )
-                out.append(f"      condition ({mark}): {condition.text}{shape}")
+                # Which hop it claims to settle, and the absence stated rather
+                # than left blank. An unpinned condition is why a finished keep
+                # sits on the workbench, and a renderer that showed nothing
+                # there would hide the one field that has to change.
+                pins = (
+                    ", ".join(f"hop {h}" for h in condition.settles_hops)
+                    or "settles no hop yet"
+                )
+                out.append(f"      condition ({mark}): {condition.text}{shape} [{pins}]")
         out.append("")
 
     # AFTER the open dreams, so a shared hop is read against the chains it was
@@ -736,6 +789,19 @@ def build_prompt(
         "workbench. Give each a sentence, and a symbol/field/op/value wherever "
         "the claim can carry one. The value is a number you read off the "
         "figures, never the name of another figure."
+    )
+    # Third, and separate from the two above because it is the one that decides
+    # whether the prophecy shelf means anything. The other two were added after
+    # three live runs came back with the fields simply never filled; this one is
+    # the operator's correction — the shelf is for dreams parked awaiting the
+    # link that could kill them, not for whichever claim was easiest to number.
+    out.append(
+        "  - the WEAKEST HOP has to be covered. Name it, give its number in "
+        "`weakest_hop_index`, and put that number in `settles_hops` on a "
+        "checkable condition. A prophecy is a dream parked awaiting the link "
+        "that could kill it; a threshold on a link nobody doubted settles "
+        "nothing and the dream stays on the workbench. If no number could "
+        "settle that hop, leave the dream on the workbench and say why."
     )
     return "\n".join(out)
 
@@ -1222,6 +1288,19 @@ class Dreamer:
             ]
         if step.weakest_hop:
             dream.weakest_hop = step.weakest_hop
+            # Written TOGETHER, including when the step gave no number. A new
+            # sentence with the previous step's index still attached would pin
+            # the promotion rule to whichever hop the last step thought was
+            # weakest — a stale answer wearing a current claim, which is the
+            # shape `Adoption.symbols_granted` is copied at adoption to avoid.
+            # Clearing it costs a run and is recoverable; keeping it is wrong
+            # silently.
+            dream.weakest_hop_index = step.weakest_hop_index
+        elif step.weakest_hop_index is not None:
+            # A number on its own still numbers the sentence already on the
+            # dream, which is the case where a step is fixing exactly the thing
+            # `promotion_for` refused it for.
+            dream.weakest_hop_index = step.weakest_hop_index
         if step.trigger:
             dream.trigger = step.trigger
         if step.instruments:
@@ -1241,6 +1320,17 @@ class Dreamer:
                     DreamCondition(
                         text=c.text,
                         symbol=c.symbol.strip().upper(),
+                        # Structural, so it is cleaned rather than trusted:
+                        # deduped, order kept, and anything that is not a
+                        # position in the chain dropped rather than clamped. A
+                        # pin at hop 0 or past the end names no link, and one
+                        # reported as covering the weakest hop when it names
+                        # nothing is worse than no pin at all.
+                        settles_hops=tuple(
+                            dict.fromkeys(
+                                h for h in c.settles_hops if 1 <= h <= len(dream.chain)
+                            )
+                        ),
                         field=c.field,
                         op=c.op,
                         value=c.value,

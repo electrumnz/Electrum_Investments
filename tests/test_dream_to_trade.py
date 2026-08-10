@@ -89,7 +89,14 @@ def _dream() -> Dream:
             Hop("The largest US smelter sits inside that region.", False, ""),
             Hop("Alcoa is the listed instrument that exposure reaches.", False, ""),
         ],
-        weakest_hop="that the smelter cannot re-contract power elsewhere",
+        # The hop the chain rests on, as a sentence AND as a number. Hop 3 is the
+        # bridge from an unlisted mechanism to a ticker, which is the link most
+        # likely to be wrong and the one nobody checks — and the condition below
+        # is pinned to it, which is what buys this dream a place on the prophecy
+        # shelf at all. Pin it to hop 1 instead and `promotion_for` refuses:
+        # a threshold on a link nobody doubted settles nothing.
+        weakest_hop="that the exposure actually reaches Alcoa rather than a private smelter",
+        weakest_hop_index=3,
         instruments=["aluminium", "grid power", "data centres"],
         symbols=[GRANTED_SYMBOL],
         asset_class_key="us_equity",
@@ -100,6 +107,7 @@ def _dream() -> Dream:
                 field=TriggerField.CLOSE,
                 op=TriggerOp.ABOVE,
                 value=100.0,
+                settles_hops=(3,),
             )
         ],
     )
@@ -270,7 +278,7 @@ def test_the_granted_symbol_reaches_the_prompt_labelled(rules, store):
     assert "permission ends" in blob
     # The chain, and never without what qualifies it.
     assert "PARTIAL" in blob
-    assert "WEAKEST HOP: that the smelter cannot re-contract" in blob
+    assert "WEAKEST HOP: that the exposure actually reaches Alcoa" in blob
     assert "hop 2 (UNCHECKED)" in blob
     # And the rule that keeps a permission from reading as a recommendation.
     assert "does NOT propose a position" in blob
@@ -314,6 +322,10 @@ def test_a_dream_naming_a_disabled_class_never_completes_the_chain(rules, store)
         field=TriggerField.CLOSE,
         op=TriggerOp.ABOVE,
         value=100_000.0,
+        # Pinned to the chain's weakest hop, like the one it replaces. Without
+        # it this dream would never leave the workbench and the test would prove
+        # the promotion rule rather than the class hard block it is here for.
+        settles_hops=(3,),
         fulfilled=True,
     )
     dream_id = store.save(crypto)

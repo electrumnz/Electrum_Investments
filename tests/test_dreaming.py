@@ -1646,6 +1646,302 @@ def test_one_unmet_condition_holds_the_whole_dream_back():
     assert promotion_for(dream).to is Vault.PROPHECY
 
 
+# ------------------------------------------- the weakest hop has to be covered
+#
+# The operator's correction: *"the weakest hop you speak of here is what that
+# prophecy vault was for, dreams that were parked awaiting the prophecy to be
+# fulfilled."* Before this, a keep plus any checkable condition promoted — so a
+# dream could reach the prophecy shelf on a threshold about a link nobody
+# doubted, which grades cleanly, promotes cleanly and settles nothing. That
+# makes the shelf a filing decision rather than a claim awaiting settlement.
+#
+# Every test below is about the RULE. The first one is the one that must never
+# regress, because it is the only one that proves the gate REJECTS.
+
+
+def _chain() -> list[Hop]:
+    """Two sourced links and one assumption. The assumption is hop 3."""
+    return [
+        Hop("Smelters buy power on long interconnect contracts.", True, "a filing"),
+        Hop("Data centres bid for the same interconnect.", True, "a grid notice"),
+        Hop("Alcoa is the listed instrument that exposure reaches."),
+    ]
+
+
+def _pinned(*hops: int, **kw) -> DreamCondition:
+    """A checkable condition claiming to settle the given one-based hops."""
+    return replace(_checkable(**kw), settles_hops=tuple(hops))
+
+
+def test_a_keep_whose_conditions_miss_the_weakest_hop_stays_on_the_workbench():
+    """**The rejection. Everything else here is about the edges of it.**
+
+    A perfectly good pre-registered number, on a link that was already sourced.
+    Under the old rule this promoted, and the prophecy shelf then held a dream
+    parked awaiting nothing in particular.
+    """
+    dream = _keeper(
+        chain=_chain(),
+        weakest_hop_index=3,
+        weakest_hop="that the exposure actually reaches a listed instrument",
+        conditions=[_pinned(1)],
+    )
+
+    promotion = promotion_for(dream)
+
+    assert promotion.to is None
+    assert promotion.moves is False
+
+
+def test_the_refusal_names_the_HOP_and_what_would_fix_it():
+    """A rejection message carries its consequence, like every other one here.
+
+    "not promotable" would be a code. The dreamer reads this sentence on its
+    next run and has to be able to tell an unpinned weakest hop apart from a
+    missing verdict, a missing condition and a full shelf — and to know that
+    the fix is a hop number rather than a better sentence.
+    """
+    dream = _keeper(
+        chain=_chain(), weakest_hop_index=3, weakest_hop="the bridge to a ticker",
+        conditions=[_pinned(1)],
+    )
+
+    reason = promotion_for(dream).reason
+
+    assert "weakest link has nothing pinned to it" in reason
+    assert "Hop 3" in reason
+    assert "Alcoa is the listed instrument" in reason
+    assert "settles_hops" in reason
+
+
+def test_a_condition_pinned_to_the_weakest_hop_is_what_buys_the_shelf():
+    """The other side of the same rule, or it would only ever refuse."""
+    dream = _keeper(
+        chain=_chain(), weakest_hop_index=3, weakest_hop="the bridge to a ticker",
+        conditions=[_pinned(3)],
+    )
+
+    assert promotion_for(dream).to is Vault.PROPHECY
+
+
+def test_one_condition_may_settle_several_hops():
+    """A single public fact often settles more than one link.
+
+    Forcing a choice would push the dreamer into writing the same threshold
+    twice, and two rows for one claim is two things that can disagree.
+    """
+    dream = _keeper(
+        chain=_chain(), weakest_hop_index=3, weakest_hop="the bridge",
+        conditions=[_pinned(1, 3)],
+    )
+
+    assert promotion_for(dream).to is Vault.PROPHECY
+
+
+def test_a_prose_only_condition_on_the_weakest_hop_is_not_enough():
+    """A hop number attached to an opinion is still an opinion.
+
+    `weakest_hop_is_pinned` asks for `is_checkable`, matching the clause above
+    it: the shelf holds claims that can be GRADED, and "the spread normalises,
+    hop 3" cannot be.
+    """
+    dream = _keeper(
+        chain=_chain(), weakest_hop_index=3, weakest_hop="the bridge",
+        conditions=[
+            _pinned(1),
+            DreamCondition(text="the spread normalises", settles_hops=(3,)),
+        ],
+    )
+
+    assert promotion_for(dream).to is None
+
+
+def test_a_weakest_hop_that_matches_no_hop_refuses_rather_than_guessing():
+    """Prose is a paraphrase in practice, so an unnumbered sentence is unusable.
+
+    Fail closed: if which link is weakest cannot be established, nothing can be
+    shown to settle it. The refusal names the fix, which is a number.
+    """
+    dream = _keeper(
+        chain=_chain(),
+        weakest_hop="that the smelter cannot re-contract power elsewhere",
+        conditions=[_pinned(3)],
+    )
+
+    promotion = promotion_for(dream)
+
+    assert promotion.to is None
+    assert "matches no hop" in promotion.reason
+    assert "weakest_hop_index" in promotion.reason
+
+
+def test_a_chain_whose_weakest_hop_was_never_named_refuses_and_says_so():
+    """Distinct from the message above, because it is fixed differently.
+
+    Nothing to match and no number given: the answer is to name the link, not
+    to renumber a sentence that does not exist.
+    """
+    dream = _keeper(chain=_chain(), conditions=[_pinned(3)])
+
+    promotion = promotion_for(dream)
+
+    assert promotion.to is None
+    assert "nobody has said which link it is" in promotion.reason
+
+
+def test_an_index_outside_the_chain_names_no_hop_and_is_not_clamped():
+    """A model answering 9 on a three-hop chain has named no hop.
+
+    Clamping to the last one would be this file choosing which link is weakest,
+    which is exactly the judgement it refuses to make anywhere else.
+    """
+    dream = _keeper(chain=_chain(), weakest_hop_index=9, conditions=[_pinned(3)])
+
+    assert dream.resolved_weakest_hop is None
+    assert promotion_for(dream).to is None
+
+
+def test_the_prose_resolves_the_hop_when_it_quotes_the_claim_exactly():
+    """The fallback, and it is deliberately exact rather than fuzzy.
+
+    `_claim_key` normalises whitespace and case and nothing else, which is the
+    same rule fusion uses to decide two hops are the same claim. A similarity
+    score would decide two differently-worded claims are one, which is precisely
+    the judgement a reader has to be able to check.
+    """
+    dream = _keeper(
+        chain=_chain(),
+        weakest_hop="  alcoa IS the listed instrument that exposure reaches. ",
+        conditions=[_pinned(3)],
+    )
+
+    assert dream.resolved_weakest_hop == 3
+    assert promotion_for(dream).to is Vault.PROPHECY
+
+
+def test_a_chain_with_every_hop_checked_has_no_weakest_link_to_pin():
+    """The first honest edge case: nothing is awaiting settlement.
+
+    A prophecy is a dream parked awaiting the link that could kill it. When
+    every link is sourced there is no such link, and demanding a threshold on
+    one would be asking for a number against a hop already nailed down. The
+    badge reads SOURCED on every surface, which is where that claim is checked.
+    """
+    sourced = _keeper(
+        chain=[Hop("a", True, "s"), Hop("b", True, "s")],
+        conditions=[_checkable()],
+    )
+
+    assert sourced.awaits_settlement is False
+    assert sourced.verification is Verification.SOURCED
+    assert promotion_for(sourced).to is Vault.PROPHECY
+
+
+def test_a_dream_with_no_chain_is_not_held_back_by_a_rule_about_chains():
+    """The second edge case, and it reaches the same answer for another reason.
+
+    This clause pins a chain's weakest link; it does not require a chain to
+    exist. Refusing a chainless keep is a separate rule about whether a dream
+    needs an argument at all, and smuggling it in here would be adding a limit
+    nobody agreed to.
+    """
+    bare = _keeper(conditions=[_checkable()])
+
+    assert bare.chain == []
+    assert bare.resolved_weakest_hop is None
+    assert promotion_for(bare).to is Vault.PROPHECY
+
+
+def test_a_fusion_is_refused_for_its_VERDICT_and_never_for_its_weakest_hop():
+    """The third edge case, and it needs no exemption — only the right order.
+
+    A fresh fusion has no verdict and no `weakest_hop` by design: nobody has
+    attacked it yet. The verdict clause runs first, so the fusion is held back
+    for the honest reason. Reverse the two and every fusion would be reported
+    as having an unpinned weak link, which reads like a defect in the fusion
+    rather than a chain nobody has examined.
+    """
+    fresh = Dream(
+        title="fused", seed="s", chain=_chain(), conditions=[_pinned(1)]
+    )
+
+    reason = promotion_for(fresh).reason
+
+    assert promotion_for(fresh).to is None
+    assert "no verdict yet" in reason
+    assert "weakest" not in reason
+
+
+def test_a_fusion_that_has_been_attacked_faces_the_ordinary_rule():
+    """And it is not exempt once it has one. A keep means somebody looked."""
+    attacked = Dream(
+        title="fused", seed="s", parents=[1, 2], verdict=DreamVerdict.KEEP,
+        chain=_chain(), weakest_hop_index=3, conditions=[_pinned(1)],
+    )
+
+    assert attacked.is_fusion is True
+    assert promotion_for(attacked).to is None
+    assert "Hop 3" in promotion_for(attacked).reason
+
+
+def test_the_direct_route_to_the_vault_cannot_slip_past_the_rule():
+    """The clause sits AHEAD of the all-conditions-met branch on purpose.
+
+    Otherwise a workbench dream whose conditions all fired would go straight to
+    the shelf the trading agent can see, having settled nothing the chain rests
+    on — the same defect, arriving one shelf further along.
+    """
+    dream = _keeper(
+        chain=_chain(), weakest_hop_index=3,
+        conditions=[_pinned(1, fulfilled=True)],
+    )
+
+    assert dream.all_conditions_met is True
+    assert promotion_for(dream).to is None
+
+
+def test_a_prophecy_already_on_the_shelf_is_not_stranded_by_the_new_rule():
+    """The rule gates leaving the WORKBENCH, not arriving at the vault.
+
+    A dream already on the prophecy shelf is by definition parked awaiting its
+    conditions. Re-testing the pin when they fire would strand every prophecy
+    promoted before this clause existed — turning a tightening into a silent
+    deletion of the shelf's contents.
+    """
+    legacy = _keeper(
+        vault=Vault.PROPHECY, chain=_chain(),
+        weakest_hop="an unnumbered sentence from before the pin existed",
+        conditions=[_checkable(fulfilled=True)],
+    )
+
+    assert legacy.resolved_weakest_hop is None
+    assert promotion_for(legacy).to is Vault.VAULT
+
+
+def test_a_pin_at_hop_zero_is_dropped_rather_than_read_as_a_hop():
+    """Hop 0 is not a hop, and a pin pointing nowhere would report as covered."""
+    condition = DreamCondition.from_row({"text": "t", "settles_hops": [0, -2, "x", 2, 2]})
+
+    assert condition.settles_hops == (2,)
+    assert condition.settles(None) is False
+
+
+def test_repinning_a_condition_keeps_the_grade_it_already_earned():
+    """`settles_hops` is out of `DreamCondition.key`, and this is why.
+
+    The number is the claim; which hop it bears on is bookkeeping about the
+    chain. Including the pin in the key would reset a fulfilled condition every
+    time a step renumbered the chain, which is the failure `carry_forward_grading`
+    exists to prevent. The NEW pin still travels.
+    """
+    was = [_pinned(1, fulfilled=True)]
+
+    carried = carry_forward_grading(was, [_pinned(3)])
+
+    assert carried[0].fulfilled is True
+    assert carried[0].settles_hops == (3,)
+
+
 # ------------------------------------------------------------- the store method
 
 
@@ -1693,6 +1989,33 @@ def test_promote_respects_the_shelf_cap(store):
 
     assert not refused.ok
     assert MoveRefusal.FULL in refused.refusals
+
+
+def test_promote_refuses_an_unpinned_weakest_hop_and_carries_the_sentence(store):
+    """The rule through the store, which is what a caller actually sees.
+
+    `MoveResult.detail` is where `promotion_for`'s sentence lands, so the
+    dreamer, `promote_dreams` and the Dreaming page all get the consequence
+    rather than the code `NOT_PROMOTABLE`.
+    """
+    dream_id = store.save(
+        _keeper(chain=_chain(), weakest_hop_index=3, conditions=[_pinned(1)])
+    )
+
+    result = store.promote(dream_id)
+
+    assert not result.ok
+    assert MoveRefusal.NOT_PROMOTABLE in result.refusals
+    assert "weakest link has nothing pinned to it" in result.detail
+    assert store.get(dream_id).vault is Vault.WORKBENCH
+
+    # And it is not a dead end: pinning the condition to the weakest hop is all
+    # it takes, on the next pass, with nothing else changed.
+    fixed = store.get(dream_id)
+    fixed.conditions = [_pinned(3)]
+    store.save(fixed)
+
+    assert store.promote(dream_id).moved_to is Vault.PROPHECY
 
 
 def test_promote_reports_a_missing_dream_rather_than_raising(store):
@@ -2061,6 +2384,46 @@ def test_a_condition_already_fulfilled_on_a_parent_arrives_fulfilled(store):
     assert child is not None
     assert child.conditions_met == 1
     assert child.all_conditions_met is False
+
+
+def test_a_hop_pin_is_RENUMBERED_onto_the_fused_chain(store):
+    """The child's chain is a deduped union in parent order, so hop 2 of a
+    parent is rarely hop 2 of the child.
+
+    An index carried across untouched would still report as covered while
+    naming a different link, which is the one failure worse than no pin at all.
+    Here the smelters chain is [shared hop, "the marginal smelter curtails
+    first"] and the shared hop is already the child's hop 2, so the second
+    parent's hop 2 becomes the child's hop 3.
+    """
+    smelters = _smelters()
+    smelters.conditions = [replace(smelters.conditions[0], settles_hops=(2,))]
+    a, b = store.save(_hydro()), store.save(smelters)
+
+    result = store.fuse([a, b], by=DREAMER)
+    child = store.get(int(result.dream_id or 0))
+
+    assert child is not None
+    assert [h.claim for h in child.chain][2] == "the marginal smelter curtails first"
+    assert child.conditions[1].settles_hops == (3,)
+
+
+def test_a_pin_that_cannot_be_mapped_is_DROPPED_rather_than_left_pointing(store):
+    """A stale index is worse than an absent one: it reads as covered.
+
+    Nothing in this repository invents a plausible figure to fill a field, and
+    a hop number is a figure. The condition arrives honestly unpinned, and the
+    dream it lands on stays on the workbench until a dreamer pins it again.
+    """
+    smelters = _smelters()
+    smelters.conditions = [replace(smelters.conditions[0], settles_hops=(7,))]
+    a, b = store.save(_hydro()), store.save(smelters)
+
+    result = store.fuse([a, b], by=DREAMER)
+    child = store.get(int(result.dream_id or 0))
+
+    assert child is not None
+    assert child.conditions[1].settles_hops == ()
 
 
 def test_the_symbols_are_the_union_and_never_wider(store):
@@ -2521,3 +2884,200 @@ def test_the_symbiosis_migration_is_idempotent(tmp_path):
     reopened = third.get(child_id)
     assert reopened is not None
     assert reopened.parents == [old.id, other]
+
+
+# ------------------------------------------------- the migration, third time
+#
+# `weakest_hop_index` is the third column added to `dreams` after the table
+# already existed on the droplet. The CONDITIONS' own hop pins needed no column
+# at all — `conditions` is one JSON blob in a TEXT column, so a new key inside
+# it reaches an existing database with no ALTER whatever. Both halves are
+# tested, because "it needed no migration" is a claim and this is what makes it
+# checkable rather than remembered.
+
+PRE_PIN_SCHEMA = """
+CREATE TABLE IF NOT EXISTS dreams (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  title        TEXT NOT NULL,
+  seed         TEXT NOT NULL,
+  stage        TEXT NOT NULL,
+  verdict      TEXT,
+  weakest_hop  TEXT NOT NULL DEFAULT '',
+  trigger_note TEXT NOT NULL DEFAULT '',
+  origin       TEXT NOT NULL DEFAULT '',
+  chain        TEXT NOT NULL DEFAULT '[]',
+  thoughts     TEXT NOT NULL DEFAULT '[]',
+  instruments  TEXT NOT NULL DEFAULT '[]',
+  created_at   TEXT NOT NULL,
+  updated_at   TEXT NOT NULL,
+  vault           TEXT NOT NULL DEFAULT 'workbench',
+  vault_entered_at TEXT NOT NULL DEFAULT '',
+  conditions      TEXT NOT NULL DEFAULT '[]',
+  symbols         TEXT NOT NULL DEFAULT '[]',
+  asset_class_key TEXT NOT NULL DEFAULT '',
+  wisp            TEXT NOT NULL DEFAULT '',
+  parents              TEXT NOT NULL DEFAULT '[]',
+  shared_hops          TEXT NOT NULL DEFAULT '[]',
+  verification_ceiling TEXT NOT NULL DEFAULT ''
+);
+"""
+
+
+def _pre_pin_store_with_a_row(path: Path) -> None:
+    """A prophecy written before either half of the pin existed.
+
+    Its condition carries no `settles_hops` key at all, which is the shape the
+    droplet's JSON actually has — not an empty list somebody helpfully wrote.
+    """
+    conn = sqlite3.connect(path)
+    conn.executescript(PRE_PIN_SCHEMA)
+    conn.execute(
+        "INSERT INTO dreams (title, seed, stage, verdict, weakest_hop, trigger_note,"
+        " origin, chain, thoughts, instruments, created_at, updated_at, vault,"
+        " vault_entered_at, conditions, symbols, asset_class_key, wisp, parents,"
+        " shared_hops, verification_ceiling)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (
+            "Drought and hydro",
+            "the reservoir is at a decade low",
+            "verdict",
+            "keep",
+            "whether the smelter can actually curtail",
+            "the spot auction print",
+            "a headline about rainfall",
+            json.dumps(
+                [
+                    {"claim": "the reservoir is at a decade low", "checked": True,
+                     "source": "the operator's own gauge"},
+                    {"claim": "the smelter curtails first", "checked": False,
+                     "source": ""},
+                ]
+            ),
+            json.dumps([{"stage": "verdict", "text": "it holds",
+                         "at": "2026-07-01T09:00:00+00:00", "by": ""}]),
+            json.dumps(["hydro"]),
+            "2026-06-01T09:00:00+00:00",
+            "2026-07-01T09:00:00+00:00",
+            "workbench",
+            "2026-07-01T09:00:00+00:00",
+            json.dumps(
+                [{"text": "SPY clears 600", "symbol": "SPY", "field": "close",
+                  "op": "above", "value": 600.0, "fulfilled": False}]
+            ),
+            json.dumps(["SPY"]),
+            "us_equity",
+            "",
+            "[]",
+            "[]",
+            "",
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+
+def test_a_database_that_predates_the_hop_pin_is_migrated_in_place(tmp_path):
+    """`CREATE TABLE IF NOT EXISTS` is a no-op on a table that already exists.
+
+    Every other test in this file builds its store from scratch in a `tmp_path`
+    and therefore always gets the new shape, so the suite is structurally blind
+    to a missing column. This is the third generation of that migration and it
+    starts from the shape the droplet is actually running.
+    """
+    path = tmp_path / "dreams.db"
+    _pre_pin_store_with_a_row(path)
+
+    store = DreamStore(path)
+    loaded = store.recent()
+
+    assert len(loaded) == 1
+    dream = loaded[0]
+    # The row survived whole, including the condition inside the JSON column.
+    assert dream.title == "Drought and hydro"
+    assert dream.verdict is DreamVerdict.KEEP
+    assert [c.text for c in dream.conditions] == ["SPY clears 600"]
+    assert dream.conditions[0].is_checkable
+
+    # Both halves of the pin read as "not said" rather than as an error or a
+    # zero. A row from before this shipped genuinely does not record which hop
+    # its sentence meant, and inventing one would be the confident wrong figure.
+    assert dream.weakest_hop_index is None
+    assert dream.conditions[0].settles_hops == ()
+
+
+def test_a_pre_pin_prophecy_is_held_back_rather_than_promoted_blind(tmp_path):
+    """What the migration means for the RULE, which is the half worth stating.
+
+    This dream is a finished keep with a checkable condition and would have
+    promoted before. It cannot now: its weakest hop is a sentence matching no
+    hop, so nothing can be shown to settle the link the chain rests on. Held on
+    the workbench until a dreamer numbers it — not promoted on a guess, and not
+    deleted.
+    """
+    path = tmp_path / "dreams.db"
+    _pre_pin_store_with_a_row(path)
+    store = DreamStore(path)
+    dream = store.recent()[0]
+
+    assert promotion_for(dream).to is None
+    assert "matches no hop" in promotion_for(dream).reason
+
+
+def test_the_pin_migration_ends_up_identical_to_a_fresh_database(tmp_path):
+    """The columns live in `SCHEMA` and in `_ADDED_DREAM_COLUMNS`, and this is
+    what keeps the two in step. Found by comparing them, not by reading either."""
+    old = tmp_path / "old.db"
+    _pre_pin_store_with_a_row(old)
+    DreamStore(old)
+    DreamStore(tmp_path / "fresh.db")
+
+    def columns(path: Path) -> list[str]:
+        conn = sqlite3.connect(path)
+        try:
+            return [str(row[1]) for row in conn.execute("PRAGMA table_info(dreams)")]
+        finally:
+            conn.close()
+
+    assert columns(old) == columns(tmp_path / "fresh.db")
+    assert "weakest_hop_index" in columns(old)
+
+
+def test_a_migrated_row_can_be_pinned_and_promoted(tmp_path):
+    """Present is not the same as usable. The migrated row round-trips through
+    a real write of both halves and then through the rule that reads them."""
+    path = tmp_path / "dreams.db"
+    _pre_pin_store_with_a_row(path)
+    store = DreamStore(path)
+    dream = store.recent()[0]
+
+    dream.weakest_hop_index = 2
+    dream.conditions = [replace(dream.conditions[0], settles_hops=(2,))]
+    store.save(dream)
+
+    reopened = DreamStore(path).get(int(dream.id or 0))
+    assert reopened is not None
+    assert reopened.weakest_hop_index == 2
+    assert reopened.conditions[0].settles_hops == (2,)
+    assert promotion_for(reopened).to is Vault.PROPHECY
+
+
+def test_the_hop_pin_needed_no_column_of_its_own(tmp_path):
+    """The claim in `DreamCondition`, made checkable.
+
+    `settles_hops` lives inside the `conditions` JSON blob, so it reaches an
+    existing database with no ALTER at all — which is why the migration above
+    covers only `weakest_hop_index`. If somebody ever gives conditions their own
+    columns, this test is the one that should start failing.
+    """
+    path = tmp_path / "dreams.db"
+    _pre_pin_store_with_a_row(path)
+    DreamStore(path)
+
+    conn = sqlite3.connect(path)
+    try:
+        columns = [str(row[1]) for row in conn.execute("PRAGMA table_info(dreams)")]
+    finally:
+        conn.close()
+
+    assert "conditions" in columns
+    assert not [c for c in columns if "settles" in c]

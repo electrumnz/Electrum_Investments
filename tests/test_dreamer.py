@@ -180,8 +180,54 @@ def test_open_dreams_are_offered_back_for_advancing(rules, journal):
     assert "[id 7] Brood overlap" in prompt
     assert "hop 1 (checked)" in prompt
     assert "hop 2 (UNCHECKED)" in prompt
-    assert "weakest: the overlap" in prompt
+    assert "weakest (WHICH HOP NOT ESTABLISHED): the overlap" in prompt
     assert "Prefer advancing" in prompt
+
+
+def test_the_weakest_hop_is_rendered_with_its_NUMBER_when_one_is_known(rules, journal):
+    """The sentence is what a person reads; the number is what the rule uses.
+
+    Rendered together because the dreamer has to be able to see which hop the
+    promotion rule will look at — a sentence on its own is exactly what it
+    already writes, and exactly what code cannot act on.
+    """
+    dream = Dream(
+        id=7, title="Brood overlap", seed="a spark",
+        chain=[Hop("checked claim", True, "a source"), Hop("assumed claim")],
+        weakest_hop="the overlap",
+        weakest_hop_index=2,
+    )
+
+    prompt = build_prompt(rules, journal, [dream], now=ENTRY)
+
+    assert "weakest (hop 2): the overlap" in prompt
+
+
+def test_a_condition_says_which_hop_it_settles_and_says_when_it_settles_none(
+    rules, journal
+):
+    """The absence is stated rather than left blank.
+
+    An unpinned condition is the reason a finished keep sits on the workbench,
+    so a renderer that showed nothing there would hide the one field that has
+    to change — the same reason `symbols_without_history` is named on the
+    loop's cycle line rather than dropped.
+    """
+    dream = Dream(
+        id=7, title="Brood overlap", seed="a spark",
+        chain=[Hop("checked claim", True, "a source"), Hop("assumed claim")],
+        weakest_hop="the overlap",
+        weakest_hop_index=2,
+        conditions=[
+            DreamCondition(text="pinned to the weak link", settles_hops=(2,)),
+            DreamCondition(text="pinned to nothing"),
+        ],
+    )
+
+    prompt = build_prompt(rules, journal, [dream], now=ENTRY)
+
+    assert "pinned to the weak link [no checkable form] [hop 2]" in prompt
+    assert "pinned to nothing [no checkable form] [settles no hop yet]" in prompt
 
 
 def test_the_age_of_a_dream_is_stated_not_implied(rules, journal):
@@ -845,6 +891,34 @@ def test_the_prompt_asks_for_conditions_and_says_a_keep_without_one_goes_nowhere
     assert "never the name of another figure" in prompt
 
 
+def test_the_prompt_asks_for_the_weakest_hop_to_be_PINNED(rules, journal):
+    """The operator's correction, stated where the model can act on it.
+
+    `promotion_for` refuses a keep whose conditions all settle links nobody
+    doubted. Left unsaid, the dreamer has no way to know why a finished chain
+    with a perfectly good number never leaves the workbench — it would rewrite
+    the number rather than pin it.
+    """
+    prompt = build_prompt(rules, journal, [])
+
+    assert "`weakest_hop_index`" in prompt
+    assert "`settles_hops`" in prompt
+    assert "parked awaiting the link that could kill it" in prompt
+
+
+def test_the_prompt_still_says_the_threshold_is_a_number(rules, journal):
+    """The pin does not replace the older rule; it makes it matter more.
+
+    "Above the 20-day" re-checked next month tests a level nobody ever saw, and
+    the condition carrying the weakest hop is the one that has to still mean
+    something months later — a prophecy's TTL is 365 days.
+    """
+    from bot.dreamer import SYSTEM_PROMPT
+
+    assert "never the name of another figure" in SYSTEM_PROMPT
+    assert "settles nothing" in SYSTEM_PROMPT
+
+
 def test_an_advancing_step_is_shown_the_conditions_already_on_the_dream(
     rules, journal, store
 ):
@@ -895,6 +969,104 @@ def test_a_step_writes_its_conditions_onto_the_dream(rules, store, journal):
     condition = result.dream.conditions[0]
     assert condition.symbol == "AA"  # normalised on the way in
     assert condition.is_gradeable is True
+
+
+def test_a_step_pins_its_conditions_to_the_hops_they_settle(rules, store, journal):
+    """Both halves of the pin travel from the model onto the dream.
+
+    Without this the promotion rule is unreachable: nothing else in the process
+    can say which hop a threshold bears on, and a rule nothing can satisfy is a
+    rule that silently empties a shelf.
+    """
+    step = _step(
+        chain=[DreamHop(claim="one"), DreamHop(claim="two"), DreamHop(claim="three")],
+        weakest_hop="the third link",
+        weakest_hop_index=3,
+        conditions=[
+            StepCondition(
+                text="Alcoa clears 100",
+                symbol="AA",
+                settles_hops=[3],
+                field=TriggerField.CLOSE,
+                op=TriggerOp.ABOVE,
+                value=100.0,
+            )
+        ],
+    )
+    dreamer = Dreamer(_env(), rules, store, journal, client=_StubClient(step))
+
+    result = dreamer.run_once()
+
+    assert result is not None
+    assert result.dream.weakest_hop_index == 3
+    assert result.dream.resolved_weakest_hop == 3
+    assert result.dream.conditions[0].settles_hops == (3,)
+    assert result.dream.weakest_hop_is_pinned is True
+
+
+def test_a_pin_outside_the_chain_is_dropped_rather_than_stored(rules, store, journal):
+    """Structural, so it is cleaned and never clamped.
+
+    A pin at hop 0 or past the end names no link, and one stored anyway would be
+    reported as covering the weakest hop while naming nothing — the plausible
+    wrong figure, arriving as a hop number.
+    """
+    step = _step(
+        chain=[DreamHop(claim="one"), DreamHop(claim="two")],
+        conditions=[
+            StepCondition(text="prose", settles_hops=[0, 5, 2, 2, -1]),
+        ],
+    )
+    dreamer = Dreamer(_env(), rules, store, journal, client=_StubClient(step))
+
+    result = dreamer.run_once()
+
+    assert result is not None
+    assert result.dream.conditions[0].settles_hops == (2,)
+
+
+def test_a_new_weakest_hop_sentence_clears_the_OLD_number(rules, store, journal):
+    """They move together or the rule reads a stale answer.
+
+    A fresh sentence with the previous step's index still attached would pin
+    promotion to whichever hop the LAST step thought was weakest, while the
+    dream on screen claims a different one. Clearing it costs a run and is
+    recoverable; keeping it is wrong silently.
+    """
+    dream = Dream(
+        title="t", seed="s",
+        chain=[Hop("one"), Hop("two"), Hop("three")],
+        weakest_hop="the third link", weakest_hop_index=3,
+    )
+    dream_id = store.save(dream)
+    step = _step(advance_id=dream_id, weakest_hop="actually the second link")
+    dreamer = Dreamer(_env(), rules, store, journal, client=_StubClient(step))
+
+    result = dreamer.run_once()
+
+    assert result is not None
+    assert result.dream.weakest_hop == "actually the second link"
+    assert result.dream.weakest_hop_index is None
+
+
+def test_a_number_on_its_own_fixes_a_sentence_already_on_the_dream(
+    rules, store, journal
+):
+    """The case where a step is repairing exactly what promotion refused it for."""
+    dream = Dream(
+        title="t", seed="s",
+        chain=[Hop("one"), Hop("two")],
+        weakest_hop="a paraphrase matching no hop",
+    )
+    dream_id = store.save(dream)
+    step = _step(advance_id=dream_id, weakest_hop_index=2)
+    dreamer = Dreamer(_env(), rules, store, journal, client=_StubClient(step))
+
+    result = dreamer.run_once()
+
+    assert result is not None
+    assert result.dream.weakest_hop == "a paraphrase matching no hop"
+    assert result.dream.resolved_weakest_hop == 2
 
 
 def test_restating_a_condition_on_a_later_step_does_not_wipe_its_grade(

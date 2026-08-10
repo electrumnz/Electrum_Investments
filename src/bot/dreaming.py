@@ -436,6 +436,36 @@ class DreamCondition:
     # docstring gives about prose-only conditions.
     symbol: str = ""
 
+    # WHICH hop of the dream's chain this condition would settle. **One-based**,
+    # matching the `hop 1`, `hop 2` numbering `dreamer.build_prompt` renders, so
+    # the number the model writes back is the number it was shown. Zero and
+    # negatives are not positions in that numbering and are dropped on read.
+    #
+    # This is what makes the prophecy shelf a claim rather than a filing
+    # decision. A condition is otherwise free to pre-register a number about a
+    # link nobody doubted, which grades cleanly, promotes cleanly and settles
+    # nothing — see `promotion_for`, which now requires the chain's weakest hop
+    # to be covered.
+    #
+    # **A tuple because one condition may honestly settle several hops.** "The
+    # brood map is published for the season" can be the evidence for both the
+    # emergence hop and the overlap hop, and forcing a choice between them would
+    # push the dreamer into writing the same threshold twice. The reverse is
+    # allowed too: several conditions may name the same hop.
+    #
+    # Empty is legal — a condition that settles nothing in particular is still a
+    # condition, and refusing one would push the dreamer towards pinning a
+    # number to a hop it does not actually bear on, which is the invented
+    # threshold problem wearing a different hat.
+    #
+    # Persisted inside the `conditions` JSON column, so this needed **no schema
+    # migration**: the store keeps the whole list as one TEXT blob and
+    # `from_row` reads an absent key as "nothing pinned", exactly as it does for
+    # `symbol`. A row written before this field existed genuinely does not say
+    # which hop its threshold bears on, and inventing one would be the confident
+    # wrong figure this repository refuses.
+    settles_hops: tuple[int, ...] = ()
+
     fulfilled: bool = False
     fulfilled_at: datetime | None = None
     # Why it was marked, or what was seen. Prose, trimmed like all prose here.
@@ -463,6 +493,19 @@ class DreamCondition:
         """
         return self.is_checkable and bool(self.symbol.strip())
 
+    def settles(self, hop: int | None) -> bool:
+        """Whether this condition claims to settle a given one-based hop.
+
+        `None` — the position of a weakest hop nobody could establish — is False
+        rather than "matches anything". A condition cannot be shown to settle a
+        hop that could not be identified, and the permissive reading would let
+        an unresolvable weakest hop count as covered by every condition on the
+        dream, which is the exact inversion `promotion_for` exists to close.
+        """
+        if hop is None:
+            return False
+        return hop in self.settles_hops
+
     @property
     def key(self) -> tuple[str, str, str, float | None, str]:
         """What makes this the SAME claim across two steps of one dream.
@@ -479,6 +522,15 @@ class DreamCondition:
         threshold keeps its grade. Change the number and it is a NEW claim that
         starts ungraded, which is the honest half: a threshold moved after the
         fact is exactly what pre-registering one exists to prevent.
+
+        **`settles_hops` is deliberately NOT in here.** Which hop a threshold
+        bears on is bookkeeping about the chain, not the claim itself: the
+        number is what was pre-registered, and re-pinning it to a different hop
+        does not make it a different prediction. Including it would reset the
+        grading of a fulfilled condition every time a step renumbered the chain,
+        which is `carry_forward_grading`'s whole failure mode. The new pin still
+        travels — `carry_forward_grading` copies the verdict onto the INCOMING
+        condition, so a re-pinned claim keeps its grade and gains its new hop.
         """
         if self.is_checkable:
             return (
@@ -511,6 +563,7 @@ class DreamCondition:
             "op": str(self.op) if self.op else None,
             "value": self.value,
             "symbol": self.symbol,
+            "settles_hops": list(self.settles_hops),
             "fulfilled": self.fulfilled,
             "fulfilled_at": self.fulfilled_at.isoformat() if self.fulfilled_at else None,
             "note": self.note,
@@ -550,6 +603,14 @@ class DreamCondition:
             # threshold belongs to, and inventing one would be the confident
             # wrong figure this repository refuses.
             symbol=str(row.get("symbol", "") or ""),
+            # Absent on every condition written before the pin existed, which
+            # reads as "nothing pinned" rather than as an error — and therefore
+            # as a dream that cannot leave the workbench until a later step says
+            # which hop its threshold bears on. `_ids` drops anything that will
+            # not read as a positive integer rather than defaulting it to zero,
+            # because hop 0 is not a hop and a pin pointing nowhere is worse
+            # than no pin: it would be reported as covered.
+            settles_hops=tuple(_ids(row.get("settles_hops"))),
             fulfilled=bool(row.get("fulfilled", False)),
             fulfilled_at=_dt(fulfilled_at) if fulfilled_at else None,
             note=str(row.get("note", "")),
@@ -715,6 +776,20 @@ class Dream:
     # The hop the whole thing rests on. Named explicitly because a reader who
     # only has time for one sentence should be given the one that could kill it.
     weakest_hop: str = ""
+
+    # WHICH hop that sentence names, one-based into `chain`. The same split as
+    # `DreamCondition.text` against its triple, and it is here for the same
+    # reason: the sentence is what a person reads and the number is what code
+    # can act on. `weakest_hop` is a paraphrase in practice — "that the smelter
+    # cannot re-contract power elsewhere" against a chain claim reading
+    # "Smelters buy power on long interconnect contracts" — so matching prose
+    # back to a hop is a similarity judgement, and this file already refuses
+    # those in `_claim_key`.
+    #
+    # `None` means the dreamer did not say. `resolved_weakest_hop` falls back to
+    # an exact claim match on the prose, and answers `None` when neither
+    # establishes a hop — never a guess and never a clamp.
+    weakest_hop_index: int | None = None
     # What has to happen for a `keep` to become interesting, or a `park` to wake
     # up. A watch with no named trigger is not a plan, which is the same rule
     # the Decisions page applies to the decision loop's own watches.
@@ -848,6 +923,76 @@ class Dream:
     def unverified_hops(self) -> list[Hop]:
         return [hop for hop in self.chain if not hop.checked]
 
+    # ----------------------------------------------------- the weakest hop
+
+    @property
+    def resolved_weakest_hop(self) -> int | None:
+        """Which hop of the chain the weakest-hop sentence names. One-based.
+
+        Two sources, in order, and neither of them guesses:
+
+        - **The number the dreamer wrote**, when it lands inside the chain. An
+          index outside it is not honoured and is not clamped — a model that
+          answered `4` on a three-hop chain has named no hop, and pinning the
+          rule to the last one would be this file choosing which link is weakest.
+        - **An exact claim match on the prose**, normalised by `_claim_key`,
+          which is the same whitespace-and-case rule fusion uses to decide two
+          hops are the same claim. Nothing fuzzier: a similarity score would
+          decide that two differently-worded claims are one, which is precisely
+          the judgement a reader has to be able to check.
+
+        `None` for a dream with no chain, for a sentence naming nothing, and for
+        a sentence that matches no hop. All three are "could not establish it",
+        which `promotion_for` treats as a refusal rather than as a pass — the
+        `_class_total_risk` rule in a new place: an unknown that would make a
+        limit unenforceable fails closed.
+        """
+        if not self.chain:
+            return None
+        index = self.weakest_hop_index
+        if index is not None and 1 <= index <= len(self.chain):
+            return index
+        named = _claim_key(self.weakest_hop)
+        if not named:
+            return None
+        for position, hop in enumerate(self.chain, 1):
+            if _claim_key(hop.claim) == named:
+                return position
+        return None
+
+    @property
+    def awaits_settlement(self) -> bool:
+        """Whether any link in this chain is still an assumption.
+
+        The question `promotion_for`'s weakest-hop clause turns on, and it is
+        arithmetic over `checked` rather than a view on the dreamer's judgement.
+        A chain every hop of which is sourced has nothing awaiting settlement,
+        so there is no link for a prophecy to be parked against; an empty chain
+        has no links at all. Both read False here and both are documented on the
+        rule itself, because they reach the same answer for opposite reasons.
+        """
+        return bool(self.unverified_hops)
+
+    @property
+    def weakest_hop_is_pinned(self) -> bool:
+        """Whether a CHECKABLE condition claims to settle the weakest hop.
+
+        `is_checkable` rather than `is_gradeable`, matching the clause above it
+        in `promotion_for`: the promotion rule turns on whether a number was
+        pre-registered, not on whether this repository can currently look the
+        figure up. Collapsing the two would silently make a threshold on a
+        symbol the loop does not follow stop counting as a prophecy at all.
+
+        A prose-only condition pinned to the weakest hop is therefore not
+        enough. That is deliberate and is the whole point: the prophecy shelf
+        holds claims that can be graded, and "the spread normalises, hop 2" is
+        an opinion with a hop number attached.
+        """
+        hop = self.resolved_weakest_hop
+        if hop is None:
+            return False
+        return any(c.is_checkable and c.settles(hop) for c in self.conditions)
+
     @property
     def is_open(self) -> bool:
         return self.stage is not DreamStage.VERDICT
@@ -947,6 +1092,77 @@ class Promotion:
         return self.to is not None
 
 
+def _excerpt(text: str, limit: int = 140) -> str:
+    """A claim short enough to sit inside a refusal sentence.
+
+    Prose, so it truncates rather than being rejected — the `_trim` rule, with
+    a tighter cap because this one is quoted mid-sentence rather than stored.
+    """
+    clean = " ".join(text.split())
+    if len(clean) <= limit:
+        return clean
+    return clean[: limit - 1].rstrip() + "…"
+
+
+def _weakest_hop_refusal(dream: Dream) -> Promotion | None:
+    """Why the weakest hop is not covered, or `None` when it is.
+
+    Three refusals rather than one, because they are fixed three different ways
+    and a caller told "not promotable" fixes nothing. The same reasoning
+    `MoveResult` collects every refusal for, and the same reasoning
+    `SYMBOLS_NOT_OFFERED` and `CLASS_NOT_OFFERED` are two refusals rather than
+    one: name the hop, number the hop, or pin a threshold to it.
+
+    Every message carries the CONSEQUENCE rather than a code. A dream that
+    stalls here has a dreamer reading the reason on the next run, and "not
+    promotable" would teach it nothing about what to write differently.
+    """
+    hops = len(dream.chain)
+    assumptions = len(dream.unverified_hops)
+    checkable = sum(1 for c in dream.conditions if c.is_checkable)
+
+    hop = dream.resolved_weakest_hop
+    if hop is None:
+        if not dream.weakest_hop.strip() and dream.weakest_hop_index is None:
+            return Promotion(
+                reason=(
+                    "Stays on the workbench: the chain's weakest link has "
+                    "nothing pinned to it, because nobody has said which link "
+                    f"it is. {assumptions} of {hops} hop(s) are still "
+                    "assumptions and none is named as the one that could kill "
+                    "the chain. The prophecy shelf holds a dream parked "
+                    "awaiting the link that would settle it, so name the "
+                    "weakest hop and pre-register a condition against it."
+                )
+            )
+        return Promotion(
+            reason=(
+                "Stays on the workbench: the chain's weakest link has nothing "
+                f'pinned to it, because "{_excerpt(dream.weakest_hop)}" matches '
+                f"no hop in this {hops}-hop chain and no usable hop number was "
+                f"given. Set weakest_hop_index to one of hops 1-{hops} so a "
+                "condition can be shown to settle it."
+            )
+        )
+
+    if dream.weakest_hop_is_pinned:
+        return None
+
+    claim = _excerpt(dream.chain[hop - 1].claim) or "unstated"
+    return Promotion(
+        reason=(
+            "Stays on the workbench: the chain's weakest link has nothing "
+            f'pinned to it. Hop {hop} — "{claim}" — is what this rests on, and '
+            f"none of its {checkable} checkable condition(s) claims to settle "
+            "it. A prophecy is a dream parked awaiting the link that could kill "
+            "it; conditions on links nobody doubted grade cleanly and settle "
+            "nothing, which makes the shelf a filing decision rather than a "
+            f"claim. Put {hop} in settles_hops on a condition that would settle "
+            "that hop."
+        )
+    )
+
+
 def promotion_for(dream: Dream) -> Promotion:
     """The promotion rule: workbench → prophecy → vault.
 
@@ -966,6 +1182,41 @@ def promotion_for(dream: Dream) -> Promotion:
       no number pre-registered against it is an opinion, and the prophecy shelf
       exists precisely to hold claims that can be graded. This is `is_checkable`
       rather than `is_gradeable` on purpose — see that property.
+    - **And one of them must settle the chain's WEAKEST HOP.** The operator's
+      correction, and the clause that turns the prophecy shelf back into what it
+      was for: *dreams parked awaiting the prophecy to be fulfilled.* A
+      checkable condition about a link nobody doubted grades cleanly, promotes
+      cleanly and settles nothing, which makes the shelf a filing decision
+      rather than a claim. `weakest_hop` names the hop that could kill the
+      chain, so that is the hop a condition has to bear on.
+
+      Three edge cases, each answered rather than forced:
+
+      - **A chain with no unchecked hop is not held back.** `awaits_settlement`
+        is False when every link is sourced, so there is no link awaiting
+        anything and demanding a threshold on one would be asking for a number
+        against a hop already nailed down. The badge reads SOURCED and is
+        visible on every surface, which is where that claim gets checked.
+      - **No chain at all is not held back either**, and for a different
+        reason: this clause pins a chain's weakest link and does not require a
+        chain to exist. Refusing a chainless keep is a separate rule about
+        whether a dream needs an argument, and smuggling it in here would be
+        adding a limit nobody agreed to.
+      - **A FUSION needs no exemption**, because the verdict clause above
+        already catches it. A fresh fusion has no verdict and no `weakest_hop`
+        by design — nobody has attacked it yet — so it is refused for the
+        verdict, never for the pin. By the time a dreamer has taken it apart and
+        reached a keep it names a weakest hop like any other dream, and the
+        ordinary rule applies. `tests/test_dreaming.py` pins that order.
+
+      **It gates leaving the WORKBENCH, not arriving at the vault**, and the
+      asymmetry is deliberate. A dream already on the prophecy shelf is by
+      definition parked awaiting its conditions, so re-testing the pin when they
+      fire would strand it there — including every prophecy promoted before this
+      clause existed, which would turn a tightening into a silent deletion. What
+      the clause buys is the ticket off the workbench, and it sits AHEAD of the
+      all-conditions-met branch so the direct workbench-to-vault route cannot
+      slip past it.
     - **All conditions met sends it to the VAULT**, the one shelf the trading
       agent can see. `all_conditions_met` is False on an empty list, which is
       the whole reason it and `has_conditions` are separate questions: an
@@ -1005,6 +1256,11 @@ def promotion_for(dream: Dream) -> Promotion:
                 "operator and a number before this becomes a prophecy."
             )
         )
+
+    if dream.vault is Vault.WORKBENCH and dream.awaits_settlement:
+        unpinned = _weakest_hop_refusal(dream)
+        if unpinned is not None:
+            return unpinned
 
     if dream.all_conditions_met:
         return Promotion(
@@ -1214,6 +1470,32 @@ def _claim_key(claim: str) -> str:
     return " ".join(claim.split()).casefold()
 
 
+def _repin(
+    condition: DreamCondition, parent: Dream, position_of: dict[str, int]
+) -> DreamCondition:
+    """Renumber a condition's hop pins from its parent's chain onto the child's.
+
+    `plan_fusion` builds the child's chain as a deduped union in parent order,
+    so hop 2 of a parent is rarely hop 2 of the child. A pin carried across
+    unchanged would name a different link while still reporting as covered,
+    which is the one failure mode worse than no pin at all — so anything that
+    cannot be mapped is DROPPED and the condition arrives honestly unpinned.
+
+    A condition with nothing pinned is returned unchanged rather than rebuilt,
+    so the common case allocates nothing.
+    """
+    if not condition.settles_hops:
+        return condition
+    mapped: list[int] = []
+    for index in condition.settles_hops:
+        if not 1 <= index <= len(parent.chain):
+            continue
+        target = position_of.get(_claim_key(parent.chain[index - 1].claim))
+        if target is not None and target not in mapped:
+            mapped.append(target)
+    return replace(condition, settles_hops=tuple(mapped))
+
+
 @dataclass(frozen=True)
 class Fusion:
     """What a set of parents would combine into, computed before anything is written.
@@ -1313,6 +1595,14 @@ def plan_fusion(parents: Sequence[Dream]) -> Fusion:
     )
     shared = tuple(first[key].claim for key in order if len(seen_in[key]) > 1)
 
+    # Where each claim ended up in the CHILD's chain, so a parent's hop pins can
+    # be renumbered onto it. The union is deduped and reordered, so an index
+    # carried across untouched would point at whichever hop happened to land in
+    # that slot — a pin silently naming a different link, which is worse than an
+    # unpinned condition because it reads as covered. Anything that will not map
+    # is dropped for the same reason.
+    position_of = {key: index for index, key in enumerate(order, 1)}
+
     incoming: list[DreamCondition] = []
     keys: set[tuple[str, str, str, float | None, str]] = set()
     for parent in parents:
@@ -1320,7 +1610,7 @@ def plan_fusion(parents: Sequence[Dream]) -> Fusion:
             if condition.key in keys:
                 continue
             keys.add(condition.key)
-            incoming.append(condition)
+            incoming.append(_repin(condition, parent, position_of))
     conditions = tuple(
         carry_forward_grading(
             [c for parent in parents for c in parent.conditions if c.fulfilled],
@@ -1545,6 +1835,24 @@ def _ids(values: object) -> list[int]:
     return out
 
 
+def _hop_index(value: object) -> int | None:
+    """A one-based hop position, or `None` for "not said".
+
+    Structural, so it is cleaned rather than trimmed, and anything that will not
+    read as a POSITIVE integer comes back `None` rather than 0. Hop zero is not
+    a hop, and a stored pin that points at no link would be reported as a pin —
+    the same reason `_ids` drops a parent id it cannot parse instead of
+    defaulting it.
+    """
+    if value is None:
+        return None
+    try:
+        parsed = int(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
 def _verification(value: object) -> Verification | None:
     """A stored ceiling, or `None` for "no cap".
 
@@ -1593,6 +1901,11 @@ def _dream_payload(dream: Dream) -> tuple[object, ...]:
         json.dumps(_ids(dream.parents)),
         json.dumps([_trim(h) for h in dream.shared_hops]),
         str(dream.verification_ceiling) if dream.verification_ceiling else "",
+        # Structural, so it is cleaned rather than trimmed and a value that is
+        # not a position comes back as "not said". Writing 0 or a negative would
+        # store a pin pointing at no hop, which `resolved_weakest_hop` would
+        # then have to defend against on every read.
+        _hop_index(dream.weakest_hop_index),
     )
 
 
@@ -1929,7 +2242,12 @@ CREATE TABLE IF NOT EXISTS dreams (
   -- relationship; a parent's children are derived by `children_of`.
   parents              TEXT NOT NULL DEFAULT '[]',
   shared_hops          TEXT NOT NULL DEFAULT '[]',
-  verification_ceiling TEXT NOT NULL DEFAULT ''
+  verification_ceiling TEXT NOT NULL DEFAULT '',
+  -- WHICH hop `weakest_hop` names, one-based. Nullable rather than defaulted to
+  -- 0, because "the dreamer did not say" and "hop zero" are different answers
+  -- and only one of them is a position in a chain. The CONDITIONS' own pins
+  -- needed no column at all: they live inside the `conditions` JSON blob.
+  weakest_hop_index    INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS dream_messages (
@@ -1980,6 +2298,7 @@ _ADDED_DREAM_COLUMNS: tuple[tuple[str, str], ...] = (
     ("parents", "TEXT NOT NULL DEFAULT '[]'"),
     ("shared_hops", "TEXT NOT NULL DEFAULT '[]'"),
     ("verification_ceiling", "TEXT NOT NULL DEFAULT ''"),
+    ("weakest_hop_index", "INTEGER"),
 )
 
 
@@ -2109,7 +2428,8 @@ class DreamStore:
                     " weakest_hop=?, trigger_note=?, origin=?, chain=?, thoughts=?,"
                     " instruments=?, created_at=?, updated_at=?, vault=?,"
                     " vault_entered_at=?, conditions=?, symbols=?, asset_class_key=?,"
-                    " wisp=?, parents=?, shared_hops=?, verification_ceiling=?"
+                    " wisp=?, parents=?, shared_hops=?, verification_ceiling=?,"
+                    " weakest_hop_index=?"
                     " WHERE id=?",
                     (*_dream_payload(dream), dream.id),
                 )
@@ -2128,8 +2448,9 @@ class DreamStore:
             "INSERT INTO dreams (title, seed, stage, verdict, weakest_hop,"
             " trigger_note, origin, chain, thoughts, instruments, created_at,"
             " updated_at, vault, vault_entered_at, conditions, symbols,"
-            " asset_class_key, wisp, parents, shared_hops, verification_ceiling)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            " asset_class_key, wisp, parents, shared_hops, verification_ceiling,"
+            " weakest_hop_index)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             _dream_payload(dream),
         )
         return int(cursor.lastrowid or 0)
@@ -2206,6 +2527,11 @@ class DreamStore:
             stage=_stage(row["stage"]),
             verdict=verdict,
             weakest_hop=str(row["weakest_hop"] or ""),
+            # `None` on every row written before the pin existed, which reads as
+            # "the dreamer did not say" and falls back to an exact claim match
+            # on the prose. That is the honest answer: a row from before this
+            # shipped genuinely does not record which hop its sentence meant.
+            weakest_hop_index=_hop_index(cls._col(row, "weakest_hop_index", None)),
             trigger=str(row["trigger_note"] or ""),
             origin=str(row["origin"] or ""),
             chain=chain,
@@ -2571,7 +2897,16 @@ class DreamStore:
                 # attacked the fusion yet, and inheriting a parent's weakest hop
                 # would claim the combined chain had been examined when it has
                 # not. `DreamLedger.unattacked` counting it is the honest result.
+                #
+                # The index goes with the sentence, and stating it here rather
+                # than leaning on the field default is the point: a number
+                # carried across would survive the renumbering the union does to
+                # the chain and pin the rule to whichever link landed in that
+                # slot. `promotion_for` refuses a fusion on its VERDICT long
+                # before it looks at either, so nothing is made unpromotable by
+                # this pair being empty.
                 weakest_hop="",
+                weakest_hop_index=None,
             )
             child.thoughts = [
                 Thought(
