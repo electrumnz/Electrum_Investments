@@ -498,6 +498,31 @@ Compared against the **mid**, not the touch: a wide out-of-hours spread would
 otherwise trip a long on the bid and a short on the ask, reporting a breach the
 traded price never reached.
 
+### The journal records the PROPOSAL, and a fill is not atomic
+
+`record_fill` runs immediately after `broker.place_order` and writes the
+proposal's quantity and the proposal's limit price. Neither is necessarily what
+the broker did.
+
+Observed on the first real order: the limit was 772.84 and the fill averaged
+773.324285, so `open_risk_usd` read $990.36 against a real $980.19 until it was
+corrected by hand. Overstated is the safe direction and it is still a figure
+that does not describe the account.
+
+**A fill is not atomic, and one poll during it is a reading rather than an
+outcome.** A check mid-fill on that order returned `FILLED 3.0` of 21 and was
+briefly recorded as a partial fill; the order completed moments later. Anything
+that samples an in-flight order has to treat the answer as a snapshot.
+
+**`Trade` cannot express a partial fill at all** — one `qty`, one
+`entry_price`, no concept of 3 filled now and 18 later, or of 3 filled and the
+rest cancelled. That is a gap in the model, not a bug in a caller.
+
+Recording at submission is not simply wrong: the alternative, waiting for a
+terminal order state, leaves a live position unjournalled in the meantime,
+which is the `14b88c8` hole. `reconcile` already squares journal against broker
+every cycle and is the likely right home for the correction. See `TODO.md`.
+
 ### The journal must be wired in or the caps count nothing
 
 `AccountSnapshot.open_risk_usd` is what the total-risk cap counts against, and it
@@ -511,6 +536,20 @@ Every path that hands an account snapshot to the risk gate must populate it:
 Miss it and the cap silently has nothing to count. This was a real bug, fixed in
 `14b88c8`. A held position with no journal entry has an unknowable stop, so its
 risk is reported as **missing** rather than guessed at.
+
+### A resting stop whose level nobody can read is most of the way to no stop
+
+`WorkingOrder` carries `limit_price` and no `stop_price`. So a stop leg resting
+at the broker renders as `limit_price=None` on every surface that shows working
+orders, and nothing in this repository can state what level it will trigger at.
+
+That was survivable while nothing sent a stop to the broker. It is not now:
+entries go out as brackets and OTOs, the stop leg IS the thing rule 3 depends
+on, and the operator can see that a leg exists while having no way to check it
+is at the price the journal says. The journal's `planned_stop` and the broker's
+actual trigger are two different facts and only one of them is visible.
+
+Add `stop_price` to `WorkingOrder` before trusting a displayed stop.
 
 ### The command centre is the real product; brand/ is the shop window
 

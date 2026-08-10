@@ -51,34 +51,51 @@ Windows to test in: after hours 16:00–20:00 New York, pre-market 04:00–09:30
 
 ---
 
-## 2. Journal row 1 has the wrong entry price
+## 2. `record_fill` writes the PROPOSAL, not what the broker did
 
-**Corrected from an earlier reading in this file.** A poll returned
-`FILLED 3.0` and was written down as a partial fill; it was a snapshot taken
-mid-fill. The order completed in full — **21 shares at an average of
-773.324285** — and the stop leg is resting at the broker as a buy-to-cover of
-21, which is the OTO behaving exactly as designed. Rule 3 holds at the broker.
+Row 1's entry price has been corrected by hand and the journal now reads
+$980.19, matching the account. The underlying behaviour has not changed.
 
-What is actually wrong is smaller. Row 1 was hand-written from the proposal
-before anything filled, so it carries the limit rather than the fill:
+`record_fill` runs immediately after `broker.place_order` and records the
+proposal's quantity and the proposal's limit price. Neither is what happened:
 
-    journal      21 x (820 - 772.840000) = $990.36   (0.99% of equity)
-    actual       21 x (820 - 773.324285) = $980.19   (0.98% of equity)
+- the limit was 772.84, the fill averaged **773.324285**
+- a fill is **not atomic**. A poll during this one returned `FILLED 3.0` and
+  was briefly written down as a partial fill. It was a reading mid-fill, and
+  the order completed to 21.
 
-`open_risk_usd` is what the 2% total-risk cap counts against, so it is
-overstated by $10.17 — the safe direction, and still a figure that does not
-describe the account. Correct the entry price on row 1.
+So the journal records an intention and calls it an outcome. On this trade the
+gap was $10.17 of overstated risk — the safe direction, and still a number that
+does not describe the account. On a genuinely partial fill it would be worse,
+and `Trade` has no way to express one at all: one `qty`, one `entry_price`, no
+concept of 3 filled now and 18 later.
 
-Confirm the stop leg's trigger price while doing it. `WorkingOrder` does not
-carry a stop price, so the output above shows `limit_price=None` and says
-nothing about whether the trigger is 820. Read it from Alpaca directly.
+**The decision to make:** should `record_fill` wait for a terminal order state
+rather than recording at submission? That is not free — the loop would have to
+poll or reconcile before it can journal, and an unjournalled position in the
+meantime is the `14b88c8` hole again. Reconciliation already exists and may be
+the right place for it.
 
-**The general lesson, which outlives this row:** a fill is not atomic, and a
-single poll during one is a reading rather than an outcome. The journal is
-written from the proposal, so nothing reconciles quantity or price against what
-the broker actually did unless `reconcile` is given the chance. Worth deciding
-whether `record_fill` should wait for a terminal order state instead of
-recording at submission.
+---
+
+## CURRENT STATE — there is a live position
+
+Recorded here because it outlives this session and nothing else names it.
+
+    SHORT 21 SPY @ 773.324285      opened 2026-08-10 13:37:40 UTC
+    stop 820.00, no take-profit    risk $980.19 = 0.98% of equity
+    journal row 1, strategy "manual"
+    entry order  a76f0545-5db0-445e-9b31-c538b371b7a6
+    stop leg     952237ac-d7ec-426e-bb5f-5c6ce7294260  (BUY 21, resting)
+
+Placed by hand as an operator test of the out-of-hours order path, not proposed
+by the model. Tagged `manual` so it cannot corrupt `mean_reversion`'s record.
+
+**Unconfirmed:** the stop leg's trigger price has never been read back.
+`WorkingOrder` does not carry a stop price, so every check so far has shown
+`limit_price=None` and said nothing about whether the trigger is actually 820.
+Worth adding `stop_price` to `WorkingOrder` — a resting stop whose level nobody
+can see is most of the way to no stop at all.
 
 ## 3. The dashboard shows "no quote" on all sixteen
 
