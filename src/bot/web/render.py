@@ -742,47 +742,59 @@ nav a:hover::after,nav a[aria-current=page]::after{transform:scaleX(1)}
   ::view-transition-old(root),::view-transition-new(root){animation:none}
 }
 
-/* ------------------------------------------------------------------- gate */
+/* ----------------------------------------------------------------- signin */
 /* The sign-in screen, and the one the brief actually asked for: this is where
    the jump starts. It still reveals nothing about the account behind it — see
-   the docstring on `login_page` — so everything dressed up here is chrome. */
-.gate{min-height:calc(100svh - 8rem);display:grid;place-items:center;padding:2rem 0}
-.gate .panel{width:min(100% - 2rem,25rem);position:relative;
+   the docstring on `login_page` — so everything dressed up here is chrome.
+
+   Named `.signin` and NOT `.gate`, which it used to be. `.gate` is also the
+   Decisions page's modifier for the risk-gate verdict row — `<div class="rung
+   gate no">` — so a bare `.gate{min-height:calc(100svh - 8rem);place-items:
+   center}` matched it too and stretched every verdict to most of a viewport
+   with the rejection reason floating in the middle of the void. Valid CSS,
+   silently styling the wrong element, invisible unless somebody looks at a
+   page that HAS a decision on it — which no empty-journal render does. Exactly
+   the `.pill`/`.seed` collision again, so the guard that caught that one now
+   covers every modifier rather than only the badges. */
+.signin{min-height:calc(100svh - 8rem);display:grid;place-items:center;padding:2rem 0}
+.signin .panel{width:min(100% - 2rem,25rem);position:relative;
   border:1px solid var(--slate);border-radius:2px;padding:2rem 1.75rem;
   background:linear-gradient(180deg,rgba(22,27,34,.9),rgba(15,19,25,.94));
   backdrop-filter:blur(4px);
   box-shadow:0 0 0 1px rgba(111,211,232,.06),0 30px 70px -40px rgba(0,0,0,1)}
-.gate .panel::before,.gate .panel::after{content:"";position:absolute;
+.signin .panel::before,.signin .panel::after{content:"";position:absolute;
   width:14px;height:14px;border:1px solid var(--holo);opacity:.6}
-.gate .panel::before{top:-1px;left:-1px;border-right:0;border-bottom:0}
-.gate .panel::after{bottom:-1px;right:-1px;border-left:0;border-top:0}
-.gate .sig{text-align:center;margin-bottom:1.75rem}
-.gate .sig svg{display:block;margin:0 auto .875rem}
-.gate .sig svg path{fill:var(--bone)}
-.gate .sig h1{font-size:1.25rem;letter-spacing:.16em;font-family:var(--serif)}
-.gate .sig h1 span{color:var(--pewter)}
-.gate .sig p{margin:.5rem 0 0;font-family:var(--mono);font-size:.625rem;
+.signin .panel::before{top:-1px;left:-1px;border-right:0;border-bottom:0}
+.signin .panel::after{bottom:-1px;right:-1px;border-left:0;border-top:0}
+.signin .sig{text-align:center;margin-bottom:1.75rem}
+.signin .sig svg{display:block;margin:0 auto .875rem}
+.signin .sig svg path{fill:var(--bone)}
+.signin .sig h1{font-size:1.25rem;letter-spacing:.16em;font-family:var(--serif)}
+.signin .sig h1 span{color:var(--pewter)}
+.signin .sig p{margin:.5rem 0 0;font-family:var(--mono);font-size:.625rem;
   letter-spacing:.2em;text-transform:uppercase;color:var(--holo);opacity:.8}
-.gate label{display:block;margin-bottom:.5rem}
-.gate input{width:100%;background:var(--ink);color:var(--bone);
+.signin label{display:block;margin-bottom:.5rem}
+.signin input{width:100%;background:var(--ink);color:var(--bone);
   border:1px solid var(--slate);border-radius:2px;padding:.75rem .875rem;
   font-family:var(--mono);font-size:.9375rem;letter-spacing:.18em;
   transition:border-color .25s var(--ease),box-shadow .25s var(--ease)}
-.gate input:focus{border-color:var(--holo);
+.signin input:focus{border-color:var(--holo);
   box-shadow:0 0 0 3px rgba(111,211,232,.12);outline:none}
-.gate button{width:100%;margin-top:1rem;background:transparent;color:var(--bone);
+.signin button{width:100%;margin-top:1rem;background:transparent;color:var(--bone);
   border:1px solid var(--patina);border-radius:2px;padding:.75rem;
   font-family:var(--mono);font-size:.6875rem;letter-spacing:.22em;
   text-transform:uppercase;cursor:pointer;position:relative;overflow:hidden;
   transition:background .25s var(--ease),border-color .25s var(--ease)}
-.gate button:hover{background:rgba(78,140,125,.16);border-color:var(--holo)}
-.gate .standby{margin:1.25rem 0 0;text-align:center;font-family:var(--mono);
+.signin button:hover{background:rgba(78,140,125,.16);border-color:var(--holo)}
+.signin .standby{margin:1.25rem 0 0;text-align:center;font-family:var(--mono);
   font-size:.625rem;letter-spacing:.16em;text-transform:uppercase;
   color:var(--pewter)}
-.gate .standby i{display:inline-block;width:5px;height:5px;border-radius:50%;
+.signin .standby i{display:inline-block;width:5px;height:5px;border-radius:50%;
   background:var(--holo);margin-right:.5rem;vertical-align:middle;
   animation:fx-pulse 2.8s ease-in-out infinite}
-.gate .err{margin:0 0 1.25rem;padding:.625rem .75rem;font-size:.8125rem;
+/* `p.err`, not `.err`: scoped by element role rather than by a word that is
+   also a state modifier elsewhere. See the collision note above the section. */
+.signin p.err{margin:0 0 1.25rem;padding:.625rem .75rem;font-size:.8125rem;
   color:var(--loss);border:1px solid rgba(192,112,123,.4);
   border-left-width:3px;border-radius:2px;background:rgba(192,112,123,.07)}
 
@@ -3802,7 +3814,7 @@ def login_page(*, env: Env, error: str = "") -> str:
   <span class="brand">{MARK} MUDHORN <span class="thin">CAPITAL</span></span>
   <span class="live paper"><i></i>{_e(mode)}</span>
 </div></header>
-<main><div class="wrap"><div class="gate"><div class="panel">
+<main><div class="wrap"><div class="signin"><div class="panel">
   <div class="sig">
     <svg viewBox="0 0 64 64" width="44" height="44" aria-hidden="true">
       <path fill-rule="evenodd" d="M32 2a30 30 0 1 0 0 60 30 30 0 0 0 0-60Zm0 8a22 22 0 1 1 0 44 22 22 0 0 1 0-44Z"/>

@@ -1058,18 +1058,29 @@ def test_the_soul_name_from_a_request_body_cannot_name_an_arbitrary_file(
 
 
 def test_no_stylesheet_rule_collides_with_a_state_badge():
-    """A `.pill` modifier must not double as a layout class.
+    """A modifier class must not double as a layout class.
 
-    The stage badges are named after the states they show, so a rule written as
-    `.dream .seed { padding: ... }` for the spark paragraph ALSO matched
+    Caught twice now, in the same shape both times.
+
+    First: the stage badges are named after the states they show, so
+    `.dream .seed { padding: ... }` written for the spark paragraph ALSO matched
     `<span class="pill seed">` and rendered the badge as a full-width block.
-    Nothing warned: it is valid CSS that silently styles the wrong element, and
-    it is only visible if somebody looks at the page.
 
-    This flags the shape rather than the instance. A rule whose final compound
-    selector is a bare `.name` that is also a pill modifier, and which sets a
-    LAYOUT property, is the collision. Colour-only overlaps are deliberate and
-    harmless: `.loss` means the same red wherever it lands.
+    Then, with this test written to cover only `.pill` modifiers, it happened
+    again one selector across: the sign-in screen's full-height centring wrapper
+    was `.gate`, and the Decisions page marks its risk-gate verdict row
+    `<div class="rung gate no">`. So every verdict inherited
+    `min-height: calc(100svh - 8rem); place-items: center` and stretched to most
+    of a viewport with the rejection reason floating in the middle of the void.
+    Valid CSS, silently styling the wrong element, and invisible on any page
+    without a decision on it — which every empty-journal render is.
+
+    So the guard now takes EVERY class used as a modifier anywhere, rather than
+    only the badges. That is the general form: a word that names a state is a
+    bad name for a box.
+
+    Colour-only overlaps stay deliberate and harmless: `.loss` means the same
+    red wherever it lands.
     """
     import re
 
@@ -1078,8 +1089,13 @@ def test_no_stylesheet_rule_collides_with_a_state_badge():
     # Strip comments first, so prose in them cannot look like a selector.
     css = re.sub(r"/\*.*?\*/", "", STYLES, flags=re.S)
 
-    modifiers = set(re.findall(r"\.pill\.([a-z-]+)", css))
-    assert modifiers, "no pill modifiers found; has the badge markup changed?"
+    # Any class appearing in second position of a compound selector is being
+    # used as a modifier: `.pill.seed`, `.rung.gate`, `.live.link-live`.
+    modifiers = set(re.findall(r"\.[a-z-]+\.([a-z-]+)", css))
+    assert "seed" in modifiers and "gate" in modifiers, (
+        "the two known collisions are no longer detectable as modifiers; "
+        "has the markup changed?"
+    )
 
     layout = (
         "display", "padding", "margin", "position", "width", "height",
