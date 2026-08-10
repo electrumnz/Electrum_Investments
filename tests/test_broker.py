@@ -224,3 +224,66 @@ def test_a_failed_submit_is_a_rejection_not_an_exception():
 
     assert not result.accepted
     assert "422" in (result.error or "")
+
+
+# ------------------------------------------------- the half-price quote bug
+
+
+def test_a_one_sided_quote_is_refused_rather_than_halved():
+    """`mid` is `(bid + ask) / 2`, so a missing side returns HALF the real
+    price — and half a price looks exactly like a price.
+
+    Observed live against Alpaca's free IEX feed in the pre-market: SPY came
+    back `bid=0, ask=771.64`, so `mid` was 385.82 against a true 773.26.
+    Nothing raised. That figure fed position sizing, the limit price, the
+    gate's own sanity check, the tape and unrealised P&L — all agreeing with
+    each other while being twice out.
+
+    802 tests were green over it, because `MockBroker` always seeds both sides.
+    """
+    from datetime import UTC, datetime
+
+    import pytest
+
+    from bot.models import Tick
+
+    with pytest.raises(ValueError, match="one-sided quote"):
+        Tick(symbol="SPY", bid=0.0, ask=771.64, timestamp=datetime.now(UTC))
+
+    # And the mirror case, which halves just as silently.
+    with pytest.raises(ValueError, match="one-sided quote"):
+        Tick(symbol="SPY", bid=771.64, ask=0.0, timestamp=datetime.now(UTC))
+
+
+def test_a_two_sided_quote_still_works_and_mids_correctly():
+    from datetime import UTC, datetime
+
+    from bot.models import Tick
+
+    tick = Tick(symbol="SPY", bid=773.60, ask=773.98, timestamp=datetime.now(UTC))
+
+    assert tick.mid == pytest.approx(773.79)
+    assert tick.spread == pytest.approx(0.38)
+
+
+def test_an_unusable_quote_reaches_callers_as_a_no_quote_runtime_error():
+    """`check_order` catches `(KeyError, RuntimeError)` for "no market price".
+    A raw ValidationError would sail past that and crash the tool, turning a
+    thin pre-market book into an outage rather than a named missing symbol."""
+    import pytest
+
+    class _OneSided:
+        bid_price = 0.0
+        ask_price = 771.64
+        timestamp = None
+
+        def get(self, symbol: str) -> object:
+            return self
+
+    broker = _alpaca_with(_CapturingTrading())
+    broker._stock_data = type(
+        "_D", (), {"get_stock_latest_quote": lambda self, req: _OneSided()}
+    )()
+
+    with pytest.raises(RuntimeError, match="Unusable quote"):
+        broker.get_tick("SPY")
