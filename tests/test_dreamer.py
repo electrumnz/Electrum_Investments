@@ -338,7 +338,12 @@ def test_the_dream_command_feeds_it_headlines_and_posts(tmp_path, monkeypatch):
     monkeypatch.setattr(main_mod, "build_social_feed", lambda env, rules: None)
     monkeypatch.setattr(main_mod, "Journal", lambda *a, **kw: object())
     monkeypatch.setattr("bot.dreamer.Dreamer", _Dreamer)
-    monkeypatch.setattr("bot.dreaming.DreamStore", lambda *a, **kw: object())
+    # Patched where `main` binds it, not where it is defined. `cmd_dream` used
+    # to import the store inside the function; it now shares the module-level
+    # name the decision loop resolves grants through, so patching
+    # `bot.dreaming.DreamStore` would no longer intercept it — and the symptom
+    # is a real `data/dreams.db` written beside the production journal.
+    monkeypatch.setattr(main_mod, "DreamStore", lambda *a, **kw: object())
 
     env = _env()
     rc = main_mod.cmd_dream(env, Rules.load(Path("config/rules.yaml")))

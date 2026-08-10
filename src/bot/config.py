@@ -5,13 +5,19 @@ from __future__ import annotations
 from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import Self
+from typing import TYPE_CHECKING, Self
 
 import yaml
 from pydantic import BaseModel, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from .models import ExecutionMode
+
+if TYPE_CHECKING:  # pragma: no cover - types only, never imported at runtime
+    # `DreamingRules` returns these two value objects and nothing else here
+    # touches the dream store. Kept behind TYPE_CHECKING so reading a limit
+    # never drags a SQLite store into the process — see `vault_caps`.
+    from .dreaming import VaultCaps, VaultTTLs
 
 # Indexed by Python weekday, so Monday is 0. Written out rather than taken from
 # `calendar.day_abbr`, which is locale-dependent and would render the operator's
@@ -672,6 +678,129 @@ class LoopRules(BaseModel):
     )
 
 
+class VaultCapRules(BaseModel):
+    """How many dreams each vault will hold.
+
+    The numbers `dreaming.VaultCaps` is built from, carried here so the file an
+    operator edits is the file that decides. `DreamingRules.vault_caps()`
+    constructs the value object; the dataclass keeps its own defaults for the
+    callers that pass nothing, and `tests/test_config.py` asserts the two agree
+    so they cannot drift into two different answers.
+
+    A cap here is a working constraint rather than a risk rule — nothing in the
+    dream store can lose money — and it exists because a vault with two hundred
+    entries is a vault nobody reads.
+
+    **`adopted` is 3 to match `max_concurrent_positions`.** An adopted dream is
+    a promise the trading agent may act on it, and a promise the account has no
+    slot to keep reads on the page as permission granted while the position it
+    implies can never be opened. The two are related by intent rather than by
+    code; changing either wants a look at the other.
+
+    **The archive is uncapped on purpose.** `None` means no limit. The only
+    alternative to archiving a dream when the archive is full is deleting it, so
+    a cap there would quietly turn "retire this" into "destroy the record of it".
+    """
+
+    workbench: int = Field(default=24, gt=0)
+    prophecy: int = Field(default=12, gt=0)
+    vault: int = Field(default=12, gt=0)
+    adopted: int = Field(default=3, gt=0)
+    archive: int | None = Field(default=None, gt=0)
+
+
+class VaultTTLRules(BaseModel):
+    """How long a dream may sit in a vault before it is reported as expired.
+
+    Days, measured from `vault_entered_at` and never from `created_at`: a dream
+    pulled back out for another pass gets a fresh clock, because the alternative
+    punishes exactly the behaviour the arrangement wants.
+
+    The operator was explicitly unsure between ninety days and a year, which is
+    why these are configuration rather than constants. `prophecy` gets the long
+    one because a prophecy is a long-horizon claim by nature — a supply chain
+    does not reprice in a quarter. `archive` is `None` because the archive IS
+    the retirement state, so a TTL on it would be an expiry on an expiry.
+    """
+
+    workbench: int = Field(default=90, gt=0)
+    prophecy: int = Field(default=365, gt=0)
+    vault: int = Field(default=90, gt=0)
+    adopted: int = Field(default=90, gt=0)
+    archive: int | None = Field(default=None, gt=0)
+
+
+class DreamingRules(BaseModel):
+    """The dreamer's shelves, and the one setting here that widens a permission.
+
+    **`allow_symbol_grants` defaults to False in the model and is `true` in
+    `config/rules.yaml`, and that asymmetry is deliberate.** A config that does
+    not mention this feature grants nothing, so every deployment that predates
+    it — and every test that builds `Rules` without a `dreaming:` block — fails
+    closed. The shipped file turns it on because the operator asked for the
+    behaviour, in a file that can be read and reverted in one line. The default
+    is what protects a caller who never heard of the feature; the file is what
+    records a decision somebody made.
+
+    What the switch buys, stated plainly because it is a widening: an adopted
+    dream's symbols join `allowed_symbols` for as long as the adoption is live,
+    **under the existing limits of an already-enabled instrument class**. It
+    cannot enable a class, cannot raise a cap, and cannot skip a gate. A
+    permission is not an order.
+
+    Nothing in this block reaches `RiskGate` by itself. The grant is resolved in
+    `grants.resolve_granted_symbols` and handed to the gate as a mapping, in the
+    same shape as `news_windows`, because the gate has to stay deterministic:
+    no SQLite read, no network, and it must not fail open.
+    """
+
+    allow_symbol_grants: bool = False
+
+    # A ceiling on how many symbols may be granted at once. Over it, NOTHING is
+    # granted and the resolver says so loudly — see `grants.py`. Taking an
+    # arbitrary subset would be a permission set nobody could predict, which is
+    # worse than none at all.
+    #
+    # Six is twice `caps.adopted`, so three live adoptions naming two symbols
+    # each fit and a runaway does not. It is a blast-radius bound rather than a
+    # target: the binding constraint on how much a grant can cost is still the
+    # class's own risk limits, which every granted symbol faces in full.
+    max_granted_symbols: int = Field(default=6, gt=0)
+
+    caps: VaultCapRules = Field(default_factory=VaultCapRules)
+    ttl_days: VaultTTLRules = Field(default_factory=VaultTTLRules)
+
+    def vault_caps(self) -> VaultCaps:
+        """This block's caps as the value object `dreaming.py` takes.
+
+        Imported inside the method on purpose. `config` is imported by nearly
+        everything here and `dreaming` is a store; the dependency runs one way,
+        from the seam towards the store, and a module-level import would drag
+        the dream store into every process that reads a limit.
+        """
+        from .dreaming import VaultCaps
+
+        return VaultCaps(
+            workbench=self.caps.workbench,
+            prophecy=self.caps.prophecy,
+            vault=self.caps.vault,
+            adopted=self.caps.adopted,
+            archive=self.caps.archive,
+        )
+
+    def vault_ttls(self) -> VaultTTLs:
+        """This block's TTLs as the value object `dreaming.py` takes."""
+        from .dreaming import VaultTTLs
+
+        return VaultTTLs(
+            workbench=self.ttl_days.workbench,
+            prophecy=self.ttl_days.prophecy,
+            vault=self.ttl_days.vault,
+            adopted=self.ttl_days.adopted,
+            archive=self.ttl_days.archive,
+        )
+
+
 class Rules(BaseModel):
     account: AccountRules
     frequency: FrequencyRules
@@ -684,6 +813,11 @@ class Rules(BaseModel):
     social: SocialRules = Field(default_factory=SocialRules)
     loop: LoopRules = Field(default_factory=LoopRules)
     watchlist: WatchlistRules = Field(default_factory=WatchlistRules)
+
+    # The dreamer's shelves, and the only setting in this file that can widen
+    # what may be traded without an edit to `instruments:`. Defaulted, so a
+    # config with no `dreaming:` block grants nothing at all.
+    dreaming: DreamingRules = Field(default_factory=DreamingRules)
 
     # Keyed by AssetClass value: "us_equity", "crypto".
     instruments: dict[str, InstrumentRules] = Field(default_factory=dict)

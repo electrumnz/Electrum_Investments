@@ -31,6 +31,8 @@ from .data.finnhub import FinnhubCalendar
 from .data.marketaux import MarketauxNews
 from .data.news import EmptyNews, NewsFeed
 from .data.xfeed import XFeed
+from .dreaming import DreamStore
+from .grants import resolve_grant_dream_ids, resolve_granted_symbols
 from .indicators import snapshot as snapshot_indicators
 from .indicators import summarise as summarise_indicators
 from .intraday import summarise as summarise_intraday
@@ -203,6 +205,34 @@ def cmd_loop(
     session_calendar = SessionCalendar()
 
     journal = Journal()
+
+    # The dream store, opened once and only when the feature is switched on.
+    #
+    # It is the source of the symbol grants an adopted dream carries, and it is
+    # deliberately NOT reached from inside the risk gate: `RiskGate` has to stay
+    # deterministic and must not fail open, so the grant is resolved out here
+    # each cycle and passed in, in the same shape as `news_windows`.
+    #
+    # A store that will not open costs the permissions and nothing else. The
+    # cycle continues, the gate applies `config/rules.yaml` exactly as it always
+    # did, and the failure is named rather than left as a silence — the same
+    # trade as `fetch_market_ticks` catching broadly, for the same reason: an
+    # unanticipated exception here would end the decision loop, which is the
+    # worst available outcome once `--execute` is on.
+    dreams: DreamStore | None = None
+    if rules.dreaming.allow_symbol_grants:
+        try:
+            dreams = DreamStore()
+        except Exception as exc:
+            log.warning(
+                "dream_store_unavailable",
+                error=f"{type(exc).__name__}: {exc}",
+                detail=(
+                    "No dream can widen the allowed symbols this run. Trading "
+                    "continues on config/rules.yaml alone."
+                ),
+            )
+
     account = broker.get_account()
     risk = RiskGate(
         rules,
@@ -362,6 +392,39 @@ def cmd_loop(
                 time.sleep(env.decision_interval_seconds)
                 continue
 
+            # What an adopted dream permits right now, resolved once for the
+            # whole cycle so every proposal is gated against the same answer.
+            #
+            # Fails closed on everything: the feature switched off, a store that
+            # would not open, a database error, more grants live than the cap
+            # allows. All of them come back `{}`, which means the account trades
+            # exactly what `config/rules.yaml` already allows. See `grants.py`.
+            #
+            # **Nothing here can currently be proposed**, and that is worth
+            # knowing before wondering why a grant never fires: the system
+            # prompt lists `rules.allowed_symbols`, and the tick and indicator
+            # fetches above run over the same list, so the model is never told a
+            # granted symbol exists and a proposal in one would be dropped for
+            # want of a quote. Widening those is the prompt-side half of this
+            # feature and it lives in `context.py` and `claude_client.py`. The
+            # gate side is wired and inert until then, which is the same shape
+            # as crypto being fully configured while disabled.
+            granted_symbols: dict[str, str] = {}
+            granted_dream_ids: dict[str, int] = {}
+            if dreams is not None:
+                granted_symbols = resolve_granted_symbols(dreams, rules, now=now)
+                if granted_symbols:
+                    # Provenance for the journal, and a second read, so it is
+                    # only paid for when something was actually granted.
+                    granted_dream_ids = resolve_grant_dream_ids(
+                        dreams, granted_symbols, now=now
+                    )
+                    log.info(
+                        "symbol_grants_in_force",
+                        symbols=sorted(granted_symbols),
+                        classes=sorted(set(granted_symbols.values())),
+                    )
+
             headlines = news.recent_headlines(rules.allowed_symbols)
             posts = [p.render() for p in social.recent_posts()] if social else []
             social_degraded = bool(social and social.is_degraded)
@@ -469,6 +532,7 @@ def cmd_loop(
                     activity=activity,
                     news_windows=news_windows,
                     stand_down=stand_down_state,
+                    granted_symbols=granted_symbols,
                 )
                 verdicts.append(verdict)
                 log.info(
@@ -478,6 +542,10 @@ def cmd_loop(
                     qty=proposal.qty,
                     approved=verdict.approved,
                     reasons=verdict.reasons,
+                    # None on every ordinary trade. When it is set, a dream is
+                    # the only reason this symbol could be considered at all,
+                    # and a permission that leaves no trace is not auditable.
+                    granted_by_dream_class=verdict.granted_by_dream_class,
                 )
 
                 if verdict.approved and execute:
@@ -492,6 +560,15 @@ def cmd_loop(
                         # the model, so the label is always accurate and
                         # metrics.breakdown_by can separate strategies.
                         strategy=rules.strategy_for(proposal.symbol),
+                        # Only when the gate says the grant is what let this
+                        # symbol through. A listed symbol a stale grant also
+                        # names is an ordinary trade and must not be journalled
+                        # as a dream's.
+                        dream_id=(
+                            granted_dream_ids.get(proposal.symbol)
+                            if verdict.permitted_by_dream_grant
+                            else None
+                        ),
                     )
                     log.info(
                         "order_submitted",
@@ -572,6 +649,12 @@ def cmd_loop(
                 stops_breached=len(breaches),
                 stops_unchecked=unchecked_stops,
                 news_windows=len(news_windows),
+                # Every symbol an adopted dream is currently widening the
+                # allowlist by. On the cycle line for the same reason
+                # `stops_breached` is: an empty list each cycle is a stated
+                # fact, and a permission in force that is never stated is a
+                # permission nobody can audit.
+                granted_symbols=sorted(granted_symbols),
                 calendar_degraded=getattr(calendar, "is_degraded", False),
                 # Same reasoning as calendar_degraded: an empty post list from a
                 # dead token looks exactly like a quiet morning, and the
@@ -615,7 +698,6 @@ def cmd_dream(env: Env, rules: Rules) -> int:
     worth noticing rather than logging into the void.
     """
     from .dreamer import Dreamer
-    from .dreaming import DreamStore
 
     if not env.anthropic_api_key:
         log.error("dream_no_api_key", detail="ANTHROPIC_API_KEY is not set")

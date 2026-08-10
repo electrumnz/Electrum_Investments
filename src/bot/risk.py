@@ -11,10 +11,19 @@ model cannot reach.
 Each gate returns either None (pass) or a string explaining the rejection. Every
 reason is surfaced at once rather than short-circuiting, so a rejected proposal
 tells you everything that was wrong with it in one pass.
+
+**This module is deterministic and must stay that way.** It reads no database,
+opens no file and makes no network call; everything it needs arrives as an
+argument. That is why the earnings calendar arrives as `news_windows` and why a
+dream's symbol grant arrives as `granted_symbols` — resolved in `grants.py`,
+which fails to an empty mapping, because a gate that can fail is a gate that can
+fail OPEN. Nothing here imports `grants` or `dreaming`, and nothing there
+imports this.
 """
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from typing import NamedTuple
 
@@ -48,6 +57,29 @@ class NewsWindow(NamedTuple):
 
     timestamp: datetime
     affected_symbols: frozenset[str]
+
+
+class ResolvedClass(NamedTuple):
+    """Which instrument class a proposal's symbol trades under, and how.
+
+    Three facts that have to travel together, because every downstream gate
+    needs at least one of them:
+
+    - `instrument` is the block whose limits apply. `None` means no enabled
+      class claims this symbol, and every gate that takes it returns early —
+      the allowlist gate has already refused the proposal.
+    - `class_key` is the `instruments:` key, which is what `allowed_symbols`
+      alone cannot supply for a granted symbol. It is how a grant is matched
+      back to the class whose caps it counts against.
+    - `granted_class` is set only when a dream grant is the reason the symbol
+      resolved at all. `None` for a symbol `config/rules.yaml` already allows,
+      even if a grant also names it — the verdict must not claim a dream was
+      load-bearing on a trade the allowlist would have permitted anyway.
+    """
+
+    instrument: InstrumentRules | None
+    class_key: str | None
+    granted_class: str | None
 
 
 class RiskGate:
@@ -86,47 +118,141 @@ class RiskGate:
         activity: TradingActivity | None = None,
         news_windows: list[NewsWindow] | None = None,
         stand_down: StandDownState | None = None,
+        granted_symbols: Mapping[str, str] | None = None,
     ) -> RiskVerdict:
         """Run every gate. Returns approve() only if all of them pass.
 
         This gates *opening* exposure only. Closing a position and moving a stop
         never come through here, which is deliberate: a stand-down that also
         froze position management would strand open trades with no way out.
+
+        `granted_symbols` maps a symbol to the instrument-class key an adopted
+        dream permits it under, in the same shape as `news_windows` and for the
+        same reason: **it is resolved outside and passed in.** This gate reads
+        no database, opens no file and makes no network call, because a gate
+        that can fail is a gate that can fail OPEN. `grants.py` does the
+        resolution and answers `{}` for every failure, so an unavailable dream
+        store costs a permission rather than a rule.
+
+        A grant buys **entry to the allowlist and nothing else.** The symbol is
+        resolved to the class named in the grant and then faces every gate below
+        exactly as a listed symbol in that class would, including the ones that
+        count what the class already holds. See `_class_symbols`.
         """
         activity = activity or TradingActivity()
+        grants = granted_symbols or {}
 
         # Each asset class carries its own session window and symbol list, so
         # the gate resolves the class once and applies that class's rules. This
         # replaces special-casing crypto, which did not generalise.
-        instrument = self._rules.for_symbol(proposal.symbol)
+        resolved = self._resolve_class(proposal.symbol, grants)
+        instrument = resolved.instrument
+        # Which symbols count AS this class, listed or granted. Computed once
+        # and handed to the three gates that measure what the class is already
+        # carrying, so a granted symbol cannot be invisible to the caps it is
+        # supposed to be subject to.
+        class_symbols = self._class_symbols(resolved, grants)
 
         checks: list[str | None] = [
             self._kill_switch(),
             self._stand_down(stand_down),
             self._equity_floor(account),
-            self._symbol_allowed(proposal),
+            self._symbol_allowed(proposal, resolved, grants),
             self._within_session(instrument),
             self._premarket(instrument),
             self._news_blackout(proposal.symbol, news_windows or []),
-            self._concurrent_positions(account, instrument),
+            self._concurrent_positions(account, instrument, class_symbols),
             self._daily_loss(account),
             self._limit_price_sane(proposal, tick),
             self._stops_on_correct_side(proposal),
             self._per_trade_risk(proposal, account, instrument),
             self._position_size(proposal, account, instrument),
             self._total_risk(proposal, account),
-            self._class_total_risk(proposal, account, instrument),
+            self._class_total_risk(proposal, account, instrument, class_symbols),
             self._buying_power(proposal, account),
             self._gross_notional(proposal, account),
             self._trades_per_day(activity),
             self._trades_per_week(activity),
             self._symbol_cooldown(proposal, activity),
             self._option_expiry(proposal),
-            self._instrument_capital_cap(proposal, account, instrument),
+            self._instrument_capital_cap(proposal, account, instrument, class_symbols),
         ]
 
         reasons = [c for c in checks if c is not None]
-        return RiskVerdict.reject(*reasons) if reasons else RiskVerdict.approve()
+        granted_by = resolved.granted_class
+        if reasons:
+            return RiskVerdict.reject(*reasons, granted_by_dream_class=granted_by)
+        return RiskVerdict.approve(granted_by_dream_class=granted_by)
+
+    # ------------------------------------------------------- class resolution
+
+    def _resolve_class(
+        self, symbol: str, grants: Mapping[str, str]
+    ) -> ResolvedClass:
+        """Which class's limits apply to this symbol, and whether a dream did it.
+
+        `Rules.for_symbol` cannot find a granted symbol — it is in no
+        `allowed_symbols` list — so the class comes from the grant itself. Two
+        properties are load-bearing:
+
+        - **The listed answer wins.** A symbol already in an enabled class is
+          resolved that way whether or not a grant also names it, so a stale or
+          duplicated grant can never move a listed symbol into a different
+          class's limits, and the verdict does not claim a dream permitted a
+          trade the allowlist already permitted.
+        - **A grant naming a class that is not enabled resolves to NOTHING**,
+          which makes the symbol unallowed and the proposal refused. That is the
+          class hard block, and it is checked here as well as in `grants.py`:
+          the resolver is the useful error message and this is the guarantee, in
+          the same arrangement as `mode=ro` plus the statement guard in
+          `insight.py`. A gate that trusted its input to have been filtered
+          would be a gate whose safety lived in another file.
+        """
+        listed = self._rules.for_symbol(symbol)
+        if listed is not None:
+            return ResolvedClass(listed, self._rules.class_name_for(symbol), None)
+
+        class_key = grants.get(symbol)
+        if class_key is None:
+            return ResolvedClass(None, None, None)
+
+        instrument = self._rules.enabled_instruments.get(class_key)
+        if instrument is None:
+            return ResolvedClass(None, None, None)
+        return ResolvedClass(instrument, class_key, class_key)
+
+    @staticmethod
+    def _class_symbols(
+        resolved: ResolvedClass, grants: Mapping[str, str]
+    ) -> set[str]:
+        """Every symbol that counts as this class: listed plus currently granted.
+
+        **This is what stops a grant bypassing the caps that are not about the
+        symbol.** `_concurrent_positions`, `_class_total_risk` and
+        `_instrument_capital_cap` all ask "how much of this class am I already
+        carrying", and all three answer it by SYMBOL MEMBERSHIP of
+        `allowed_symbols` rather than by the position's `asset_class` enum — one
+        source, so the two cannot drift into different answers.
+
+        A granted symbol is in no `allowed_symbols` list, so without this a
+        position held under a grant would be invisible to its own class's
+        concurrency cap, class total-risk cap and capital cap: the grant would
+        have bought entry to the allowlist AND a quiet exemption from three
+        limits. Adoption buys the first and must not buy the second.
+
+        The membership is computed from the grants in force NOW, which has a
+        consequence worth stating rather than discovering: a position still held
+        under a grant that has since expired drops back out of the class's
+        counts. That is not new — before grants existed it was never in them —
+        and it is the same shape as the `dream-expired-holding` case, where the
+        permission to open ends while the position stands.
+        """
+        if resolved.instrument is None:
+            return set()
+        symbols = set(resolved.instrument.allowed_symbols)
+        if resolved.class_key is not None:
+            symbols |= {s for s, key in grants.items() if key == resolved.class_key}
+        return symbols
 
     def trip_kill_switch(self) -> None:
         self._kill_switch_tripped = True
@@ -173,10 +299,34 @@ class RiskGate:
             return f"equity {account.equity_usd:,.2f} is below floor {floor:,.2f}"
         return None
 
-    def _symbol_allowed(self, proposal: OrderProposal) -> str | None:
-        if not self._rules.is_symbol_allowed(proposal.symbol):
-            return f"symbol {proposal.symbol} is not in the allowed list"
-        return None
+    def _symbol_allowed(
+        self,
+        proposal: OrderProposal,
+        resolved: ResolvedClass,
+        grants: Mapping[str, str],
+    ) -> str | None:
+        """The allowlist, plus whatever an adopted dream currently widens it by.
+
+        A grant only passes here once it has RESOLVED — that is, once its class
+        key names an enabled instrument block. A grant naming a disabled class
+        is refused with its own sentence, because "not in the allowed list" on a
+        symbol a dream visibly granted would send an operator looking for the
+        wrong problem.
+        """
+        if self._rules.is_symbol_allowed(proposal.symbol):
+            return None
+        if resolved.granted_class is not None:
+            return None
+
+        claimed = grants.get(proposal.symbol)
+        if claimed is not None:
+            return (
+                f"symbol {proposal.symbol} is not in the allowed list: an "
+                f"adopted dream grants it under '{claimed}', which is not an "
+                f"enabled instrument class. A dream may widen the symbols "
+                f"inside an enabled class and can never enable a class."
+            )
+        return f"symbol {proposal.symbol} is not in the allowed list"
 
     def _within_session(self, instrument: InstrumentRules | None) -> str | None:
         """Session window comes from the instrument class, not a global setting.
@@ -257,7 +407,10 @@ class RiskGate:
         return None
 
     def _concurrent_positions(
-        self, account: AccountSnapshot, instrument: InstrumentRules | None = None
+        self,
+        account: AccountSnapshot,
+        instrument: InstrumentRules | None = None,
+        class_symbols: set[str] | None = None,
     ) -> str | None:
         """The portfolio cap always, and this class's own cap if it has one.
 
@@ -277,7 +430,15 @@ class RiskGate:
         # instrument block's own `allowed_symbols` is what defines the class
         # here, and reading the enum instead would ask two different sources
         # the same question and eventually get two answers.
-        symbols = set(instrument.allowed_symbols)
+        #
+        # `class_symbols` is that list PLUS anything an adopted dream currently
+        # grants under this class, so a position held under a grant is not
+        # invisible to the cap it is subject to. See `_class_symbols`.
+        symbols = (
+            class_symbols
+            if class_symbols is not None
+            else set(instrument.allowed_symbols)
+        )
         held = sum(1 for p in account.open_positions if p.symbol in symbols)
         class_cap = instrument.max_concurrent_positions
         if held >= class_cap:
@@ -414,6 +575,7 @@ class RiskGate:
         proposal: OrderProposal,
         account: AccountSnapshot,
         instrument: InstrumentRules | None,
+        class_symbols: set[str] | None = None,
     ) -> str | None:
         """Cap the combined open risk held by ONE instrument class.
 
@@ -448,7 +610,9 @@ class RiskGate:
         Membership is by the class's own `allowed_symbols` rather than the
         position's `asset_class` enum, exactly as in `_concurrent_positions` and
         `_instrument_capital_cap`: one source answers the question, so the two
-        cannot drift into different answers.
+        cannot drift into different answers. A symbol an adopted dream currently
+        grants under this class counts too — a grant buys entry to the allowlist
+        and must not buy an exemption from the cap that entry falls under.
         """
         if instrument is None or instrument.max_class_total_risk_pct is None:
             return None
@@ -457,7 +621,11 @@ class RiskGate:
 
         pct = instrument.max_class_total_risk_pct
         label = proposal_class_label(instrument)
-        symbols = set(instrument.allowed_symbols)
+        symbols = (
+            class_symbols
+            if class_symbols is not None
+            else set(instrument.allowed_symbols)
+        )
         held_symbols = [p.symbol for p in account.open_positions if p.symbol in symbols]
 
         unknown = sorted(set(held_symbols) & set(account.symbols_with_unknown_risk))
@@ -568,19 +736,27 @@ class RiskGate:
         proposal: OrderProposal,
         account: AccountSnapshot,
         instrument: InstrumentRules | None,
+        class_symbols: set[str] | None = None,
     ) -> str | None:
         """Optional ceiling on one asset class's share of the portfolio.
 
         Keeps a volatile class from quietly growing into the whole account. Only
         applies where a cap is configured; classes without one are bounded by the
         portfolio-wide risk and exposure limits alone.
+
+        Membership includes symbols an adopted dream currently grants under this
+        class, exactly as in `_concurrent_positions` and `_class_total_risk`.
         """
         if instrument is None or instrument.capital_cap_pct is None:
             return None
         if account.equity_usd <= 0:
             return None
 
-        symbols = set(instrument.allowed_symbols)
+        symbols = (
+            class_symbols
+            if class_symbols is not None
+            else set(instrument.allowed_symbols)
+        )
         held = sum(p.notional_usd for p in account.open_positions if p.symbol in symbols)
         pct_after = (held + proposal.notional_usd) / account.equity_usd * 100
 

@@ -55,7 +55,15 @@ CREATE TABLE IF NOT EXISTS trades (
     execution_mode    TEXT    NOT NULL DEFAULT 'paper',
     rationale         TEXT    NOT NULL DEFAULT '',
     entry_order_id    TEXT,
-    exit_order_id     TEXT
+    exit_order_id     TEXT,
+    -- The adopted dream whose grant permitted this symbol. NULL for a trade in
+    -- a symbol config/rules.yaml already allowed, which is every trade so far.
+    -- Provenance, never endorsement — see `Trade.dream_id`.
+    --
+    -- Listed here so a FRESH journal is built with it, and added to an existing
+    -- one by `_add_dream_id_column`. Both halves are needed: `CREATE TABLE IF
+    -- NOT EXISTS` is a no-op on the table already on the droplet.
+    dream_id          INTEGER
 );
 
 CREATE INDEX IF NOT EXISTS idx_trades_open   ON trades (exit_time);
@@ -143,13 +151,70 @@ def _drop_planned_target_not_null(conn: sqlite3.Connection) -> None:
     )
 
 
+def _add_dream_id_column(conn: sqlite3.Connection) -> None:
+    """Give a `trades` table that predates dream adoption its `dream_id` column.
+
+    **The same trap as `_drop_planned_target_not_null`, and it has already been
+    paid for once.** `CREATE TABLE IF NOT EXISTS` does nothing to a table that
+    already exists, so editing `SCHEMA` changes what a fresh journal gets and
+    nothing whatever about `data/journal.db` on the droplet. The suite is
+    structurally blind to it — every test builds its journal from scratch in a
+    `tmp_path` and therefore always gets the new shape — which is how 866 green
+    tests once sat over a database that could not store the row the models had
+    just been changed to allow. That was found by placing a real order and
+    watching the journal write fail AFTER the broker call, leaving a live
+    position the journal had never heard of and the 2% cap blind to it.
+
+    Three properties, and they are the ones the two existing migrations here and
+    in `dreaming.py` already established:
+
+    - **One statement, so there is no half-migrated state to be left in.**
+      SQLite's `ALTER TABLE ... ADD COLUMN` is atomic on its own; there is no
+      table rebuild to tear, because nothing is dropped. The rebuild in
+      `_drop_planned_target_not_null` was only needed because SQLite cannot drop
+      a NOT NULL with `ALTER`.
+    - **Additive only.** A nullable column with no default touches no existing
+      row, and `NULL` is exactly the right answer for every trade placed before
+      grants existed: none of them came from a dream.
+    - **Idempotent and cheap.** It runs on every open rather than behind a
+      version flag, because a version flag is one more piece of bookkeeping that
+      can be wrong. `PRAGMA table_info` is a lookup, so a correct database pays
+      one query and stops.
+
+    Any future change to `SCHEMA` needs a migration beside it and a test that
+    starts from the old shape. The suite will not warn you.
+    """
+    columns = {str(c["name"]) for c in conn.execute("PRAGMA table_info(trades)")}
+    if not columns:  # pragma: no cover - SCHEMA has just created the table
+        return
+    if "dream_id" in columns:
+        return
+
+    log.warning(
+        "journal_migrating_dream_id",
+        detail=(
+            "This journal predates dream adoption. Adding the dream_id column "
+            "in place; no existing row is modified, and NULL is the correct "
+            "answer for every trade placed before grants existed."
+        ),
+    )
+    conn.execute("ALTER TABLE trades ADD COLUMN dream_id INTEGER")
+
+
 class Journal:
     def __init__(self, path: Path = DEFAULT_DB_PATH) -> None:
         self._path = path
         path.parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as conn:
             conn.executescript(SCHEMA)
+            # Order matters in one direction only: the rebuild copies the OLD
+            # table's column list, so running it first means a legacy journal
+            # comes out of it already carrying `dream_id` from SCHEMA and the
+            # second migration is a no-op. The reverse order also works; this
+            # one keeps the expensive migration reading the shape it was
+            # written against.
             _drop_planned_target_not_null(conn)
+            _add_dream_id_column(conn)
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
@@ -172,8 +237,8 @@ class Journal:
                     symbol, asset_class, strategy, direction, qty,
                     entry_time, entry_price, planned_stop, planned_target,
                     fees_usd, mae_usd, mfe_usd, execution_mode, rationale,
-                    entry_order_id
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    entry_order_id, dream_id
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     trade.symbol,
@@ -191,6 +256,7 @@ class Journal:
                     trade.execution_mode.value,
                     trade.rationale,
                     trade.entry_order_id,
+                    trade.dream_id,
                 ),
             )
             return int(cursor.lastrowid or 0)
@@ -339,6 +405,10 @@ class Journal:
             rationale=row["rationale"],
             entry_order_id=row["entry_order_id"],
             exit_order_id=row["exit_order_id"],
+            # Read directly rather than defensively: the migration runs on every
+            # open, so a `Journal` that exists has this column. A row written
+            # before grants existed carries NULL, which is the right answer.
+            dream_id=row["dream_id"],
         )
 
     # --------------------------------------------------------- stand-down

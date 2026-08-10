@@ -419,6 +419,55 @@ class ClaudeClient:
             )
         return step, self._usage_from(response)
 
+    def confer(
+        self, prompt: str, output_format: type[BaseModel]
+    ) -> tuple[Any, CallUsage]:
+        """One turn of the agent-to-agent conference. See `bot/confer.py`.
+
+        Takes its schema rather than naming one, which is the only structural
+        difference from `dream`: an exchange has two speakers and they return
+        different shapes — the dreamer offers text, the trading agent may also
+        carry a verdict. A single schema covering both would let either side
+        return the other's fields, and the one that matters is `verdict`.
+
+        Bought in between `propose` and `dream`. It runs once a day like the
+        dreamer, so it thinks; but an exchange is up to six calls arguing over a
+        chain that has already been reasoned out, rather than the one call that
+        reasons it out, so it takes the default budget and medium effort instead
+        of `DREAM_MAX_TOKENS` and high. A turn is a few sentences by
+        instruction, and paying a dream's budget six times to produce them would
+        be spending on depth that the prompt explicitly asks not to be used.
+
+        The generous timeout is kept: nothing is waiting on this either, and a
+        timeout surfaces as an exchange that failed rather than one that was
+        slow.
+
+        Lives here rather than in `confer.py` so there is ONE piece of cost
+        arithmetic in the repository. `_usage_from` is what turns a response
+        into money, and a second copy of it beside a second transport is two
+        places to disagree about what a run cost.
+        """
+        kwargs: dict[str, Any] = {
+            "max_tokens": 4096,
+            "model": self._model,
+            "system": self._system_block(),
+            "messages": [{"role": "user", "content": prompt}],
+            "output_format": output_format,
+        }
+        if self._tier in (ClaudeTier.SONNET, ClaudeTier.OPUS):
+            kwargs["thinking"] = {"type": "adaptive"}
+            kwargs["output_config"] = {"effort": "medium"}
+
+        client = self._client.with_options(timeout=DREAM_TIMEOUT_SECONDS)
+        response = client.messages.parse(**kwargs)
+        turn = response.parsed_output
+        if turn is None:
+            raise RuntimeError(
+                "Claude returned no parsable conference turn; check the output "
+                "schema and whether the response hit max_tokens."
+            )
+        return turn, self._usage_from(response)
+
     def _usage_from(self, response: anthropic.types.Message) -> CallUsage:
         u = response.usage
         in_tokens = u.input_tokens

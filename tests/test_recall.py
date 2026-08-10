@@ -22,6 +22,7 @@ from bot.audit import AuditLog
 from bot.claude_client import CallUsage, ClaudeDecision
 from bot.config import Env, Rules, load_rules
 from bot.context import build_market_context
+from bot.dreaming import DreamStore
 from bot.journal import Journal
 from bot.models import (
     AccountSnapshot,
@@ -184,6 +185,12 @@ def _run(monkeypatch, tmp_path, client, *, in_session: bool = True) -> list[Any]
     monkeypatch.setattr(main_mod, "Journal", lambda: Journal(tmp_path / "journal.db"))
     monkeypatch.setattr(main_mod, "AuditLog", lambda: AuditLog(tmp_path / "audit"))
     monkeypatch.setattr(main_mod, "ClaudeClient", lambda *a, **k: client)
+    # The loop opens the dream store to resolve symbol grants, and the shipped
+    # rules turn grants on, so without this the cycle writes `data/dreams.db`
+    # beside the real journal.
+    monkeypatch.setattr(
+        main_mod, "DreamStore", lambda: DreamStore(tmp_path / "dreams.db")
+    )
     monkeypatch.setattr(Rules, "any_class_in_session", lambda self, moment: in_session)
 
     with structlog.testing.capture_logs() as logs:

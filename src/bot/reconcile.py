@@ -76,12 +76,20 @@ def record_fill(
     execution_mode: ExecutionMode,
     strategy: str = "unspecified",
     now: datetime | None = None,
+    dream_id: int | None = None,
 ) -> int | None:
     """Journal a filled order as an open trade. Returns its id, or None.
 
     Carries the planned stop across, which is the whole point: without it the
     trade has no `planned_risk_usd` and contributes nothing to the total-risk
     cap.
+
+    `dream_id` records that this symbol was tradeable only because an adopted
+    dream granted it. **Provenance, never endorsement**, and it is passed in
+    rather than looked up here: the caller is the only thing that knows whether
+    the grant was what let the proposal through, because that is the risk gate's
+    finding and it travels on the verdict. Defaulting to `None` is correct for
+    every trade in a symbol `config/rules.yaml` already allows.
     """
     if not result.accepted:
         return None
@@ -100,6 +108,7 @@ def record_fill(
         rationale=proposal.rationale,
         execution_mode=execution_mode,
         entry_order_id=result.order_id,
+        dream_id=dream_id,
     )
     return journal.record_entry(trade)
 

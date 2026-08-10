@@ -26,6 +26,7 @@ import bot.main as main_mod
 from bot.audit import AuditLog
 from bot.claude_client import CallUsage, ClaudeDecision
 from bot.config import Env, Rules, load_rules
+from bot.dreaming import DreamStore
 from bot.journal import Journal
 
 
@@ -62,6 +63,12 @@ def _run_one_cycle(
     monkeypatch.setattr(main_mod, "Journal", lambda: Journal(tmp_path / "journal.db"))
     monkeypatch.setattr(main_mod, "AuditLog", lambda: AuditLog(tmp_path / "audit"))
     monkeypatch.setattr(main_mod, "ClaudeClient", lambda *a, **k: _StubClaude(decision))
+    # The loop opens the dream store to resolve symbol grants, and the shipped
+    # `config/rules.yaml` turns grants on — so without this the cycle writes
+    # `data/dreams.db` next to the real journal. The runtime-directory guard in
+    # conftest catches that exactly once, on the run that first creates the
+    # file, and is blind to it ever after.
+    monkeypatch.setattr(main_mod, "DreamStore", lambda: DreamStore(tmp_path / "dreams.db"))
 
     env = Env(_env_file=None)  # type: ignore[call-arg]
     rules = load_rules()
@@ -113,6 +120,7 @@ def _run_one_cycle_with_client(
     monkeypatch.setattr(main_mod, "Journal", lambda: Journal(tmp_path / "journal.db"))
     monkeypatch.setattr(main_mod, "AuditLog", lambda: AuditLog(tmp_path / "audit"))
     monkeypatch.setattr(main_mod, "ClaudeClient", lambda *a, **k: client)
+    monkeypatch.setattr(main_mod, "DreamStore", lambda: DreamStore(tmp_path / "dreams.db"))
 
     env = Env(_env_file=None)  # type: ignore[call-arg]
     rules = load_rules()

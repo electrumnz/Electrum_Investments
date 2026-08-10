@@ -655,13 +655,48 @@ class RiskVerdict(BaseModel):
     approved: bool
     reasons: list[str] = Field(default_factory=list)
 
-    @classmethod
-    def approve(cls) -> RiskVerdict:
-        return cls(approved=True)
+    # Set when the ONLY thing that got this symbol past `_symbol_allowed` was a
+    # live grant from an adopted dream, and carrying the instrument-class key
+    # that grant resolved to — "us_equity", "crypto". `None` means the symbol
+    # was already in `config/rules.yaml`, which is the ordinary case.
+    #
+    # **It names the class and not the dream, and the name says so**, because
+    # the gate is handed a symbol -> class mapping and nothing else. That is
+    # deliberate: the class is what the gate needs (it is how a granted symbol
+    # gets limits at all), and a database read to fetch a dream id is exactly
+    # what `RiskGate` must not do. Provenance — which dream — is resolved
+    # outside the gate by `grants.resolve_grant_dream_ids` and stored on
+    # `Trade.dream_id`. A field named for the dream while holding a class key
+    # would be a plausible wrong label, which is the failure this repository
+    # exists to refuse.
+    #
+    # Recorded on a rejection as well as an approval. A refused trade in a
+    # granted symbol is a fact about the grant, and the Decisions page is the
+    # only surface a rejected proposal exists on.
+    #
+    # Optional with a default, like every field added after the fact: the audit
+    # log is append-only and never migrated, so a verdict written before this
+    # existed must still parse.
+    granted_by_dream_class: str | None = None
+
+    @property
+    def permitted_by_dream_grant(self) -> bool:
+        """Whether a dream is the reason this symbol could be considered."""
+        return self.granted_by_dream_class is not None
 
     @classmethod
-    def reject(cls, *reasons: str) -> RiskVerdict:
-        return cls(approved=False, reasons=list(reasons))
+    def approve(cls, *, granted_by_dream_class: str | None = None) -> RiskVerdict:
+        return cls(approved=True, granted_by_dream_class=granted_by_dream_class)
+
+    @classmethod
+    def reject(
+        cls, *reasons: str, granted_by_dream_class: str | None = None
+    ) -> RiskVerdict:
+        return cls(
+            approved=False,
+            reasons=list(reasons),
+            granted_by_dream_class=granted_by_dream_class,
+        )
 
 
 class Trade(BaseModel):
@@ -703,6 +738,25 @@ class Trade(BaseModel):
     rationale: str = ""
     entry_order_id: str | None = None
     exit_order_id: str | None = None
+
+    # The adopted dream whose grant permitted this symbol, or `None` for a trade
+    # in a symbol `config/rules.yaml` already allowed — which is every trade the
+    # bot has ever placed.
+    #
+    # **Provenance, never endorsement.** It says where the permission to hold
+    # this came from. It must not be rendered as "a prophecy backs this trade":
+    # the chain that produced it is speculative by construction, and a badge
+    # implying otherwise would put the dreamer's confidence next to a real
+    # figure. It is also the only thing that makes the Board's `dream` and
+    # `dream-expired-holding` tags derivable from STORED state rather than
+    # recomputed by a model, which is what stops a tag being argued into
+    # existence.
+    #
+    # `journal.SCHEMA` carries the column and `_add_dream_id_column` adds it to
+    # a database that predates it. `CREATE TABLE IF NOT EXISTS` does nothing to
+    # a table that already exists, and the suite is structurally blind to that
+    # because every test builds a fresh journal in a `tmp_path`.
+    dream_id: int | None = None
 
     @property
     def planned_risk_usd(self) -> float:

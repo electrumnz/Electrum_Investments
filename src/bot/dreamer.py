@@ -28,6 +28,26 @@ as an EVENT ("this position closed on its stop"), never as an outcome ("this
 position made $340"). The distinction is the whole reason this module can read
 the journal at all.
 
+## Where it may look, and where it may not
+
+The operator's rule: **the dreamer may look outside `allowed_symbols` to other
+Alpaca instruments, as long as it does not go around the hard blocks on GROUPS
+of instruments.** Crypto disabled means the dreamer cannot see, name or dream
+crypto. Enable crypto and it can — and the reverse the moment it is switched
+off again.
+
+So the watch list is a *starting point* here and the instrument CLASS is the
+fence. `scope_symbols` is that fence in code, and the prompt states it in
+words, and both are needed for the reason belt and braces is usually needed:
+one of them is an instruction to a model and the other is arithmetic, and only
+the second is a guarantee.
+
+**A dropped symbol is recorded rather than quietly discarded.** It goes into
+the log, onto `DreamerResult`, and into the dream's own transcript, because a
+dreamer that keeps reaching for a blocked class is worth knowing about and an
+invisible filter would look like a model that had simply stopped naming
+symbols.
+
 ## Failure
 
 Same shape as the decision loop's model call, learned the same way. The call is
@@ -39,7 +59,8 @@ restart straight into the same failure.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Sequence
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -52,6 +73,8 @@ from .claude_client import CallUsage, ClaudeClient
 from .config import CLAUDE_PRICING_USD_PER_MTOK, ClaudeTier, Env, Rules
 from .dreaming import Dream, DreamStage, DreamStore, DreamVerdict, Hop
 from .journal import Journal
+from .models import AssetClass
+from .options import parse_occ_symbol
 from .souls import GROGU, load_soul
 
 log = structlog.get_logger(__name__)
@@ -63,6 +86,138 @@ CARRY_FORWARD = 4
 # How much journal history to describe as events. Enough to notice a pattern,
 # short enough that it cannot become a performance narrative.
 RECENT_CLOSURES = 8
+
+# Who a scoping note is from, in the dream's transcript. Deliberately neither
+# `DREAMER` nor `TRADER`: it is a fact about the plumbing rather than a turn of
+# anybody's conversation, and `confer.last_agent_turn_at` would otherwise read
+# it as one.
+SCOPE = "scope"
+
+
+# Alpaca writes a crypto pair with a slash — `BTC/USD` — and writes nothing else
+# that way. That is the whole classifier for crypto, and it is a shape test
+# rather than a lookup on purpose: the point of this feature is that the dreamer
+# may name symbols nobody has listed anywhere, so a table of known symbols would
+# refuse exactly the case it exists to permit.
+_CRYPTO_PAIR_MARK = "/"
+
+
+def class_key_for_symbol(symbol: str) -> str:
+    """Which `instruments:` key a symbol would belong to, from its shape alone.
+
+    Three answers, and they are the three asset classes Alpaca actually offers:
+    a slash is a crypto pair, an OCC contract is an option, and everything else
+    is an equity — which is what a bare ticker IS at Alpaca, ETFs included.
+
+    `parse_occ_symbol` is reused rather than a second regex written here, so
+    there is one definition of an OCC symbol in the repository.
+
+    **It answers a shape, not an existence.** `ZZZZ` comes back `us_equity`
+    because that is what a four-letter ticker is, and whether Alpaca lists it is
+    a question for the broker at order time, not for a dreamer's subject line.
+    Guessing the class wrong in that direction costs nothing: the symbol still
+    faces every gate, under that class's own limits, and `RiskGate` still refuses
+    anything it cannot price.
+
+    **A second broker would need this revisited.** `ES` is a Globex future and
+    reads as an equity here. That is harmless while Alpaca is the only adapter —
+    nothing on Globex is reachable — and it is the same seam the session-shape
+    template in `config/rules.yaml` is waiting on.
+    """
+    clean = symbol.strip().upper()
+    if not clean:
+        return ""
+    if _CRYPTO_PAIR_MARK in clean:
+        return str(AssetClass.CRYPTO)
+    if parse_occ_symbol(clean) is not None:
+        return str(AssetClass.OPTION)
+    return str(AssetClass.EQUITY)
+
+
+@dataclass(frozen=True)
+class SymbolScope:
+    """What survived the class fence, and what did not and why.
+
+    `dropped` is a tuple of pairs rather than a dict so the order is the order
+    the model named them, which is what a person reading the note wants, and so
+    the whole thing stays comparable in a test.
+    """
+
+    kept: tuple[str, ...] = ()
+    dropped: tuple[tuple[str, str], ...] = ()
+    # The single `instruments:` key every kept symbol belongs to, or empty when
+    # they span more than one. Empty is the fail-closed answer: `DreamStore.adopt`
+    # refuses an unresolved class with `NEEDS_ASSET_CLASS`, and
+    # `granted_symbols` drops a grant without one, because a symbol whose class
+    # is unknown is a symbol whose limits are unknown.
+    asset_class_key: str = ""
+
+    @property
+    def summary(self) -> str:
+        """The sentence written into the dream's transcript. Empty if nothing went."""
+        if not self.dropped:
+            return ""
+        named = "; ".join(f"{symbol} ({why})" for symbol, why in self.dropped)
+        return (
+            f"Dropped {len(self.dropped)} symbol(s) before storing this dream: "
+            f"{named}. A blocked instrument class is a decision the operator "
+            "made in config/rules.yaml, not a gap for a dream to route around."
+        )
+
+
+def scope_symbols(symbols: Sequence[str], rules: Rules) -> SymbolScope:
+    """Keep only symbols that could belong to an ENABLED instrument class.
+
+    The operator's rule in code: the dreamer may look past `allowed_symbols` to
+    other Alpaca instruments, and may not look past the hard block on a class.
+    So membership of the watch list is not required and membership of an enabled
+    class is.
+
+    **This is the second lock, not the only one.** `grants.resolve_granted_symbols`
+    enforces the same block deterministically at permission time, which is what
+    actually decides whether a symbol may be traded; do not treat this as the
+    guarantee and do not delete it as a duplicate. One of the two is an
+    instruction to a model, one of them is arithmetic, and only the second can
+    be relied on — which is exactly why both are here. Same arrangement as
+    `mode=ro` plus the statement guard in `insight.py`, and as `adopt` checking
+    the asset class that `granted_symbols` also drops: the first check is the
+    useful message, the second is the promise.
+
+    Pure, and it takes `rules` rather than reading a file, so a test can turn a
+    class on and off without touching the shipped config.
+    """
+    enabled = set(rules.enabled_instruments)
+    kept: list[str] = []
+    dropped: list[tuple[str, str]] = []
+    classes: set[str] = set()
+    seen: set[str] = set()
+
+    for raw in symbols:
+        symbol = str(raw).strip().upper()
+        if not symbol or symbol in seen:
+            continue
+        seen.add(symbol)
+        # The watch list answers first, because a listed symbol's class is a
+        # fact rather than an inference. Only an unlisted one falls back to its
+        # shape, which is the case this feature exists for.
+        key = rules.class_name_for(symbol) or class_key_for_symbol(symbol)
+        if key and key in enabled:
+            kept.append(symbol)
+            classes.add(key)
+        else:
+            dropped.append(
+                (symbol, f"{key or 'unclassifiable'} is not an enabled class")
+            )
+
+    return SymbolScope(
+        kept=tuple(kept),
+        dropped=tuple(dropped),
+        # One class or nothing. A dream spanning two classes cannot say which
+        # limits apply to it, and picking one would be choosing a risk cap by
+        # accident — the same reason `granted_symbols` DROPS a symbol claimed by
+        # two live grants rather than resolving it.
+        asset_class_key=classes.pop() if len(classes) == 1 else "",
+    )
 
 
 class DreamHop(BaseModel):
@@ -130,6 +285,17 @@ class DreamStep(BaseModel):
             "matter, never a ticker to trade and never an instruction."
         ),
     )
+    symbols: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Tradeable tickers this dream claims, if any. You MAY name symbols "
+            "that are not on the watch list, as long as they belong to an "
+            "instrument class the prompt says is ENABLED. Anything in a blocked "
+            "class is dropped before storage. Leave empty unless the dream is "
+            "genuinely about something the bot could trade — this is the only "
+            "field here that can ever become a permission."
+        ),
+    )
     verdict: DreamVerdict | None = Field(
         default=None, description="Set only when stage is verdict."
     )
@@ -180,11 +346,62 @@ Hard rules:
   dropped rather than returning next month in a new headline.
 - Prefer advancing an existing dream over starting a new one.
 
+Where you may look:
+
+- The watch list is a starting point, not a fence. You may dream about any
+  instrument in a class the prompt marks ENABLED, including ones nobody has
+  listed. That is the point of you.
+- **A BLOCKED class is a hard stop.** It is a decision the operator made about a
+  whole group of instruments, not a gap for a dream to route around. Do not name
+  a symbol in one, do not build a chain that only pays off through one, and do
+  not suggest enabling one. Anything you name there is dropped before it is
+  stored, and the drop is recorded against the dream.
+- `instruments` is what the dream is ABOUT and is free text — a commodity, a
+  region, an industry. `symbols` is different and much narrower: the tradeable
+  tickers the dream claims. It is the only field you write that could ever
+  become a permission, so leave it empty unless the dream really is about
+  something the bot could hold.
+
 You are shown what the bot watches, recent headlines and posts, and which
 positions recently opened or closed. You are NOT shown profit or loss, and you
 must not ask for it or reason about it. Forty trades is noise; a dreamer that
 chases what recently worked is a momentum strategy with a personality.
 """
+
+
+def render_class_fence(rules: Rules) -> list[str]:
+    """Which instrument classes are open to the dreamer, and which are shut.
+
+    **A disabled class is NAMED rather than omitted**, which is the opposite of
+    what `build_system_prompt` does for the decision loop and is deliberate in
+    both places. There, listing a class the bot cannot trade only invites
+    proposals for it. Here the whole permission is "look outside the watch list,
+    inside the fence", so the dreamer has to be able to SEE the fence — and the
+    operator's rule runs both ways: enable crypto and the dreamer should notice,
+    disable it and it should notice that too. A dreamer left to infer a block
+    from an absence infers it wrongly and spends a run on ideas that get
+    dropped.
+
+    Returned as lines rather than a string so `build_prompt` keeps assembling
+    one list, and so a class list that is somehow empty contributes nothing
+    rather than an empty heading.
+    """
+    if not rules.instruments:
+        return []
+    out = ["Instrument classes. The watch list above is a starting point; this is a fence:"]
+    for name, instrument in sorted(rules.instruments.items()):
+        if instrument.enabled:
+            out.append(
+                f"  {name} — ENABLED. Any symbol in this class is fair game, "
+                "including ones not on the watch list."
+            )
+        else:
+            out.append(
+                f"  {name} — BLOCKED. Do not name a symbol here and do not build "
+                "a chain that only pays off through one."
+            )
+    out.append("")
+    return out
 
 
 def build_prompt(
@@ -208,6 +425,8 @@ def build_prompt(
     out.append("What the bot watches (context only, not a list to have ideas about):")
     out.append("  " + ", ".join(sorted(rules.allowed_symbols)) or "  nothing enabled")
     out.append("")
+
+    out.extend(render_class_fence(rules))
 
     if headlines:
         out.append("Recent headlines:")
@@ -258,6 +477,18 @@ class DreamerResult:
     dream: Dream
     usage: CallUsage | None
     advanced: bool
+
+    # What the class fence took off this step, and why. Optional with a default
+    # because a caller built before the fence existed still constructs this
+    # positionally, which is the same rule every field added after the fact in
+    # this repository carries.
+    #
+    # Reported rather than swallowed: a dreamer repeatedly reaching for a
+    # blocked class is a fact worth having, and a filter that left no trace
+    # would be indistinguishable from a model that had simply stopped naming
+    # symbols. Same reasoning as `symbols_without_history` on the loop's
+    # `cycle_complete` line.
+    scope: SymbolScope = field(default_factory=SymbolScope)
 
 
 # Where the timer unit lives once bootstrap has installed it, and the repo copy
@@ -416,8 +647,25 @@ class Dreamer:
             log.warning("dream_call_failed_unexpectedly", error=repr(exc))
             return None
 
-        dream, advanced = self._apply(step, existing, now=now)
+        dream, advanced, scope = self._apply(step, existing, now=now)
         self._store.save(dream)
+
+        if scope.dropped:
+            # Three records, and each is for a different reader. The log line is
+            # what an operator greps; `DreamerResult` is what a caller can act
+            # on; the transcript note is the durable one a human sees beside the
+            # dream itself on the Dreaming page, which is where the question
+            # "why does this dream name nothing" actually gets asked.
+            log.warning(
+                "dream_symbols_dropped",
+                dream_id=dream.id,
+                dropped=[s for s, _ in scope.dropped],
+                kept=list(scope.kept),
+            )
+            self._store.add_message(
+                int(dream.id or 0), speaker=SCOPE, kind="note", text=scope.summary
+            )
+
         log.info(
             "dream_step",
             dream_id=dream.id,
@@ -425,18 +673,26 @@ class Dreamer:
             advanced=advanced,
             hops=len(dream.chain),
             unchecked=len(dream.unverified_hops),
+            symbols=list(scope.kept),
+            symbols_dropped=len(scope.dropped),
         )
-        return DreamerResult(dream=dream, usage=usage, advanced=advanced)
+        return DreamerResult(dream=dream, usage=usage, advanced=advanced, scope=scope)
 
     def _apply(
         self, step: DreamStep, existing: list[Dream], *, now: datetime | None = None
-    ) -> tuple[Dream, bool]:
+    ) -> tuple[Dream, bool, SymbolScope]:
         """Fold a step into a new or existing dream.
 
         The id is looked up in what we actually offered rather than trusted: a
         model returning an id for a dream that does not exist, or one belonging
         to somebody else's row, starts a new dream instead of writing over an
         unrelated one.
+
+        Symbols go through `scope_symbols` on the way in, so a blocked class is
+        refused at the point of storage rather than at the point of use. That
+        ordering matters: a dream that reached the vault naming a crypto pair
+        would be an offer the trading agent could accept, and the refusal would
+        then have to happen inside a permission check that nobody is reading.
         """
         target: Dream | None = None
         if step.advance_id is not None:
@@ -459,9 +715,19 @@ class Dreamer:
         if step.instruments:
             dream.instruments = step.instruments
 
+        scope = scope_symbols(step.symbols, self._rules)
+        if scope.kept:
+            dream.symbols = list(scope.kept)
+            # Written unconditionally alongside the symbols, including when it
+            # is empty. A step that widens a dream across two classes leaves the
+            # class UNRESOLVED, and carrying the previous step's key forward
+            # would be a permission described by a claim that is no longer true.
+            # Unresolved grants nothing, which is the direction to fail in.
+            dream.asset_class_key = scope.asset_class_key
+
         # A verdict is only honoured on a verdict step, so a stray value on an
         # explore step cannot silently close a dream that is still running.
         if step.stage is DreamStage.VERDICT:
             dream.verdict = step.verdict
         dream.add_thought(step.stage, step.thought, at=now)
-        return dream, advanced
+        return dream, advanced, scope

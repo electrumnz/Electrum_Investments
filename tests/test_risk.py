@@ -1251,3 +1251,410 @@ def test_a_stop_on_the_wrong_side_is_still_refused_without_a_target(
 
     assert not verdict.approved
     assert _reasons_mention(verdict, "not above entry")
+
+
+# ---------------------------------------------------- symbols granted by a dream
+#
+# The most safety-sensitive rule in this file, because it is the only one that
+# WIDENS what may be traded. The grant is resolved outside the gate — see
+# `grants.py` — and arrives as a mapping of symbol to instrument-class key, in
+# the same shape as `news_windows` and for the same reason: this gate reads no
+# database and cannot be allowed to fail open.
+#
+# What adoption buys is entry to the allowlist. Every test below is about
+# something it does NOT buy.
+
+
+def _tsla_tick(when: datetime) -> Tick:
+    return Tick(symbol="TSLA", bid=419.98, ask=420.02, timestamp=when)
+
+
+def _tsla(qty: float, rationale: str, *, stop: float = 415.0) -> OrderProposal:
+    return OrderProposal(
+        symbol="TSLA",
+        direction=Direction.BUY,
+        qty=qty,
+        limit_price=420.00,
+        stop_loss_price=stop,
+        take_profit_price=430.00,
+        rationale=rationale,
+    )
+
+
+def test_an_unlisted_symbol_is_refused_with_no_grant(rules, account):
+    """The control for everything below: TSLA is in no instrument block."""
+    verdict = _gate(rules).evaluate(
+        _tsla(3, "Nothing grants this, so it is an ordinary unlisted symbol."),
+        account=account,
+        tick=_tsla_tick(INSIDE_SESSION),
+    )
+
+    assert not verdict.approved
+    assert _reasons_mention(verdict, "not in the allowed list")
+    assert verdict.granted_by_dream_class is None
+
+
+def test_a_granted_symbol_is_approved(rules, account):
+    verdict = _gate(rules).evaluate(
+        _tsla(3, "An adopted dream grants this symbol under the equity block."),
+        account=account,
+        tick=_tsla_tick(INSIDE_SESSION),
+        granted_symbols={"TSLA": "us_equity"},
+    )
+
+    assert verdict.approved, verdict.reasons
+
+
+def test_the_verdict_records_that_a_dream_was_what_permitted_this(rules, account):
+    """A permission that leaves no trace is not auditable.
+
+    The verdict names the CLASS rather than the dream, and the field is named
+    for that: the gate is handed a symbol-to-class mapping and a database read
+    to fetch a dream id is exactly what it must not do. Which dream is resolved
+    outside and lands on `Trade.dream_id`.
+    """
+    verdict = _gate(rules).evaluate(
+        _tsla(3, "An adopted dream grants this symbol under the equity block."),
+        account=account,
+        tick=_tsla_tick(INSIDE_SESSION),
+        granted_symbols={"TSLA": "us_equity"},
+    )
+
+    assert verdict.granted_by_dream_class == "us_equity"
+    assert verdict.permitted_by_dream_grant
+
+
+def test_a_listed_symbol_is_never_marked_as_granted(rules, account, spy_tick, buy_proposal):
+    """A stale grant naming SPY must not make an ordinary trade look like a
+    dream's. The allowlist answer wins, so the audit trail cannot claim a dream
+    was load-bearing on a trade that would have happened anyway."""
+    verdict = _gate(rules).evaluate(
+        buy_proposal,
+        account=account,
+        tick=spy_tick,
+        granted_symbols={"SPY": "crypto"},
+    )
+
+    assert verdict.approved, verdict.reasons
+    assert verdict.granted_by_dream_class is None
+    assert not verdict.permitted_by_dream_grant
+
+
+def test_a_grant_under_a_disabled_class_is_refused(rules, account):
+    """The class hard block, enforced in the gate as well as in the resolver.
+
+    `grants.py` drops it first and this is the lock that does not depend on that
+    having been got right — the same arrangement as `mode=ro` plus the statement
+    guard in `insight.py`. A gate that trusted its input to have been filtered
+    would be a gate whose safety lived in another file.
+    """
+    assert rules.instruments["crypto"].enabled is False
+
+    verdict = _gate(rules).evaluate(
+        _btc(0.01, "A dream grants this, but the whole class is switched off."),
+        account=account,
+        tick=_btc_tick(INSIDE_SESSION),
+        granted_symbols={"BTC/USD": "crypto"},
+    )
+
+    assert not verdict.approved
+    assert _reasons_mention(verdict, "not in the allowed list")
+    # Named, so an operator is not sent looking for the wrong problem.
+    assert _reasons_mention(verdict, "can never enable a class")
+    # And no class was applied, so nothing may claim a dream permitted this.
+    assert verdict.granted_by_dream_class is None
+
+
+def test_a_grant_naming_a_class_nobody_configured_is_refused(rules, account):
+    verdict = _gate(rules).evaluate(
+        _tsla(3, "The grant names an instrument block that does not exist."),
+        account=account,
+        tick=_tsla_tick(INSIDE_SESSION),
+        granted_symbols={"TSLA": "futures"},
+    )
+
+    assert not verdict.approved
+    assert _reasons_mention(verdict, "not in the allowed list")
+
+
+def test_an_empty_or_absent_mapping_behaves_exactly_as_before(
+    rules, account, spy_tick, buy_proposal
+):
+    """The feature must be invisible when nothing is granted."""
+    gate = _gate(rules)
+    without = gate.evaluate(buy_proposal, account=account, tick=spy_tick)
+    empty = gate.evaluate(
+        buy_proposal, account=account, tick=spy_tick, granted_symbols={}
+    )
+    explicit_none = gate.evaluate(
+        buy_proposal, account=account, tick=spy_tick, granted_symbols=None
+    )
+
+    assert without == empty == explicit_none
+    assert without.approved, without.reasons
+
+
+# ------------------------- a grant buys the allowlist and not one thing more
+
+
+def test_a_granted_symbol_still_faces_the_per_trade_cap_of_its_class(rules, account):
+    """The whole tolerability argument: a permission is not an order.
+
+    Sized to breach the equity class's 1% per-trade cap, and refused for it.
+    """
+    verdict = _gate(rules).evaluate(
+        # 5 points of stop distance x 250 shares is $1,250 against a $1,000 cap.
+        _tsla(250, "Granted, and deliberately too large for the class limit."),
+        account=account,
+        tick=_tsla_tick(INSIDE_SESSION),
+        granted_symbols={"TSLA": "us_equity"},
+    )
+
+    assert not verdict.approved
+    assert _reasons_mention(verdict, "per-trade cap")
+    # The rejection is about size, not about the symbol — the grant worked.
+    assert not _reasons_mention(verdict, "not in the allowed list")
+    # And the verdict still records that the symbol was only considerable
+    # because of a dream. A refused trade in a granted symbol is a fact about
+    # the grant, and the Decisions page is the only surface it exists on.
+    assert verdict.granted_by_dream_class == "us_equity"
+
+
+def test_a_granted_symbol_faces_its_class_session_window(rules, account):
+    """Out of hours for the class it was granted under, not for no class at all."""
+    saturday = datetime(2026, 5, 2, 15, 0, tzinfo=UTC)
+
+    verdict = _gate(rules, now=saturday).evaluate(
+        _tsla(3, "Granted, but the equity session does not run on a Saturday."),
+        account=account,
+        tick=_tsla_tick(saturday),
+        granted_symbols={"TSLA": "us_equity"},
+    )
+
+    assert not verdict.approved
+    assert _reasons_mention(verdict, "not a trading day")
+
+
+def test_a_granted_symbol_counts_toward_its_class_concurrency_cap(rules):
+    """The bypass that is not `_symbol_allowed`, and the reason `_class_symbols`
+    exists.
+
+    `_concurrent_positions` counts a class's positions by SYMBOL MEMBERSHIP of
+    `allowed_symbols`, and a granted symbol is in no such list. Without the
+    grants folded into that membership, a position held under a grant would be
+    invisible to the very cap it is supposed to be subject to: the grant would
+    have bought entry to the allowlist AND a quiet exemption.
+    """
+    tightened = rules.model_copy(deep=True)
+    tightened.instruments["us_equity"].max_concurrent_positions = 1
+
+    held = Position(
+        symbol="TSLA",
+        direction=Direction.BUY,
+        qty=3,
+        entry_price=420.0,
+        opened_at=INSIDE_SESSION,
+        current_price=420.0,
+    )
+    account = AccountSnapshot(
+        equity_usd=PAPER_EQUITY,
+        cash_usd=PAPER_EQUITY,
+        buying_power_usd=PAPER_EQUITY,
+        open_positions=[held],
+        open_risk_by_symbol={"TSLA": 15.0},
+        open_risk_usd=15.0,
+    )
+
+    verdict = _gate(tightened).evaluate(
+        OrderProposal(
+            symbol="SPY",
+            direction=Direction.BUY,
+            qty=3,
+            limit_price=580.00,
+            stop_loss_price=575.00,
+            take_profit_price=590.00,
+            rationale="A listed symbol, with the class's one slot already used.",
+        ),
+        account=account,
+        tick=Tick(symbol="SPY", bid=579.98, ask=580.02, timestamp=INSIDE_SESSION),
+        granted_symbols={"TSLA": "us_equity"},
+    )
+
+    assert not verdict.approved
+    assert _reasons_mention(verdict, "for this instrument class")
+
+
+def test_a_granted_symbol_counts_toward_its_class_total_risk_cap(rules):
+    """Same bypass, on the cap the operator wrote in their own words.
+
+    A granted crypto symbol holding 0.4% of the class's 0.5% must leave room for
+    only 0.1% more, exactly as a listed one would.
+    """
+    enabled = _crypto_class_total(rules)
+
+    held = Position(
+        symbol="DOGE/USD",
+        asset_class=AssetClass.CRYPTO,
+        direction=Direction.BUY,
+        qty=1000,
+        entry_price=0.4,
+        opened_at=INSIDE_SESSION,
+        current_price=0.4,
+    )
+    account = _account_with_class_risk(
+        positions=[held], open_risk_by_symbol={"DOGE/USD": 400.0}
+    )
+
+    verdict = _gate(enabled).evaluate(
+        # 0.2 BTC with the stop $2,000 away is $400 of risk: $800 against $500.
+        _btc(0.2, "The granted position already holds most of the class budget."),
+        account=account,
+        tick=_btc_tick(INSIDE_SESSION),
+        granted_symbols={"DOGE/USD": "crypto"},
+    )
+
+    assert not verdict.approved
+    assert _reasons_mention(verdict, "open risk would reach")
+    assert _reasons_mention(verdict, "800.00")
+
+
+def test_a_granted_position_with_no_journal_row_refuses_the_class(rules):
+    """Fails closed, exactly as an untracked listed position does.
+
+    A held position the journal has never seen has an unknowable planned stop,
+    so the class total cannot be established — and a grant must not be a way to
+    make a position invisible to that check.
+    """
+    enabled = _crypto_class_total(rules)
+
+    held = Position(
+        symbol="DOGE/USD",
+        asset_class=AssetClass.CRYPTO,
+        direction=Direction.BUY,
+        qty=1000,
+        entry_price=0.4,
+        opened_at=INSIDE_SESSION,
+        current_price=0.4,
+    )
+    account = _account_with_class_risk(
+        positions=[held], symbols_with_unknown_risk=["DOGE/USD"]
+    )
+
+    verdict = _gate(enabled).evaluate(
+        _btc(0.01, "The class total cannot be established while that is unknown."),
+        account=account,
+        tick=_btc_tick(INSIDE_SESSION),
+        granted_symbols={"DOGE/USD": "crypto"},
+    )
+
+    assert not verdict.approved
+    assert _reasons_mention(verdict, "cannot be established")
+
+
+def test_a_granted_symbol_counts_toward_its_class_capital_cap(rules):
+    """The third membership-counted gate. Crypto ships a 15% capital cap."""
+    enabled = _with_crypto(rules, cap=15.0)
+    enabled.instruments["crypto"].max_concurrent_positions = 5
+
+    held = Position(
+        symbol="DOGE/USD",
+        asset_class=AssetClass.CRYPTO,
+        direction=Direction.BUY,
+        qty=1000,
+        entry_price=14.0,          # $14,000 of the $15,000 cap
+        opened_at=INSIDE_SESSION,
+        current_price=14.0,
+    )
+    account = _account_with_class_risk(
+        positions=[held], open_risk_by_symbol={"DOGE/USD": 100.0}
+    )
+
+    verdict = _gate(enabled).evaluate(
+        _btc(0.05, "Small, but the granted position already fills the sleeve."),
+        account=account,
+        tick=_btc_tick(INSIDE_SESSION),
+        granted_symbols={"DOGE/USD": "crypto"},
+    )
+
+    assert not verdict.approved
+    assert _reasons_mention(verdict, "allocation would reach")
+
+
+def test_a_granted_symbol_still_faces_the_portfolio_total_risk_cap(rules):
+    """Nothing about a grant touches the account-wide rules."""
+    account = AccountSnapshot(
+        equity_usd=PAPER_EQUITY,
+        cash_usd=PAPER_EQUITY,
+        buying_power_usd=PAPER_EQUITY,
+        open_risk_usd=1_900.0,     # 1.9% of a 2% portfolio budget already used
+    )
+
+    verdict = _gate(rules).evaluate(
+        _tsla(40, "Granted, and it would take the portfolio through 2%."),
+        account=account,
+        tick=_tsla_tick(INSIDE_SESSION),
+        granted_symbols={"TSLA": "us_equity"},
+    )
+
+    assert not verdict.approved
+    assert _reasons_mention(verdict, "total risk would reach")
+
+
+def test_a_granted_symbol_is_still_refused_during_a_live_stand_down(rules, account):
+    """A grant is a permission to consider a symbol, never a way past a rule
+    that has nothing to do with symbols."""
+    from bot.models import ExecutionMode, StandDownState
+
+    gate = RiskGate(
+        rules,
+        equity_at_session_start=PAPER_EQUITY,
+        execution_mode=ExecutionMode.LIVE,
+        now=INSIDE_SESSION,
+    )
+    state = StandDownState(
+        stage=1,
+        started_at=INSIDE_SESSION,
+        ends_at=INSIDE_SESSION + timedelta(days=3),
+        consecutive_losses=3,
+    )
+
+    verdict = gate.evaluate(
+        _tsla(3, "Granted, and the account is standing down after three losses."),
+        account=account,
+        tick=_tsla_tick(INSIDE_SESSION),
+        stand_down=state,
+        granted_symbols={"TSLA": "us_equity"},
+    )
+
+    assert not verdict.approved
+    assert _reasons_mention(verdict, "stand-down")
+
+
+def test_the_gate_reads_nothing_but_its_arguments(rules, account):
+    """Determinism, stated as a test rather than as a comment.
+
+    The same gate, the same inputs, the same answer — and no store, no file and
+    no clock beyond the injected one is involved in producing it. A gate that
+    read the dream store itself would be a gate that could fail, and this one
+    must not fail open.
+    """
+    import bot.risk as risk_mod
+
+    assert "dreaming" not in risk_mod.__dict__
+    assert "grants" not in risk_mod.__dict__
+
+    gate = _gate(rules)
+    first = gate.evaluate(
+        _tsla(3, "Granted, and asked for twice with identical inputs."),
+        account=account,
+        tick=_tsla_tick(INSIDE_SESSION),
+        granted_symbols={"TSLA": "us_equity"},
+    )
+    second = gate.evaluate(
+        _tsla(3, "Granted, and asked for twice with identical inputs."),
+        account=account,
+        tick=_tsla_tick(INSIDE_SESSION),
+        granted_symbols={"TSLA": "us_equity"},
+    )
+
+    assert first == second
