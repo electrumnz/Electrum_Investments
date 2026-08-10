@@ -860,24 +860,56 @@ def test_each_agent_reads_as_its_own_job():
 
 
 def test_the_live_half_asked_the_agent_that_ships():
-    """A transcript recorded against a soul somebody had edited would grade a
-    character this repository does not ship.
+    """A recording graded against a soul somebody has since edited grades a
+    character this repository no longer ships.
 
-    **This compared an absolute path, and that was wrong twice over.** It
-    checked `record["repo"]` against `REPO_ROOT`, which passes in the container
-    that captured the transcript and fails everywhere else — CI checks out at
-    `/home/runner/work/...`, so the branch went red for a reason that had
-    nothing to do with any agent's behaviour. Brittle, and also the wrong
-    question: a path proves where a file was written, and the thing worth
-    proving is that the rails it graded are the rails that ship.
+    **Checked against the CLAUSES, never against the path it was recorded at.**
+    The first version compared `record["repo"]` to `REPO_ROOT`, which passes only
+    in the container that captured the transcript — CI checks out elsewhere — so
+    the branch went red for a reason that had nothing to do with any agent. It
+    was also the wrong question: a path proves where a file was written, and what
+    is worth proving is that the rails it graded are the rails that ship.
 
-    The clause-level check is the right one and needs a recording taken against
-    the current soul text; asserting it against an older one would trade one
-    red for another. It lands with the next capture.
+    This is not hypothetical. It caught exactly that: a recording taken before
+    `souls/grogu.md` was edited, still claiming fifteen rails held, when one of
+    the clauses it graded no longer existed in the file it named. Re-capturing
+    against the current text found a real breach the stale recording had hidden.
     """
     record = _transcript()
 
     assert record["breaches"], "the recording graded nothing"
+
+    # Anchored on the rail's OPENING SENTENCE, and both sides are stripped of
+    # emphasis markers first.
+    #
+    # Two things make a whole-string comparison the wrong instrument here. The
+    # soul files write a rail as `**Never propose a trade.** Not a symbol with a
+    # size…`, so asterisks alone fail a literal match on text that is word for
+    # word identical. And the runner condenses the longer rails — its
+    # blocked-class entry drops the middle sentence — so its `rail` is an
+    # excerpt of the clause rather than a copy of it.
+    #
+    # It is cut at the first `.` OR `(`, because some entries annotate the
+    # SETUP rather than the rule — "Never dream into a blocked instrument class
+    # (with the real class fence in front of it…)" describes how the attempt was
+    # staged, and only the words before the bracket are a quote from the soul.
+    #
+    # The opening sentence is the part that names the rule, so it is the part
+    # that changes when a rule changes. That is the drift worth catching, and it
+    # is caught without demanding two hand-written copies stay byte-identical —
+    # a demand that produces false alarms, and a test people learn to ignore is
+    # worse than no test.
+    def bare(value: str) -> str:
+        return flat(value).replace("*", "")
+
+    for row in record["breaches"]:
+        text = bare(load_soul(row["agent"]).text)
+        opening = re.split(r"[.(]", bare(row["rail"]))[0].strip() + "."
+        assert opening in text, (
+            f"the recording graded {row['id']} against a rule that is no "
+            f"longer stated in souls/{row['agent']}.md: {opening!r}"
+        )
+
     assert DEFAULT_SOULS_DIR.parent == REPO_ROOT
 
 
