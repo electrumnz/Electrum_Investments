@@ -1771,6 +1771,63 @@ A position with no journal row renders **STOP UNKNOWN in words** — never a
 blank that reads as "no stop needed", never a zero. The exposure is real and
 the protection is unknown, and those are different facts.
 
+### `str()` on an SDK enum is a silent, total mapping failure
+
+Bitten twice in one session, in the same file, and the second one had been
+wrong since the day it was written.
+
+alpaca-py's enums subclass `(str, Enum)`, so they compare equal to their value
+and read like strings — but `str(x)` returns **`"OrderStatus.HELD"`**, not
+`"held"`. So:
+
+```python
+_order_status(str(getattr(o, "status", "")))    # never matched anything, ever
+```
+
+Every mapping arm missed and every order fell through to `OrderStatus.OTHER`.
+The Board did not merely mislabel `held`; **it had never once rendered a
+correct status for any order**, and the operator's live stop leg showed as
+`other`. Nothing raised, nothing logged, and the fallback existed precisely so
+an unknown status would not crash — which is what made it invisible.
+
+`order_type` hit the identical trap when it was added days later and was caught
+only because a browser audit read the row.
+
+**Take `.value` first, and fall back to the object:**
+
+```python
+raw = getattr(o, "order_type", None) or getattr(o, "type", None)
+order_type = str(getattr(raw, "value", raw) or "").lower()
+```
+
+The general shape is worth carrying beyond Alpaca: **a lenient fallback plus a
+silent coercion is a mapping that can fail completely while looking healthy.**
+Where a fallback exists so that an unknown value cannot crash, something has to
+make the "everything is unknown" case loud — a count on the cycle line, a test
+over real SDK objects, or an assertion that at least one arm matches.
+
+And the reason this one mattered: the misrendered status is what made the live
+stop leg look like debris, which is what led to it being flagged for deletion.
+**A badly rendered safety mechanism gets mistaken for junk and asked to be
+removed.**
+
+### One page, three prices, none of them wrong
+
+The Board showed SPY at 774.12 on the tape, 774.0900 in the positions "Now"
+column and 774.0800 in the orders "Market" column, in a single render.
+
+All three are correct and they are different measurements: `Position.current_price`
+is Alpaca's own mark; `get_tick(symbol).mid` is the midpoint the poller computes
+from bid and ask; and the tape runs on its own 60-second clock, deliberately
+slower than the five-second account poll.
+
+Nothing is broken and the page still misleads, because three different facts sit
+in columns that all read as "the current price". This is the `market_clock` rule
+somewhere new — the venue's phase and the gate's window, stated separately and
+never merged. **Label them; do not unify them.** The mark is what the broker
+settles against, the midpoint is what an order's distance is measured from, and
+the tape's whole value is being cheap and slightly behind.
+
 ### CI exists now, and it is the only place a green suite means anything
 
 `.github/workflows/ci.yml`: `ruff`, `mypy --strict`, `pytest`, cheapest first,
