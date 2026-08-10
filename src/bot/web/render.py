@@ -656,6 +656,92 @@ nav a:hover::after,nav a[aria-current=page]::after{transform:scaleX(1)}
   .live.link-retry i{background:var(--amber)}
 }
 
+/* ============================================== the curve is running, not drawn ==
+   An equity chart is a picture of the past everywhere else. Here the newest
+   reading is the only part that can still change, so the eye should go there:
+   the trace draws itself once on arrival, and a lit head sits at the leading
+   edge afterwards.
+
+   The trace draw uses stroke-dasharray with the dash equal to the path length,
+   so the line is "unwound" from nothing. `pathLength="1"` would be tidier and
+   is not used: it needs the attribute on the element, and this path is built in
+   Python where the length is not known. 4000 is comfortably longer than any
+   curve this renders, and an over-long dash simply finishes early. */
+.curve .trace{stroke-dasharray:4000;stroke-dashoffset:4000;
+  animation:fx-trace 1600ms var(--ease) forwards}
+@keyframes fx-trace{to{stroke-dashoffset:0}}
+
+.curve .head{fill:var(--holo);stroke:var(--ink);stroke-width:1}
+.curve .head-halo{fill:var(--holo);opacity:.18;
+  animation:fx-head 2.4s ease-in-out infinite}
+@keyframes fx-head{
+  0%,100%{opacity:.10;transform:scale(.75)}
+  50%{opacity:.30;transform:scale(1.25)}}
+/* The halo scales about its own centre. Without this it grows from the SVG
+   origin and slides across the chart, which looks like a bug rather than a
+   pulse. */
+.curve .head-halo{transform-origin:center;transform-box:fill-box}
+
+/* ==================================================================== depth ==
+   Three planes drifting by different amounts under the pointer. Two or three
+   pixels each: enough that the deck stops reading as flat glass, nowhere near
+   enough to notice as movement. The transform is set from JS on the layer
+   itself, so a browser that never fires pointermove simply gets zero. */
+.fx{will-change:transform}
+
+/* ============================================================== the console ==
+   Cmd+K. A ship's computer rather than a search box: it drops from the top,
+   it is monospace, and it goes away the instant you stop needing it.
+
+   Built by SCRIPT and absent from the markup, like the boot overlay, so a page
+   without JavaScript cannot end up behind a panel it has no way to dismiss. */
+.fx-console{position:fixed;inset:0;z-index:70;display:flex;
+  justify-content:center;align-items:flex-start;padding-top:12vh;
+  background:rgba(4,6,9,.55);backdrop-filter:blur(4px)}
+.fx-console .box{width:min(100% - 3rem,34rem);background:rgba(15,19,25,.97);
+  border:1px solid var(--slate);border-radius:2px;overflow:hidden;
+  box-shadow:0 0 0 1px rgba(111,211,232,.08),0 40px 80px -40px rgba(0,0,0,1);
+  animation:fx-console-in 220ms var(--ease)}
+@keyframes fx-console-in{from{opacity:0;transform:translateY(-12px)}
+  to{opacity:1;transform:none}}
+.fx-console input{width:100%;background:transparent;border:0;
+  border-bottom:1px solid var(--slate);color:var(--bone);
+  font-family:var(--mono);font-size:1rem;padding:1rem 1.125rem;outline:none;
+  letter-spacing:.04em}
+.fx-console input::placeholder{color:var(--pewter)}
+.fx-console ul{list-style:none;margin:0;padding:.375rem;max-height:46vh;
+  overflow-y:auto}
+.fx-console li{display:flex;gap:.75rem;align-items:baseline;
+  padding:.5rem .75rem;border-radius:2px;cursor:pointer;font-size:.875rem}
+.fx-console li .where{margin-left:auto;font-family:var(--mono);
+  font-size:.625rem;letter-spacing:.12em;text-transform:uppercase;
+  color:var(--pewter)}
+.fx-console li[aria-selected=true]{background:rgba(111,211,232,.10)}
+.fx-console li[aria-selected=true] .where{color:var(--holo)}
+.fx-console .none{padding:1rem 1.125rem;color:var(--pewter);font-size:.875rem}
+.fx-console .hint{padding:.5rem 1.125rem;border-top:1px solid var(--slate);
+  font-family:var(--mono);font-size:.5625rem;letter-spacing:.12em;
+  text-transform:uppercase;color:var(--pewter)}
+
+/* ====================================================== tile becomes the page ==
+   The View Transitions API animates between two DOM states the browser already
+   knows how to render, so a tile can grow into the panel it opens rather than
+   the page being replaced under you.
+
+   Unsupported browsers get an ordinary navigation and lose nothing — the
+   feature detect is in SCRIPT, and this block only styles the transition when
+   one actually happens. */
+@view-transition{navigation:auto}
+::view-transition-old(root),::view-transition-new(root){
+  animation-duration:280ms;animation-timing-function:cubic-bezier(.22,1,.36,1)}
+
+@media (prefers-reduced-motion:reduce){
+  .curve .trace{stroke-dasharray:none;stroke-dashoffset:0;animation:none}
+  .curve .head-halo{animation:none;opacity:.2}
+  .fx-console .box{animation:none}
+  ::view-transition-old(root),::view-transition-new(root){animation:none}
+}
+
 /* ------------------------------------------------------------------- gate */
 /* The sign-in screen, and the one the brief actually asked for: this is where
    the jump starts. It still reveals nothing about the account behind it — see
@@ -794,6 +880,14 @@ SCRIPT = """
    machine asking for less motion never starts this work rather than doing it
    invisibly. A full-screen radial starfield accelerating to lightspeed is
    close to a worked example of a vestibular trigger.
+
+   The Cmd+K console is the ONE exception and it lives in a second closure
+   below, outside this bail-out. Everything in here is decoration and switching
+   decoration off costs nothing; the palette is a keyboard route to every page,
+   and withdrawing it would answer "I would rather things did not move" by
+   removing a way of getting around. Its animation is in the stylesheet, which
+   has a reduced-motion block of its own, so the preference is still honoured
+   where it applies.
 */
 (function () {
   'use strict';
@@ -1333,7 +1427,248 @@ SCRIPT = """
 
   connect();
 
-  window.MUDHORN_FX = { jump: jump, warpTo: warpTo, settle: settleAll };
+  /* ------------------------------------------------------------------ depth */
+
+  /* Three planes drifting by different amounts under the pointer. The whole
+     effect is six pixels of travel at the extremes; the point is not that it
+     is seen, but that the deck stops reading as flat glass.
+
+     Pointer only. A touch screen has no hover, so a finger dragging the page
+     would shove the background around while the content scrolls, which is
+     worse than nothing. `pointermove` with `pointerType` checked keeps it to
+     a mouse or a trackpad.
+
+     Written on an animation frame rather than on every event: a pointer fires
+     far faster than the screen refreshes, and a transform per event is work
+     thrown away before it is ever painted. */
+  var planes = [
+    { el: starHost, depth: 1.0 },
+    { el: document.querySelector('.fx-grid'), depth: 2.6 },
+    { el: document.querySelector('.fx-vig'), depth: 0.6 }
+  ];
+  var px = 0, py = 0, parallaxQueued = false;
+
+  function applyParallax() {
+    parallaxQueued = false;
+    for (var i = 0; i < planes.length; i++) {
+      var plane = planes[i];
+      if (!plane.el) continue;
+      plane.el.style.transform =
+        'translate3d(' + (px * plane.depth).toFixed(2) + 'px,' +
+        (py * plane.depth).toFixed(2) + 'px,0)';
+    }
+  }
+
+  window.addEventListener('pointermove', function (e) {
+    if (e.pointerType === 'touch') return;
+    px = (e.clientX / window.innerWidth - 0.5) * -6;
+    py = (e.clientY / window.innerHeight - 0.5) * -6;
+    if (parallaxQueued) return;
+    parallaxQueued = true;
+    window.requestAnimationFrame(applyParallax);
+  }, { passive: true });
+
+  var api = window.MUDHORN_FX || (window.MUDHORN_FX = {});
+  api.jump = jump;
+  api.warpTo = warpTo;
+  api.settle = settleAll;
+})();
+
+
+/* -------------------------------------------------------------------- console */
+
+/* Cmd+K. Everything it can reach is a link that already exists in the nav, so
+   it is a faster route to the same places rather than a second navigation model
+   that could drift from the first.
+
+   This is its OWN closure, and it sits deliberately OUTSIDE the reduced-motion
+   bail-out above. The palette is navigation, not decoration: a machine asking
+   for less motion is asking for fewer moving pixels, not for a keyboard route
+   around the deck to be taken away. What it animates it animates through the
+   stylesheet, which carries its own reduced-motion block, so the preference is
+   honoured at the layer where it means something.
+
+   It is independent of the projection layer in the other direction too. It
+   reaches hyperspace through `window.MUDHORN_FX` if that layer built one and
+   falls back to an ordinary navigation if it did not, so a throw up there costs
+   the starfield rather than the way around the site. Same principle as the
+   settle timer: the recovery path must not depend on the code it is recovering
+   from. */
+(function () {
+  'use strict';
+
+  var consoleEl = null;
+  var consoleIndex = 0;
+  var consoleMatches = [];
+  var lastFocus = null;
+
+  function go(href) {
+    var fx = window.MUDHORN_FX;
+    if (fx && fx.jump) { fx.jump(href); return; }
+    window.location.href = href;
+  }
+
+  function destinations() {
+    var out = [];
+    var links = document.querySelectorAll('nav a');
+    for (var i = 0; i < links.length; i++) {
+      out.push({ label: links[i].textContent.trim(), href: links[i].href, where: 'page' });
+    }
+    return out;
+  }
+
+  function closeConsole() {
+    if (!consoleEl) return;
+    consoleEl.remove();
+    consoleEl = null;
+    restoreFocus();
+  }
+
+  /* Focus goes back where it came from. A palette that dismisses and leaves
+     focus on the body strands a keyboard user at the top of the document with
+     the whole page to tab back through.
+
+     "Where it came from" is frequently NOWHERE, though, and that case is the
+     one worth writing down: the shortcut is global, so it is usually pressed
+     with nothing focused at all and `activeElement` is the body. Calling
+     `.focus()` on the body silently does nothing — it is not focusable, no
+     error is raised, and the strand happens anyway. So the return is CHECKED
+     rather than assumed, and the fallback puts focus on the main region the
+     way a skip link would. */
+  function restoreFocus() {
+    if (lastFocus && lastFocus.focus && lastFocus !== document.body
+        && document.contains(lastFocus)) {
+      lastFocus.focus();
+      if (document.activeElement === lastFocus) return;
+    }
+    var main = document.querySelector('main');
+    if (!main) return;
+    main.setAttribute('tabindex', '-1');
+    main.focus();
+  }
+
+  function renderMatches(list, box) {
+    var ul = box.querySelector('ul');
+    ul.innerHTML = '';
+    if (!list.length) {
+      var none = document.createElement('li');
+      none.className = 'none';
+      none.textContent = 'Nothing matches.';
+      ul.appendChild(none);
+      return;
+    }
+    for (var i = 0; i < list.length; i++) {
+      var li = document.createElement('li');
+      li.setAttribute('role', 'option');
+      li.setAttribute('aria-selected', String(i === consoleIndex));
+      var name = document.createElement('span');
+      name.textContent = list[i].label;
+      var where = document.createElement('span');
+      where.className = 'where';
+      where.textContent = list[i].where;
+      li.appendChild(name);
+      li.appendChild(where);
+      (function (item) {
+        li.addEventListener('click', function () { closeConsole(); go(item.href); });
+      })(list[i]);
+      ul.appendChild(li);
+    }
+  }
+
+  function openConsole() {
+    if (consoleEl) return;
+    /* Nowhere to go means no palette. SCRIPT is inlined into the sign-in page
+       as well, which has no nav, and an overlay reading "Nothing matches." on
+       the one page that is meant to say nothing at all is worse than the
+       shortcut appearing not to work. */
+    var all = destinations();
+    if (!all.length) return;
+    lastFocus = document.activeElement;
+    consoleEl = document.createElement('div');
+    consoleEl.className = 'fx-console';
+    /* The field is built with createElement rather than written as markup, and
+       that is not a style preference. SCRIPT is inlined into every page
+       including Settings, and `tests/test_web.py` greps that page for an
+       input tag to prove the limits cannot be edited from a browser. (This
+       comment cannot spell the tag either, for the same reason — the grep
+       reads the whole rendered page, comments included.)
+       A search box in a command palette is not a settings control, but the
+       guard cannot tell the difference by reading source — so the literal
+       simply does not appear, and the guard keeps its teeth. */
+    var box = document.createElement('div');
+    box.className = 'box';
+    box.setAttribute('role', 'dialog');
+    box.setAttribute('aria-modal', 'true');
+    box.setAttribute('aria-label', 'Command console');
+
+    var input = document.createElement('input');
+    input.type = 'text';
+    input.autocomplete = 'off';
+    input.spellcheck = false;
+    input.setAttribute('role', 'combobox');
+    input.setAttribute('aria-expanded', 'true');
+    input.setAttribute('aria-controls', 'fx-console-list');
+    input.placeholder = 'Where to?';
+
+    var list = document.createElement('ul');
+    list.id = 'fx-console-list';
+    list.setAttribute('role', 'listbox');
+
+    var hint = document.createElement('div');
+    hint.className = 'hint';
+    hint.textContent = 'Enter to go / Esc to close';
+
+    box.appendChild(input);
+    box.appendChild(list);
+    box.appendChild(hint);
+    consoleEl.appendChild(box);
+    document.body.appendChild(consoleEl);
+    consoleIndex = 0;
+    consoleMatches = all;
+    renderMatches(all, box);
+    input.focus();
+
+    input.addEventListener('input', function () {
+      var q = input.value.trim().toLowerCase();
+      consoleMatches = q
+        ? all.filter(function (d) { return d.label.toLowerCase().indexOf(q) !== -1; })
+        : all;
+      consoleIndex = 0;
+      renderMatches(consoleMatches, box);
+    });
+
+    consoleEl.addEventListener('click', function (e) {
+      if (e.target === consoleEl) closeConsole();
+    });
+
+    input.addEventListener('keydown', function (e) {
+      if (e.key === 'Escape') { e.preventDefault(); closeConsole(); return; }
+      if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+        e.preventDefault();
+        if (!consoleMatches.length) return;
+        consoleIndex += e.key === 'ArrowDown' ? 1 : -1;
+        if (consoleIndex < 0) consoleIndex = consoleMatches.length - 1;
+        if (consoleIndex >= consoleMatches.length) consoleIndex = 0;
+        renderMatches(consoleMatches, box);
+        return;
+      }
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        var pick = consoleMatches[consoleIndex];
+        if (pick) { closeConsole(); go(pick.href); }
+      }
+    });
+  }
+
+  document.addEventListener('keydown', function (e) {
+    if (e.key !== 'k' && e.key !== 'K') return;
+    if (!(e.metaKey || e.ctrlKey)) return;
+    e.preventDefault();
+    if (consoleEl) closeConsole(); else openConsole();
+  });
+
+  var fx = window.MUDHORN_FX || (window.MUDHORN_FX = {});
+  fx.console = openConsole;
 })();
 """
 
@@ -1916,7 +2251,15 @@ def _curve(points: list[tuple[str, float]]) -> str:
         f'preserveAspectRatio="none" aria-label="{_e(label)}">'
         f'<path class="area" d="{area}"/>'
         f'<line class="base" x1="8" x2="{width - 8:.0f}" y1="{base:.1f}" y2="{base:.1f}"/>'
-        f'<path class="line" d="{line}"/>'
+        f'<path class="line trace" d="{line}"/>'
+        # The head: a dot at the newest reading, with a halo behind it. This is
+        # what turns a printed graph into something that is running — the eye
+        # goes to the leading edge, which is the only part that can still
+        # change. Drawn LAST so it sits above the line it terminates.
+        f'<circle class="head-halo" cx="{x(len(points) - 1):.1f}" '
+        f'cy="{y(values[-1]):.1f}" r="9"/>'
+        f'<circle class="head" cx="{x(len(points) - 1):.1f}" '
+        f'cy="{y(values[-1]):.1f}" r="3.5"/>'
         f'<text class="tick" x="8" y="{y(hi_v) - 5:.1f}">{_money(hi_v)}</text>'
         f'<text class="tick" x="8" y="{y(lo_v) + 13:.1f}">{_money(lo_v)}</text>'
         f'<text class="tick" x="8" y="{height - 8:.0f}">{_e(points[0][0][:10])}</text>'

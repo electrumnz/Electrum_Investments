@@ -1270,6 +1270,43 @@ def test_only_a_page_with_live_figures_opens_the_stream():
     assert "if (!document.querySelector('[data-live]')) return;" in SCRIPT
 
 
+def test_the_command_console_survives_the_reduced_motion_bail_out():
+    """Cmd+K is navigation, and navigation is not decoration.
+
+    SCRIPT answers `prefers-reduced-motion` by returning on line one and doing
+    none of the work — right for a starfield, wrong for the only keyboard route
+    to every page. Somebody asking for less motion is asking for fewer moving
+    pixels, not for a way around the site to be withdrawn.
+
+    So the palette lives in a second closure, after the projection layer's, and
+    this pins that arrangement: the bail-out must be shut before `openConsole`
+    is defined. Found in a browser rather than here — the whole suite was green
+    while reduced motion had no console at all, because a closure boundary is
+    exactly the kind of thing a unit test does not see.
+    """
+    from bot.web.render import SCRIPT
+
+    bail = SCRIPT.index("if (reduced && reduced.matches) return;")
+    # Only two closures in the file, so the first `})();` after the bail-out is
+    # unambiguously the end of the one that carries it.
+    assert SCRIPT.count("})();") == 2
+    assert SCRIPT.index("})();", bail) < SCRIPT.index("function openConsole")
+
+
+def test_the_console_returns_focus_somewhere_reachable():
+    """A palette that dismisses and leaves focus on the body strands a keyboard
+    user at the top of the document with the whole page to tab back through.
+
+    The shortcut is global, so it is usually pressed with nothing focused and
+    `activeElement` is the body — and `body.focus()` silently does nothing,
+    raising no error while the strand happens anyway. The restore is therefore
+    checked rather than assumed, with the main region as the fallback."""
+    from bot.web.render import SCRIPT
+
+    assert "lastFocus !== document.body" in SCRIPT
+    assert "document.activeElement === lastFocus" in SCRIPT
+
+
 def test_the_sign_in_page_carries_no_live_targets(client):
     """The other half of the guard: if the gate ever grew a `data-live`
     attribute it would start opening an authenticated stream unauthenticated."""
