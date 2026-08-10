@@ -204,6 +204,13 @@ a:hover{text-decoration-color:var(--patina)}
    whispered. Not the loss colour — unreadable is not losing. */
 .alert{color:var(--amber)}
 .note{font-size:.8125rem;color:var(--pewter)}
+/* A path or a key with no spaces in it will not wrap, and one long enough to
+   pass the viewport pushes the whole PAGE sideways -- 404px of content in a
+   390px phone, which is the one thing the layout rules say must never happen.
+   Measured on Settings, where the forge prints an absolute path. `anywhere`
+   rather than `break-word` because only the former is allowed to break at a
+   point that leaves the previous line short, which is exactly the case here. */
+code{overflow-wrap:anywhere}
 h1,h2,h3{font-family:var(--serif);font-weight:400;letter-spacing:-.01em;margin:0}
 h1{font-size:1.75rem} h2{font-size:1.375rem;margin-bottom:.25rem} h3{font-size:1rem}
 .eyebrow{font-family:var(--mono);font-size:.6875rem;letter-spacing:.18em;

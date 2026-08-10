@@ -1829,6 +1829,35 @@ A position with no journal row renders **STOP UNKNOWN in words** — never a
 blank that reads as "no stop needed", never a zero. The exposure is real and
 the protection is unknown, and those are different facts.
 
+### A two-class element is decided by DECLARATION ORDER, and it has bitten three times
+
+`class="note alert"` renders **pewter, not amber**. Both are single-class
+rules, so the specificity is equal, and `.note` is declared after `.alert` —
+the later one wins. The most severe note on the page stops looking like a
+warning. Valid CSS, no error, text still readable, and invisible unless
+somebody looks at the rendered pixels.
+
+That is the third instance of one bug:
+
+- `.pill.seed` — a stage badge picked up `.dream .seed { padding: … }`, written
+  for a paragraph, and rendered as a full-width block.
+- `.rung.gate` — same shape.
+- `.note.alert` — a colour modifier silently overridden by a base class.
+
+So it is a rule now rather than three anecdotes. **A modifier class must not
+depend on winning a tie.** Either give it higher specificity deliberately
+(`.note.alert`, which beats both), or put the modifier on its own element so
+there is no tie to lose. Guess neither: `tests/test_web.py` pins the shape.
+
+The general form is worth carrying past CSS: **where two things are combined
+and precedence is implicit, the result is decided by an ordering nobody is
+looking at.** The `.gitignore` depth trap, the SDK enum below, and this are all
+the same failure wearing different clothes.
+
+And note what all three have in common — **each was found by looking at the
+page, never by a test.** A collision produces valid CSS, valid HTML and a
+plausible render.
+
 ### `str()` on an SDK enum is a silent, total mapping failure
 
 Bitten twice in one session, in the same file, and the second one had been
