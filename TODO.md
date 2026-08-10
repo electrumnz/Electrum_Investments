@@ -93,7 +93,7 @@ next person to see it should not chase that.
 
 ## 3. The ticker tape — UI, and it is diagnosed rather than vague
 
-Three separate problems. The third is the one that makes the strip look wrong.
+Four separate problems. (b) is the one that makes the strip look wrong.
 
 **(a) The clocks do not stand out.** `.tape .clk` is `background: var(--ink)` —
 darker than the graphite band — with `border-left`/`border-right` in
@@ -140,10 +140,16 @@ If it goes, that fact needs a home. The Board is the obvious candidate, and the
 tape is not the place for it.
 
 **(d) The exchange glow has never actually been seen.** `.mkt-live` carries a
-green `text-shadow` and no screenshot taken has ever had an exchange open —
-NYSE rendered `ooh` (amber) and TSE/ASX/NZX rendered `closed` in every capture.
-So the open state and its glow are **unverified in a browser**, not merely
-unpolished. Look at it during a session before tuning it.
+green `text-shadow` and no screenshot taken during development ever had an
+exchange open — NYSE rendered `ooh` (amber) and TSE/ASX/NZX `closed` in every
+capture. So the open state and its glow are **unverified in a browser**, not
+merely unpolished.
+
+It is observable now: the US session is open, so the NYSE badge is rendering
+`mkt-live` with the glow live on the strip. Look at it before tuning it, and
+note the glow has to survive being read by someone who cannot separate green
+from amber — it is a second channel, not decoration, which is why colour alone
+was not used.
 
 Related and already decided, recorded so it is not re-litigated: hover-pause on
 the tape **stays**. Every cell now carries a tooltip naming its kind and whether
