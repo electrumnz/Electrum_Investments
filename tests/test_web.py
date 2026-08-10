@@ -1550,7 +1550,7 @@ def test_the_clocks_tick_regardless_of_the_motion_preference():
 
     bail = SCRIPT.index("if (reduced && reduced.matches) return;")
     assert SCRIPT.index("})();", bail) < SCRIPT.index("var bar = document.querySelector")
-    assert ".clockface.turning .t,.clockface.turning{animation:none}" in STYLES
+    assert ".tape .clk.turning .t,.tape.turning{animation:none}" in STYLES
 
 
 def test_a_clock_that_is_not_ticking_says_so(client):

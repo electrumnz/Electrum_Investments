@@ -92,6 +92,62 @@ def test_rejects_outside_session(rules, account, spy_tick, buy_proposal):
     assert _reasons_mention(verdict, "outside the trading sessions")
 
 
+def test_rejects_the_pre_market_the_utc_window_would_have_let_through(
+    rules, account, spy_tick, buy_proposal
+):
+    """The operator's rule: no pre-market. After hours is fine.
+
+    This is the case `sessions_utc` structurally cannot catch. It is fixed UTC
+    hours; the US session is defined in New York time and moves an hour twice a
+    year. `[[14, 21]]` is the winter window applied all year, so in JANUARY
+    14:00 UTC is 09:00 New York — half an hour of pre-market, inside the
+    configured window, every day, with nothing in the window able to notice.
+
+    It used to cost nothing: an out-of-hours equity order was queued to the
+    next open rather than filled. It costs something now, because Alpaca runs a
+    pre-market session from 04:00 ET, so an order placed into it trades in a
+    thinner book than anybody chose.
+    """
+    winter_premarket = datetime(2026, 1, 12, 14, 15, tzinfo=UTC)  # 09:15 EST
+    gate = _gate(rules, now=winter_premarket)
+
+    # The UTC window is satisfied — this is the trap.
+    assert rules.instruments["us_equity"].is_in_session(winter_premarket)
+
+    verdict = gate.evaluate(buy_proposal, account=account, tick=spy_tick)
+
+    assert not verdict.approved
+    assert _reasons_mention(verdict, "pre-market")
+    assert not _reasons_mention(verdict, "outside the trading sessions")
+
+
+@pytest.mark.parametrize(
+    ("label", "moment"),
+    [
+        # 10:00 New York, EST. The regular session.
+        ("regular session", datetime(2026, 1, 12, 15, 0, tzinfo=UTC)),
+        # 16:30 New York, EDT. After hours, which the operator allows.
+        ("after hours", datetime(2026, 8, 10, 20, 30, tzinfo=UTC)),
+    ],
+)
+def test_the_premarket_rule_refuses_nothing_else(
+    rules, account, spy_tick, buy_proposal, label, moment
+):
+    """Only 04:00-09:30 New York. The rule must not quietly become
+    regular-session-only — after hours was explicitly kept."""
+    verdict = _gate(rules, now=moment).evaluate(
+        buy_proposal, account=account, tick=spy_tick
+    )
+
+    assert not _reasons_mention(verdict, "pre-market"), f"{label} was refused"
+
+
+def test_crypto_never_gets_a_premarket_rule(rules):
+    """A 24/7 market has no pre-market, and the phases this reads are the US
+    equity ones. Switched on for crypto it would refuse every hour of the day."""
+    assert rules.instruments["crypto"].refuse_premarket is False
+
+
 @pytest.mark.parametrize(
     ("moment", "day"),
     [

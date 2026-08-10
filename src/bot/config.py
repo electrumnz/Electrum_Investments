@@ -353,6 +353,33 @@ class InstrumentRules(BaseModel):
     # allowed only when they match exactly.
     session_days_utc: list[int] = Field(default_factory=list)
 
+    # Operator's rule, stated directly: **this bot does not trade pre-market.**
+    # After hours is fine — the stretch from the close onward — and so is the
+    # regular session. Only 04:00-09:30 New York is refused.
+    #
+    # It needs its own field because `sessions_utc` cannot express it, and the
+    # reason is daylight saving. That window is fixed UTC hours; the US session
+    # is defined in New York time and moves an hour twice a year. So
+    # `[[14, 21]]` is the WINTER window applied all year, and in winter it
+    # opens at 14:00 UTC — which is 09:00 New York, half an hour of pre-market
+    # permitted every day, silently, with nothing in a fixed-UTC window able to
+    # detect it.
+    #
+    # That gap used to be nearly free, because an out-of-hours equity order was
+    # simply queued to the next open. It is not free now: Alpaca runs a
+    # pre-market session from 04:00 ET, so an order placed into it TRADES, in a
+    # thinner book than the operator chose.
+    #
+    # `market_clock` computes the phase in New York time, so this follows
+    # daylight saving without anybody keeping a diary entry, and it is
+    # deterministic and offline as everything the gate reads must be. It can
+    # only ever NARROW what the UTC window allows — an additional reason to
+    # refuse, never a reason to permit.
+    #
+    # Off by default, and it must stay off for crypto: a 24/7 market has no
+    # pre-market, and the phases this reads are the US equity ones.
+    refuse_premarket: bool = False
+
     # Optional ceiling on this class's share of equity, as a fraction of the
     # portfolio. Used to keep a volatile class from quietly dominating.
     capital_cap_pct: float | None = Field(default=None, ge=0, le=100)

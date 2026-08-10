@@ -19,6 +19,7 @@ from datetime import UTC, datetime, timedelta
 from typing import NamedTuple
 
 from .config import InstrumentRules, Rules
+from .market_clock import MarketPhase, market_state
 from .models import (
     AccountSnapshot,
     Direction,
@@ -105,6 +106,7 @@ class RiskGate:
             self._equity_floor(account),
             self._symbol_allowed(proposal),
             self._within_session(instrument),
+            self._premarket(instrument),
             self._news_blackout(proposal.symbol, news_windows or []),
             self._concurrent_positions(account),
             self._daily_loss(account),
@@ -210,6 +212,38 @@ class RiskGate:
             return None
         return (
             f"{now.hour:02d}:00 UTC is outside the trading sessions for {label}"
+        )
+
+    def _premarket(self, instrument: InstrumentRules | None) -> str | None:
+        """The operator's rule: no pre-market. After hours is fine.
+
+        Separate from `_within_session` because it answers a question a UTC
+        window structurally cannot. `sessions_utc` is fixed hours; the US
+        session is defined in New York time and moves an hour twice a year, so
+        the configured `[[14, 21]]` opens at 09:00 New York through the winter
+        — half an hour of pre-market, every day, with nothing in the window
+        able to notice.
+
+        That gap used to cost nothing, because an out-of-hours equity order was
+        queued to the next open rather than filled. It costs something now:
+        Alpaca runs a pre-market session from 04:00 ET, so an order placed into
+        it **trades**, in a thinner book than anybody chose.
+
+        `market_clock` is a pure function over the clock — no network, no
+        calendar fetch — so this stays deterministic and cannot fail open, and
+        it only ever adds a reason to refuse.
+
+        **Holidays are still not covered**, exactly as in `_within_session`.
+        Thanksgiving reads as an ordinary Thursday to both.
+        """
+        if instrument is None or not instrument.refuse_premarket:
+            return None
+        phase = market_state(self._now()).phase
+        if phase is not MarketPhase.PRE:
+            return None
+        return (
+            "pre-market session (04:00-09:30 New York); this account does not "
+            "trade pre-market, and Alpaca would fill this rather than queue it"
         )
 
     def _news_blackout(self, symbol: str, windows: list[NewsWindow]) -> str | None:

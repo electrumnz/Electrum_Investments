@@ -290,80 +290,6 @@ section.block>h2{margin-bottom:.75rem}
   .tape .fixed .until,.tape .fixed .sep{display:none}
 }
 
-/* ================================================================= clocks ==
-   Four cities and one session phase. It is here because three different clocks
-   were once in play at once — Alpaca's sessions, the gate's window, and an
-   operator in New Zealand — and confusing any two produces an order that rests
-   until the next open.
-
-   Deliberately small. This is orientation, not a figure: it must not compete
-   with equity for attention, so it sits above the tiles at roughly the size of
-   a caption. Fixed-width digits, because a clock whose columns shuffle every
-   second is a fidget rather than an instrument. */
-.clockbar{margin-bottom:1.25rem}
-.clockbar .phase{display:flex;align-items:baseline;gap:.6rem;flex-wrap:wrap;
-  font-family:var(--mono);font-size:.6875rem;letter-spacing:.12em;
-  text-transform:uppercase;color:var(--pewter);margin-bottom:.5rem}
-.clockbar .phase .name{color:var(--bone)}
-.clockbar .phase .sep{color:var(--slate)}
-.clockbar .phase .dot{width:6px;height:6px;border-radius:50%;
-  background:var(--pewter);display:inline-block}
-.clockbar .phase .trades{margin-left:auto;text-transform:none;letter-spacing:0;
-  font-size:.75rem}
-/* Visible only when SCRIPT has not run. It removes this before its first tick,
-   so its presence means the digits below are frozen at page-load time. */
-.clockbar .phase .frozen{color:var(--amber);text-transform:none;letter-spacing:0}
-.clockfaces{display:grid;gap:.5rem;
-  grid-template-columns:repeat(auto-fit,minmax(150px,1fr))}
-.clockface{background:var(--graphite);border:1px solid var(--slate);
-  border-radius:2px;padding:.6rem .75rem;position:relative;overflow:hidden}
-.clockface .city{font-family:var(--mono);font-size:.5625rem;letter-spacing:.14em;
-  text-transform:uppercase;color:var(--pewter)}
-.clockface .t{font-family:var(--mono);font-size:1.25rem;color:var(--bone);
-  margin-top:.2rem;font-variant-numeric:tabular-nums;letter-spacing:.02em}
-.clockface .t .s{color:var(--pewter);font-size:.875rem}
-.clockface .sub{font-family:var(--mono);font-size:.5625rem;letter-spacing:.08em;
-  color:var(--pewter);margin-top:.15rem}
-/* The zone every session boundary is defined in. Marked, because "16:00" means
-   something in New York that it does not mean in Auckland. */
-.clockface.home{border-color:rgba(111,211,232,.30)}
-.clockface.home .city{color:var(--holo)}
-
-/* Phase accents. Colour only — nothing here moves a box, so none of these can
-   collide with a layout rule the way `.gate` did. */
-.clockbar[data-phase=open] .phase .dot{background:var(--patina)}
-.clockbar[data-phase=open] .phase .name{color:var(--patina)}
-.clockbar[data-phase=pre] .phase .dot{background:var(--amber)}
-.clockbar[data-phase=pre] .phase .name{color:var(--amber)}
-.clockbar[data-phase=post] .phase .dot{background:var(--amber)}
-.clockbar[data-phase=overnight] .phase .dot{background:var(--pewter)}
-.clockbar[data-phase=weekend] .phase .dot{background:var(--slate)}
-
-/* Pre-market is a warm-up, so the marker breathes rather than sits. Slow on
-   purpose: a fast pulse beside an account reads as an alarm. */
-@keyframes clock-warm{0%,100%{opacity:.35}50%{opacity:1}}
-.clockbar[data-phase=pre] .phase .dot{animation:clock-warm 2.8s ease-in-out infinite}
-@keyframes clock-live{0%,100%{opacity:.55}50%{opacity:1}}
-.clockbar[data-phase=open] .phase .dot{animation:clock-live 1.6s ease-in-out infinite}
-
-/* The transition. On a phase change the seconds spin up to a blur and settle
-   into the new state, which is the one moment this thing is worth watching.
-   Driven by a class the script adds, so it cannot fire on a static page. */
-@keyframes clock-spin{
-  0%{filter:blur(0);opacity:1}
-  35%{filter:blur(3px);opacity:.75}
-  70%{filter:blur(5px);opacity:.55}
-  100%{filter:blur(0);opacity:1}}
-.clockface.turning .t{animation:clock-spin 1500ms ease-in-out}
-.clockbar.turning{transition:none}
-@keyframes clock-flash{0%{background:rgba(111,211,232,.16)}100%{background:var(--graphite)}}
-.clockface.turning{animation:clock-flash 1800ms ease-out}
-
-@media (prefers-reduced-motion:reduce){
-  .clockbar .phase .dot{animation:none}
-  .clockface.turning .t,.clockface.turning{animation:none}
-}
-
 .banner{border:1px solid var(--slate);border-left-width:3px;border-radius:2px;
   padding:.875rem 1.125rem;margin-bottom:.75rem;background:var(--graphite);
   font-size:.875rem}
@@ -3639,6 +3565,16 @@ def settings_page(rules: Rules, env: Env, *, chat_enabled: bool) -> str:
             + _row("Symbols", ", ".join(inst.allowed_symbols) or "none")
             + _row("Sessions (UTC)", sessions or "none")
             + _row("Trading days", days or "none")
+            # Named on its own row rather than folded into the hours, because
+            # it is the one session rule the hours cannot express: those are
+            # fixed UTC and the US session moves an hour twice a year, so the
+            # window permits half an hour of pre-market every winter day.
+            + _row(
+                "Pre-market",
+                "refused (04:00-09:30 New York)"
+                if inst.refuse_premarket
+                else "permitted by these hours",
+            )
             + (
                 _row("Capital cap", f"{inst.capital_cap_pct:.1f}%")
                 if inst.capital_cap_pct is not None

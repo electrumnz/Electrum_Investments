@@ -201,6 +201,24 @@ instruments:
     sessions_utc:
       - [14, 21]
 
+    # Operator's rule: no pre-market. After hours is fine.
+    #
+    # This is NOT expressible in sessions_utc above, and the reason is daylight
+    # saving: those are fixed UTC hours, while the US session is defined in New
+    # York time and moves an hour twice a year. [[14, 21]] is the winter window
+    # applied all year, so through the winter it opens at 09:00 New York --
+    # half an hour of pre-market, every day, silently.
+    #
+    # That used to cost nothing, because an out-of-hours equity order was
+    # queued to the next open. It costs something now: Alpaca runs a pre-market
+    # session from 04:00 ET, so an order placed into it TRADES, in a thinner
+    # book than anybody chose.
+    #
+    # RiskGate._premarket reads the phase in New York time, so it follows
+    # daylight saving with no diary entry, and it can only ever narrow what the
+    # window above permits.
+    refuse_premarket: true
+
     # Monday to Friday. Monday is 0, Sunday is 6.
     #
     # Without this the hours alone made Saturday 15:00 UTC a valid session, and
