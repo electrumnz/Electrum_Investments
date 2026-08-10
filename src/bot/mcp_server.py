@@ -31,6 +31,7 @@ from .news_history import NewsItem
 from .news_history import recall as recall_news
 from .news_history import render as render_news
 from .options import alerts_for_positions, parse_occ_symbol, render_alerts
+from .reconcile import record_fill
 from .risk import RiskGate
 from .stand_down import describe
 from .triggers import render as render_watches
@@ -267,6 +268,34 @@ def place_order(
     )
     result = _session.broker.place_order(proposal)
 
+    # Journalled, exactly as `cmd_loop` journals its own fills. This was
+    # missing, and the consequence is the bug fixed in `14b88c8` arriving
+    # through a different door: Alpaca holds a stop-loss as a separate order,
+    # so the broker cannot report what a position was designed to lose. The
+    # journal is the only place that knows, and a position placed here without
+    # an entry has an UNKNOWABLE stop.
+    #
+    # What that costs is not cosmetic. `AccountSnapshot.open_risk_usd` is what
+    # the 2% total-risk cap counts against, so an unjournalled position is
+    # exposure the cap cannot see — the next proposal is measured against a
+    # total that is missing this one, and the Board renders the position with
+    # its stop as "unknown" under an "open risk is understated" banner.
+    #
+    # `record_fill` returns None on a refusal, so a broker rejection writes
+    # nothing. Recorded BEFORE the audit event so the audit line can carry the
+    # trade id.
+    trade_id = record_fill(
+        _session.journal,
+        proposal,
+        result,
+        # "manual" rather than the instrument's strategy label. Metrics group
+        # by strategy, and folding an operator-directed trade into
+        # `mean_reversion`'s record would corrupt the track record of a
+        # strategy that did not propose it.
+        strategy="manual",
+        execution_mode=_session.env.execution_mode,
+    )
+
     _session.audit.record_event(
         "mcp_place_order",
         {
@@ -274,6 +303,7 @@ def place_order(
             "accepted": result.accepted,
             "order_id": result.order_id,
             "error": result.error,
+            "trade_id": trade_id,
         },
     )
     return {
@@ -282,6 +312,10 @@ def place_order(
         "filled_price": result.filled_price,
         "filled_qty": result.filled_qty,
         "error": result.error,
+        # Named in the response so a caller can see the position is tracked.
+        # `None` beside `placed: true` means the fill is at the broker and the
+        # journal does not know, which is the state the cap cannot count.
+        "trade_id": trade_id,
     }
 
 

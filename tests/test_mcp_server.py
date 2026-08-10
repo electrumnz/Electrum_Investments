@@ -103,6 +103,55 @@ def test_place_order_places_an_approved_proposal(wired_session):
     assert positions[0].symbol == "SPY"
 
 
+def test_place_order_journals_the_fill_so_the_cap_can_count_it(wired_session):
+    """Placing without journalling is `14b88c8` arriving through another door.
+
+    Alpaca holds a stop-loss as a separate order, so the broker cannot report
+    what a position was designed to lose. The journal is the only place that
+    knows. A position placed here with no entry therefore has an unknowable
+    stop — and `AccountSnapshot.open_risk_usd` is what the 2% total-risk cap
+    counts against, so the exposure is invisible to the cap and the next
+    proposal is measured against a total that is missing this one.
+
+    This tool wrote an audit event and no journal entry. The Board would have
+    rendered the very first hand-placed trade as untracked, under an "open risk
+    is understated" banner.
+    """
+    before = wired_session.journal.open_risk_usd()
+    assert before == 0.0
+
+    result = mcp_server.place_order(**_good_args())
+
+    assert result["placed"]
+    assert result["trade_id"] is not None
+
+    open_trades = wired_session.journal.open_trades()
+    assert len(open_trades) == 1
+    trade = open_trades[0]
+    assert trade.symbol == "SPY"
+    # The planned stop is the field that carries across, and the reason the
+    # entry exists at all.
+    assert trade.planned_stop == _good_args()["stop_loss_price"]
+    # Which is what makes the risk countable.
+    assert wired_session.journal.open_risk_usd() > 0.0
+
+    # Not folded into a strategy's record. Metrics group by strategy, and an
+    # operator-directed trade in `mean_reversion`'s bucket would corrupt the
+    # track record of a strategy that never proposed it.
+    assert trade.strategy == "manual"
+
+
+def test_a_refused_order_journals_nothing(wired_session):
+    """A rejection must leave no trace in the journal. An entry with no
+    position is the mirror of the bug above: risk counted against exposure that
+    does not exist, which tightens the cap for no reason."""
+    result = mcp_server.place_order(**_good_args(symbol="GME"))
+
+    assert not result["placed"]
+    assert wired_session.journal.open_trades() == []
+    assert wired_session.journal.open_risk_usd() == 0.0
+
+
 def test_place_order_refuses_a_rejected_proposal(wired_session):
     """The critical test: a rule violation must never reach the broker."""
     result = mcp_server.place_order(**_good_args(symbol="GME"))
