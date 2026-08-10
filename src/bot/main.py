@@ -519,13 +519,66 @@ def cmd_loop(
         broker.disconnect()
 
 
+def cmd_dream(env: Env, rules: Rules) -> int:
+    """One dream step.
+
+    Its own command rather than a step inside `cmd_loop`, and deliberately so.
+    The loop wakes every fifteen minutes because a price moves that fast; a
+    second-order supply-chain idea does not, and a lateral thought every quarter
+    hour would buy ninety-six shallow ones a day. Drive this from a timer at
+    whatever cadence suits, or by hand.
+
+    It also keeps the two apart structurally: the loop proposes orders and this
+    cannot, because a `Dream` has no field an order needs.
+
+    Returns 0 on a dream and 1 on a failed call. A non-zero exit is what a timer
+    unit surfaces through `systemctl --failed`, and a model call that failed is
+    worth noticing rather than logging into the void.
+    """
+    from .dreamer import Dreamer
+    from .dreaming import DreamStore
+
+    if not env.anthropic_api_key:
+        log.error("dream_no_api_key", detail="ANTHROPIC_API_KEY is not set")
+        return 1
+
+    journal = Journal()
+    dreamer = Dreamer(env, rules, DreamStore(), journal)
+    result = dreamer.run_once()
+
+    if result is None:
+        # Already logged with its reason inside run_once. Nothing was written:
+        # a dream that could not be had is not recorded as one that decided
+        # nothing.
+        return 1
+
+    dream = result.dream
+    log.info(
+        "dream_complete",
+        dream_id=dream.id,
+        title=dream.title,
+        stage=str(dream.stage),
+        verdict=str(dream.verdict) if dream.verdict else None,
+        advanced=result.advanced,
+        hops=len(dream.chain),
+        unchecked_hops=len(dream.unverified_hops),
+        verification=str(dream.verification),
+        cost_usd=round(result.usage.estimated_cost_usd, 4) if result.usage else None,
+    )
+    return 0
+
+
 def main() -> int:
     structlog.configure(processors=[structlog.processors.JSONRenderer()])
     parser = argparse.ArgumentParser(prog="electrum-bot")
     parser.add_argument(
         "command",
-        choices=["smoketest", "loop"],
-        help="smoketest: one-shot connectivity check. loop: run the decision loop.",
+        choices=["smoketest", "loop", "dream"],
+        help=(
+            "smoketest: one-shot connectivity check. loop: run the decision "
+            "loop. dream: one lateral-thinking step, written to data/dreams.db "
+            "and shown on the Dreaming page. Places nothing, ever."
+        ),
     )
     parser.add_argument(
         "--rules",
@@ -555,6 +608,8 @@ def main() -> int:
 
     if args.command == "smoketest":
         return cmd_smoketest(env, rules, force_mock=args.mock)
+    if args.command == "dream":
+        return cmd_dream(env, rules)
     return cmd_loop(env, rules, execute=args.execute, force_mock=args.mock)
 
 

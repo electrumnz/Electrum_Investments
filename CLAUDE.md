@@ -692,6 +692,30 @@ about the **reasoning**, true regardless of how any trade went, with no outcome
 sample to overfit to. It reaches the operator on the Dreaming page and stops
 there, exactly as `metrics.py` reaches Analytics and stops there.
 
+**The dreamer runs on its own command, not on the loop.** `electrum-bot dream`
+is one Claude call producing one step: a new chain, or the next step on one it
+already started. Separate from `cmd_loop` for two reasons, and the second is the
+one that matters. The loop wakes every fifteen minutes because a price moves
+that fast and a second-order supply-chain idea does not, so a lateral thought
+per cycle would buy ninety-six shallow ones a day. And the loop proposes orders
+while this cannot, so keeping them in different processes means no later
+refactor quietly connects a dream to the code that places one.
+
+**The dreamer is never shown profit and loss, and that is where the rule is
+actually enforced.** `souls/grogu.md` asks it not to learn from the track
+record; `build_prompt` is what makes that true, because the figures never enter
+the prompt. What closed is given as an EVENT ("SPY closed 04 May, opened on
+mean_reversion"), never as an outcome ("SPY made $340"). `tests/test_dreamer.py`
+asserts no P&L figure reaches the text. A dreamer that starts chasing what
+recently worked is a momentum strategy with a personality.
+
+**An `advance_id` is looked up in what was actually offered, never trusted.** A
+model returning an id for a row it was never shown starts a new dream instead of
+writing over an unrelated one. A verdict is honoured only on a verdict step, so
+a stray value cannot silently close a chain that is still running, and a source
+on an unchecked hop is dropped rather than kept, because that pair is a
+contradiction and the unchecked flag is the honest half of it.
+
 **`data/dreams.db` is its own file, not the journal.** Losing every dream costs
 some speculative notes; `backup-journal.sh` covers the one irreplaceable file
 and deliberately does not cover this. Keeping them apart also means no query can
@@ -913,6 +937,10 @@ src/bot/
   dreaming.py           Second-order hypotheses: Dream, Hop, the stage machine
                         and the store. Carries NO order fields, which is the
                         whole reason it may sit beside an order path.
+  dreamer.py            The thing that fills it. One Claude call per run,
+                        driven by `electrum-bot dream`, never by the loop.
+                        Shown headlines, posts and what CLOSED; never shown
+                        profit and loss.
   web/                  Operator command centre: Board, Decisions, Trades,
                         Analytics, Dreaming, Settings, Chat. Binds 127.0.0.1.
                         Read-only apart from POST /chat, which is off unless
@@ -957,9 +985,10 @@ reference/              Third-party projects we borrow from. See reference/STATU
 ## Running it
 
 ```sh
-.venv/bin/python -m pytest              # full suite (525 tests)
+.venv/bin/python -m pytest              # full suite (544 tests)
 electrum-bot smoketest --mock           # no credentials needed
 electrum-bot smoketest                  # needs Alpaca paper keys
+electrum-bot dream                      # one lateral-thinking step; places nothing
 electrum-bot loop                       # proposes and vets; places nothing
 electrum-bot loop --execute             # places approved orders on PAPER
 electrum-bot-mcp                        # MCP server, usually launched by Claude Code

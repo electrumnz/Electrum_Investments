@@ -275,6 +275,46 @@ class ClaudeClient:
             )
         return decision, self._usage_from(response)
 
+    def dream(self, prompt: str) -> tuple[Any, CallUsage]:
+        """One dream step. Same transport as `propose`, different schema.
+
+        Imported inside the method rather than at module scope: `dreamer`
+        imports this module for `ClaudeClient` and `CallUsage`, so a top-level
+        import of `DreamStep` would close the cycle. Nothing else here needs it.
+
+        Kept on this class rather than given its own client so the caching,
+        tier handling and cost accounting have exactly one implementation. A
+        second copy would drift, and the one that drifted would be the one
+        nobody was watching.
+        """
+        from .dreamer import DreamStep
+
+        kwargs: dict[str, Any] = {
+            "model": self._model,
+            "max_tokens": 4096,
+            "system": [
+                {
+                    "type": "text",
+                    "text": self._system_prompt,
+                    "cache_control": {"type": "ephemeral", "ttl": "1h"},
+                }
+            ],
+            "messages": [{"role": "user", "content": prompt}],
+            "output_format": DreamStep,
+        }
+        if self._tier in (ClaudeTier.SONNET, ClaudeTier.OPUS):
+            kwargs["thinking"] = {"type": "adaptive"}
+            kwargs["output_config"] = {"effort": "medium"}
+
+        response = self._client.messages.parse(**kwargs)
+        step = response.parsed_output
+        if step is None:
+            raise RuntimeError(
+                "Claude returned no parsable dream step; check the output schema "
+                "and whether the response hit max_tokens."
+            )
+        return step, self._usage_from(response)
+
     def _usage_from(self, response: anthropic.types.Message) -> CallUsage:
         u = response.usage
         in_tokens = u.input_tokens
