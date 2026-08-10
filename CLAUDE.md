@@ -1709,11 +1709,69 @@ those are a permission rather than an instruction. `instruments` remains free
 text naming what a dream is *about*, precisely so it cannot be read as a
 ticker. **Do not collapse `instruments` and `symbols` into one field.**
 
-**The feature is currently INERT and `TODO.md` item 2 says why.** The gate
-honours a grant; the prompt and every feed still run off
-`rules.allowed_symbols`, so the model is never told a granted symbol exists.
-Gate-first was the right order — a permission path that worked before it was
-safe would be backwards — but adoption grants nothing usable until that closes.
+**The feature is no longer inert, and the three reasons it was are worth
+keeping**, because every one of them was invisible to a green suite and two of
+them were invisible to two adversarial audits. It took generating real dreams
+against the live model to find them.
+
+- **Nothing promoted a dream off the workbench.** `Dream.is_offerable` was
+  defined and never called, and the conference reads only `Vault.VAULT`, so the
+  vault was permanently empty and `confer` completed honestly with
+  `considered: 0` every day. `dreaming.promotion_for` is the rule now — a `keep`
+  verdict **plus** at least one `is_checkable` condition makes a PROPHECY, all
+  conditions met makes it a VAULT dream, everything else stays put — and
+  `dreamer.promote_dreams` runs it from `electrum-bot dream`, never from the
+  trading loop.
+- **The dreamer never named a symbol.** Not filtered — `symbols_dropped` was 0
+  — simply never filled. The prompt asks now, and asks for the *bridge*: the
+  subject of a dream is unrestricted, a `symbols` entry must be something the
+  broker can route, and the step from one to the other is a `Hop` like any
+  other. **An empty list stays a respectable answer**, and the prompt says so,
+  because a weak proxy invented to fill a field is worse than none.
+- **A granted symbol never reached the model.** The prompt and every feed ran
+  off `rules.allowed_symbols`, so a permitted symbol had no quote and no
+  history and a proposal in one would have been dropped for want of a tick
+  before reaching the gate that would have allowed it. The loop resolves the
+  grant **before** the feeds now and runs them over `allowed_symbols | granted`.
+
+Gate-first was still the right order — a permission path that worked before it
+was safe would have been backwards.
+
+Four properties of the prompt half, and they are the ones to defend:
+
+- **The system prompt carries the RULE and never the symbols.** It is cached
+  for an hour and built once at loop start, so an interpolated grant would be
+  stale within the day and would change the cached bytes every time an adoption
+  moved. The per-cycle context is the only place that can be current.
+- **The chain never appears without its badge.** `Verification` and
+  `weakest_hop` render adjacent to the hops and must not be separated from
+  them; an unqualified causal chain in a prompt reads as established fact, and
+  `Hop.checked` exists because some of those sentences were invented.
+- **The grant block renders LAST**, after every measured figure. It is the one
+  speculative section in the document, and a model that reads a story before it
+  has seen a number anchors on the story.
+- **The briefing fails in the opposite direction to everything else here.**
+  `grants.brief_grants` keeps the symbols and drops only the reasoning when the
+  store fails, because the symbols come from the resolution the gate already
+  holds — dropping them would leave the gate permitting something the model was
+  never told about, which is the inert state this closed.
+
+`FinnhubCalendar` is **rebuilt** from the widened set when it changes, never
+mutated: the feed caches windows already filtered against its symbol list, so
+assigning to `.symbols` looks fixed and behaves inconsistently, which is worse
+than the open gap.
+
+**Conditions are graded by code, never by the model.** `DreamCondition` gained
+a `symbol` — a `field`/`op`/`value` with no subject is a comparison nothing can
+look up — and `grade_conditions` settles them through `as_trigger()` and
+`triggers.CycleReadings`, against the figures the decision loop actually
+recorded in `MarketInputs.readings`. **There is no horizon**, unlike a watch: a
+prophecy is a long-horizon claim by construction, which is why its TTL is 365
+days, and adding one would quietly make the prophecy shelf a five-day shelf.
+A restated condition keeps the grade it earned (`carry_forward_grading`) — a
+grading that reset on every step would make the vault unreachable — but a MOVED
+threshold is a new claim and starts ungraded, because inheriting the old
+verdict would be back-dating a prediction.
 
 ### The two agents may talk, once a day, and the fifth cap is the one that works
 

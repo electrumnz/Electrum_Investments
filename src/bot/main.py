@@ -1261,6 +1261,77 @@ def cmd_vault_expire(rules: Rules) -> int:
     return 1 if refused else 0
 
 
+def cmd_settings_apply(
+    target: str | None,
+    rules_path: Path,
+    *,
+    dry_run: bool = False,
+) -> int:
+    """Apply a change request the settings agent recorded. **Run this as root.**
+
+    The privileged half of the settings agent, and the reason there is a half at
+    all: `config/` is owned by root on the droplet so the service account cannot
+    edit its own limits, and the dashboard runs as the service account. A bot
+    that can widen its own risk limits is exactly what this architecture is
+    built to prevent, so the interface argues and records, and a person applies.
+
+    **Nothing here checks for root**, deliberately. An unprivileged run fails on
+    the write with a permission error from the operating system, which is a
+    guarantee; a `geteuid` check in Python is a comment somebody can delete. The
+    same reasoning as the user split behind the chat wrapper — Unix permissions
+    do not fail quietly, and config trimming is always the second lock.
+
+    With no id it lists what is pending, because the alternative is an operator
+    guessing at a number, and a wrong guess here edits a risk limit. It exits
+    non-zero in that case so a script cannot read "nothing applied" as success.
+    """
+    from .settings_agent import SettingsRequestStore, apply_request, commit_message
+
+    # Parsed BEFORE the store is opened, which is not tidiness: opening it
+    # creates `data/settings_requests.db`, and a typo at the shell should not
+    # bring a database into existence on a box that has never used the feature.
+    request_id: int | None = None
+    if target:
+        try:
+            request_id = int(target)
+        except ValueError:
+            print(f"'{target}' is not a request id. Run with no id to list them.")
+            return 2
+
+    store = SettingsRequestStore()
+    if request_id is None:
+        pending = store.recent(limit=25, status="pending")
+        if not pending:
+            print("No pending settings requests.")
+            return 1
+        print("Pending settings requests:")
+        for req in pending:
+            print(
+                f"  {req.id}: {req.key} {req.old_value} -> {req.new_value} "
+                f"({req.stance}, argued {req.created_at:%Y-%m-%d %H:%M} UTC)"
+            )
+            print(f"      because: {req.reason or 'no reason recorded'}")
+            if req.objection.strip():
+                print(f"      objection: {req.objection}")
+        print("\nApply one with: electrum-bot settings-apply <id>")
+        return 1
+
+    request = store.get(request_id)
+    result = apply_request(store, request_id, rules_path=rules_path, dry_run=dry_run)
+    if result.diff:
+        print(result.diff)
+    print(result.detail)
+    if result.ok and request is not None and not dry_run:
+        # The commit message goes to stdout rather than into a file, because
+        # `CLAUDE.md` is explicit that a limit changes in its own commit with a
+        # reason — and the reason, along with the objection the operator
+        # overruled, is already recorded. Printing it means the commit that
+        # lands carries the argument rather than "tweak config".
+        print("\nCommit it with:\n")
+        print(commit_message(request))
+    return 0 if result.ok else 1
+
+
 def cmd_reindex() -> int:
     """Rebuild the searchable history from the audit log.
 
@@ -1313,6 +1384,7 @@ def main() -> int:
             "vault",
             "vault-expire",
             "reindex",
+            "settings-apply",
         ],
         help=(
             "smoketest: one-shot connectivity check. loop: run the decision "
@@ -1324,7 +1396,28 @@ def main() -> int:
             "grants and anything expiring — read-only. vault-expire: mark "
             "dreams past their shelf's TTL and withdraw the grants that "
             "lapsed; it marks and never deletes, and never closes a position. "
-            "reindex: rebuild the searchable history from audit/."
+            "reindex: rebuild the searchable history from audit/. "
+            "settings-apply: apply a change request the settings agent recorded "
+            "— RUN AS ROOT, because config/ is root-owned so the service "
+            "account cannot edit its own limits. With no id it lists what is "
+            "pending."
+        ),
+    )
+    parser.add_argument(
+        "target",
+        nargs="?",
+        default=None,
+        help=(
+            "The settings request id, for settings-apply. Ignored by every "
+            "other command."
+        ),
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help=(
+            "settings-apply only: show the diff and prove the edited file loads, "
+            "then write nothing."
         ),
     )
     parser.add_argument(
@@ -1349,6 +1442,21 @@ def main() -> int:
     # because Alpaca is unconfigured would be a check protecting nothing.
     if args.command == "reindex":
         return cmd_reindex()
+
+    # Also before the credential check, and for a stronger reason than reindex's.
+    # This is meant to be run as root on a box that may be halfway through a
+    # problem — Alpaca unreachable, a key rotated out, the loop refusing to
+    # start. Tightening a limit is exactly what somebody would want to do at
+    # that moment, and gating it behind a broker credential it never touches
+    # would refuse the operator the one safe action available to them.
+    #
+    # It cannot loosen anything on its own: the request it applies was argued,
+    # confirmed and recorded already, and the file is re-validated through
+    # `Rules.load` before it is replaced.
+    if args.command == "settings-apply":
+        return cmd_settings_apply(
+            args.target, Path(args.rules), dry_run=args.dry_run
+        )
 
     env = Env()
     try:

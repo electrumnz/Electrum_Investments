@@ -27,11 +27,14 @@ import html
 import json
 from collections.abc import Sequence
 from datetime import UTC, datetime
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from ..audit import AuditView, DecisionEntry
 from ..broker import is_crypto_symbol
 from ..config import DAY_NAMES, Env, InstrumentRules, Rules, WatchlistRules
+from ..data.xfeed import DEFAULT_CACHE_TTL_SECONDS as XFEED_CACHE_TTL_SECONDS
+from ..data.xfeed import FeedState
 from ..dreamer import estimated_cost_usd, read_schedule
 from ..dreaming import (
     THIN_LEDGER_THRESHOLD,
@@ -59,8 +62,10 @@ from ..models import (
     Trade,
     WorkingOrder,
 )
+from ..news_history import NewsItem, NewsRecall, Sightings, sightings
 from ..options import ExpiryAlert
 from ..session_calendar import SessionCalendar
+from ..settings_agent import ChangeRequest, LimitFact, Unit, effective_value
 from ..tailnet import TailnetStatus
 from .live import SessionDayView, TickerQuote
 from .seen import SinceLastVisit
@@ -734,6 +739,14 @@ tr.why .quote{border-left:2px solid var(--patina);padding-left:.875rem;
 .considered .chain{margin-top:.4rem;border-left-color:var(--slate)}
 .feed{margin:.3rem 0 0;padding-left:1.1rem;font-size:.8125rem;color:var(--pewter)}
 .feed li{margin:.15rem 0}
+/* Where a feed item came from, on its own line UNDER the item rather than
+   trailing it.
+   Inline, it wraps into the headline and the two run together at 390 wide, so
+   "already on file" reads as part of the story. On its own line it is a label
+   about the line above it, which is what it is. Smaller and in the mono face so
+   it cannot be mistaken for more of the item's text. */
+.feed li .seen{display:block;font-family:var(--mono);font-size:.625rem;
+  letter-spacing:.06em;margin-top:.1rem}
 /* Newer / range / older. Ordinary links, so the trail is reachable with the
    script blocked and every page of it is a URL somebody can bookmark. */
 .pager{display:flex;align-items:baseline;justify-content:space-between;
@@ -808,6 +821,28 @@ td.thin{color:var(--pewter);font-style:italic}
 .source{margin-top:.875rem;font-size:.75rem;color:var(--pewter);
   border-top:1px solid var(--slate);padding-top:.6rem}
 .source code{font-family:var(--mono);color:var(--bone)}
+
+/* The forge: the only controls on this deck that submit anything but a
+   password or a chat message. They record a change request and cannot write
+   config/rules.yaml — see the note above `_forge` for why that is structural
+   rather than a promise. */
+.forge .field{display:flex;flex-direction:column;gap:.35rem;margin-bottom:.875rem}
+.forge label{font-family:var(--mono);font-size:.625rem;letter-spacing:.14em;
+  text-transform:uppercase;color:var(--pewter)}
+.forge textarea,.forge input[type=text]{width:100%}
+select{background:var(--graphite);color:var(--bone);width:100%;
+  border:1px solid var(--slate);border-radius:2px;padding:.7rem .875rem;
+  font-family:var(--sans);font-size:.9375rem;min-height:44px}
+select:hover{border-color:var(--pewter)}
+.forge .verdict{margin-top:1rem;border-top:1px solid var(--slate);
+  padding-top:.875rem}
+.forge .verdict h4{margin:0 0 .5rem;font-family:var(--mono);font-size:.6875rem;
+  letter-spacing:.14em;text-transform:uppercase;color:var(--bone)}
+.forge .verdict.loosening h4{color:var(--amber)}
+.forge .verdict.tightening h4{color:var(--patina)}
+.forge .verdict ul{margin:.2rem 0 .8rem 1.05rem;padding:0}
+.forge .verdict li{font-size:.8125rem;color:var(--bone);margin-bottom:.4rem}
+.forge pre{white-space:pre-wrap;word-break:break-word;margin:.6rem 0 0}
 
 footer{padding:2rem 0 3rem;color:var(--pewter);font-size:.75rem;
   border-top:1px solid var(--slate)}
@@ -4021,11 +4056,29 @@ def decisions(view: AuditView, *, shown: int = DECISIONS_PER_PAGE, page: int = 1
         )
         + "</p>"
     )
+    # The legend for the feed markers, ONCE on the page rather than once per
+    # cycle. It is a property of how the page reads, not of any one cycle, and
+    # at ~380 bytes it would have been 15 KB across forty cycles saying the
+    # same sentence forty times — on the page already measured at 269 KB.
+    body += (
+        '<p class="note">Under &ldquo;what it read&rdquo;, an item marked as '
+        "already on file was in front of the model on an earlier pass too: the "
+        "headline cache is 30 minutes and the post cache 10, against a loop "
+        "that wakes every 15. Its age is measured to that cycle rather than to "
+        "now, and the trailing count is how many of the cycles read into this "
+        "page carried it.</p>"
+    )
+    # Built ONCE over the whole view rather than per cycle, and over the whole
+    # view rather than the page: paging back must not change whether a headline
+    # counts as new. It is a dict walk over decisions already parsed off disk,
+    # so it costs no read of its own.
+    index = sightings(view)
+
     for i, entry in enumerate(window):
         # Only the first on the page. Every cycle open is what made this 57,574
         # pixels tall at 390 wide; every cycle shut would make the newest one —
         # the reason anybody opened the page — cost a click as well.
-        body += _cycle(entry, expanded=i == 0)
+        body += _cycle(entry, expanded=i == 0, seen=index)
     body += "</section>"
     body += _pager(page=page, start=start, end=end, total=total, shown=shown)
     return body
@@ -4149,60 +4202,255 @@ def _held(entry: DecisionEntry) -> str:
     )
 
 
-def _read(entry: DecisionEntry) -> str:
+#: How many items of each feed a cycle renders before it starts counting.
+#:
+#: The Decisions page already measured 269 KB and 57,574px tall at 390 wide for
+#: forty cycles, and the loop wakes 96 times a day. Every feed line is inside
+#: the cycle's `<details>` and inside this step's own `<details>`, so it costs
+#: no layout until somebody opens it — but it still costs BYTES on every render,
+#: which is the budget these caps are actually protecting.
+HEADLINES_PER_CYCLE = 8
+POSTS_PER_CYCLE = 10
+# No cap in practice: the calendar returns the announcements inside one blackout
+# window, which is a handful. The number is here so that a feed that started
+# returning hundreds could not silently make this page enormous.
+BLACKOUTS_PER_CYCLE = 12
+
+
+def _span(seconds: float) -> str:
+    """An elapsed gap between two recorded moments.
+
+    Not `_countdown`, which answers "any moment" at zero because it describes
+    something about to happen. This describes something that already did.
+    """
+    total = max(0, int(seconds))
+    hours, rem = divmod(total, 3600)
+    minutes = rem // 60
+    if hours >= 24:
+        days, hours = divmod(hours, 24)
+        return f"{days}d {hours}h"
+    if hours:
+        return f"{hours}h {minutes:02d}m"
+    if minutes:
+        return f"{minutes}m"
+    return "under a minute"
+
+
+def _aware(stamp: datetime) -> datetime:
+    """Treat a naive timestamp as UTC rather than raising on a comparison.
+
+    Everything the loop writes is timezone-aware. The audit log is append-only
+    and read tolerantly, so a hand-edited or older line must not take a page
+    down. Same reasoning as `audit._timestamp` and `news_history._aware`.
+    """
+    return stamp if stamp.tzinfo else stamp.replace(tzinfo=UTC)
+
+
+def _provenance(
+    text: str, index: dict[str, NewsItem], stamp: datetime, *, edge: bool
+) -> str:
+    """Whether this cycle is where an item FIRST appeared, or a later sighting.
+
+    The Marketaux cache is 30 minutes against a loop that wakes every 15, so
+    the same headline is in front of the model for two or three consecutive
+    cycles and the X cache repeats a post for up to ten minutes. Rendering each
+    of those as a fresh sighting would show one story forty times down the page
+    and present every one of them as news — which is the `first_seen`/`last_seen`
+    distinction being decorative instead of load-bearing.
+
+    **The oldest cycle on the page cannot claim anything is new.** The index is
+    built from the cycles actually read off disk, so an item appearing first in
+    the oldest of them may be far older than that; saying "new this cycle"
+    there would be an artefact of where the read window happened to stop. It is
+    named as the edge instead, which is the same rule `has_cycles` and
+    `can_grade_anything` follow: an absence of evidence gets its own answer.
+    """
+    item = index.get(text)
+    if item is None:
+        # Only reachable when a caller renders a cycle the index never saw.
+        # Silence is honest; a guessed provenance would not be.
+        return ""
+
+    moment = _aware(stamp)
+    if item.first_seen >= moment:
+        if edge:
+            return '<span class="seen alert">oldest cycle read &mdash; may be older</span>'
+        return '<span class="seen">new this cycle</span>'
+
+    first = item.first_seen.astimezone(UTC)
+    # The date only when it differs from the cycle's own, which is most of the
+    # time it does not. A repeated date on every line of a page of one day's
+    # cycles is bytes spent restating the cycle header above it — and this page
+    # renders up to forty cycles of nine items each, so a dozen redundant
+    # characters is a measurable fraction of it.
+    when = first.strftime(
+        "%H:%M UTC" if first.date() == moment.astimezone(UTC).date() else "%d %b %H:%M UTC"
+    )
+    gap = _span((moment - first).total_seconds())
+    # `sightings` counts across the whole view, so this is "in N of the cycles
+    # read" and not "in N cycles up to here". The legend above the block says
+    # so once; saying it on every line would be the same words 360 times.
+    return (
+        f'<span class="seen">on file since {_e(when)} &mdash; {_e(gap)} before '
+        f"this cycle, in {_count(item.cycles, 'cycle')}</span>"
+    )
+
+
+def _feed_rung(
+    label: str,
+    texts: list[str],
+    index: dict[str, NewsItem],
+    stamp: datetime,
+    *,
+    edge: bool,
+    limit: int,
+    empty: str,
+    degraded: bool = False,
+    degraded_text: str = "",
+) -> str:
+    """One feed's contribution to a cycle, with its emptiness explained.
+
+    An absent block and an empty one read identically, so this never renders
+    nothing: a feed with no items says so in a sentence naming which of the
+    several reasons applies. That is the `calendar_degraded` lesson — zero is
+    not the same claim as unknown — applied per feed, per cycle.
+    """
+    if not texts:
+        if degraded:
+            return (
+                f'<div class="rung gate no"><span class="lbl">{_e(label)}</span>'
+                f"{degraded_text}</div>"
+            )
+        return (
+            f'<div class="rung"><span class="lbl">{_e(label)}</span>'
+            f'<span class="muted">{empty}</span></div>'
+        )
+
+    items = "".join(
+        f"<li>{_e(t)}{_provenance(t, index, stamp, edge=edge)}</li>"
+        for t in texts[:limit]
+    )
+    more = (
+        f'<li class="muted">and {len(texts) - limit} more</li>'
+        if len(texts) > limit
+        else ""
+    )
+    # A list that arrived alongside a failed fetch is incomplete even though it
+    # is not empty. Saying so under the items rather than instead of them, so
+    # the partial answer is still readable and still labelled partial.
+    #
+    # `.alert` sits on an INNER span rather than beside `.note` on the `<p>`.
+    # Both are single-class rules and `.note` is declared after `.alert` in the
+    # stylesheet, so `class="note alert"` resolves to pewter and the warning
+    # colour is silently lost — measured in Chromium at rgb(139,150,164) where
+    # amber was intended. Nothing errors and the text still reads; it just
+    # stops looking like a warning, which is the whole job it has.
+    warn = (
+        '<p class="note" style="margin-top:.35rem"><span class="alert">This '
+        "list is INCOMPLETE</span>: a fetch failed on this cycle, so what is "
+        "above is part of what there was.</p>"
+        if degraded
+        else ""
+    )
+    return (
+        f'<div class="rung"><span class="lbl">{_e(label)}</span>'
+        f'<ul class="feed">{items}{more}</ul>{warn}</div>'
+    )
+
+
+def _read(entry: DecisionEntry, *, seen: Sightings | None = None) -> str:
     """What the model was actually shown when it decided.
 
     Recorded with the decision rather than reconstructed later. A snapshot taken
     now answers a different question from the one an old cycle raises.
+
+    **The feeds live here rather than on a page of their own.** A headline is
+    evidence for one cycle's reasoning, and this is the only surface on which a
+    rejected proposal exists at all — so the story and the decision it informed
+    belong in the same box. A separate news feed would show the same headlines
+    with no decision beside them, which is a different and much weaker artefact.
+
+    `seen` is the cross-cycle index. Optional, because a caller rendering one
+    cycle in isolation genuinely has no way to know what came before it, and an
+    unmarked item is better than one wrongly marked new.
     """
     inputs = entry.decision.inputs
+    index = seen or Sightings()
+    stamp = _aware(entry.timestamp)
+    edge = index.is_edge(stamp)
+
     if inputs is None:
-        return ""
-
-    parts = ""
-    if inputs.headlines:
-        items = "".join(f"<li>{_e(h)}</li>" for h in inputs.headlines[:8])
-        more = (
-            f'<li class="muted">and {len(inputs.headlines) - 8} more</li>'
-            if len(inputs.headlines) > 8
-            else ""
-        )
-        parts += f'<div class="rung"><span class="lbl">Headlines</span><ul class="feed">{items}{more}</ul></div>'
-    else:
-        parts += (
-            '<div class="rung"><span class="lbl">Headlines</span>'
-            '<span class="muted">none supplied. Marketaux gates nothing, so this '
-            "is context the model did without.</span></div>"
+        # NOT an empty string, which is what this used to be. A cycle written
+        # before `MarketInputs` existed has no feeds ON FILE, and rendering
+        # nothing makes it indistinguishable from a cycle that saw nothing. The
+        # audit log is append-only and never migrated, so these lines keep the
+        # shape they were written in and no later cleverness recovers them.
+        return (
+            '<details class="step"><summary class="eyebrow">What it read'
+            "</summary>"
+            '<div class="chain" style="margin-top:.7rem">'
+            '<div class="rung"><span class="lbl">Not on file</span>'
+            "This cycle predates input recording, so the headlines, posts and "
+            "blackout windows it was shown were never written down. That is a "
+            "gap in the record rather than a cycle that saw nothing, and it "
+            "cannot be backfilled.</div></div></details>"
         )
 
-    if inputs.social_posts:
-        items = "".join(f"<li>{_e(s)}</li>" for s in inputs.social_posts[:10])
-        parts += (
-            '<div class="rung"><span class="lbl">Posts</span>'
-            f'<ul class="feed">{items}</ul></div>'
-        )
-    elif inputs.social_degraded:
-        parts += (
-            '<div class="rung gate no"><span class="lbl">Posts</span>'
+    # Posts BEFORE headlines, exactly as they reach the model. By the time a
+    # headline carries the story the gap has already opened, so reading them in
+    # the other order inverts what makes the feed worth having.
+    parts = _feed_rung(
+        "Posts",
+        list(inputs.social_posts),
+        index.social_posts,
+        stamp,
+        edge=edge,
+        limit=POSTS_PER_CYCLE,
+        empty=(
+            "no posts this cycle. The X feed is off unless social.enabled and "
+            "X_BEARER_TOKEN are both set, and from this record an unconfigured "
+            "feed and a quiet one look identical — Settings says which this "
+            "deployment is."
+        ),
+        degraded=inputs.social_degraded,
+        degraded_text=(
             "the social feed was DEGRADED. An empty list here means the fetch "
-            "failed, not that nothing was posted.</div>"
-        )
+            "failed, not that nothing was posted."
+        ),
+    )
 
-    if inputs.news_windows:
-        items = "".join(f"<li>{_e(w)}</li>" for w in inputs.news_windows)
-        parts += f'<div class="rung"><span class="lbl">Blackouts</span><ul class="feed">{items}</ul></div>'
-    elif inputs.calendar_degraded:
-        parts += (
-            '<div class="rung gate no"><span class="lbl">Blackouts</span>'
+    parts += _feed_rung(
+        "Headlines",
+        list(inputs.headlines),
+        index.headlines,
+        stamp,
+        edge=edge,
+        limit=HEADLINES_PER_CYCLE,
+        empty=(
+            "no headlines this cycle. Marketaux gates nothing, so this is "
+            "context the model did without."
+        ),
+    )
+
+    # Through the same helper as the two feeds above, so a degraded calendar and
+    # a degraded X feed cannot drift into being reported differently. This one
+    # is the feed that actually gates something — `RiskGate._news_blackout`
+    # reads it — which is why its degraded wording says the RULE could not fire.
+    parts += _feed_rung(
+        "Blackouts",
+        list(inputs.news_windows),
+        index.news_windows,
+        stamp,
+        edge=edge,
+        limit=BLACKOUTS_PER_CYCLE,
+        empty="no announcements inside the window",
+        degraded=inputs.calendar_degraded,
+        degraded_text=(
             "the earnings calendar was DEGRADED. Zero windows here means the feed "
             "failed, not that there were no announcements, and the blackout rule "
-            "could not fire.</div>"
-        )
-    else:
-        parts += (
-            '<div class="rung"><span class="lbl">Blackouts</span>'
-            '<span class="muted">no announcements inside the window</span></div>'
-        )
+            "could not fire."
+        ),
+    )
 
     if inputs.symbols_without_history:
         parts += (
@@ -4236,7 +4484,9 @@ def _read(entry: DecisionEntry) -> str:
     )
 
 
-def _cycle(entry: DecisionEntry, *, expanded: bool = False) -> str:
+def _cycle(
+    entry: DecisionEntry, *, expanded: bool = False, seen: Sightings | None = None
+) -> str:
     d = entry.decision
     pill = {
         "executed": "ok",
@@ -4282,7 +4532,7 @@ def _cycle(entry: DecisionEntry, *, expanded: bool = False) -> str:
 
     out += _considered(entry)
     out += _held(entry)
-    out += _read(entry)
+    out += _read(entry, seen=seen)
 
     if not d.proposals:
         out += (
@@ -4631,6 +4881,497 @@ def _calendar_card(
     )
 
 
+SOCIAL_PILL = {"on": "ok", "off": "hold", "no token": "watch", "degraded": "no"}
+
+#: The span Settings describes the X feed's observed state over.
+#:
+#: Named here rather than taken from whatever the caller happened to read,
+#: because the figure is rendered into the row label — "Degraded in 24h" — and a
+#: label that disagreed with the window it describes would be worse than no
+#: label at all.
+NEWS_WINDOW_HOURS = 24.0
+
+
+def social_state(rules: Rules, env: Env, recall: NewsRecall | None) -> FeedState:
+    """What Settings is allowed to say about the X feed.
+
+    Configuration comes from `config/rules.yaml` and the environment; the two
+    observed facts come out of the audit log, because the dashboard never holds
+    an `XFeed` — the loop owns it, in a different process.
+
+    **`recall=None` means nobody has read the record**, which is why `degraded`
+    stays `None` there rather than defaulting to `False`. A page that had not
+    looked must not report a healthy feed, and neither must one whose window
+    holds no cycles: `FeedState` keeps those two apart from "nothing failed".
+    """
+    return FeedState(
+        enabled=rules.social.enabled,
+        token_present=bool(env.x_bearer_token),
+        accounts=tuple(rules.social.accounts),
+        lookback_minutes=rules.social.lookback_minutes,
+        max_posts=rules.social.max_posts,
+        # The loop builds its `XFeed` with the module default, so this is the
+        # TTL actually in force rather than a number this page chose. If
+        # `main.build_social_feed` ever starts passing one, it belongs in
+        # `config/rules.yaml` and this reads it from there instead.
+        cache_ttl_seconds=XFEED_CACHE_TTL_SECONDS,
+        degraded=(
+            None if recall is None or not recall.has_cycles else recall.social_degraded
+        ),
+        last_post_at=None if recall is None else recall.social_last_seen_at,
+    )
+
+
+def _social_card(state: FeedState, *, window_hours: float) -> str:
+    """The X feed's state, reported and never guessed.
+
+    Every one of these is either read from a file or read from the record. The
+    one that looks like a measurement and is not is `Last post on file`, which
+    is evidence a read WORKED and is not evidence that one failed — a watched
+    account with nothing to say produces exactly the same absence. It says so
+    on the row rather than leaving a reader to assume.
+    """
+    degraded = (
+        "not known"
+        if state.degraded is None
+        else ("YES — a fetch failed" if state.degraded else "no failed fetch")
+    )
+    last = (
+        _when(state.last_post_at) if state.last_post_at is not None else "none on file"
+    )
+    # `.alert` on an inner span, not beside `.note`. See `_feed_rung`: `.note`
+    # is declared after `.alert`, so the two together resolve to pewter and the
+    # caveat stops looking like one.
+    caveats = "".join(
+        f'<p class="note"><span class="alert">{_e(c)}</span></p>'
+        for c in state.caveats()
+    )
+    return (
+        '<div class="card"><h3>X posts '
+        f'<span class="pill {SOCIAL_PILL.get(state.status, "hold")}">'
+        f"{_e(state.status)}</span></h3>"
+        f'<p class="note">{_e(state.headline())}</p>'
+        '<dl class="kv">'
+        + _row(
+            "Enabled",
+            "yes" if state.enabled else "no",
+            "social.enabled in config/rules.yaml.",
+        )
+        + _row(
+            "Bearer token",
+            "configured" if state.token_present else "not configured",
+            "X_BEARER_TOKEN. Presence only — no key is rendered here.",
+        )
+        + _row("Accounts", ", ".join(state.accounts) or "none")
+        + _row("Lookback", f"{state.lookback_minutes} minutes")
+        + _row("Posts per cycle", str(state.max_posts))
+        + _row(
+            "Cache TTL",
+            f"{state.cache_ttl_seconds:g}s",
+            "Shorter than Marketaux's 1800s on purpose: caching a "
+            "market-moving post for half an hour defeats the point of it. A "
+            "DEGRADED result is never cached, so one bad minute cannot silence "
+            "the feed for a whole TTL.",
+        )
+        + _row(
+            f"Degraded in {window_hours:g}h",
+            degraded,
+            "Any failed fetch anywhere in the window, not merely the newest "
+            "cycle: the claim being made is that the post list was complete "
+            "over the whole span.",
+        )
+        + _row(
+            "Last post on file",
+            last,
+            "The newest cycle that recorded a post. Evidence a read worked; "
+            "its absence is NOT evidence that one failed, because a quiet "
+            "account looks identical from the record.",
+        )
+        + "</dl>"
+        + caveats
+        + '<p class="source">Context only. Nothing from this feed reaches '
+        "<code>src/bot/risk.py</code> — a blackout after a high-impact post "
+        "would change what the gate refuses and is its own commit.</p></div>"
+    )
+
+
+# --------------------------------------------------------------- the forge
+#
+# The one place on this dashboard that submits anything other than a password
+# or a chat message, and the reasoning for it belongs where somebody tightening
+# the page would look.
+#
+# `tests/test_web.py` asserted that Settings carried no `<form`, `<input`,
+# `<select`, `<button` or `contenteditable` at all. That rule has been widened a
+# third time, deliberately and by editing the assertion rather than loosening
+# it: `<select>` picks WHICH limit, `<input>` and `<textarea>` carry the
+# proposed value and the operator's reason, and two `<button>`s ask and confirm.
+#
+# **What matters is that none of it can change a limit.** The controls POST to
+# `/settings/request`, which records a change request in
+# `data/settings_requests.db` and writes nothing else. `config/` is root-owned
+# on the droplet so this process could not edit `config/rules.yaml` even if a
+# route tried; applying a request is `electrum-bot settings-apply <id>`, run as
+# root, by a person, which re-validates through `Rules.load` first.
+
+
+def _forge_option(fact: LimitFact, rules: Rules) -> str:
+    value, source = effective_value(rules, fact.key)
+    shown = "unset" if value is None else (str(value) if isinstance(value, int) else f"{value:g}")
+    tail = "" if source == "set" else f", {source}"
+    return (
+        f'<option value="{_e(fact.key)}" data-current="{_e(shown)}">'
+        f"{_e(fact.label)} — now {_e(shown)}{_e(tail)}</option>"
+    )
+
+
+def _forge_reference(limits: dict[str, LimitFact], rules: Rules) -> str:
+    """Every limit, with what it is, why it sits there, and what loosening costs.
+
+    Collapsed by default because the whole table is long — thirty entries — and
+    a wall of prose is a wall nobody reads. The four questions are kept apart
+    rather than merged into one paragraph: what a number DOES, why it sits at
+    the value it sits at, the goal it serves, and what loosening actually costs
+    are four different answers, and collapsing them is how "it is for safety"
+    ends up being the whole justification for a limit.
+    """
+    rows = []
+    for fact in limits.values():
+        value, source = effective_value(rules, fact.key)
+        shown = (
+            "(a list)"
+            if fact.unit is Unit.LIST
+            else ("unset" if value is None else f"{value:g}" if isinstance(value, float) else str(value))
+        )
+        note = "" if source == "set" else f' <span class="muted">({_e(source)})</span>'
+        rows.append(
+            '<details class="step"><summary>'
+            f"{_e(fact.label)} — <code>{_e(fact.key)}</code> = {_e(shown)}{note}"
+            "</summary>"
+            f'<p class="note"><b>What it is.</b> {_e(fact.what)}</p>'
+            f'<p class="note"><b>Why it sits there.</b> {_e(fact.why)}</p>'
+            f'<p class="note"><b>The goal it serves.</b> {_e(fact.goal)}</p>'
+            f'<p class="note"><b>Loosening it costs.</b> {_e(fact.cost)}</p>'
+            f'<p class="note">Looser means <b>{_e(fact.looser.value)}</b>.'
+            + (
+                ""
+                if fact.requestable
+                else " Not editable through the forge: it is a list, not a "
+                "single value, so no safe one-line diff exists for it."
+            )
+            + "</p></details>"
+        )
+    return (
+        '<div class="card"><h3>What each limit is for</h3>'
+        '<p class="note">Lifted from <code>config/rules.yaml</code> and '
+        "<code>CLAUDE.md</code> rather than rewritten, and handed to the Armorer "
+        "as its briefing — so the sentence you read here is the sentence it "
+        "argues from.</p>" + "".join(rows) + "</div>"
+    )
+
+
+def _forge_requests(requests: Sequence[ChangeRequest]) -> str:
+    """The arguments already had, won or lost.
+
+    An argument the operator won is a fact worth keeping and so is one they
+    lost, so the objection is rendered beside the reason rather than dropped
+    once the request was recorded. Six months on, the useful question is not
+    what the limit is — the file says that — but what was said before it moved.
+    """
+    if not requests:
+        return (
+            '<div class="card"><h3>Change requests</h3>'
+            '<p class="empty">None recorded. Nothing has been argued on this '
+            "deck yet.</p></div>"
+        )
+    rows = []
+    for req in requests:
+        rows.append(
+            '<details class="step"><summary>'
+            f"#{req.id} <code>{_e(req.key)}</code> {_e(req.old_value)} &rarr; "
+            f"{_e(req.new_value)} &mdash; {_e(req.stance)}, {_e(req.status)}"
+            "</summary>"
+            f'<p class="note"><b>Asked for because.</b> '
+            f"{_e(req.reason or 'no reason was given')}</p>"
+            + (
+                f'<p class="note"><b>The Armorer objected.</b> {_e(req.objection)}</p>'
+                if req.objection.strip()
+                else '<p class="note">No objection: this was a tightening.</p>'
+            )
+            + (
+                '<p class="note"><b>Stated at the time.</b></p><ul class="note">'
+                + "".join(f"<li>{_e(line)}</li>" for line in req.consequence)
+                + "</ul>"
+                if req.consequence
+                else ""
+            )
+            + (f'<pre class="readout">{_e(req.diff)}</pre>' if req.diff else "")
+            + (
+                f'<p class="note">Apply with <code>{_e(req.apply_command)}</code>, '
+                "as root. It re-validates the edited file through "
+                "<code>Rules.load</code> and refuses if the file has moved.</p>"
+                if req.status == "pending"
+                else f'<p class="note">Status: {_e(req.status)}.</p>'
+            )
+            + "</details>"
+        )
+    return (
+        '<div class="card"><h3>Change requests</h3>'
+        '<p class="note">Recorded in <code>data/settings_requests.db</code>, '
+        "which is not the journal and is not backed up. Nothing here has "
+        "changed a limit; each one waits on a person running the apply "
+        "command.</p>" + "".join(rows) + "</div>"
+    )
+
+
+#: The forge's client half.
+#:
+#: A plain string with a placeholder rather than an f-string, and that is the
+#: `SYSTEM_PROMPT_TEMPLATE` lesson applied to JavaScript: this text is full of
+#: `{` and `}`, so interpolating into it means doubling every brace, and a
+#: missed one is a `KeyError` at render time or, worse, a silently mangled
+#: script. One `.replace` of one token avoids the whole class of problem.
+#:
+#: Every value it puts on screen goes in through `textContent`, never
+#: `innerHTML`. The server escapes what it renders; building nodes means the
+#: client cannot be the place that stops doing so.
+FORGE_SCRIPT = """
+<script>
+(function () {
+  var TOKEN = __TOKEN__;
+  var sel = document.getElementById('fg-key');
+  var val = document.getElementById('fg-val');
+  var why = document.getElementById('fg-why');
+  var ask = document.getElementById('fg-ask');
+  var out = document.getElementById('fg-out');
+  if (!sel || !ask || !out) return;
+
+  function clear(node) { while (node.firstChild) node.removeChild(node.firstChild); }
+
+  function el(tag, text, cls) {
+    var n = document.createElement(tag);
+    if (cls) n.className = cls;
+    if (text !== undefined && text !== null) n.textContent = text;
+    return n;
+  }
+
+  /* What the operator was actually SHOWN, read off the Armorer's log rather
+     than held in a parallel array. An argument the operator won is worth
+     keeping and so is one they lost; recording the panel as it stands means
+     the transcript cannot drift from what was on screen. */
+  function transcript() {
+    var turns = [];
+    document.querySelectorAll('.chat .log .turn').forEach(function (t) {
+      var msg = t.querySelector('.msg');
+      if (!msg) return;
+      turns.push({
+        role: t.classList.contains('user') ? 'operator' : 'armorer',
+        text: msg.textContent
+      });
+    });
+    return turns;
+  }
+
+  function post(confirmed) {
+    ask.disabled = true;
+    clear(out);
+    out.appendChild(el('p', 'Working it out.', 'note'));
+    fetch('/settings/request', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        token: TOKEN,
+        key: sel.value,
+        value: val.value,
+        reason: why.value,
+        confirm: !!confirmed,
+        transcript: transcript()
+      })
+    })
+      .then(function (r) { return r.json(); })
+      .then(paint)
+      .catch(function (e) {
+        clear(out);
+        out.appendChild(el('p', String(e), 'note'));
+      })
+      .finally(function () { ask.disabled = false; });
+  }
+
+  function paint(d) {
+    clear(out);
+    if (!d.ok) {
+      out.appendChild(el('p', d.error || 'The request was refused.', 'note'));
+      return;
+    }
+    var box = el('div', null, 'verdict ' + (d.stance || ''));
+    box.appendChild(el('h4', d.stance === 'loosening'
+      ? 'This loosens a limit'
+      : (d.stance === 'tightening' ? 'This tightens a limit' : 'No change')));
+    var list = el('ul');
+    (d.consequence || []).forEach(function (line) {
+      list.appendChild(el('li', line));
+    });
+    box.appendChild(list);
+
+    if (!d.can_record) {
+      box.appendChild(el('p', d.blocked_reason || 'This cannot be recorded.', 'note'));
+    } else if (d.recorded) {
+      box.appendChild(el('p',
+        'Recorded as request #' + d.recorded.id + '. Nothing has changed yet.',
+        'note'));
+      box.appendChild(el('pre', d.recorded.diff, 'readout'));
+      box.appendChild(el('pre', d.recorded.commit_message, 'readout'));
+      box.appendChild(el('p',
+        'Apply it as root: ' + d.recorded.apply_command +
+        '. Reload this page to see it in the request list.', 'note'));
+    } else if (d.requires_confirmation) {
+      /* The asymmetry, on screen. A loosening change cannot be accepted in the
+         same click that asked about it, so the cost has been read before it is
+         agreed to. A tightening one never reaches here. */
+      box.appendChild(el('p',
+        'Nothing has been recorded. Confirm only if you still want this after '
+        + 'reading the above.', 'note'));
+      var yes = el('button', 'I have read that. Record the request.', 'btn');
+      yes.type = 'button';
+      yes.addEventListener('click', function () { post(true); });
+      box.appendChild(yes);
+    }
+    out.appendChild(box);
+  }
+
+  ask.addEventListener('click', function () { post(false); });
+})();
+</script>
+"""
+
+
+def _forge(
+    rules: Rules,
+    limits: dict[str, LimitFact],
+    *,
+    enabled: bool,
+    token: str,
+    hermes_available: bool,
+    soul_found: bool,
+    rules_path: Path | None,
+    requests: Sequence[ChangeRequest],
+) -> str:
+    path_name = str(rules_path) if rules_path else "config/rules.yaml"
+    intro = (
+        '<section class="block"><h2>The forge</h2>'
+        '<p class="note" style="max-width:68ch">The Armorer keeps the limits. '
+        "It will equip you &mdash; it does not refuse &mdash; but it makes you "
+        "say what a change is for, and it states what the new number costs "
+        "before anything is written down. A limit getting <b>tighter</b> is "
+        "recorded as asked. A limit getting <b>looser</b> states the arithmetic "
+        "and waits for you to confirm after reading it.</p>"
+        '<p class="note" style="max-width:68ch"><b>Nothing here writes '
+        f"<code>{_e(path_name)}</code>.</b> That file is owned by root on the "
+        "box precisely so the service account cannot edit its own limits, and "
+        "this dashboard runs as the service account. What the forge produces is "
+        "a change request: the exact key, the old value, the new value, your "
+        "reason, the objection it made, the YAML diff and a commit message. "
+        "Applying one is <code>electrum-bot settings-apply &lt;id&gt;</code>, "
+        "run as root at a shell, which re-validates the edited file through "
+        "<code>Rules.load</code> and refuses if the file has moved since the "
+        "argument was had.</p>"
+    )
+
+    if not enabled:
+        return intro + (
+            '<div class="banner warn"><b>The forge is off</b>'
+            "Set <code>DASHBOARD_CHAT_TOKEN</code> in the environment to enable "
+            "it. Off by default on purpose: the rest of this page "
+            "<em>displays</em> configuration, while this drives an agent and "
+            "writes a request somebody may act on. Switching it on should be a "
+            "decision, never a side effect of deploying.</div></section>"
+        )
+
+    requestable = [f for f in limits.values() if f.requestable]
+    options = "".join(_forge_option(fact, rules) for fact in requestable)
+
+    panel = (
+        '<div class="card forge"><h3>Argue a limit</h3>'
+        '<div class="field"><label for="fg-key">Which limit</label>'
+        f'<select id="fg-key" aria-describedby="fg-note">{options}</select></div>'
+        '<div class="field"><label for="fg-val">Proposed value</label>'
+        '<input id="fg-val" type="text" inputmode="decimal" '
+        'placeholder="a number, in the same units as the current value"></div>'
+        '<div class="field"><label for="fg-why">What is this change for</label>'
+        '<textarea id="fg-why" rows="3" placeholder="The reason is recorded '
+        'with the request and goes into the commit message"></textarea></div>'
+        '<div class="composer"><button class="btn" id="fg-ask" type="button">'
+        "Ask the Armorer</button></div>"
+        '<p class="note" id="fg-note">Asking computes the consequence and '
+        "records nothing. A loosening change needs a second, explicit "
+        "confirmation after you have read it.</p>"
+        '<div id="fg-out" aria-live="polite"></div></div>'
+    )
+
+    body = intro + (
+        f'<div class="grid g2">{panel}{_forge_reference(limits, rules)}</div>'
+        f'<div style="margin-top:1rem">{_forge_requests(requests)}</div>'
+        + FORGE_SCRIPT.replace("__TOKEN__", json.dumps(token))
+    )
+
+    if not hermes_available:
+        body += (
+            '<p class="note">The Armorer\'s conversation panel needs Hermes '
+            "installed where this process expects it; see "
+            "<code>docs/HERMES_SETUP.md</code>. The forge above does not need "
+            "it &mdash; the arithmetic is computed in Python, not by a model.</p>"
+        )
+    else:
+        if not soul_found:
+            body += (
+                '<div class="banner warn"><b>Speaking without a character</b>'
+                "<code>souls/armorer.md</code> did not load, so the agent below "
+                "answers plainly. It reaches the same figures and is bound by "
+                "the same arrangement; only the voice is missing.</div>"
+            )
+        body += chat_panel(
+            token=token,
+            soul="armorer",
+            who="The Armorer",
+            intro="Tell me which limit, and what it is for.",
+            placeholder="Ask what a limit is for, or what moving it would cost",
+            suggestions=[
+                "What would raising max_risk_per_trade_pct to 2% actually cost?",
+                "Why is the equity floor where it is?",
+                "I have had three losses. Should I loosen the stand-down?",
+                "What does raising a per-class limit above the total do?",
+                "Which limit is most likely to be the one that refuses a trade?",
+            ],
+            footnote="It argues, it records, and it cannot write the file. "
+            "Every figure it quotes is computed in Python and handed to it; ask "
+            "it for the arithmetic and it will name where the number came from.",
+            extra_notes=ARMORER_NOTES,
+        )
+    return body + "</section>"
+
+
+# Notes specific to the ARMORER, in the shape `ACCOUNT_AGENT_NOTES` established.
+# Both describe reach. This one has to say what the agent cannot do, because the
+# obvious reading of a settings agent is that it changes settings.
+#
+# Raw HTML rather than escaped text, and a module constant for that reason:
+# nothing user-supplied reaches it.
+ARMORER_NOTES = """
+  <p class="note"><b>It records; it never applies.</b> The Armorer has no way to
+  write <code>config/rules.yaml</code> and neither does this dashboard.
+  <code>config/</code> is owned by root on the box so the service account cannot
+  edit its own limits, and the only thing this surface writes is a row in
+  <code>data/settings_requests.db</code>. If it ever says it changed something,
+  it is wrong &mdash; check the request list above.</p>
+  <p class="note"><b>The arithmetic is not its own.</b> Every consequence is
+  computed in <code>src/bot/settings_agent.py</code> against the rules actually
+  loaded and handed to it as figures, the same way indicators are computed in
+  Python rather than derived by the model. A model asked to work out what
+  doubling a cap costs will produce a number, state it confidently, and be
+  believed.</p>
+"""
+
+
 def settings_page(
     rules: Rules,
     env: Env,
@@ -4640,13 +5381,28 @@ def settings_page(
     calendar_loaded: bool = False,
     calendar_degraded: bool = False,
     poller_has_read: bool = False,
+    social_recall: NewsRecall | None = None,
+    forge_enabled: bool = False,
+    token: str = "",
+    hermes_available: bool = False,
+    soul_found: bool = False,
+    limits: dict[str, LimitFact] | None = None,
+    rules_path: Path | None = None,
+    requests: Sequence[ChangeRequest] = (),
 ) -> str:
-    """Structured, and read-only for anything that governs risk.
+    """Structured, and read-only for every figure that governs risk.
 
-    A settings screen that could widen a limit would be a settings screen that
-    gets used to widen one during a losing run, which is exactly when the limit
-    is doing its job. So the limits are shown with their reasoning and with the
-    file that owns them, and changing one stays a commit.
+    **The one control on this page cannot change a limit**, and that is a
+    deliberate widening of a rule this page used to keep absolutely. A settings
+    screen that could widen a cap would be used to widen one during a losing
+    run, which is exactly when the cap is doing its job — so the forge below
+    argues, computes the arithmetic consequence, and records a CHANGE REQUEST.
+    `config/` is root-owned on the box so this process cannot write
+    `config/rules.yaml` at all, and applying a request is
+    `electrum-bot settings-apply <id>` run as root by a person.
+
+    Everything else here stays display only: the limits are shown with their
+    reasoning and with the file that owns them.
     """
     body = head(
         "Configuration",
@@ -4654,38 +5410,69 @@ def settings_page(
         "",
         "What the bot is currently configured to do. The risk limits are shown "
         "read-only on purpose: they change in a commit, by a person, with a "
-        "reason, and never from a browser.",
+        "reason. The forge below argues about one and records the request; it "
+        "cannot write the file and this process could not if it tried.",
     )
 
     a = rules.account
+    # The reasoning beside each figure comes from `settings_agent.limits_for`
+    # rather than being written out again here. One story per limit: the same
+    # sentence the Armorer argues from is the one the card shows, so a change to
+    # what a limit is FOR cannot land in one place and not the other.
+    facts = limits or {}
+
+    def _why(key: str, fallback: str = "") -> str:
+        fact = facts.get(key)
+        return fact.what if fact else fallback
+
     body += (
         '<section class="block"><h2>Risk limits</h2><div class="grid g2">'
         '<div class="card"><h3>Per trade and across the book</h3><dl class="kv">'
         + _row(
             "Per trade",
             f"{a.max_risk_per_trade_pct:.2f}%",
-            "Most any single position may lose if its stop fills.",
+            _why(
+                "account.max_risk_per_trade_pct",
+                "Most any single position may lose if its stop fills.",
+            ),
         )
         + _row(
             "Total open",
             f"{a.max_total_risk_pct:.2f}%",
-            "Most everything open may lose at once. Measured in risk, not "
-            "notional, which is what makes it leverage-neutral.",
+            _why(
+                "account.max_total_risk_pct",
+                "Most everything open may lose at once. Measured in risk, not "
+                "notional, which is what makes it leverage-neutral.",
+            ),
         )
         + _row(
             "Concentration",
             f"{a.max_position_pct:.1f}%",
-            "A backstop on one position's market value. Deliberately generous; "
-            "it is not meant to be the binding constraint.",
+            _why(
+                "account.max_position_pct",
+                "A backstop on one position's market value. Deliberately "
+                "generous; it is not meant to be the binding constraint.",
+            ),
         )
-        + _row("Concurrent positions", str(a.max_concurrent_positions))
+        + _row(
+            "Concurrent positions",
+            str(a.max_concurrent_positions),
+            _why("account.max_concurrent_positions"),
+        )
         + _row(
             "Daily loss kill",
             f"{a.daily_loss_kill_pct:.2f}%",
-            "Sticky for the session. A recovery within the same day does not "
-            "re-enable trading.",
+            _why(
+                "account.daily_loss_kill_pct",
+                "Sticky for the session. A recovery within the same day does "
+                "not re-enable trading.",
+            ),
         )
-        + _row("Equity floor", _money(a.min_equity_floor_usd), "Below this the bot halts.")
+        + _row(
+            "Equity floor",
+            _money(a.min_equity_floor_usd),
+            _why("account.min_equity_floor_usd", "Below this the bot halts."),
+        )
         + '</dl><p class="source">Owned by <code>config/rules.yaml</code>, '
         "enforced in <code>src/bot/risk.py</code>.</p></div>"
         '<div class="card"><h3>Anti-churn</h3><dl class="kv">'
@@ -4732,6 +5519,21 @@ def settings_page(
         + '</dl><p class="source">These replace the Pattern Day Trader rule, which '
         "FINRA retired on 2026-06-04. What applies now is Intraday Margin "
         "Deficit calls.</p></div></div></section>"
+    )
+
+    # Directly under the limits it argues about, rather than at the foot of the
+    # page. An operator reading a cap and wondering what moving it would cost
+    # should not have to scroll past the runtime and the dream schedule to find
+    # the thing that answers.
+    body += _forge(
+        rules,
+        facts,
+        enabled=forge_enabled,
+        token=token,
+        hermes_available=hermes_available,
+        soul_found=soul_found,
+        rules_path=rules_path,
+        requests=requests,
     )
 
     instrument_cards = _calendar_card(
@@ -4870,22 +5672,21 @@ def settings_page(
             "configured" if env.marketaux_api_key else "not configured",
             "Headlines only. Gates nothing.",
         )
-        + _row(
-            "X posts",
-            (
-                "off in rules.yaml"
-                if not rules.social.enabled
-                else ("configured" if env.x_bearer_token else "enabled but no token")
-            ),
-            (
-                f"Watching {', '.join(rules.social.accounts)}. Context only."
-                if rules.social.enabled and rules.social.accounts
-                else "Accounts to watch live in the social block of rules.yaml."
-            ),
-        )
+        # The X feed used to be one row here and is a card of its own beside
+        # this one now. A single "configured / not configured" cell could not
+        # carry the distinctions that matter for this feed — off, enabled
+        # without a token, and reading-but-degraded are three different states
+        # and only the third is a fault.
         + _row("Dashboard chat", "on" if chat_enabled else "off")
         + '</dl><p class="source">Presence only. No key is rendered on this page, '
-        "on any surface, at any time.</p></div></div></section>"
+        "on any surface, at any time.</p></div>"
+        + _social_card(
+            social_state(rules, env, social_recall),
+            window_hours=(
+                social_recall.window_hours if social_recall else NEWS_WINDOW_HOURS
+            ),
+        )
+        + "</div></section>"
     )
 
     # The dreamer is scheduled outside this process, so what it says here is

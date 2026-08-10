@@ -43,6 +43,7 @@ from .models import (
     OrderResult,
     Trade,
 )
+from .position_actions import UnexplainedMoveReport, detect_unexplained_moves
 from .stand_down import evaluate_stand_down
 
 log = structlog.get_logger()
@@ -58,6 +59,15 @@ class ReconcileResult:
     estimated_exits: int = 0
     untracked_positions: list[str] = field(default_factory=list)
     stand_down_triggered: bool = False
+
+    # Stops and quantities that changed at the broker with NO reason on file,
+    # plus the two states that are not findings and must not be read as clean
+    # ones: a stop leg whose trigger the broker would not report, and a position
+    # with no stop resting behind it at all.
+    #
+    # Optional with a default, like everything else added here after the fact.
+    # Populated by `position_actions.detect_unexplained_moves`, which is pure.
+    unexplained: UnexplainedMoveReport = field(default_factory=UnexplainedMoveReport)
 
     @property
     def risk_is_understated(self) -> bool:
@@ -178,6 +188,49 @@ def reconcile(
             ),
         )
 
+    # 3b. Anything that changed at the broker with no reason on file.
+    #
+    #     The inverse of the action record, and the half that makes it honest: a
+    #     feature that only showed the moves it managed to capture would hide
+    #     its own failures. A stop pulled in through the Alpaca web UI, a
+    #     partial fill nobody journalled, a bracket leg cancelled by hand — all
+    #     of them show here and none of them shows anywhere else.
+    #
+    #     `get_open_orders` catches its own failures and returns `[]`, so the
+    #     degraded flag has to travel with it or an outage would render as an
+    #     account with nothing resting and therefore nothing wrong.
+    still_open = [t for t in journal.open_trades() if t.is_open]
+    result.unexplained = detect_unexplained_moves(
+        positions=snapshot.open_positions,
+        orders=broker.get_open_orders(),
+        open_trades=still_open,
+        # Newest first and bounded: an explanation for a level resting NOW is a
+        # recent move, and reading the whole history to find one would grow with
+        # the log for no gain.
+        actions=journal.position_actions(limit=200),
+        orders_degraded=broker.orders_degraded,
+    )
+    if result.unexplained.moves:
+        log.warning(
+            "unexplained_position_moves",
+            moves=[m.describe() for m in result.unexplained.moves],
+            detail=(
+                "A stop or a quantity differs from what the journal records, "
+                "and no position action explains it. The broker is "
+                "authoritative about what exists; the journal is the only "
+                "thing that knows what was intended."
+            ),
+        )
+    if result.unexplained.unreadable_stops:
+        log.warning(
+            "stop_trigger_unreadable",
+            symbols=result.unexplained.unreadable_stops,
+            detail=(
+                "A stop leg is resting and the broker reported no trigger "
+                "price, so whether it has moved is unknown rather than fine."
+            ),
+        )
+
     # 4. A close may have completed a losing streak.
     if result.closed:
         state = evaluate_stand_down(journal, rules.stand_down, now=moment)
@@ -232,21 +285,35 @@ def apply_journal_state(
     by_symbol: dict[str, float] = {}
     stops: dict[str, float] = {}
     for trade in open_trades:
-        by_symbol[trade.symbol] = by_symbol.get(trade.symbol, 0.0) + trade.planned_risk_usd
+        # `current_risk_usd`, not `planned_risk_usd`. The cap is a statement
+        # about what the stops would cost if they filled, so a stop that has
+        # been tightened costs less and the cap should count less. The two
+        # figures are identical for every trade whose stop has never moved.
+        #
+        # `planned_risk_usd` stays fixed at what the position was SIZED against,
+        # because that is the denominator of R and redefining it after the fact
+        # would make a trade that lost half what it risked read as a full
+        # stop-out.
+        by_symbol[trade.symbol] = by_symbol.get(trade.symbol, 0.0) + trade.current_risk_usd
         # The stop LEVEL, so the model can be shown the price it is being asked
         # to manage. Aggregating risk across two trades in one symbol is
         # arithmetic; aggregating two stop levels is not, so the widest — the
         # furthest from entry, i.e. the one that would fill last — is the honest
         # single answer, and it is the one that describes the position's real
         # exposure rather than the tightest leg of it.
+        #
+        # `effective_stop`, so a stop the agent has pulled in is the level the
+        # agent is then shown. Handing it back the level it moved away from
+        # would make its own action invisible to it on the next cycle.
+        in_force = trade.effective_stop
         held = stops.get(trade.symbol)
         stops[trade.symbol] = (
-            trade.planned_stop
+            in_force
             if held is None
             else (
-                max(held, trade.planned_stop)
+                max(held, in_force)
                 if trade.direction == Direction.SELL
-                else min(held, trade.planned_stop)
+                else min(held, in_force)
             )
         )
 

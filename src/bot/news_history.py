@@ -227,6 +227,67 @@ def recall(
         social_degraded=social_degraded,
         malformed_lines=view.malformed,
         unreadable_files=list(view.unreadable_files),
+        # Computed over every sighting rather than off the head of the ordered
+        # list, which is sorted by `first_seen`: the most recently SEEN post is
+        # frequently an old one still sitting in the feed.
+        social_last_seen_at=max((s.last for s in posts.values()), default=None),
+    )
+
+
+@dataclass(frozen=True)
+class Sightings:
+    """Every distinct item in a view, with when it was first and last seen.
+
+    The recall above answers "what has the loop been shown lately". This
+    answers a different question, asked by a surface that is already rendering
+    one particular cycle: **is this headline new, or has it been on file for
+    hours?** The 30-minute Marketaux cache means most of what a cycle saw was
+    also in the three cycles before it, and a page that rendered each of them
+    as a fresh sighting would show one story forty times and call each of them
+    news.
+
+    No window and no limit, because the caller has already chosen the span by
+    choosing what to read off disk. That is also the limit worth stating: this
+    knows only about the cycles in the view it was handed, so an item first
+    appearing in the OLDEST cycle here may well be older than that. Hence
+    `oldest_cycle_at` travelling with it — a caller can tell "this is new" from
+    "this is as old as anything I can see", and only the first is a claim.
+    """
+
+    headlines: dict[str, NewsItem] = field(default_factory=dict)
+    social_posts: dict[str, NewsItem] = field(default_factory=dict)
+    news_windows: dict[str, NewsItem] = field(default_factory=dict)
+
+    #: The oldest recorded cycle in the view, or `None` if none had inputs.
+    oldest_cycle_at: datetime | None = None
+
+    def is_edge(self, stamp: datetime) -> bool:
+        """Whether a cycle sits at the old end, where "new" cannot be claimed."""
+        return self.oldest_cycle_at is None or _aware(stamp) <= self.oldest_cycle_at
+
+
+def sightings(view: AuditView) -> Sightings:
+    """Index a view by item text. Pure, and offline like everything else here."""
+    headlines: dict[str, _Seen] = {}
+    posts: dict[str, _Seen] = {}
+    windows: dict[str, _Seen] = {}
+    oldest: datetime | None = None
+
+    for entry in view.decisions:
+        inputs = entry.decision.inputs
+        if inputs is None:
+            continue
+        stamp = _aware(entry.timestamp)
+        oldest = stamp if oldest is None else min(oldest, stamp)
+        _absorb(headlines, inputs.headlines, stamp)
+        _absorb(posts, inputs.social_posts, stamp)
+        _absorb(windows, inputs.news_windows, stamp)
+
+    return Sightings(
+        headlines=_as_items(headlines),
+        social_posts=_as_items(posts),
+        news_windows=_as_items(windows),
+        oldest_cycle_at=oldest,
     )
 
 
@@ -326,11 +387,15 @@ def _absorb(store: dict[str, _Seen], texts: list[str], stamp: datetime) -> None:
         seen.cycles += 1
 
 
-def _ordered(store: dict[str, _Seen], limit: int) -> list[NewsItem]:
-    items = [
-        NewsItem(text=text, first_seen=s.first, last_seen=s.last, cycles=s.cycles)
+def _as_items(store: dict[str, _Seen]) -> dict[str, NewsItem]:
+    return {
+        text: NewsItem(text=text, first_seen=s.first, last_seen=s.last, cycles=s.cycles)
         for text, s in store.items()
-    ]
+    }
+
+
+def _ordered(store: dict[str, _Seen], limit: int) -> list[NewsItem]:
+    items = list(_as_items(store).values())
     items.sort(key=lambda i: (i.first_seen, i.last_seen), reverse=True)
     return items[: max(0, limit)]
 

@@ -678,6 +678,32 @@ class LoopRules(BaseModel):
     )
 
 
+class PositionActionRules(BaseModel):
+    """Whether the LOOP may act on its own position plans, unattended.
+
+    **Off by default in the model and off in `config/rules.yaml`**, and unlike
+    `dreaming.allow_symbol_grants` the two agree, because nobody has asked for
+    this one to be on. A config that predates this block permits nothing, which
+    is the direction every switch here fails in.
+
+    What it does NOT control is the attended path. `tighten_stop` and
+    `close_position_with_reason` on the MCP server work regardless: the operator
+    asked for the trading agent to be able to action its own position, and that
+    is satisfied by an agent in a conversation with a person present. This flag
+    is about the other thing — the fifteen-minute loop closing a position or
+    moving a stop at 3am with nobody watching, which is a new unattended
+    execution path and the operator's deliberate switch to throw.
+
+    **Nothing here can widen a stop**, whichever way it is set.
+    `position_actions.classify_stop_move` refuses a move away from entry before
+    any of this is consulted, because that is the one position move that
+    increases the loss at unchanged size and `RiskGate` never sees a position
+    move at all.
+    """
+
+    enabled: bool = False
+
+
 class VaultCapRules(BaseModel):
     """How many dreams each vault will hold.
 
@@ -818,6 +844,12 @@ class Rules(BaseModel):
     # what may be traded without an edit to `instruments:`. Defaulted, so a
     # config with no `dreaming:` block grants nothing at all.
     dreaming: DreamingRules = Field(default_factory=DreamingRules)
+
+    # Whether the loop may act on its own position plans unattended. Defaulted
+    # to off, so a config with no `position_actions:` block executes none of
+    # them. Read by `position_actions.execute_position_plan`, which refuses
+    # before doing anything else.
+    position_actions: PositionActionRules = Field(default_factory=PositionActionRules)
 
     # Keyed by AssetClass value: "us_equity", "crypto".
     instruments: dict[str, InstrumentRules] = Field(default_factory=dict)

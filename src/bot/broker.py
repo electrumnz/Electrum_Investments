@@ -130,6 +130,28 @@ class Broker(Protocol):
     def place_order(self, proposal: OrderProposal) -> OrderResult: ...
     def close_position(self, symbol: str) -> OrderResult: ...
 
+    def replace_stop(self, order_id: str, *, stop_price: float) -> OrderResult:
+        """Move a resting stop leg to a new trigger price.
+
+        **Alpaca replaces a leg rather than editing one**, so the order coming
+        back has a NEW id and the old one is cancelled by the same call. The
+        result's `order_id` is the new leg; a caller that keeps the old id is
+        holding a reference to something that no longer exists.
+
+        This is the only mutation on this protocol that is neither an open nor a
+        close, and it is here rather than behind `RiskGate` for the reason the
+        rest of position management is: the gate vets proposals that OPEN
+        exposure, and it never sees this. That exemption holds only because
+        `position_actions.classify_stop_move` refuses any move away from entry
+        before this is ever called. **Do not call it directly with a level a
+        caller supplied.** A stop moved outward increases the loss at unchanged
+        size on a live position, and nothing downstream of here would catch it.
+
+        A failure leaves the ORIGINAL leg resting, which is the right direction
+        to fail in: the position keeps the stop it had.
+        """
+        ...
+
 
 class MockBroker:
     """In-memory broker for tests and for local development without credentials."""
@@ -151,6 +173,7 @@ class MockBroker:
         self._intraday: dict[str, list[Bar]] = {}
         self._open_orders: list[WorkingOrder] = []
         self._orders_degraded = False
+        self._replace_refused: str | None = None
         self._clock: BrokerClock | None = None
         self._calendar: list[TradingDay] | None = None
 
@@ -240,6 +263,41 @@ class MockBroker:
 
     def get_open_orders(self) -> list[WorkingOrder]:
         return list(self._open_orders)
+
+    def set_replace_refused(self, reason: str | None) -> None:
+        """Test hook: make the next `replace_stop` fail the way Alpaca can.
+
+        Nothing in memory can fail, so without this the refusal path is
+        unreachable from a test — and an untested refusal path on a stop move is
+        the one that decides whether the journal claims a stop that is not
+        there. Same reason `set_orders_degraded` exists.
+        """
+        self._replace_refused = reason
+
+    def replace_stop(self, order_id: str, *, stop_price: float) -> OrderResult:
+        """Replace a resting stop leg, mirroring what Alpaca actually does.
+
+        **The replacement gets a NEW id and the old order is gone**, which is
+        the behaviour worth doubling faithfully: a mock that edited the order in
+        place would let a caller pass a test while holding a stale id against
+        the real broker. The trap named in `orders_degraded` — a double that
+        fails differently from the thing it doubles pins a path production never
+        takes — applies just as well to one that SUCCEEDS differently.
+        """
+        if self._replace_refused is not None:
+            return OrderResult(accepted=False, error=self._replace_refused)
+        for index, order in enumerate(self._open_orders):
+            if order.order_id != order_id:
+                continue
+            self._order_seq += 1
+            new_id = f"mock-{self._order_seq:06d}"
+            self._open_orders[index] = order.model_copy(
+                update={"order_id": new_id, "stop_price": stop_price}
+            )
+            return OrderResult(accepted=True, order_id=new_id)
+        return OrderResult(
+            accepted=False, error=f"no working order {order_id} to replace"
+        )
 
     def get_account(self) -> AccountSnapshot:
         return AccountSnapshot(
@@ -825,6 +883,57 @@ class AlpacaBroker:
             order_id=str(order.id),
             filled_price=float(filled_price) if filled_price else None,
             filled_qty=float(filled_qty) if filled_qty else None,
+        )
+
+    def replace_stop(self, order_id: str, *, stop_price: float) -> OrderResult:
+        """Move a resting stop leg via Alpaca's replace, not a cancel-and-place.
+
+        `replace_order_by_id` is one server-side operation: Alpaca cancels the
+        old leg and opens the new one, and either both happen or neither does.
+        Cancel-then-place is the same thing with a WINDOW IN IT — between the
+        two calls the position has no stop at all, and a failure on the second
+        call leaves it that way with nothing on screen to say so. That window is
+        exactly what the operator's third rule exists to close, so it is not
+        worth opening to save an SDK import.
+
+        **The returned id is a NEW order.** The leg that was resting is gone.
+        `PositionActionRecord.broker_order_id` stores the new one, and anything
+        holding the old id is holding a reference to something cancelled.
+
+        Only `stop_price` is sent. `ReplaceOrderRequest` also accepts `qty`,
+        `limit_price` and `trail`, and every one of them left unset is a field
+        Alpaca carries over unchanged — which is what is wanted, because this
+        call has one job and a quantity quietly travelling with a stop move
+        would be a second, unrecorded change to the position.
+
+        Failure is reported rather than raised, exactly as `place_order` and
+        `close_position` report theirs, and the failure direction is the safe
+        one: the original leg is still resting at its original trigger.
+        """
+        from alpaca.trading.requests import ReplaceOrderRequest
+
+        try:
+            order: Any = self._trading.replace_order_by_id(
+                order_id, ReplaceOrderRequest(stop_price=stop_price)
+            )
+        except Exception as e:  # surface any SDK/API failure as a rejection
+            return OrderResult(
+                accepted=False,
+                error=(
+                    f"replace_order_by_id failed for {order_id}: {e}. The "
+                    "original stop leg is still resting at its original trigger."
+                ),
+            )
+
+        return OrderResult(
+            accepted=True,
+            order_id=str(order.id),
+            # Deliberately not read back off the replacement. A stop leg does
+            # not fill on submission, so a `filled_qty` here would be zero and
+            # zero read as an outcome is how a partial fill was once recorded
+            # off a mid-flight poll. The trigger price the leg now carries is
+            # confirmed by the next `get_open_orders` read, which is the only
+            # place it is a fact rather than a request.
         )
 
     def close_position(self, symbol: str) -> OrderResult:

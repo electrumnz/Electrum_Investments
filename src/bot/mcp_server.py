@@ -42,6 +42,13 @@ from .news_history import NewsItem
 from .news_history import recall as recall_news
 from .news_history import render as render_news
 from .options import alerts_for_positions, parse_occ_symbol, render_alerts
+from .position_actions import (
+    ActionOutcome,
+    close_with_reason,
+    detect_unexplained_moves,
+    loop_execution_state,
+)
+from .position_actions import tighten_stop as tighten_stop_action
 from .reconcile import apply_journal_state, record_fill
 from .risk import RiskGate
 from .stand_down import describe
@@ -54,6 +61,18 @@ server = MCPServer(
         "Always call check_order before proposing a trade to the user, and use "
         "place_order rather than any other order tool — it is the only path that "
         "enforces config/rules.yaml.\n\n"
+        "**Open positions are yours to manage, not yours to comment on.** "
+        "tighten_stop pulls a stop closer to entry and "
+        "close_position_with_reason closes one, both immediately and both "
+        "requiring a reason that is stored with the move. Neither goes through "
+        "the risk gate, because the gate vets orders that OPEN exposure and "
+        "these reduce it — which is also why a stand-down never blocks them. "
+        "Widening a stop is refused by code on either side of the market: it is "
+        "the one position move that increases the loss at unchanged size, and "
+        "nothing else in the system would catch it. If the risk on a position "
+        "is the problem, close part of it. get_position_actions reads the "
+        "record back, and reports stops or quantities that changed with no "
+        "reason on file.\n\n"
         "This server also carries the market information the bot reads. "
         "get_recent_news returns the headlines, watched-account posts and "
         "earnings windows the loop was actually shown, recorded with the time "
@@ -422,7 +441,25 @@ def place_order(
 
 @server.tool()
 def close_position(symbol: str) -> dict[str, Any]:
-    """Close the entire open position in a symbol on the paper account."""
+    """Close a position WITHOUT recording why. Prefer close_position_with_reason.
+
+    This still works, and it is left in place because closing a position must
+    never be harder than opening one — a stand-down that could not be exited
+    would be worse than the losing streak that caused it, and the same is true
+    of a tool that made getting out conditional on writing a sentence first.
+
+    But it leaves no reason on file, and that is now a gap rather than a
+    neutral difference. `record_exit` stores a price, a time and a realised
+    figure, so afterwards a stop-hit, a target-hit and a deliberate close by
+    hand are indistinguishable — and the interesting one is the third, because
+    that is the plan being abandoned. `close_position_with_reason` captures it
+    at the only moment anybody knows it.
+
+    A close through this tool shows on the Board as an unexplained move.
+
+    Args:
+        symbol: Ticker of the position to close.
+    """
     result = _session.broker.close_position(symbol.upper())
     _session.audit.record_event(
         "mcp_close_position",
@@ -432,6 +469,253 @@ def close_position(symbol: str) -> dict[str, Any]:
         "closed": result.accepted,
         "order_id": result.order_id,
         "error": result.error,
+        "reason_recorded": False,
+        "note": (
+            "No reason was recorded for this close. Use "
+            "close_position_with_reason instead — the reason is the one thing "
+            "nothing else can reconstruct afterwards."
+        ),
+    }
+
+
+def _action_payload(outcome: ActionOutcome) -> dict[str, Any]:
+    """One shape for both moves, so a caller reads them the same way.
+
+    A refusal is an ANSWER rather than an error, exactly as `_move_payload`
+    treats a refused dream move and as `check_order` treats a refused proposal.
+    Every reason is carried, because the refusal paths here collect all of them
+    rather than short-circuiting.
+    """
+    record = outcome.record
+    return {
+        "ok": outcome.ok,
+        "symbol": outcome.symbol,
+        "action": str(outcome.action),
+        "reasons": outcome.reasons,
+        "warnings": outcome.warnings,
+        "detail": outcome.detail,
+        "reached_broker": outcome.reached_broker,
+        "broker_order_id": outcome.broker_order_id,
+        "risk_before_usd": (
+            round(outcome.risk_before_usd, 2)
+            if outcome.risk_before_usd is not None
+            else None
+        ),
+        "risk_after_usd": (
+            round(outcome.risk_after_usd, 2)
+            if outcome.risk_after_usd is not None
+            else None
+        ),
+        "risk_reduced_usd": (
+            round(outcome.risk_reduced_usd, 2)
+            if outcome.risk_reduced_usd is not None
+            else None
+        ),
+        "recorded_action_id": record.id if record else None,
+        "record": record.model_dump(mode="json") if record else None,
+        "note": (
+            ""
+            if outcome.ok
+            else (
+                "This was refused by deterministic code, not by a judgement "
+                "call. Fix what it names or leave the position alone; asking "
+                "again will not change the answer."
+            )
+        ),
+    }
+
+
+@server.tool()
+def close_position_with_reason(symbol: str, reason: str) -> dict[str, Any]:
+    """Close the whole position in a symbol, recording WHY it was closed.
+
+    **This is the close to use.** It does exactly what close_position does at
+    the broker and additionally writes the one thing nothing else can
+    reconstruct: the reason. Afterwards the journal can tell a deliberate exit
+    from a stop-hit, and the interesting case — closed by hand before either
+    level, which is the plan being abandoned — stops being invisible.
+
+    Closing is never gated. `RiskGate` vets proposals that OPEN exposure and
+    never sees this, deliberately: a stand-down that froze position management
+    would strand open trades with no way out. Nothing here is refused except a
+    blank reason and a broker refusal.
+
+    A position the journal has never seen is still closed. The record is written
+    with no trade behind it and the response says so, because refusing to reduce
+    exposure over incomplete paperwork would be the wrong way round.
+
+    The exit price, the time and the realised figure are written by the next
+    reconcile cycle, not here — a fill is not atomic, and one poll during it is
+    a reading rather than an outcome.
+
+    Args:
+        symbol: Ticker of the position to close.
+        reason: Why it is being closed. One sentence. It does not have to be a
+            good reason — nothing here judges it — but it cannot be blank, and
+            a blank one is refused rather than stored empty.
+    """
+    outcome = close_with_reason(
+        _session.journal,
+        _session.broker,
+        symbol=symbol,
+        reason=reason,
+        actor="trader",
+    )
+    _session.audit.record_event(
+        "mcp_close_position_with_reason",
+        {
+            "symbol": outcome.symbol,
+            "ok": outcome.ok,
+            "reason": reason,
+            "reasons": outcome.reasons,
+            "order_id": outcome.broker_order_id,
+        },
+    )
+    return _action_payload(outcome)
+
+
+@server.tool()
+def tighten_stop(symbol: str, new_stop_price: float, reason: str) -> dict[str, Any]:
+    """Pull an open position's stop CLOSER to entry, and record why.
+
+    **Tighter only, and this is enforced in code rather than asked for.** On a
+    long the stop tightens UPWARD, on a short DOWNWARD. A level further from
+    entry than the one in force is refused outright, on either side of the
+    market, and no wording in `reason` changes that.
+
+    The reason it is absolute: `RiskGate.evaluate` gates proposals that OPEN
+    exposure and never sees a position move, because a stand-down that froze
+    position management would strand open trades with no way out. That
+    exemption is safe only for moves that reduce exposure. Widening a stop is
+    the one position move that increases the loss at unchanged size, on a live
+    position, with no gate anywhere in the system behind it — so it is
+    impossible through this path rather than discouraged.
+
+    If the risk on a position is the problem, close part of it. Do not buy room
+    by moving the stop.
+
+    What happens: the resting stop leg at the broker is REPLACED, in one
+    server-side operation — never cancelled and re-placed, which would leave the
+    position with no stop at all in between. The new leg has a new order id. The
+    journal's stop in force is updated in the same transaction as the record, so
+    the two cannot come apart, and open risk falls by the amount the response
+    reports.
+
+    Refused when the reason is blank, when the symbol has no open journal row
+    (the stop in force would be unknowable), when the move widens or changes
+    nothing, when more than one stop leg is resting, when the resting orders
+    could not be read, or when the broker refuses the replace — in which case
+    the original stop is still there and nothing was written.
+
+    A symbol with no resting stop leg is NOT refused, and the response says so
+    loudly: the move lands in the journal only, where `stop_watch` reports a
+    breach against it on the loop's pulse. That is the normal arrangement for
+    crypto, which Alpaca accepts no bracket on. On an equity it means nothing at
+    the broker is protecting the position.
+
+    Args:
+        symbol: Ticker of the open position.
+        new_stop_price: The new trigger, as a number. Closer to entry than the
+            stop currently in force. Call get_positions or get_risk_status first
+            if you are not certain where that is.
+        reason: Why it is being tightened. One sentence, and it cannot be blank.
+    """
+    outcome = tighten_stop_action(
+        _session.journal,
+        _session.broker,
+        symbol=symbol,
+        new_stop=new_stop_price,
+        reason=reason,
+        actor="trader",
+    )
+    _session.audit.record_event(
+        "mcp_tighten_stop",
+        {
+            "symbol": outcome.symbol,
+            "ok": outcome.ok,
+            "new_stop_price": new_stop_price,
+            "reason": reason,
+            "reasons": outcome.reasons,
+            "reached_broker": outcome.reached_broker,
+            "broker_order_id": outcome.broker_order_id,
+        },
+    )
+    return _action_payload(outcome)
+
+
+@server.tool()
+def get_position_actions(symbol: str = "", limit: int = 25) -> dict[str, Any]:
+    """Every recorded move on an open position, newest first, with its reason.
+
+    This is the record `tighten_stop` and `close_position_with_reason` write. A
+    record nothing can read back is not a record, and this is also the only
+    place a stop's history exists: the journal stores the level in force and the
+    broker stores the leg resting now, and neither says where either came from.
+
+    It reports the inverse too, and that half is the point. `unexplained_moves`
+    lists stops and quantities that differ from what the journal records with
+    **no action explaining them** — a stop pulled in through Alpaca's web UI, a
+    partial fill nobody journalled, a bracket leg cancelled by hand. A feature
+    that only showed the moves it managed to capture would hide its own
+    failures.
+
+    Read the two caveat lists before concluding anything from an empty
+    `unexplained_moves`:
+
+    - `stop_trigger_unreadable` — a stop leg is resting and the broker reported
+      no trigger price. Whether it moved is UNKNOWN, not fine.
+    - `positions_without_a_resting_stop` — the position is there and no stop
+      order is. Expected on crypto, which Alpaca accepts no bracket on, so
+      crypto is excluded from the list. On an equity it means nothing at the
+      broker would close the position.
+
+    If `broker_orders_readable` is false the resting orders could not be
+    fetched at all, and an empty `unexplained_moves` then means nothing
+    whatsoever.
+
+    Args:
+        symbol: Only this ticker. Empty means every symbol.
+        limit: Maximum recorded moves returned (default 25).
+    """
+    actions = _session.journal.position_actions(
+        symbol=symbol.strip().upper() or None, limit=max(1, limit)
+    )
+    account = _session.account()
+    orders = _session.broker.get_open_orders()
+    report = detect_unexplained_moves(
+        positions=account.open_positions,
+        orders=orders,
+        open_trades=_session.journal.open_trades(),
+        actions=_session.journal.position_actions(limit=200),
+        orders_degraded=_session.broker.orders_degraded,
+    )
+    enabled, sentence = loop_execution_state(_session.rules)
+
+    return {
+        "symbol_filter": symbol.strip().upper() or "all symbols",
+        "recorded_moves": len(actions),
+        "actions": [
+            {
+                **a.model_dump(mode="json"),
+                "summary": a.describe(),
+            }
+            for a in actions
+        ],
+        "broker_orders_readable": report.can_check,
+        "unexplained_moves": [m.describe() for m in report.moves],
+        "stop_trigger_unreadable": report.unreadable_stops,
+        "positions_without_a_resting_stop": report.positions_without_a_resting_stop,
+        # Named so an agent describing its own powers describes them correctly.
+        # It has the two tools regardless; what this flag decides is whether the
+        # unattended LOOP may act on the plans it writes.
+        "loop_may_act_unattended": enabled,
+        "loop_execution_note": sentence,
+        "note": (
+            "An empty actions list means no move has been recorded, which is "
+            "the ordinary state. An empty unexplained_moves list means nothing "
+            "was found to differ — but only if broker_orders_readable is true, "
+            "and only outside whatever the two caveat lists name."
+        ),
     }
 
 

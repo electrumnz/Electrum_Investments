@@ -24,6 +24,8 @@ from bot.grants import (
     OVER_CAP,
     SWITCHED_OFF,
     UNAVAILABLE,
+    GrantResolution,
+    brief_grants,
     resolve_grant_dream_ids,
     resolve_granted_symbols,
     resolve_grants,
@@ -77,6 +79,13 @@ class _Store:
         if self._error is not None:
             raise self._error
         return list(self._adoptions)
+
+    def get(self, dream_id: int) -> Dream | None:
+        """`brief_grants` reads the dream behind a grant for its chain."""
+        self.reads += 1
+        if self._error is not None:
+            raise self._error
+        return None
 
 
 def _adoption(
@@ -482,3 +491,66 @@ def test_an_adoption_row_that_will_not_iterate_costs_the_provenance_only():
     store = _Store(adoptions=[broken])
 
     assert resolve_grant_dream_ids(store, {"TSLA": "us_equity"}, now=NOW) == {}
+
+
+# ------------------------------------------------------- the model's briefing
+#
+# A third question, kept apart from the other two. `resolve_grants` answers what
+# may be traded, `resolve_grant_dream_ids` answers what to journal it against,
+# and this answers what the reasoner is told — which is worth nothing to either
+# of the others and must never be able to change what they say.
+
+
+def test_the_briefing_carries_the_chain_and_the_expiry_behind_each_grant(
+    rules, tmp_path
+):
+    store = DreamStore(tmp_path / "dreams.db")
+    dream_id = store.save(
+        Dream(
+            title="Smelters and power",
+            seed="s",
+            symbols=["TSLA"],
+            asset_class_key="us_equity",
+        )
+    )
+    store.move(dream_id, Vault.VAULT, by=DREAMER)
+    store.adopt(dream_id, at=NOW)
+
+    resolution = resolve_grants(store, rules, now=NOW + timedelta(days=1))
+    briefing = brief_grants(store, resolution, now=NOW + timedelta(days=1))
+
+    assert briefing.symbols == {"TSLA": "us_equity"}
+    assert briefing.dream_ids == {"TSLA": dream_id}
+    assert [d.id for d in briefing.dreams] == [dream_id]
+    assert briefing.expires_at[dream_id] == NOW + timedelta(days=90)
+    assert briefing.chains_available is True
+
+
+def test_a_briefing_failure_costs_the_CHAIN_and_never_the_PERMISSION(rules):
+    """**The failure direction, and it is the opposite of everywhere else here.**
+
+    Every other path in this module fails closed to an empty mapping, because an
+    unknown must never be treated as a permission. This one must not: the
+    symbols come from the resolution the GATE has already been handed, so
+    dropping them here would leave the gate permitting something the model was
+    never told about — which is exactly the inert state this whole feature
+    exists to leave behind. Losing the chain is the smaller failure.
+    """
+    store = _Store({"TSLA": "us_equity"}, error=RuntimeError("store is gone"))
+    resolution = GrantResolution(symbols={"TSLA": "us_equity"}, state=GRANTED)
+
+    briefing = brief_grants(store, resolution, now=NOW)
+
+    assert briefing.symbols == {"TSLA": "us_equity"}
+    assert briefing.dreams == ()
+    assert briefing.chains_available is False
+
+
+def test_nothing_granted_means_nothing_is_read(rules):
+    """An ordinary cycle pays nothing for a feature it is not using."""
+    store = _Store({})
+
+    briefing = brief_grants(store, GrantResolution(state=NONE_LIVE), now=NOW)
+
+    assert briefing.has_grants is False
+    assert store.reads == 0

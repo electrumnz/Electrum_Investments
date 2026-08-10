@@ -316,6 +316,40 @@ Deliberately NOT on the Board: dream chains and reasoning (that is the Dreaming
 page), and `DreamLedger` rates (reasoning-quality statistics, which belong
 beside `metrics.py` on Analytics and reach the operator, never the model).
 
+### RESOLVED — all three gaps below are closed, and the chain now completes
+
+Kept as written, because the shape of each is worth more than a tick and
+because all three were invisible to a green suite and two survived two
+adversarial audits.
+
+What changed, in one line each. **(1)** `dreaming.promotion_for` is the
+promotion rule — `keep` plus at least one `is_checkable` condition → PROPHECY,
+all conditions met → VAULT, everything else stays — applied by
+`DreamStore.promote` and driven by `dreamer.promote_dreams` from
+`electrum-bot dream`, never from the trading loop. **(2)** The dreamer's prompt
+asks for `symbols` and for the *bridging hop* that reaches a listed instrument,
+with an empty list still a respectable answer. **(3)** `cmd_loop` resolves the
+grant BEFORE the feeds and runs ticks, indicators, intraday and news over
+`allowed_symbols | granted`; the earnings calendar is rebuilt from the widened
+set; and the context carries the symbol, its expiry and the full chain with its
+badge and weakest hop adjacent.
+
+`tests/test_dream_to_trade.py` walks one dream from the workbench to an
+approving `RiskGate` verdict on a symbol in no allowlist —
+promote → vault → adopt → `resolve_granted_symbols` → `evaluate` — and asserts
+the same proposal is refused the moment the dream is handed back.
+
+**What is NOT done, and is the next thing here.** Grading is driven by
+`electrum-bot dream`, so a prophecy is checked once a day and only when the
+dreamer runs; a deployment that stops dreaming stops grading, and nothing says
+so on any surface. `PromotionRun.cycles_available` is on the log line and
+reaches no page. Nothing renders the prophecy shelf's grading state to the
+operator at all — how many conditions are ungradeable for want of a symbol, how
+many prophecies have been waiting and for how long — which is the
+`can_grade_anything` question with nowhere to be asked. And `Dream.trigger`
+(free-text prose) still sits beside `Dream.conditions` (the structured claim)
+with nothing relating them.
+
 ### Running it end to end found two gaps no test could show
 
 Three real dreams were generated against the live model, then the vault and a
@@ -853,34 +887,80 @@ against broker every cycle and is the likely right home for the correction.
 
 ---
 
-## 11. The X feed is configured and inert
+## 11. The X feed is built and inert — what is left is a subscription
 
 `social:` in `config/rules.yaml` names three accounts whose posts move a price
 before the wire story lands, `src/bot/data/xfeed.py` is written and tested, and
 **none of it runs**: `social.enabled` is false and `X_BEARER_TOKEN` is unset.
-Reading timelines needs a paid X tier, so off is the normal state and a
-deployment without it is fully functional.
+Off is the normal state, a deployment without it is fully functional, and
+nothing added since assumes otherwise.
 
-What is actually outstanding is a decision plus a subscription, not code:
+### Done — the code side is finished
 
-- **Which X tier**, and what it costs against what it buys. The binding
-  constraint is a MONTHLY cap on posts retrieved rather than a daily request
-  count, which is why the cache TTL here is 10 minutes rather than Marketaux's
-  30 — caching a market-moving post for half an hour would defeat the point of
-  fetching it.
-- **`is_degraded` is already wired and must stay wired.** An empty post list
-  from an expired token looks exactly like a quiet morning, and only one of
-  those should change how a price move is read. A degraded result is
-  deliberately not cached, so one bad minute does not silence the feed for the
-  whole TTL.
+The adapter was checked against `docs.x.com` on **2026-08-10**. That is a read
+of the documentation, **not a live exercise**: no bearer token exists on this
+box, so every claim below is documented rather than observed, and
+`tests/test_xfeed.py` says so where it pins them. A green suite is evidence
+about this repository and never about a third party.
+
+- **The endpoints and auth are current.** `https://api.x.com/2`,
+  `GET /2/users/by/username/:handle` then `GET /2/users/:id/tweets`, app-only
+  bearer. Rate limits are 300 and 3,500 per 15 minutes, so a handful of
+  accounts per cycle is nowhere near either.
+- **`tweet.fields`, not `post.fields`.** The documentation renamed Tweets to
+  Posts throughout and the parameter did not follow. Getting this wrong would
+  drop `created_at` and every post would render "time unknown".
+- **One mismatch found and fixed: `max_results` was the page we wanted to
+  KEEP.** `exclude=replies,retweets` filters *after* retrieval, so
+  `max_results` bounds what is considered rather than what comes back. Asking
+  for exactly `max_posts` let a run of replies push the originals out of the
+  page — and the result looks exactly like a quiet account, which is the one
+  reading this feed exists to prevent. It over-fetches by `EXCLUDE_OVERFETCH`
+  now, which costs nothing on a quiet account because `start_time` already
+  bounds the window.
+- **Posts carry `post_id` and a `url`.** `id` is a default field, so the
+  permalink is free; a payload with no id yields `None` rather than a link to
+  a 404. `Post.render()` deliberately omits it — the model cannot open a link,
+  and one it cannot follow is an invitation to pretend it did.
+- **No pagination, on purpose.** The timeline is reverse-chronological and
+  `start_time` bounds it, so `meta.next_token` leads only to posts older than
+  the ones already in hand — which is what `max_posts` then trims away.
+- **The feed's state is on the Settings page.** Enabled, token present,
+  accounts, lookback, posts per cycle, cache TTL, whether anything failed in
+  the last 24h, and when a post was last recorded. `xfeed.FeedState` supplies
+  its own words so a renderer cannot paraphrase them wrong, `degraded` is
+  three-valued because "no cycles on file" is not "nothing failed", and
+  "no post on file" is explicitly NOT reported as a failed fetch — a quiet
+  account looks identical from the record.
+- **The posts themselves are on the Decisions page**, inside each cycle's
+  inputs block and ahead of the headlines, with an item already seen on an
+  earlier cycle marked as such rather than presented as new.
+
+### Still outstanding — and it is a purchase, not a task
+
+- **Which access, and what it costs against what it buys.** X replaced its
+  fixed tiers with **pay-per-use on 2026-02-06**, metered per post read, and
+  Basic/Pro are closed to new customers. So the old framing here — "which
+  tier" — no longer describes the decision. **There is no free read tier at
+  all**, which is why off has to remain a fully supported configuration rather
+  than a broken one.
+- The binding constraint is still a **cap on posts retrieved** rather than a
+  daily request count, which is why the cache TTL is 10 minutes against
+  Marketaux's 30: caching a market-moving post for half an hour would defeat
+  the point of fetching it.
+- **`is_degraded` is wired and must stay wired.** An empty post list from an
+  expired token looks exactly like a quiet morning, and only one of those
+  should change how a price move is read. A degraded result is deliberately
+  not cached, so one bad minute does not silence the feed for the whole TTL.
 - **Do not make it gate anything.** A blackout window after a high-impact post
   would mirror `news_blackout_minutes_after` and is a genuinely reasonable idea,
   but it changes what the gate refuses: its own commit, with a reason and a test
   that proves it rejects. "The model thought this post sounded bearish" is the
   opposite of a deterministic input.
 
-Posts render AHEAD of headlines in the prompt on purpose. By the time a headline
-carries the story the gap has already opened.
+Posts render AHEAD of headlines in the prompt on purpose, and on the Decisions
+page for the same reason. By the time a headline carries the story the gap has
+already opened.
 
 ---
 

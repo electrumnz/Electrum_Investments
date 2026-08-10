@@ -42,7 +42,16 @@ PROTECTED = [
 # returns, and `/logout` and `/openapi.json` are not pages. The refusal tests
 # are safe on all three precisely because the middleware answers before the
 # route runs.
-REFUSED = [*PROTECTED, "/live", "/logout", "/openapi.json", "/session"]
+#
+# `/settings/request` is here rather than in `PROTECTED` for the same shape of
+# reason as `/live`: it is not a page, so it would never have come up when
+# somebody wrote "every page is refused", and the loopback test below asserts a
+# 200 body that a POST-only route cannot give. What it does is record a change
+# to a RISK LIMIT, argued and confirmed, which is the last thing on this
+# dashboard that should be reachable without a session.
+REFUSED = [
+    *PROTECTED, "/live", "/logout", "/openapi.json", "/session", "/settings/request"
+]
 
 # The only routes an unauthenticated request may reach, each for a stated
 # reason. `test_no_route_escapes_the_lists` is what makes this file complete

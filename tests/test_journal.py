@@ -302,12 +302,34 @@ def _schema_without_dream_id() -> str:
     """
 
     start = SCHEMA.index("    -- The adopted dream whose grant")
-    end = SCHEMA.index("    dream_id          INTEGER\n") + len(
-        "    dream_id          INTEGER\n"
-    )
+    # `dream_id` is no longer the last column, so it now carries the comma that
+    # separates it from `current_stop`. Cutting to the end of the LINE rather
+    # than to a literal that assumes the trailing punctuation is what keeps this
+    # helper working the next time a column is appended after it.
+    end = SCHEMA.index("\n", SCHEMA.index("    dream_id          INTEGER")) + 1
     without = SCHEMA[:start] + SCHEMA[end:]
-    # The column before it carried the comma that separated the two.
+    # The column before it carried the comma that separated the two — but only
+    # when removing `dream_id` leaves nothing behind it. With `current_stop`
+    # after it there is still a column to separate from, so this is a no-op.
     return without.replace("    exit_order_id     TEXT,\n)", "    exit_order_id     TEXT\n)")
+
+
+def _schema_without_current_stop() -> str:
+    """`journal.SCHEMA` as it stood before a stop could be moved.
+
+    Same construction and same reasoning as the helper above: derived from the
+    live schema so only the column under test differs, with its comment block
+    removed alongside it so the assertion below cannot pass on a comment.
+
+    `current_stop` IS the last column, so removing it leaves `dream_id` with a
+    trailing comma and the DDL has to be repaired.
+    """
+    start = SCHEMA.index("    -- The stop actually in force")
+    end = SCHEMA.index("\n", SCHEMA.index("    current_stop      REAL")) + 1
+    without = SCHEMA[:start] + SCHEMA[end:]
+    return without.replace(
+        "    dream_id          INTEGER,\n)", "    dream_id          INTEGER\n)"
+    )
 
 
 def _columns(conn) -> set[str]:

@@ -643,6 +643,23 @@ class SymbolAssessment(BaseModel):
 
 
 class PositionAction(StrEnum):
+    """What may be done to a position that is already open.
+
+    **There is deliberately no WIDEN_STOP.** Every member here either leaves
+    exposure alone or reduces it, which is the whole reason this vocabulary can
+    exist beside an order path that `RiskGate.evaluate` never sees: the gate
+    vets proposals that OPEN exposure, and a stand-down that froze position
+    management would strand open trades with no way out. That exemption is safe
+    only for moves that cannot increase what is at risk.
+
+    Moving a stop AWAY from entry is the one position move that increases the
+    loss at unchanged size, on a live position, with no gate anywhere in the
+    system to catch it. It is refused in `position_actions.classify_stop_move`
+    rather than merely absent here — an enum with no member for it is a
+    convention, and this repository uses structure where it can — but the
+    absence is the readable half of the same guarantee.
+    """
+
     HOLD = "hold"
     CLOSE = "close"
     TIGHTEN_STOP = "tighten_stop"
@@ -651,11 +668,17 @@ class PositionAction(StrEnum):
 class PositionPlan(BaseModel):
     """The model's read on a position already held.
 
-    **Advisory only.** The loop does not act on these: closing a position and
-    moving a stop are deliberately outside the proposal path, so nothing here
-    reaches the broker. It exists because "why am I still in this, and what
-    would get me out" is the question an open position raises and nothing else
-    here answers.
+    **Advisory by default, and executable only behind a switch that is off.**
+    Nothing here reaches the broker on the loop's own initiative:
+    `position_actions.execute_position_plan` refuses unless
+    `position_actions.enabled` is true in `config/rules.yaml`, and it ships
+    false. The attended path — an operator in chat, or an agent calling
+    `tighten_stop` / `close_position_with_reason` over MCP — is what the
+    operator asked for; a loop that closes a position at 3am unattended is a
+    different proposition and is the operator's own switch to throw.
+
+    It exists because "why am I still in this, and what would get me out" is the
+    question an open position raises and nothing else here answers.
     """
 
     symbol: str
@@ -676,6 +699,127 @@ class PositionPlan(BaseModel):
     invalidation: str = Field(
         default="", description="What would prove the original thesis wrong."
     )
+
+    # WHERE to move the stop to, for `action = tighten_stop`. Optional with a
+    # default, like every field added after the fact: the audit log is
+    # append-only and never migrated, so a plan written before this existed must
+    # still parse.
+    #
+    # Without it a `tighten_stop` plan names an intention and no level, so it is
+    # not executable at all — `execute_position_plan` refuses one and says why,
+    # rather than picking a number, which would be the invented-target failure
+    # arriving on the exit side.
+    #
+    # The direction is not the model's to choose. A level that widens the stop
+    # is refused by `position_actions.classify_stop_move` whatever is written
+    # here, on either side of the market.
+    new_stop_price: float | None = Field(
+        default=None,
+        gt=0,
+        description=(
+            "For tighten_stop: the new stop level, as a number. It must be "
+            "CLOSER to entry than the stop currently in force — a level further "
+            "away is refused, because widening a stop on an open position "
+            "increases the loss at unchanged size."
+        ),
+    )
+
+
+def _required_prose(value: object) -> object:
+    """Trim, then cap. A blank string survives as blank so `min_length` refuses it.
+
+    Order matters: stripping before the length check is what makes a reason of
+    three spaces a refusal rather than a stored reason nobody can read.
+    """
+    if isinstance(value, str):
+        return truncate_free_text(value.strip())
+    return value
+
+
+class PositionActionRecord(BaseModel):
+    """One intentional move on an OPEN position, and the reason it was made.
+
+    `record_exit` takes a price, a time and a realised figure, so stop-hit,
+    target-hit, closed-by-hand and expiry are indistinguishable afterwards. This
+    is the front half of closing that gap: the reason is captured at the moment
+    of the move rather than reconstructed from the numbers later, which is the
+    only moment anybody actually knows it.
+
+    **The reason is required and a blank one is refused**, here and again in
+    `Journal.record_position_action`. Two guards rather than one because the
+    absence of a reason is exactly what the Board's `unexplained-move` tag
+    exists to make visible, and a row with an empty reason would be an
+    explained move that explains nothing — worse than an unrecorded one,
+    because it would silence the tag.
+
+    Nothing here judges the reason. It does not have to be a good reason; it has
+    to exist.
+
+    `before_*` and `after_*` are the values on either side of the move, so the
+    record is readable without joining it against whatever the trade row says
+    today. `None` on both sides of a pair means that dimension did not change —
+    a close moves quantity and not the stop.
+    """
+
+    id: int | None = None
+
+    # The journal row this acted on, or `None` for a move on a position the
+    # journal has never seen. Absent rather than zero, and the same fact as a
+    # symbol appearing in `AccountSnapshot.symbols_with_unknown_risk`.
+    trade_id: int | None = None
+
+    symbol: str
+    action: PositionAction
+
+    # Who moved it. Free text and recorded verbatim — a claim about who acted
+    # rather than a verified identity, the same as `Message.speaker` on a dream.
+    # Conventionally "operator", "trader" (the chat agent) or "loop".
+    actor: str = Field(min_length=1, max_length=64)
+
+    at: datetime
+    reason: str = Field(min_length=1, max_length=RATIONALE_MAX_CHARS)
+
+    before_stop: float | None = None
+    after_stop: float | None = None
+    before_qty: float | None = None
+    after_qty: float | None = None
+
+    # The order the broker is now holding for this stop, if one is. Alpaca
+    # REPLACES a leg rather than editing it, so this is a NEW id and not the one
+    # that was resting before the move.
+    broker_order_id: str | None = None
+
+    # Whether the move actually reached the broker, as opposed to being recorded
+    # against a journal figure alone. False is an ordinary state — crypto
+    # carries no bracket at Alpaca, so its stop has always been a journal figure
+    # watched by `stop_watch` — and it is carried explicitly because "the stop
+    # moved" and "the stop moved at the broker" are different claims, and only
+    # one of them puts something between the position and a loss.
+    reached_broker: bool = False
+
+    _trim = field_validator("reason", "actor", mode="before")(_required_prose)
+
+    @property
+    def stop_changed(self) -> bool:
+        return self.before_stop is not None and self.after_stop is not None
+
+    @property
+    def qty_changed(self) -> bool:
+        return self.before_qty is not None and self.after_qty is not None
+
+    def describe(self) -> str:
+        """One line, for a log or a cycle summary."""
+        if self.action is PositionAction.TIGHTEN_STOP and self.stop_changed:
+            where = "at the broker" if self.reached_broker else "in the journal only"
+            what = (
+                f"stop {self.before_stop:,.4f} -> {self.after_stop:,.4f} {where}"
+            )
+        elif self.action is PositionAction.CLOSE:
+            qty = f"{self.before_qty:,.4f}" if self.before_qty is not None else "unknown"
+            what = f"closed {qty}"
+        else:
+            what = str(self.action)
+        return f"{self.symbol}: {what} — {self.actor}: {self.reason}"
 
 
 class IndicatorSnapshot(BaseModel):
@@ -817,6 +961,26 @@ class Trade(BaseModel):
     # never was.
     planned_target: float | None = Field(default=None, gt=0)
 
+    # The stop actually in force now, when it is no longer the one the position
+    # was sized against. `None` means it has never moved, which is the truth
+    # about every trade this bot has placed so far.
+    #
+    # **Two columns rather than one, and the reason is that they answer
+    # different questions.** `planned_stop` is the sizing figure: the position's
+    # quantity was computed from `|entry - planned_stop|`, so it is what 1R
+    # means and what `metrics.py` grades stop placement against. Overwriting it
+    # on a tighten would silently redefine R after the fact and make a trade
+    # that lost half what it risked read as a full stop-out.
+    #
+    # `effective_stop` is what would actually fill, so it is what the risk caps
+    # count, what the model is shown, and what a breach is measured against.
+    #
+    # Only ever moves TOWARD entry. `position_actions.classify_stop_move`
+    # refuses the other direction, on either side of the market, because
+    # widening a stop on an open position is the one position move that
+    # increases the loss at unchanged size and no gate in this system sees it.
+    current_stop: float | None = Field(default=None, gt=0)
+
     exit_time: datetime | None = None
     exit_price: float | None = None
 
@@ -855,8 +1019,44 @@ class Trade(BaseModel):
 
     @property
     def planned_risk_usd(self) -> float:
-        """What the trade was designed to lose if the stop filled as planned."""
+        """What the trade was designed to lose if the stop filled as planned.
+
+        The SIZING figure, and deliberately fixed at entry: this is the
+        denominator of `r_multiple`, so it has to keep meaning "what one R was
+        when this position was sized". A stop moved afterwards changes what the
+        trade now stands to lose — that is `current_risk_usd` — and does not
+        change what it was built to lose.
+        """
         return abs(self.entry_price - self.planned_stop) * self.qty
+
+    @property
+    def effective_stop(self) -> float:
+        """The stop in force. The moved one if it has been moved, else the plan.
+
+        Every consumer that asks "what would this fill at" wants this rather
+        than `planned_stop`: the risk caps, the level the model is shown on the
+        position it manages, and the breach check.
+        """
+        return self.current_stop if self.current_stop is not None else self.planned_stop
+
+    @property
+    def stop_has_moved(self) -> bool:
+        return self.current_stop is not None
+
+    @property
+    def current_risk_usd(self) -> float:
+        """What the trade loses NOW if its stop fills. What the caps count.
+
+        Floored at zero rather than left as `abs(...)`, and that floor is the
+        point at which the arithmetic would otherwise start lying. A stop moved
+        past entry — breakeven-plus, the end state of tightening — is a
+        GUARANTEED PROFIT, not a large loss, and `abs()` would report it as
+        risk growing again the further into profit it went. Zero is the honest
+        answer: there is nothing left to lose on this position.
+        """
+        if self.direction == Direction.BUY:
+            return max(0.0, self.entry_price - self.effective_stop) * self.qty
+        return max(0.0, self.effective_stop - self.entry_price) * self.qty
 
     @property
     def is_open(self) -> bool:

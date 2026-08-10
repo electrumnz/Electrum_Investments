@@ -20,13 +20,31 @@ from bot.dreamer import (
     Dreamer,
     DreamHop,
     DreamStep,
+    StepCondition,
     build_prompt,
     class_key_for_symbol,
+    promote_dreams,
+    render_class_fence,
     scope_symbols,
 )
-from bot.dreaming import Dream, DreamStage, DreamStore, DreamVerdict, Hop
+from bot.dreaming import (
+    Dream,
+    DreamCondition,
+    DreamStage,
+    DreamStore,
+    DreamVerdict,
+    Hop,
+    Vault,
+)
 from bot.journal import Journal
-from bot.models import Direction, Trade
+from bot.models import (
+    Direction,
+    IndicatorSnapshot,
+    Trade,
+    TriggerField,
+    TriggerOp,
+)
+from bot.triggers import CycleReadings
 
 ENTRY = datetime(2026, 5, 4, 15, 0, tzinfo=UTC)
 USAGE = CallUsage(
@@ -756,3 +774,237 @@ def test_the_cost_estimate_reflects_the_tier():
     assert haiku_year == pytest.approx(haiku_run * 365)
     # A year of daily dreaming stays in double digits on the shipped tier.
     assert sonnet_year < 100
+
+
+# ------------------------------------------------ asking for the two fields
+#
+# Three real dreams generated against the live model came back with
+# `symbols: []` and `symbols_dropped: 0` — nothing was filtered, the field was
+# simply never filled — and no conditions at all. Between them that left the
+# vault permanently empty and the whole permission path inert, so the prompt has
+# to ASK, and asking well is the whole fix.
+
+
+def test_the_prompt_asks_for_symbols_and_says_empty_is_a_good_answer(rules, journal):
+    """Both halves, because only one of them is the risk.
+
+    A field that is merely demanded gets filled, and a dreamer that invents a
+    ticker to satisfy a schema produces the confident-plausible-value failure
+    this repository exists to refuse. The prompt has to make an empty list a
+    respectable answer in the same breath as it asks for one.
+    """
+    prompt = build_prompt(rules, journal, [])
+
+    assert "`symbols`" in prompt
+    assert "leave it empty" in prompt
+    assert "respectable answer" in prompt
+
+
+def test_the_prompt_asks_for_the_bridge_as_a_HOP_not_as_a_bare_ticker(rules, journal):
+    """The second-order move the dreamer exists for.
+
+    The thing a good dream is about — a private supplier, a co-operative, a
+    commodity — usually is not listed. The job is then to name the listed
+    instrument whose fortunes that thing moves, and THAT step is a claim like any
+    other: it is the hop most likely to be wrong and the one nobody checks,
+    because it arrives looking like bookkeeping rather than an argument.
+    """
+    prompt = build_prompt(rules, journal, [])
+
+    assert "bridge" in prompt
+    assert "write that bridge as a hop" in prompt
+
+
+def test_the_fence_says_a_symbol_must_be_something_the_broker_can_route(rules, journal):
+    """Reasoning is unrestricted; naming is not.
+
+    `scope_symbols` drops anything outside an enabled class silently from the
+    model's point of view, so the fence has to state what will survive storage.
+    """
+    fence = "\n".join(render_class_fence(rules))
+
+    assert "broker can route" in fence
+    assert "private company" in fence
+    assert "`instruments`" in fence
+
+
+def test_the_prompt_asks_for_conditions_and_says_a_keep_without_one_goes_nowhere(
+    rules, journal
+):
+    """The promotion rule, stated where the model can act on it.
+
+    A keep with no checkable condition stays on the workbench for ever. Left
+    unsaid, the model has no way to know its conclusions reach nobody.
+    """
+    prompt = build_prompt(rules, journal, [])
+
+    assert "`conditions`" in prompt
+    assert "never leaves the workbench" in prompt
+    assert "never the name of another figure" in prompt
+
+
+def test_an_advancing_step_is_shown_the_conditions_already_on_the_dream(
+    rules, journal, store
+):
+    """Or it restates them from scratch every time, blind to what has fired."""
+    dream = Dream(
+        title="t",
+        seed="s",
+        conditions=[
+            DreamCondition(
+                text="Alcoa clears 100",
+                symbol="AA",
+                field=TriggerField.CLOSE,
+                op=TriggerOp.ABOVE,
+                value=100.0,
+                fulfilled=True,
+            )
+        ],
+        symbols=["AA"],
+    )
+    dream.id = store.save(dream)
+
+    prompt = build_prompt(rules, journal, [store.get(dream.id)])
+
+    assert "condition (MET): Alcoa clears 100" in prompt
+    assert "symbols claimed: AA" in prompt
+
+
+# ------------------------------------------------------ folding them in safely
+
+
+def test_a_step_writes_its_conditions_onto_the_dream(rules, store, journal):
+    step = _step(
+        conditions=[
+            StepCondition(
+                text="Alcoa clears 100",
+                symbol="aa",
+                field=TriggerField.CLOSE,
+                op=TriggerOp.ABOVE,
+                value=100.0,
+            )
+        ]
+    )
+    dreamer = Dreamer(_env(), rules, store, journal, client=_StubClient(step))
+
+    result = dreamer.run_once()
+
+    assert result is not None
+    condition = result.dream.conditions[0]
+    assert condition.symbol == "AA"  # normalised on the way in
+    assert condition.is_gradeable is True
+
+
+def test_restating_a_condition_on_a_later_step_does_not_wipe_its_grade(
+    rules, store, journal
+):
+    """**Verified to fail without `carry_forward_grading`.**
+
+    The vault is reached by `all_conditions_met`. If a restated condition came
+    back unfulfilled, a dream that restates its conditions on every step could
+    never be promoted at all, and would be re-checked for ever against readings
+    that had already fired it.
+    """
+    graded = DreamCondition(
+        text="Alcoa clears 100",
+        symbol="AA",
+        field=TriggerField.CLOSE,
+        op=TriggerOp.ABOVE,
+        value=100.0,
+        fulfilled=True,
+    )
+    dream = Dream(title="t", seed="s", conditions=[graded])
+    dream_id = store.save(dream)
+
+    step = _step(
+        advance_id=dream_id,
+        conditions=[
+            StepCondition(
+                text="Alcoa finally clears the hundred handle",
+                symbol="AA",
+                field=TriggerField.CLOSE,
+                op=TriggerOp.ABOVE,
+                value=100.0,
+            )
+        ],
+    )
+    dreamer = Dreamer(_env(), rules, store, journal, client=_StubClient(step))
+    dreamer.run_once()
+
+    reloaded = store.get(dream_id)
+    assert reloaded is not None
+    assert reloaded.conditions[0].fulfilled is True
+
+
+# ------------------------------------------------------------- promote_dreams
+
+
+def _prophecy_ready(**kw) -> Dream:
+    base = {
+        "title": "Smelters",
+        "seed": "s",
+        "verdict": DreamVerdict.KEEP,
+        "conditions": [
+            DreamCondition(
+                text="Alcoa clears 100",
+                symbol="AA",
+                field=TriggerField.CLOSE,
+                op=TriggerOp.ABOVE,
+                value=100.0,
+            )
+        ],
+    }
+    base.update(kw)
+    return Dream(**base)  # type: ignore[arg-type]
+
+
+def test_promote_dreams_moves_a_finished_keep_off_the_workbench(store):
+    """The step that was missing. Without it the vault is permanently empty."""
+    dream_id = store.save(_prophecy_ready())
+
+    run = promote_dreams(store)
+
+    assert run.considered == 1
+    assert run.promoted == ((dream_id, str(Vault.PROPHECY)),)
+
+
+def test_promote_dreams_grades_before_it_promotes(store):
+    """A condition that fires on this pass moves the dream on this pass.
+
+    The other order holds every prophecy back a full day for no reason — the
+    command runs daily.
+    """
+    dream_id = store.save(_prophecy_ready(vault=Vault.PROPHECY))
+    fired = [
+        CycleReadings(
+            at=datetime(2026, 6, 2, tzinfo=UTC),
+            readings={"AA": IndicatorSnapshot(close=140.0)},
+        )
+    ]
+
+    run = promote_dreams(store, readings=fired)
+
+    assert run.conditions_fulfilled == 1
+    assert run.promoted == ((dream_id, str(Vault.VAULT)),)
+    assert [d.id for d in store.in_vault(Vault.VAULT)] == [dream_id]
+
+
+def test_promote_dreams_reports_what_it_looked_at_even_when_nothing_moved(store):
+    """`considered` separates "nothing was promotable" from "nothing was looked
+    at" — the `has_cycles` rule, and the fact the original bug hid behind."""
+    store.save(Dream(title="still thinking", seed="s"))
+
+    run = promote_dreams(store)
+
+    assert run.considered == 1
+    assert run.promoted == ()
+    assert run.held and "workbench" in run.held[0][1]
+
+
+def test_promote_dreams_says_when_it_had_no_readings_to_grade_against(store):
+    """With no recorded cycles nothing can fire, and that is a fact about the
+    audit log rather than about the prophecies. A zero explains an unchanging
+    shelf."""
+    store.save(_prophecy_ready(vault=Vault.PROPHECY))
+
+    assert promote_dreams(store).cycles_available == 0

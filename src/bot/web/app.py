@@ -31,6 +31,7 @@ from __future__ import annotations
 import argparse
 import sqlite3
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
@@ -43,15 +44,26 @@ from urllib.parse import quote
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 
+from .. import news_history
 from ..audit import AuditLog
-from ..config import Env, Rules, load_rules
+from ..config import DEFAULT_RULES_PATH, Env, Rules, load_rules
 from ..dreaming import DreamStore, DreamSummary
 from ..journal import Journal
 from ..market_clock import market_state
 from ..metrics import build_report
 from ..models import AccountSnapshot, WorkingOrder
 from ..options import alerts_for_positions
-from ..souls import GROGU, YODA, load_soul
+from ..settings_agent import (
+    DEFAULT_REQUESTS_PATH,
+    SettingsRequestStore,
+    UnknownLimit,
+    argue,
+    build_request,
+    commit_message,
+    limits_for,
+    render_briefing,
+)
+from ..souls import ARMORER, GROGU, KNOWN_SOULS, YODA, load_soul
 from ..tailnet import read as read_tailnet_status
 from . import live, render, seen
 from .auth import COOKIE_NAME, SESSION_TTL_SECONDS, SessionStore
@@ -65,6 +77,16 @@ from .chat import DREAMER_BINARY, HermesBridge
 #: the cost is bounded by this number and not by how much history exists.
 DECISION_WINDOW = 200
 
+#: How many cycles Settings reads to describe the X feed's recent state.
+#:
+#: The loop wakes 96 times a day, so this covers `render.NEWS_WINDOW_HOURS` with
+#: room for a faster `DECISION_INTERVAL_SECONDS`. The recall stops at the window
+#: boundary regardless, so a generous number costs a parse of files already on
+#: disk and buys the guarantee that the window is not silently short — which is
+#: the failure mode that matters here, because a truncated read would report
+#: "no failed fetch" over a span it never looked at.
+NEWS_WINDOW_CYCLES = 400
+
 
 def build_app(
     *,
@@ -74,6 +96,8 @@ def build_app(
     audit_log: AuditLog | None = None,
     dreams: DreamStore | None = None,
     poller: live.LivePoller | None = None,
+    settings_requests: SettingsRequestStore | None = None,
+    rules_path: Path | None = None,
     force_mock: bool = False,
 ) -> Any:
     """Construct the FastAPI app. Dependencies are injectable so tests never
@@ -158,10 +182,33 @@ def build_app(
             target = "/login" if wanted == "/" else f"/login?next={quote(wanted)}"
             return RedirectResponse(target, status_code=303)
         return JSONResponse({"error": "authentication required"}, status_code=401)
-    resolved_rules = rules or load_rules()
+    # The path comes first, because the loaded rules are read FROM it. The
+    # settings agent computes a diff against the file on disk and compares the
+    # located line to the loaded value, so the two disagreeing would produce a
+    # request argued against one file and applied to another.
+    resolved_rules_path = rules_path or DEFAULT_RULES_PATH
+    resolved_rules = rules or load_rules(resolved_rules_path)
     resolved_journal = journal or Journal()
     audit = audit_log or AuditLog()
     resolved_dreams = dreams or DreamStore()
+
+    # The settings agent's store, opened LAZILY and never at construction.
+    #
+    # Two reasons, and the second is the one that keeps the suite honest. The
+    # forge is off unless `DASHBOARD_CHAT_TOKEN` is set, so a deployment that
+    # never enables it has no requests and needs no database; and constructing
+    # a store eagerly here is exactly how `DreamStore` once started writing to
+    # the repository's own `data/` from every test that built an app.
+    # `tests/conftest.py` fails the suite over that now, and this arrangement
+    # means it never has to.
+    held_requests: list[SettingsRequestStore] = (
+        [settings_requests] if settings_requests is not None else []
+    )
+
+    def _requests() -> SettingsRequestStore:
+        if not held_requests:
+            held_requests.append(SettingsRequestStore(DEFAULT_REQUESTS_PATH))
+        return held_requests[0]
 
     # One poller for the whole application. Polling per connected browser would
     # multiply broker load for nothing, and every page render would still be
@@ -531,8 +578,143 @@ def build_app(
                 # reading Alpaca inline. Before the first read this renders as
                 # "not loaded", which is the honest answer rather than a blank.
                 **_calendar_view(resolved_poller.latest()),
+                # The X feed's OBSERVED state, out of the audit log rather than
+                # off a live feed. This process never holds an `XFeed` — the
+                # loop owns it — so "did a fetch fail" and "when was a post last
+                # recorded" can only come from the record, and the alternative
+                # is a card that reports configuration and calls it health.
+                #
+                # A file read, not a network call: the same rule that keeps the
+                # broker off this page. `AuditLog.read` walks dated files newest
+                # first and stops at the limit, measured at tens of
+                # milliseconds.
+                social_recall=news_history.recall(
+                    audit.read(limit=NEWS_WINDOW_CYCLES),
+                    hours=render.NEWS_WINDOW_HOURS,
+                ),
+                # The forge: the settings agent's panel and the change requests
+                # already argued. Off with chat, because it drives an agent.
+                #
+                # The store is opened only when the forge is on, so a dashboard
+                # without a chat token never creates the database at all — see
+                # `_requests`.
+                forge_enabled=bool(resolved_env.dashboard_chat_token),
+                token=resolved_env.dashboard_chat_token,
+                hermes_available=bridge.available,
+                soul_found=load_soul(ARMORER).found,
+                limits=limits_for(resolved_rules),
+                rules_path=resolved_rules_path,
+                requests=(
+                    _requests().recent(limit=10)
+                    if resolved_env.dashboard_chat_token
+                    else []
+                ),
             ),
         )
+
+    @app.post("/settings/request", response_class=JSONResponse)
+    def settings_request(payload: dict[str, Any]) -> dict[str, Any]:
+        """Argue about a limit, and record the argument. **Never write the file.**
+
+        This is the second write route on a dashboard that was wholly read-only,
+        and the reasoning has to sit here rather than in a commit message.
+
+        **What it cannot do is the point.** `config/` is root-owned on the
+        droplet (`deploy/bootstrap.sh`) precisely so the service account cannot
+        edit its own limits, and this process runs as `mudhorn`. A settings
+        screen that could widen a cap would be used to widen one during a losing
+        run, which is exactly when the cap is doing its job — so what this
+        produces is a `ChangeRequest` in `data/settings_requests.db`, and
+        applying it is `electrum-bot settings-apply <id>`, run as root, which
+        re-validates through `Rules.load` and refuses if the file has moved.
+
+        **The asymmetry is enforced here and not only in the character.** A
+        tightening change records on the first ask. A loosening one states the
+        arithmetic consequence and records NOTHING until `confirm` comes back
+        true — so the operator has to have been shown the cost before they can
+        accept it. `souls/armorer.md` shapes how that is said; this decides it.
+
+        Behind `DASHBOARD_CHAT_TOKEN` as well as the dashboard password, for the
+        same reason `POST /chat` is: viewing an account and driving an agent are
+        different privileges, and one secret must not grant both. Off entirely
+        without the token, so a deploy never switches it on.
+
+        Takes a plain `dict` rather than `request: Request` for the reason
+        `chat` gives — a function-local annotation is invisible to FastAPI and
+        the parameter is silently treated as a query field.
+        """
+        if not resolved_env.dashboard_chat_token:
+            raise HTTPException(status_code=404, detail="the settings agent is not enabled")
+        if payload.get("token") != resolved_env.dashboard_chat_token:
+            raise HTTPException(status_code=403, detail="bad token")
+
+        key = str(payload.get("key", ""))
+        try:
+            argument = argue(
+                resolved_rules,
+                key,
+                str(payload.get("value", "")),
+                equity_usd=_equity_reading(),
+                rules_path=resolved_rules_path,
+            )
+        except (UnknownLimit, ValueError) as exc:
+            return {"ok": False, "error": str(exc)}
+
+        view: dict[str, Any] = {
+            "ok": True,
+            "key": argument.key,
+            "label": argument.fact.label,
+            "current": argument.current,
+            "current_source": argument.current_source,
+            "proposed": argument.proposed,
+            "stance": str(argument.stance),
+            "consequence": argument.consequence,
+            "objection": argument.objection,
+            "requires_confirmation": argument.requires_confirmation,
+            "can_record": argument.can_record,
+            "blocked_reason": argument.blocked_reason,
+            "recorded": None,
+        }
+
+        if not argument.can_record:
+            return view
+        # The confirmation gate. A loosening change that has not been confirmed
+        # returns the consequence and stops — nothing is written, so the
+        # operator cannot accept a cost they were not shown.
+        if argument.requires_confirmation and not bool(payload.get("confirm")):
+            return view
+
+        record = build_request(
+            argument,
+            reason=str(payload.get("reason", "")),
+            # The conversation with the Armorer, as the browser holds it. An
+            # argument the operator won is a fact worth keeping, and so is one
+            # they lost; the objection is stored in its own column either way,
+            # so an empty transcript costs context and never the record.
+            transcript=[
+                {"role": str(t.get("role", "")), "text": str(t.get("text", ""))}
+                for t in payload.get("transcript") or []
+            ],
+            rules_path=resolved_rules_path,
+        )
+        _requests().record(record)
+        view["recorded"] = {
+            "id": record.id,
+            "diff": record.diff,
+            "commit_message": commit_message(record),
+            "apply_command": record.apply_command,
+        }
+        return view
+
+    def _equity_reading() -> float | None:
+        """Equity if the poller has read, and `None` if it has not.
+
+        Never a default. Every money figure the settings agent states is
+        computed against this, so an assumed $100,000 would put a number that
+        looks like a measurement in front of an operator deciding what to risk.
+        """
+        snapshot = resolved_poller.latest()
+        return snapshot.account.equity_usd if snapshot and snapshot.account else None
 
     @app.get("/chat", response_class=HTMLResponse)
     def chat_view() -> str:
@@ -548,7 +730,7 @@ def build_app(
 
     @app.post("/chat", response_class=JSONResponse)
     def chat(payload: dict[str, Any]) -> dict[str, Any]:
-        """Ask Hermes a question. The one non-GET route in this application.
+        """Ask Hermes a question.
 
         The dashboard was read-only and a test enforced it. That changed
         deliberately, not incidentally, so the reasoning belongs here:
@@ -598,15 +780,37 @@ def build_app(
         # account agent rather than erroring, because the worst case of getting
         # this wrong is the wrong voice, and refusing the question would be a
         # larger failure than answering it plainly.
+        # `KNOWN_SOULS` rather than a literal set repeated here: a soul added to
+        # `souls/` and forgotten at this call site is a character nobody can
+        # select, and there is now more than one page selecting one.
         requested = str(payload.get("soul", YODA)).lower()
-        soul = load_soul(requested if requested in {YODA, GROGU} else YODA)
+        soul = load_soul(requested if requested in KNOWN_SOULS else YODA)
 
         # The dreamer gets its own instance when there is one. Falling back
         # to the shared bridge keeps the panel working on a box that has not had
         # the second Hermes installed; the page it is embedded in states that
         # this is what is happening, so the fallback is disclosed rather than
         # silent.
+        #
+        # The Armorer speaks on the shared instance, and that is worth being
+        # explicit about rather than quietly true: it has the same MCP reach as
+        # the account agent, including `place_order`, and nothing about the
+        # settings surface changes that. What keeps it away from a limit is not
+        # its soul — `config/` is root-owned so the service account cannot edit
+        # its own limits, and the only thing this surface writes is a request in
+        # a different database.
         answering = dreamer if (soul.name == GROGU and dreamer.available) else bridge
+
+        # The limit table, as FIGURES the agent must not derive. Only the
+        # Armorer gets it: handing the account agent a table of caps it has no
+        # reason to argue about would cost tokens on every question, and
+        # `render_briefing` is the settings agent's own rendering rather than a
+        # general-purpose one.
+        briefing = (
+            render_briefing(resolved_rules, equity_usd=_equity_reading())
+            if soul.name == ARMORER
+            else ""
+        )
 
         # The operator's name reaches the agent only from here, which is
         # behind both the dashboard password and the chat token. The sign-in
@@ -616,6 +820,7 @@ def build_app(
             history,
             soul=soul,
             operator=resolved_env.greeting_name,
+            briefing=briefing,
         )
         return {"ok": reply.ok, "text": reply.text, "error": reply.error}
 

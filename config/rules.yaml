@@ -566,3 +566,39 @@ dreaming:
     prophecy: 365
     vault: 90
     adopted: 90
+
+# Whether the LOOP may act on the position plans it writes, unattended.
+#
+# The operator asked for the trading agent to have control of its own open
+# position — to be able to close it, or pull its stop in, and to have the reason
+# recorded rather than reconstructed later. **That is satisfied with this set to
+# false.** The agent acts through the MCP tools `tighten_stop` and
+# `close_position_with_reason`, in a conversation, with a person present.
+#
+# This switch is about something else, and it is worth being blunt about which:
+# the fifteen-minute decision loop closing a position or moving a stop AT 3AM
+# WITH NOBODY WATCHING. That is a new unattended live execution path. Building
+# the record is not the same decision as arming the trigger, and the trigger is
+# the operator's to throw deliberately — in its own commit, with a reason.
+#
+# What it cannot do, whichever way it is set:
+#
+#   It cannot widen a stop. `position_actions.classify_stop_move` refuses any
+#   move away from entry, on a long or a short, before this flag is consulted.
+#   Widening a stop on an open position increases the loss at unchanged size,
+#   and `RiskGate` never sees a position move — closing and stop moves sit
+#   outside the gated path on purpose, so that a stand-down cannot strand an
+#   open trade. That exemption is only safe for moves that reduce exposure, so
+#   the one move that does not is refused in code rather than discouraged in a
+#   prompt.
+#
+#   It cannot act without a reason. Every move is stored with an actor, a
+#   timestamp, the before and after values and a required non-empty reason; a
+#   blank one is refused at three layers. A stop or a quantity that changed at
+#   the broker with no reason on file is reported as an `unexplained-move`,
+#   which is what stops the record hiding its own failures.
+#
+#   It cannot open anything. Opening exposure is `place_order` and nothing else,
+#   and that still goes through `RiskGate.evaluate` on every path.
+position_actions:
+  enabled: false

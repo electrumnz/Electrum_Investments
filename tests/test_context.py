@@ -14,7 +14,14 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from bot.broker import MockBroker
-from bot.context import build_market_context, fetch_indicators, fetch_market_ticks
+from bot.context import (
+    build_market_context,
+    fetch_indicators,
+    fetch_market_ticks,
+    render_grants,
+)
+from bot.dreaming import Dream, Hop
+from bot.grants import GrantBriefing
 from bot.models import AccountSnapshot, Bar, Tick
 
 START = datetime(2026, 1, 5, tzinfo=UTC)
@@ -374,3 +381,166 @@ def test_the_journalled_stop_is_not_presented_as_the_brokers():
     text = build_market_context(account=account, ticks={}, headlines=[], news_windows=[])
 
     assert "the JOURNAL planned" in text
+
+
+# ---------------------------------------- symbols an adopted dream permits
+#
+# The block that made the permission usable. Until it existed the gate honoured
+# a grant that the model was never told about, so a granted symbol had no quote,
+# no indicators and no chance of being proposed — the feature was wired and
+# inert.
+
+
+def _dream(**kw) -> Dream:
+    base = {
+        "id": 4,
+        "title": "Smelters and power",
+        "seed": "Data centres bid up the same grid aluminium smelters run on.",
+        "chain": [
+            Hop("Smelters buy power on the same interconnect.", True, "grid operator filing"),
+            Hop("Two of the three largest are inside that region.", False, ""),
+        ],
+        "weakest_hop": "that the smelters cannot re-contract elsewhere",
+        "symbols": ["AA"],
+        "asset_class_key": "us_equity",
+    }
+    base.update(kw)
+    return Dream(**base)  # type: ignore[arg-type]
+
+
+def _briefing(**kw) -> GrantBriefing:
+    base = {
+        "symbols": {"AA": "us_equity"},
+        "dream_ids": {"AA": 4},
+        "dreams": (_dream(),),
+        "expires_at": {4: datetime(2026, 8, 1, tzinfo=UTC)},
+    }
+    base.update(kw)
+    return GrantBriefing(**base)  # type: ignore[arg-type]
+
+
+def test_no_grants_renders_no_section(account):
+    """A deployment that does not use dreams pays nothing and reads nothing."""
+    blob = build_market_context(
+        account=account, ticks={}, headlines=[], news_windows=[]
+    )
+
+    assert "adopted dream permits" not in blob
+
+
+def test_a_granted_symbol_reaches_the_prompt_with_its_class_and_its_expiry(account):
+    """A permission rendered without an end reads as permanent, and it is not."""
+    blob = build_market_context(
+        account=account,
+        ticks={},
+        headlines=[],
+        news_windows=[],
+        grants=_briefing(),
+        now=datetime(2026, 7, 1, tzinfo=UTC),
+    )
+
+    assert "AA (us_equity)" in blob
+    assert "permission ends 2026-08-01" in blob
+    assert "31.0 days" in blob
+
+
+def test_the_prompt_says_a_dream_permits_a_symbol_and_does_not_propose_a_position(
+    account,
+):
+    """The operator's rule, stated where the reasoner will read it.
+
+    A dream is a reason the symbol is on the table, never a reason to be in it.
+    Direction, entry, stop and size are still the agent's to justify on its own
+    evidence.
+    """
+    blob = build_market_context(
+        account=account, ticks={}, headlines=[], news_windows=[], grants=_briefing()
+    )
+
+    assert "does NOT propose a position" in blob
+    assert "Direction, entry, stop and size are yours to justify" in blob
+
+
+def test_the_chain_never_appears_without_its_badge_and_its_weakest_hop(account):
+    """**The property that makes shipping the chain tolerable at all.**
+
+    An unqualified causal chain in a prompt reads as established fact, and the
+    whole reason `Hop.checked` exists is that some of those sentences were
+    invented. So the verification badge and the weakest hop are rendered
+    adjacent to the hops and must never be separated from them.
+    """
+    lines = render_grants(_briefing(), now=datetime(2026, 7, 1, tzinfo=UTC))
+
+    heading = next(i for i, line in enumerate(lines) if line.startswith("### Dream 4"))
+    first_hop = next(i for i, line in enumerate(lines) if "hop 1 " in line)
+    weakest = next(i for i, line in enumerate(lines) if "WEAKEST HOP" in line)
+    last_hop = max(i for i, line in enumerate(lines) if "hop " in line and "(" in line)
+
+    assert "PARTIAL" in lines[heading]
+    # Badge above the hops, weakest hop immediately under them. Nothing may be
+    # inserted that separates a hop from either.
+    assert heading < first_hop < weakest
+    assert weakest == last_hop + 1
+    assert "cannot re-contract" in lines[weakest]
+
+
+def test_an_unchecked_hop_is_labelled_as_an_assertion(account):
+    lines = render_grants(_briefing(), now=datetime(2026, 7, 1, tzinfo=UTC))
+    blob = "\n".join(lines)
+
+    assert "hop 2 (UNCHECKED)" in blob
+    assert "1 of 2 hop(s) below are UNCHECKED" in blob
+    assert "assertions, not facts" in blob
+
+
+def test_a_dream_that_named_no_weakest_hop_says_so_rather_than_going_quiet(account):
+    """A silent omission would read as "nothing here could break", which is the
+    opposite of what an unnamed weakest hop means."""
+    lines = render_grants(
+        _briefing(dreams=(_dream(weakest_hop=""),)),
+        now=datetime(2026, 7, 1, tzinfo=UTC),
+    )
+
+    assert any("not named by the dreamer" in line for line in lines)
+
+
+def test_an_unknown_expiry_is_rendered_as_a_reason_for_more_caution(account):
+    """Never as an absent limit. A permission whose end cannot be read is the
+    state to be more careful about, not less."""
+    lines = render_grants(
+        _briefing(dream_ids={}, expires_at={}), now=datetime(2026, 7, 1, tzinfo=UTC)
+    )
+
+    assert any("expiry unknown" in line for line in lines)
+
+
+def test_a_grant_whose_reasoning_could_not_be_read_says_so(account):
+    """Missing record, not an absence of speculation.
+
+    The symbol still stands — the gate has it — and the model is told to judge
+    it on the figures alone rather than left to assume there was no chain.
+    """
+    lines = render_grants(
+        GrantBriefing(symbols={"AA": "us_equity"}),
+        now=datetime(2026, 7, 1, tzinfo=UTC),
+    )
+
+    assert any("could not be read this cycle" in line for line in lines)
+    assert any("NOT an absence of speculation" in line for line in lines)
+
+
+def test_the_grant_block_is_rendered_last(account):
+    """Everything above it is a measurement; this is the one speculative block.
+
+    A model that reads a story before it has seen a figure anchors on the story.
+    """
+    blob = build_market_context(
+        account=account,
+        ticks={},
+        headlines=[],
+        news_windows=[],
+        grants=_briefing(),
+    )
+
+    assert blob.index("adopted dream permits") > blob.index("## Indicators")
+    assert blob.index("adopted dream permits") > blob.index("## Recent headlines")

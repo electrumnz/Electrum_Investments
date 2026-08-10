@@ -217,6 +217,92 @@ def test_malformed_audit_lines_are_reported_rather_than_swallowed(tmp_path):
     assert "unparseable audit line" in " ".join(render(result, now=NOW))
 
 
+def test_the_newest_post_sighting_is_the_newest_LAST_seen(tmp_path):
+    """Ordered lists sort by `first_seen`, so the head of the list is regularly
+    an old story still sitting in the feed. "When did a read last work" is the
+    other question and needs the other field."""
+    view = _view(
+        _cycle(90, posts=["[@a 13:30] old post"]),
+        _cycle(10, posts=["[@a 13:30] old post"]),
+        tmp_path=tmp_path,
+    )
+
+    result = recall(view, now=NOW)
+
+    assert result.social_posts[0].first_seen == NOW - timedelta(minutes=90)
+    assert result.social_last_seen_at == NOW - timedelta(minutes=10)
+
+
+def test_no_posts_at_all_leaves_the_last_sighting_unknown(tmp_path):
+    """`None` rather than a stamp, because the absence is not a reading."""
+    view = _view(_cycle(10, headlines=["something"]), tmp_path=tmp_path)
+
+    assert recall(view, now=NOW).social_last_seen_at is None
+
+
+# ------------------------------------------------------------------ sightings
+# The index a per-cycle surface uses to tell a story it has already shown from
+# one that has just broken.
+
+
+def test_the_index_collapses_repeats_and_keeps_both_ends(tmp_path):
+    from bot.news_history import sightings
+
+    view = _view(
+        _cycle(90, headlines=["Fed holds"]),
+        _cycle(45, headlines=["Fed holds"]),
+        _cycle(10, headlines=["Fed holds", "Chips soften"]),
+        tmp_path=tmp_path,
+    )
+
+    index = sightings(view)
+
+    assert index.headlines["Fed holds"].cycles == 3
+    assert index.headlines["Fed holds"].first_seen == NOW - timedelta(minutes=90)
+    assert index.headlines["Fed holds"].last_seen == NOW - timedelta(minutes=10)
+    assert index.headlines["Chips soften"].cycles == 1
+
+
+def test_the_index_names_its_own_edge(tmp_path):
+    """It knows only about the cycles it was handed, so the oldest of them
+    cannot support a claim that anything in it is new."""
+    from bot.news_history import sightings
+
+    view = _view(
+        _cycle(90, headlines=["a"]), _cycle(10, headlines=["b"]), tmp_path=tmp_path
+    )
+
+    index = sightings(view)
+
+    assert index.oldest_cycle_at == NOW - timedelta(minutes=90)
+    assert index.is_edge(NOW - timedelta(minutes=90)) is True
+    assert index.is_edge(NOW - timedelta(minutes=10)) is False
+
+
+def test_an_empty_index_treats_every_cycle_as_its_edge(tmp_path):
+    """A caller with no index must not be handed a confident "new this cycle"."""
+    from bot.news_history import Sightings
+
+    assert Sightings().is_edge(NOW) is True
+
+
+def test_cycles_with_no_inputs_do_not_enter_the_index(tmp_path):
+    """They have no feeds on file, so they can neither contribute an item nor
+    set the edge to a moment nothing was recorded at."""
+    from bot.news_history import sightings
+
+    view = _view(
+        Decision(timestamp=NOW - timedelta(minutes=200)),
+        _cycle(10, headlines=["only this"]),
+        tmp_path=tmp_path,
+    )
+
+    index = sightings(view)
+
+    assert index.oldest_cycle_at == NOW - timedelta(minutes=10)
+    assert list(index.headlines) == ["only this"]
+
+
 def test_a_naive_timestamp_does_not_crash_the_reader(tmp_path):
     """The log is append-only and read tolerantly; a hand-edited line happens."""
     log = AuditLog(tmp_path)

@@ -28,8 +28,9 @@ from bot.audit import AuditLog
 from bot.claude_client import CallUsage, ClaudeDecision
 from bot.confer import CONFERENCE
 from bot.config import Env, Rules, load_rules
-from bot.dreaming import DreamStore, Vault
+from bot.dreaming import DreamStore, Hop, Vault
 from bot.journal import Journal
+from bot.models import Decision, IndicatorSnapshot, MarketInputs
 
 
 class _StubClaude:
@@ -731,3 +732,176 @@ def test_the_loop_never_confers(monkeypatch, tmp_path):
     used = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
     used |= {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)}
     assert not used & {"run_conference", "Conference", "cmd_confer", "confer"}
+
+
+# --------------------------- the feeds run over the WIDENED symbol set
+#
+# The gate honoured a grant and nothing else did. The prompt listed
+# `rules.allowed_symbols` and the tick, indicator, intraday and news fetches all
+# ran over the same list, so a granted symbol had no quote and no history and a
+# proposal in one would have been dropped before it reached the gate that would
+# have allowed it. These tests are about the ORDERING as much as the set: the
+# grant used to be resolved after the feeds had already run.
+
+
+def _adopt(store: DreamStore, symbol: str = "TSLA") -> int:
+    from bot.dreaming import DREAMER, Dream
+
+    dream_id = store.save(
+        Dream(
+            title="t",
+            seed="s",
+            symbols=[symbol],
+            asset_class_key="us_equity",
+            chain=[Hop("a claim nobody checked", False, "")],
+            weakest_hop="the first hop",
+        )
+    )
+    assert store.move(dream_id, Vault.VAULT, by=DREAMER)
+    assert store.adopt(dream_id, at=datetime.now(UTC)).ok
+    return dream_id
+
+
+def test_a_granted_symbol_is_fetched_a_tick_and_indicators_like_any_other(
+    monkeypatch, tmp_path
+):
+    """**Verified to fail when the feeds are narrowed back to `allowed_symbols`.**
+
+    Without this the permission is unusable: no tick means the loop drops the
+    proposal with `no_tick_for_proposal` before `RiskGate.evaluate` is ever
+    called.
+    """
+    from bot.context import fetch_market_ticks as real_ticks
+
+    seen: list[list[str]] = []
+
+    def _record(broker, symbols):
+        seen.append(list(symbols))
+        return real_ticks(broker, symbols)
+
+    monkeypatch.setattr(main_mod, "fetch_market_ticks", _record)
+    _adopt(DreamStore(tmp_path / "dreams.db"))
+
+    _run_one_cycle(
+        monkeypatch,
+        tmp_path,
+        ClaudeDecision(market_assessment="One dream adopted.", proposals=[]),
+    )
+
+    assert seen, "the tick fetch never ran"
+    assert "TSLA" in seen[0]
+    assert "SPY" in seen[0], "the allowlist must still be fetched alongside it"
+
+
+def test_the_earnings_calendar_is_REBUILT_for_a_granted_symbol_not_mutated(
+    monkeypatch, tmp_path
+):
+    """`FinnhubCalendar` is constructed once with `rules.allowed_symbols`, so the
+    news blackout could never fire for a granted symbol — the gate's logic was
+    fine and its input was narrowed.
+
+    It must be a rebuild rather than an assignment to `.symbols`: the feed caches
+    windows it has already filtered against its symbol list, so mutating the
+    attribute leaves that cache in place, which looks fixed and behaves
+    inconsistently. That is worse than the open gap.
+    """
+    built: list[list[str]] = []
+
+    def _build(env, rules, *, extra_symbols=()):
+        built.append(sorted(set(rules.allowed_symbols) | set(extra_symbols)))
+        return _NoWindows()
+
+    monkeypatch.setattr(main_mod, "build_calendar_feed", _build)
+    _adopt(DreamStore(tmp_path / "dreams.db"))
+
+    _run_one_cycle(
+        monkeypatch,
+        tmp_path,
+        ClaudeDecision(market_assessment="One dream adopted.", proposals=[]),
+    )
+
+    # Built twice: once at loop start on the allowlist, once when the grant
+    # widened the set. The second build is the one that closes the gap.
+    assert len(built) == 2, built
+    assert "TSLA" not in built[0]
+    assert "TSLA" in built[1]
+
+
+class _NoWindows:
+    def upcoming_windows(self, *, lookahead_minutes: int):
+        del lookahead_minutes
+        return []
+
+
+def test_the_granted_symbol_and_its_chain_reach_the_market_context(
+    monkeypatch, tmp_path
+):
+    """A permission the model is never told about is a permission nothing uses.
+
+    And the chain must arrive labelled — badge and weakest hop adjacent — because
+    an unqualified speculative chain in a prompt reads as established fact.
+    """
+    from bot.context import build_market_context as real_context
+
+    contexts: list[str] = []
+
+    def _record(**kwargs):
+        blob = real_context(**kwargs)
+        contexts.append(blob)
+        return blob
+
+    monkeypatch.setattr(main_mod, "build_market_context", _record)
+    _adopt(DreamStore(tmp_path / "dreams.db"))
+
+    _run_one_cycle(
+        monkeypatch,
+        tmp_path,
+        ClaudeDecision(market_assessment="One dream adopted.", proposals=[]),
+    )
+
+    assert contexts
+    blob = contexts[0]
+    assert "TSLA (us_equity)" in blob
+    assert "permission ends" in blob
+    assert "UNVERIFIED" in blob
+    assert "WEAKEST HOP: the first hop" in blob
+    assert "does NOT propose a position" in blob
+
+
+# ------------------------------------------- readings a prophecy is graded on
+
+
+def test_recent_readings_come_back_oldest_first(tmp_path):
+    """`AuditLog.read` is newest-first and `grade_conditions` needs ascending.
+
+    Reversed, every condition would be stamped with the most recent moment it
+    held rather than the moment it became true — which is the whole value of
+    pre-registering a claim.
+    """
+    audit = AuditLog(tmp_path / "audit")
+    for hour, close in ((9, 90.0), (10, 110.0)):
+        audit.record(
+            Decision(
+                timestamp=datetime(2026, 6, 1, hour, tzinfo=UTC),
+                inputs=MarketInputs(readings={"AA": IndicatorSnapshot(close=close)}),
+            )
+        )
+
+    readings = main_mod.recent_readings(audit.read())
+
+    assert [c.at.hour for c in readings] == [9, 10]
+    assert readings[0].readings["AA"].close == 90.0
+
+
+def test_a_cycle_that_recorded_no_numeric_readings_is_skipped(tmp_path):
+    """`MarketInputs.readings` could not be backfilled: a cycle written before it
+    shipped carries prose about figures and no figures. Counting those as
+    cycles-with-no-reading would make `can_grade_anything` claim evidence that is
+    not there."""
+    audit = AuditLog(tmp_path / "audit")
+    audit.record(
+        Decision(timestamp=datetime(2026, 6, 1, 9, tzinfo=UTC), inputs=MarketInputs())
+    )
+    audit.record(Decision(timestamp=datetime(2026, 6, 1, 10, tzinfo=UTC), inputs=None))
+
+    assert main_mod.recent_readings(audit.read()) == []

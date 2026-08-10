@@ -31,8 +31,12 @@ from bot.dreaming import (
     VaultCaps,
     VaultTTLs,
     Verification,
+    carry_forward_grading,
+    grade_conditions,
+    promotion_for,
 )
-from bot.models import OrderProposal, TriggerField, TriggerOp
+from bot.models import IndicatorSnapshot, OrderProposal, TriggerField, TriggerOp
+from bot.triggers import CycleReadings
 
 # ------------------------------------------------- the reason this is allowed
 
@@ -1506,3 +1510,369 @@ def test_a_shelf_is_ordered_by_when_a_dream_ARRIVED_not_when_it_changed(store):
     assert [d.title for d in shelf] == ["offered yesterday", "waiting since March"]
     # Which is what `confer` reverses to get longest-waiting first.
     assert next(d.title for d in reversed(shelf)) == "waiting since March"
+
+
+# ------------------------------------------------------ promotion off the bench
+#
+# The gap that made the whole feature inert. `is_offerable` was defined and
+# never called, nothing moved a dream off the workbench, and `confer` reads only
+# `Vault.VAULT` — so the vault was permanently empty and the conference
+# permanently a no-op. Every test below is about the RULE, because the rule is
+# the decision and the plumbing is not.
+
+
+def _keeper(**kw) -> Dream:
+    """A dream that has reached a keep verdict, with whatever conditions given."""
+    base = {"title": "Smelters and power", "seed": "s", "verdict": DreamVerdict.KEEP}
+    base.update(kw)
+    return Dream(**base)  # type: ignore[arg-type]
+
+
+def _checkable(value: float = 100.0, *, fulfilled: bool = False) -> DreamCondition:
+    return DreamCondition(
+        text="Alcoa closes above 100",
+        symbol="AA",
+        field=TriggerField.CLOSE,
+        op=TriggerOp.ABOVE,
+        value=value,
+        fulfilled=fulfilled,
+    )
+
+
+def test_a_keep_with_a_checkable_condition_becomes_a_prophecy():
+    """The first half of the promotion rule.
+
+    A conclusion plus a pre-registered number is what the prophecy shelf is
+    for — a claim that can later be graded rather than an opinion.
+    """
+    promotion = promotion_for(_keeper(conditions=[_checkable()]))
+
+    assert promotion.to is Vault.PROPHECY
+    assert promotion.moves
+
+
+def test_a_keep_with_every_condition_met_goes_straight_to_the_vault():
+    """The second half: met conditions put a dream in front of the trading agent."""
+    promotion = promotion_for(_keeper(conditions=[_checkable(fulfilled=True)]))
+
+    assert promotion.to is Vault.VAULT
+
+
+def test_a_keep_with_no_conditions_at_all_stays_on_the_workbench():
+    """**The one that must never regress.**
+
+    `all([])` is True, so an empty condition list read as "all conditions met"
+    would put every dream that reached a conclusion straight into the vault
+    claiming to have been proven. `has_conditions` and `all_conditions_met` are
+    separate questions precisely so an ABSENCE of evidence cannot look like
+    satisfied evidence — the same rule as an empty chain reading UNVERIFIED.
+    """
+    bare = _keeper()
+
+    assert bare.has_conditions is False
+    assert bare.all_conditions_met is False
+    assert promotion_for(bare).to is None
+    assert "checkable condition" in promotion_for(bare).reason
+
+
+def test_a_keep_whose_only_condition_is_prose_stays_on_the_workbench():
+    """A conclusion nobody can grade is an opinion.
+
+    The condition is legal and is kept — refusing it would push the dreamer
+    towards inventing a threshold — but it does not buy a place on the prophecy
+    shelf, which exists to hold claims that can be checked.
+    """
+    prose = _keeper(conditions=[DreamCondition(text="the spread normalises")])
+
+    assert prose.has_conditions is True
+    assert promotion_for(prose).to is None
+
+
+@pytest.mark.parametrize(
+    "verdict", [None, DreamVerdict.PARK, DreamVerdict.DROP]
+)
+def test_only_a_keep_is_ever_promoted(verdict):
+    """A dream still running, parked or broken reaches nobody."""
+    dream = Dream(
+        title="t", seed="s", verdict=verdict, conditions=[_checkable(fulfilled=True)]
+    )
+
+    assert promotion_for(dream).to is None
+
+
+@pytest.mark.parametrize("shelf", [Vault.VAULT, Vault.ADOPTED, Vault.ARCHIVE])
+def test_promotion_never_moves_a_dream_off_the_other_shelves(shelf):
+    """The vault is where promotion ends, adoption is the trading agent's, and
+    the archive is deliberate. An automatic rule that pulled a dream back out of
+    the archive would resurrect ideas somebody put down on purpose."""
+    dream = _keeper(vault=shelf, conditions=[_checkable(fulfilled=True)])
+
+    assert promotion_for(dream).to is None
+
+
+def test_a_prophecy_with_unmet_conditions_is_not_moved_again():
+    """It is already on the right shelf.
+
+    Returning PROPHECY here would be refused as ALREADY_THERE, and a caller that
+    retried would reset `vault_entered_at` on every pass — so nothing would ever
+    age out of the shelf whose TTL is a year.
+    """
+    prophecy = _keeper(vault=Vault.PROPHECY, conditions=[_checkable()])
+
+    assert promotion_for(prophecy).to is None
+    assert "Already a prophecy" in promotion_for(prophecy).reason
+
+
+def test_a_prophecy_whose_conditions_have_fired_is_promoted_to_the_vault():
+    prophecy = _keeper(vault=Vault.PROPHECY, conditions=[_checkable(fulfilled=True)])
+
+    assert promotion_for(prophecy).to is Vault.VAULT
+
+
+def test_one_unmet_condition_holds_the_whole_dream_back():
+    """Every condition, not a majority."""
+    dream = _keeper(
+        conditions=[
+            _checkable(fulfilled=True),
+            DreamCondition(text="the harvest report lands", symbol="AA",
+                           field=TriggerField.CLOSE, op=TriggerOp.BELOW, value=50.0),
+        ]
+    )
+
+    assert promotion_for(dream).to is Vault.PROPHECY
+
+
+# ------------------------------------------------------------- the store method
+
+
+def test_promote_walks_a_dream_from_the_bench_to_the_vault(store):
+    """The whole ladder, through the store rather than through the pure rule."""
+    dream_id = store.save(_keeper(conditions=[_checkable()]))
+
+    first = store.promote(dream_id)
+    assert first.ok and first.moved_to is Vault.PROPHECY
+
+    # Nothing moves while the condition is unmet, and the refusal is ordinary.
+    again = store.promote(dream_id)
+    assert not again.ok
+    assert MoveRefusal.NOT_PROMOTABLE in again.refusals
+
+    fired = store.get(dream_id)
+    assert fired is not None
+    fired.conditions = [_checkable(fulfilled=True)]
+    store.save(fired)
+
+    second = store.promote(dream_id)
+    assert second.ok and second.moved_to is Vault.VAULT
+    assert [d.id for d in store.in_vault(Vault.VAULT)] == [dream_id]
+
+
+def test_promote_is_idempotent_and_does_not_reset_the_expiry_clock(store):
+    """Safe to call on every dream on every run, which is how it is called."""
+    dream_id = store.save(_keeper(conditions=[_checkable()]))
+    store.promote(dream_id, at=datetime(2026, 5, 1, tzinfo=UTC))
+    entered = store.get(dream_id).vault_entered_at
+
+    store.promote(dream_id, at=datetime(2026, 6, 1, tzinfo=UTC))
+
+    assert store.get(dream_id).vault_entered_at == entered
+
+
+def test_promote_respects_the_shelf_cap(store):
+    """A full shelf refuses and says so; it does not raise and does not overflow."""
+    caps = VaultCaps(prophecy=1)
+    first = store.save(_keeper(conditions=[_checkable()]))
+    second = store.save(_keeper(conditions=[_checkable()]))
+
+    assert store.promote(first, caps=caps).ok
+    refused = store.promote(second, caps=caps)
+
+    assert not refused.ok
+    assert MoveRefusal.FULL in refused.refusals
+
+
+def test_promote_reports_a_missing_dream_rather_than_raising(store):
+    result = store.promote(9999)
+
+    assert not result.ok
+    assert MoveRefusal.NOT_FOUND in result.refusals
+
+
+# ------------------------------------------------------- grading the conditions
+
+
+def _cycle(at: datetime, close: float, symbol: str = "AA") -> CycleReadings:
+    return CycleReadings(at=at, readings={symbol: IndicatorSnapshot(close=close)})
+
+
+def test_a_condition_fires_on_the_first_reading_that_meets_it():
+    """The first, not the latest.
+
+    Stamped with the most recent moment it held rather than the moment it became
+    true, a prophecy would report as having fired days after it did.
+    """
+    dream = _keeper(conditions=[_checkable(value=100.0)])
+    later = [
+        _cycle(datetime(2026, 6, 1, tzinfo=UTC), 95.0),
+        _cycle(datetime(2026, 6, 2, tzinfo=UTC), 101.0),
+        _cycle(datetime(2026, 6, 3, tzinfo=UTC), 110.0),
+    ]
+
+    grading = grade_conditions(dream, later)
+
+    assert grading.changed
+    assert grading.conditions[0].fulfilled
+    assert grading.conditions[0].fulfilled_at == datetime(2026, 6, 2, tzinfo=UTC)
+    assert "101" in grading.conditions[0].note
+
+
+def test_a_condition_no_reading_reaches_stays_unmet():
+    dream = _keeper(conditions=[_checkable(value=100.0)])
+
+    grading = grade_conditions(dream, [_cycle(datetime(2026, 6, 1, tzinfo=UTC), 95.0)])
+
+    assert not grading.changed
+    assert grading.conditions[0].fulfilled is False
+
+
+def test_a_missing_figure_is_not_a_failed_condition():
+    """`holds` answers None for an unavailable reading, and None is not False.
+
+    A symbol whose bars could not supply the field has not failed a test against
+    it — the `IndicatorSnapshot` keeps `None` rather than a zero for exactly this
+    reason, and a zero close would fire every `below` condition ever written.
+    """
+    dream = _keeper(conditions=[_checkable(value=100.0)])
+    blank = CycleReadings(
+        at=datetime(2026, 6, 2, tzinfo=UTC), readings={"AA": IndicatorSnapshot()}
+    )
+
+    grading = grade_conditions(dream, [blank])
+
+    assert not grading.changed
+    assert grading.cycles_checked == 1
+
+
+def test_a_condition_with_no_symbol_is_counted_as_ungradeable_not_as_unmet():
+    """A triple with no subject is a comparison with nothing to look up.
+
+    Counted rather than dropped, the same as `watches_with_prose_only`: a
+    prophecy nobody can grade is the interesting failure, and an invisible one
+    looks exactly like patience.
+    """
+    dream = _keeper(
+        conditions=[
+            DreamCondition(
+                text="close above 100",
+                field=TriggerField.CLOSE,
+                op=TriggerOp.ABOVE,
+                value=100.0,
+            )
+        ]
+    )
+
+    grading = grade_conditions(dream, [_cycle(datetime(2026, 6, 2, tzinfo=UTC), 500.0)])
+
+    assert grading.ungradeable == 1
+    assert not grading.changed
+
+
+def test_grading_never_unfires_a_condition_that_already_held():
+    """The claim was that the figure would REACH a level, not stay there."""
+    dream = _keeper(conditions=[_checkable(value=100.0, fulfilled=True)])
+
+    grading = grade_conditions(dream, [_cycle(datetime(2026, 6, 2, tzinfo=UTC), 10.0)])
+
+    assert grading.conditions[0].fulfilled is True
+    assert not grading.changed
+
+
+def test_no_recorded_cycles_is_not_evidence_that_nothing_fired():
+    """`can_grade_anything`, the same distinction as `has_cycles`."""
+    grading = grade_conditions(_keeper(conditions=[_checkable()]), [])
+
+    assert grading.can_grade_anything is False
+    assert grade_conditions(
+        _keeper(conditions=[_checkable()]),
+        [_cycle(datetime(2026, 6, 2, tzinfo=UTC), 1.0)],
+    ).can_grade_anything is True
+
+
+def test_the_store_writes_back_what_fired_without_touching_the_shelf_clock(store):
+    """A condition firing is not the dream entering its shelf again."""
+    dream_id = store.save(_keeper(vault=Vault.PROPHECY, conditions=[_checkable()]))
+    entered = store.get(dream_id).vault_entered_at
+
+    grading = store.grade(
+        dream_id, [_cycle(datetime(2026, 6, 2, tzinfo=UTC), 150.0)]
+    )
+
+    assert grading.changed
+    reloaded = store.get(dream_id)
+    assert reloaded is not None
+    assert reloaded.conditions[0].fulfilled is True
+    assert reloaded.all_conditions_met is True
+    assert reloaded.vault_entered_at == entered
+
+
+# --------------------------------------------- keeping a grade across a restate
+
+
+def test_a_restated_condition_keeps_the_grade_it_already_earned():
+    """Wiping it would make the vault unreachable.
+
+    A later dream step may return the whole condition list again. Taken as
+    written, every `fulfilled` flag would reset, `all_conditions_met` could never
+    be true two steps running, and the dream would be re-checked forever against
+    readings that had already fired it.
+    """
+    was = [_checkable(value=100.0, fulfilled=True)]
+    restated = [
+        DreamCondition(
+            text="Alcoa finally clears the hundred handle",  # reworded
+            symbol="AA",
+            field=TriggerField.CLOSE,
+            op=TriggerOp.ABOVE,
+            value=100.0,  # same claim
+        )
+    ]
+
+    carried = carry_forward_grading(was, restated)
+
+    assert carried[0].fulfilled is True
+    assert carried[0].text == "Alcoa finally clears the hundred handle"
+
+
+def test_moving_the_threshold_starts_a_new_claim_ungraded():
+    """Inheriting the old verdict would be back-dating a prediction.
+
+    A number changed after the fact is exactly what pre-registering one exists
+    to prevent, so it is a NEW condition and starts unfulfilled.
+    """
+    was = [_checkable(value=100.0, fulfilled=True)]
+    moved = [_checkable(value=80.0)]
+
+    assert carry_forward_grading(was, moved)[0].fulfilled is False
+
+
+def test_a_condition_symbol_survives_the_round_trip(store):
+    dream_id = store.save(_keeper(conditions=[_checkable()]))
+
+    reloaded = store.get(dream_id)
+
+    assert reloaded is not None
+    assert reloaded.conditions[0].symbol == "AA"
+    assert reloaded.conditions[0].is_gradeable is True
+
+
+def test_a_condition_written_before_symbols_existed_reads_as_ungradeable():
+    """The store is JSON in a TEXT column, so this needed no migration — but a
+    row from before the field shipped genuinely does not say whose figure it is,
+    and inventing one would be the confident wrong value this repo refuses."""
+    old = DreamCondition.from_row(
+        {"text": "close above 100", "field": "close", "op": "above", "value": 100.0}
+    )
+
+    assert old.symbol == ""
+    assert old.is_checkable is True  # still promotes to the prophecy shelf
+    assert old.is_gradeable is False  # but nothing can settle it

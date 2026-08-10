@@ -25,6 +25,8 @@ from .models import (
     AssetClass,
     Direction,
     ExecutionMode,
+    PositionAction,
+    PositionActionRecord,
     StandDownState,
     Trade,
     TradeOutcome,
@@ -63,12 +65,63 @@ CREATE TABLE IF NOT EXISTS trades (
     -- Listed here so a FRESH journal is built with it, and added to an existing
     -- one by `_add_dream_id_column`. Both halves are needed: `CREATE TABLE IF
     -- NOT EXISTS` is a no-op on the table already on the droplet.
-    dream_id          INTEGER
+    dream_id          INTEGER,
+    -- The stop actually in force, once it is no longer the one the position was
+    -- sized against. NULL means it has never moved. `planned_stop` above stays
+    -- the sizing figure so R keeps meaning what it meant at entry — see
+    -- `Trade.current_stop`. Added to an existing table by
+    -- `_add_current_stop_column`, for the same reason `dream_id` needs one.
+    current_stop      REAL
 );
 
 CREATE INDEX IF NOT EXISTS idx_trades_open   ON trades (exit_time);
 CREATE INDEX IF NOT EXISTS idx_trades_symbol ON trades (symbol);
 CREATE INDEX IF NOT EXISTS idx_trades_entry  ON trades (entry_time);
+
+-- Every intentional move on an OPEN position, with the reason it was made.
+--
+-- A NEW TABLE needs no migration and that is worth stating rather than leaving
+-- somebody to work out: `CREATE TABLE IF NOT EXISTS` is a no-op only on a table
+-- that ALREADY EXISTS, so this statement does reach the database on the
+-- droplet and does create the table there. The trap that has bitten this
+-- repository twice is editing an existing table's definition, which is why
+-- `current_stop` above gets a migration and this does not.
+--
+-- Append-only by convention: nothing here updates or deletes a row. The whole
+-- value of the record is that it cannot be tidied afterwards, which is the same
+-- argument the JSONL audit log rests on.
+--
+-- `reason` is NOT NULL and is refused when blank at two layers above this. The
+-- absence of a reason is what the Board's `unexplained-move` tag exists to
+-- show, so a row carrying an empty one would silence the tag while explaining
+-- nothing.
+CREATE TABLE IF NOT EXISTS position_actions (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    -- NULL for a move on a position the journal has never seen. Absent, never
+    -- zero; the same fact as a symbol in `symbols_with_unknown_risk`.
+    trade_id        INTEGER,
+    symbol          TEXT    NOT NULL,
+    action          TEXT    NOT NULL,
+    actor           TEXT    NOT NULL,
+    at              TEXT    NOT NULL,
+    reason          TEXT    NOT NULL,
+    before_stop     REAL,
+    after_stop      REAL,
+    before_qty      REAL,
+    after_qty       REAL,
+    -- Alpaca REPLACES a stop leg rather than editing it, so this is the id of
+    -- the NEW order and not the one that was resting before the move.
+    broker_order_id TEXT,
+    -- Whether the move reached the broker at all. 0 is an ordinary state —
+    -- Alpaca accepts no bracket on crypto, so a crypto stop has always been a
+    -- journal figure — and it is stored because "the stop moved" and "the stop
+    -- moved at the broker" are different claims.
+    reached_broker  INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS idx_position_actions_symbol ON position_actions (symbol);
+CREATE INDEX IF NOT EXISTS idx_position_actions_at     ON position_actions (at);
+CREATE INDEX IF NOT EXISTS idx_position_actions_trade  ON position_actions (trade_id);
 
 -- Single row, id enforced to 1. Small enough that a row-per-change history
 -- would be noise; changes worth auditing land in the JSONL log instead.
@@ -201,6 +254,54 @@ def _add_dream_id_column(conn: sqlite3.Connection) -> None:
     conn.execute("ALTER TABLE trades ADD COLUMN dream_id INTEGER")
 
 
+def _add_current_stop_column(conn: sqlite3.Connection) -> None:
+    """Give a `trades` table that predates stop moves its `current_stop` column.
+
+    **The third time this exact migration has been needed, and the reason it is
+    needed a third time is unchanged.** `CREATE TABLE IF NOT EXISTS` does
+    nothing to a table that already exists, so adding `current_stop` to `SCHEMA`
+    changes what a fresh journal gets and nothing whatever about
+    `data/journal.db` on the droplet — the file holding the one live position.
+    The suite cannot see that gap on its own: every other test here builds its
+    journal from scratch in a `tmp_path` and therefore always gets the new
+    shape. That is how 866 green tests once sat over a database that could not
+    store the row the models had just been changed to allow, found by placing a
+    real order and watching the journal write fail AFTER the broker call.
+
+    Three properties, the same three the two migrations above establish:
+
+    - **One statement, so there is no half-migrated state.** SQLite's
+      `ALTER TABLE ... ADD COLUMN` is atomic on its own, and nothing is dropped,
+      so there is no table rebuild to tear.
+    - **Additive only.** A nullable column with no default touches no existing
+      row, and NULL is exactly the right answer for every trade already open:
+      none of their stops has been moved, so the stop in force is still the stop
+      they were sized against. `Trade.effective_stop` reads it that way.
+    - **Idempotent and cheap.** It runs on every open rather than behind a
+      version flag, because a version flag is one more piece of bookkeeping that
+      can be wrong. `PRAGMA table_info` is a lookup, so a correct database pays
+      one query and stops.
+
+    Any future change to `SCHEMA` needs a migration beside it and a test that
+    starts from the old shape. The suite will not warn you.
+    """
+    columns = {str(c["name"]) for c in conn.execute("PRAGMA table_info(trades)")}
+    if not columns:  # pragma: no cover - SCHEMA has just created the table
+        return
+    if "current_stop" in columns:
+        return
+
+    log.warning(
+        "journal_migrating_current_stop",
+        detail=(
+            "This journal predates recorded stop moves. Adding the current_stop "
+            "column in place; no existing row is modified, and NULL is correct "
+            "for every position whose stop has never been moved."
+        ),
+    )
+    conn.execute("ALTER TABLE trades ADD COLUMN current_stop REAL")
+
+
 class Journal:
     def __init__(self, path: Path = DEFAULT_DB_PATH) -> None:
         self._path = path
@@ -215,6 +316,7 @@ class Journal:
             # written against.
             _drop_planned_target_not_null(conn)
             _add_dream_id_column(conn)
+            _add_current_stop_column(conn)
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
@@ -310,14 +412,19 @@ class Journal:
         return self._query("SELECT * FROM trades WHERE exit_time IS NULL ORDER BY entry_time")
 
     def open_risk_usd(self) -> float:
-        """Combined planned risk across every open trade.
+        """Combined risk IN FORCE across every open trade.
 
         Feeds `AccountSnapshot.open_risk_usd`, which the total-risk cap counts
         against. Alpaca cannot supply this — it holds stop-losses as separate
         orders, not as attributes of a position — so the journal is the only
-        place that knows what each open trade was designed to lose.
+        place that knows what each open trade stands to lose.
+
+        `current_risk_usd` rather than `planned_risk_usd`, because the cap is a
+        statement about what the stops would cost if they filled, and a stop
+        that has been tightened would cost less. The two are identical for every
+        trade whose stop has never moved, which is all of them until one is.
         """
-        return sum(t.planned_risk_usd for t in self.open_trades())
+        return sum(t.current_risk_usd for t in self.open_trades())
 
     def open_trade_for(self, symbol: str) -> Trade | None:
         rows = self._query(
@@ -409,6 +516,153 @@ class Journal:
             # open, so a `Journal` that exists has this column. A row written
             # before grants existed carries NULL, which is the right answer.
             dream_id=row["dream_id"],
+            # Same again. NULL means the stop has never moved, so the stop in
+            # force is still `planned_stop` — which `effective_stop` answers.
+            current_stop=row["current_stop"],
+        )
+
+    # --------------------------------------------------- position actions
+    #
+    # The record of every intentional move on a position already open, and the
+    # reason it was made. `record_exit` takes a price, a time and a realised
+    # figure, so stop-hit, target-hit, closed-by-hand and expiry are
+    # indistinguishable afterwards; this captures the reason at the moment of
+    # the move, which is the only moment anybody knows it.
+
+    def record_position_action(self, action: PositionActionRecord) -> int:
+        """Store one move. Returns its id. **A blank reason is refused here too.**
+
+        `PositionActionRecord` already refuses one, so this is a second guard on
+        the same rule rather than the only one. It is worth the duplication: the
+        absence of a reason is precisely what the Board's `unexplained-move`
+        state exists to make visible, so a row with an empty reason would be an
+        explained move that explains nothing — and it would silence the tag
+        while doing it, which is worse than never having recorded the move at
+        all.
+        """
+        if not action.reason.strip():
+            raise ValueError(
+                f"a position action on {action.symbol} needs a reason. A move "
+                "with no reason recorded is indistinguishable from a move "
+                "nobody made deliberately, which is the state the "
+                "unexplained-move tag exists to report."
+            )
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """
+                INSERT INTO position_actions (
+                    trade_id, symbol, action, actor, at, reason,
+                    before_stop, after_stop, before_qty, after_qty,
+                    broker_order_id, reached_broker
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+                """,
+                (
+                    action.trade_id,
+                    action.symbol,
+                    action.action.value,
+                    action.actor,
+                    _iso(action.at),
+                    action.reason,
+                    action.before_stop,
+                    action.after_stop,
+                    action.before_qty,
+                    action.after_qty,
+                    action.broker_order_id,
+                    1 if action.reached_broker else 0,
+                ),
+            )
+            return int(cursor.lastrowid or 0)
+
+    def record_stop_move(self, action: PositionActionRecord) -> int:
+        """Move a trade's stop AND record why, in one transaction.
+
+        Two writes that must not come apart. Updating the trade without the
+        record produces exactly the state this feature exists to expose — a
+        stop that changed with no reason on file — and writing the record
+        without the update leaves the caps counting a stop that is no longer
+        there. One connection, one commit, so the pair is atomic.
+
+        The trade row is only touched when `trade_id` and `after_stop` are both
+        present. A move on a position the journal has never seen is still worth
+        recording; there is simply no row to update.
+        """
+        if not action.reason.strip():
+            raise ValueError(
+                f"a stop move on {action.symbol} needs a reason; nothing was "
+                "written."
+            )
+        with self._connect() as conn:
+            if action.trade_id is not None and action.after_stop is not None:
+                conn.execute(
+                    "UPDATE trades SET current_stop = ? WHERE id = ? AND exit_time IS NULL",
+                    (action.after_stop, action.trade_id),
+                )
+            cursor = conn.execute(
+                """
+                INSERT INTO position_actions (
+                    trade_id, symbol, action, actor, at, reason,
+                    before_stop, after_stop, before_qty, after_qty,
+                    broker_order_id, reached_broker
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+                """,
+                (
+                    action.trade_id,
+                    action.symbol,
+                    action.action.value,
+                    action.actor,
+                    _iso(action.at),
+                    action.reason,
+                    action.before_stop,
+                    action.after_stop,
+                    action.before_qty,
+                    action.after_qty,
+                    action.broker_order_id,
+                    1 if action.reached_broker else 0,
+                ),
+            )
+            return int(cursor.lastrowid or 0)
+
+    def position_actions(
+        self, *, symbol: str | None = None, limit: int | None = None
+    ) -> list[PositionActionRecord]:
+        """Recorded moves, NEWEST FIRST.
+
+        Newest first on purpose, and it is the ordering `closed_trades` gets
+        wrong: that query sorts ascending before its LIMIT, so a limited call
+        drops the newest rows while leaving the earliest bucket full. A limited
+        read of an action log has to be the most recent moves or it answers a
+        question nobody asked.
+        """
+        sql = "SELECT * FROM position_actions"
+        params: list[Any] = []
+        if symbol:
+            sql += " WHERE symbol = ?"
+            params.append(symbol)
+        sql += " ORDER BY at DESC, id DESC"
+        if limit:
+            sql += f" LIMIT {int(limit)}"
+        with self._connect() as conn:
+            rows = conn.execute(sql, tuple(params)).fetchall()
+        return [self._to_action(r) for r in rows]
+
+    @staticmethod
+    def _to_action(row: sqlite3.Row) -> PositionActionRecord:
+        at = _dt(row["at"])
+        assert at is not None  # NOT NULL in schema
+        return PositionActionRecord(
+            id=row["id"],
+            trade_id=row["trade_id"],
+            symbol=row["symbol"],
+            action=PositionAction(row["action"]),
+            actor=row["actor"],
+            at=at,
+            reason=row["reason"],
+            before_stop=row["before_stop"],
+            after_stop=row["after_stop"],
+            before_qty=row["before_qty"],
+            after_qty=row["after_qty"],
+            broker_order_id=row["broker_order_id"],
+            reached_broker=bool(row["reached_broker"]),
         )
 
     # --------------------------------------------------------- stand-down

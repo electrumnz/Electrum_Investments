@@ -247,17 +247,23 @@ def test_untracked_position_warning(client, journal, tmp_path, dreams):
 # ---------------------------------------------------------------- read-only
 
 
-def test_the_write_routes_are_exactly_the_two_that_were_decided_on(client):
+def test_the_write_routes_are_exactly_the_three_that_were_decided_on(client):
     """The dashboard was wholly read-only and this test enforced it.
 
-    It has been widened twice, each time deliberately and each time by editing
-    this set rather than loosening the assertion: `POST /chat` when the agent
-    panel landed, and `POST /login` when the operator chose to expose the
-    dashboard publicly. Anything else appearing here means a write route
-    arrived without anyone deciding it should.
+    It has been widened three times now, each time deliberately and each time by
+    editing this set rather than loosening the assertion: `POST /chat` when the
+    agent panel landed, `POST /login` when the operator chose to expose the
+    dashboard publicly, and `POST /settings/request` when the settings agent
+    did. Anything else appearing here means a write route arrived without
+    anyone deciding it should.
 
-    Neither of these writes to the journal or reaches an order path. `/login`
-    mints a session; `/chat` is gated by its own separate token on top.
+    None of the three writes to the journal or reaches an order path. `/login`
+    mints a session; `/chat` is gated by its own separate token on top; and
+    `/settings/request` records a change REQUEST in
+    `data/settings_requests.db` and cannot touch `config/rules.yaml` — that
+    file is root-owned on the box precisely so the service account cannot edit
+    its own limits, and applying a request is `electrum-bot settings-apply`,
+    run as root by a person.
     """
     app = client.app
     writes = {
@@ -269,6 +275,7 @@ def test_the_write_routes_are_exactly_the_two_that_were_decided_on(client):
     assert writes == {
         ("/chat", "POST"),
         ("/login", "POST"),
+        ("/settings/request", "POST"),
     }, f"unexpected write routes: {writes}"
 
 
@@ -334,7 +341,13 @@ def test_chat_page_says_what_its_news_actually_is():
 
 def test_settings_shows_the_limits_without_offering_to_change_them(client):
     """A settings screen that could widen a limit would be used to widen one
-    during a losing run, which is exactly when the limit is doing its job."""
+    during a losing run, which is exactly when the limit is doing its job.
+
+    With the forge OFF — no `DASHBOARD_CHAT_TOKEN`, which is this fixture and is
+    the default everywhere — the page is exactly what it always was: not one
+    control of any kind. The settings agent is a decision somebody makes, not
+    something a deploy switches on.
+    """
     body = client.get("/settings").text
 
     assert "Total open" in body
@@ -399,6 +412,79 @@ def test_settings_shows_trading_days_beside_the_session_hours(client):
 
     assert "Trading days" in body
     assert "Mon, Tue, Wed, Thu, Fri" in body
+
+
+def test_settings_reports_the_x_feed_as_off_rather_than_broken(client):
+    """Off is the NORMAL state. Reading timelines needs a paid X tier — there
+    has been no free read tier since 2026-02-06 — so a deployment without one
+    is fully functional and must not be shown a fault."""
+    body = client.get("/settings").text
+
+    assert "X posts" in body
+    assert "social.enabled is false" in body
+    assert "fully functional" in body
+    # Configuration is on file whether or not the feed runs, so the numbers a
+    # subscription decision needs are visible before there is a subscription.
+    assert "Cache TTL" in body
+    assert "600s" in body
+
+
+def test_settings_never_claims_the_x_feed_is_healthy_when_nothing_was_read():
+    """No cycles on file is not "nothing failed". Same rule as `has_cycles`."""
+    state = render.social_state(load_rules(), _env(), None)
+    card = render._social_card(state, window_hours=24)
+
+    assert state.degraded is None
+    # Not "no failed fetch", which is the answer a `False` default would give.
+    assert "not known" in card
+    assert "no failed fetch" not in card
+    assert any("only of how it is configured" in c for c in state.caveats())
+
+
+def test_settings_separates_an_unconfigured_x_feed_from_a_failed_one():
+    """Three states, and only the third is a fault."""
+    from bot.news_history import NewsRecall
+
+    rules = load_rules()
+    off = render.social_state(rules, _env(), NewsRecall(cycles_read=1))
+    assert off.status == "off"
+
+    enabled = rules.model_copy(
+        update={"social": rules.social.model_copy(update={
+            "enabled": True, "accounts": ["realDonaldTrump"]
+        })}
+    )
+    no_token = render.social_state(enabled, _env(), NewsRecall(cycles_read=1))
+    assert no_token.status == "no token"
+    assert "X_BEARER_TOKEN is unset" in no_token.headline()
+
+    env = _env()
+    env.x_bearer_token = "a-token"
+    broken = render.social_state(
+        enabled, env, NewsRecall(cycles_read=1, social_degraded=True)
+    )
+    assert broken.status == "degraded"
+    assert "not evidence of a quiet morning" in broken.headline()
+
+
+def test_settings_does_not_read_no_posts_as_a_failed_fetch():
+    """A watched account with nothing to say and a token that expired produce
+    the same absence in the record. Only one of them is a fault."""
+    from bot.news_history import NewsRecall
+
+    rules = load_rules()
+    enabled = rules.model_copy(
+        update={"social": rules.social.model_copy(update={
+            "enabled": True, "accounts": ["realDonaldTrump"]
+        })}
+    )
+    env = _env()
+    env.x_bearer_token = "a-token"
+
+    state = render.social_state(enabled, env, NewsRecall(cycles_read=4))
+
+    assert state.status == "on"
+    assert any("not evidence that the fetch failed" in c for c in state.caveats())
 
 
 def test_settings_never_renders_a_credential(tmp_path, journal, dreams):
@@ -808,6 +894,181 @@ def test_a_degraded_social_feed_is_not_shown_as_a_quiet_morning(audited):
     assert "not that nothing was posted" in body
 
 
+# -------------------------------------------------- the feeds, inside a cycle
+# The headlines and the posts belong to the cycle they informed rather than to
+# a feed page of their own. This is the only surface a rejected proposal exists
+# on, so the story and the decision it produced have to be readable together.
+
+
+def _feed_cycle(minutes_ago: int, **inputs: object) -> Decision:
+    """One cycle, with an explicit age so provenance can be asserted."""
+    return Decision(
+        timestamp=datetime(2026, 5, 4, 15, 0, tzinfo=UTC) - timedelta(minutes=minutes_ago),
+        inputs=MarketInputs(**inputs),  # type: ignore[arg-type]
+    )
+
+
+def test_posts_render_ahead_of_headlines_as_they_do_in_the_prompt(audited):
+    """By the time a headline carries the story the gap has already opened, so
+    reading them in the other order inverts what makes the feed worth having."""
+    log, client = audited
+    log.record(
+        _decision(
+            inputs=MarketInputs(
+                headlines=["Wire story about steel"],
+                social_posts=["[@realDonaldTrump 14:31] Tariffs on steel"],
+            )
+        )
+    )
+
+    body = client.get("/decisions").text
+
+    assert body.index("Tariffs on steel") < body.index("Wire story about steel")
+
+
+def test_a_cycle_that_saw_no_headlines_says_so_rather_than_rendering_nothing(audited):
+    """An absent block and an empty one read identically. Only one is a reading."""
+    log, client = audited
+    log.record(_decision(inputs=MarketInputs()))
+
+    body = client.get("/decisions").text
+
+    assert "no headlines this cycle" in body
+    assert "no posts this cycle" in body
+
+
+def test_an_empty_post_list_does_not_claim_the_feed_was_even_running(audited):
+    """`MarketInputs` records no posts and no feed identically, so the page
+    must not read the first as evidence of the second."""
+    log, client = audited
+    log.record(_decision(inputs=MarketInputs()))
+
+    body = client.get("/decisions").text
+
+    assert "an unconfigured feed and a quiet one look identical" in body
+
+
+def test_a_headline_already_on_file_is_not_presented_as_new(audited):
+    """The 30-minute cache puts one story in front of the model three cycles
+    running. Three fresh sightings would be one story called news three times."""
+    log, client = audited
+    # Three cycles so the oldest is the edge and the newest can claim nothing.
+    log.record(_feed_cycle(90, headlines=["Fed holds rates steady"]))
+    log.record(_feed_cycle(45, headlines=["Fed holds rates steady"]))
+    log.record(_feed_cycle(15, headlines=["Fed holds rates steady", "Chip orders soften"]))
+
+    body = client.get("/decisions").text
+
+    # The newest cycle renders first and carries both markers: the repeated
+    # story is on file from 75 minutes earlier, the second one is genuinely new.
+    assert "on file since 13:30 UTC" in body
+    assert "1h 15m before this cycle" in body
+    assert "new this cycle" in body
+    # The legend is on the page ONCE rather than on every cycle. It carries what
+    # the terse marker cannot: what the count is over, and why an item repeats.
+    assert body.count("already on file was in front of the model") == 1
+
+
+def test_the_oldest_cycle_read_never_claims_an_item_is_new(audited):
+    """It cannot know. The index is built from what was read off disk, so an
+    item first appearing in the oldest cycle may be far older than that —
+    saying "new" there would be an artefact of where the read stopped."""
+    log, client = audited
+    log.record(_feed_cycle(15, headlines=["Only ever seen once"]))
+
+    body = client.get("/decisions").text
+
+    assert "oldest cycle read &mdash; may be older" in body
+    assert "new this cycle" not in body
+
+
+def test_a_cycle_with_no_inputs_is_a_gap_in_the_record_not_a_quiet_cycle(audited):
+    """The audit log is append-only and never migrated, so a line written
+    before `MarketInputs` existed has no feeds at all. Rendering nothing made
+    that indistinguishable from a cycle that saw nothing."""
+    log, client = audited
+    log.record(_decision())  # no inputs whatever
+
+    body = client.get("/decisions").text
+
+    assert "predates input recording" in body
+    assert "gap in the record rather than a cycle that saw nothing" in body
+
+
+def test_a_partial_list_beside_a_failed_fetch_is_labelled_partial(audited):
+    """Degraded with items is not degraded with none: the list is readable and
+    it is still incomplete, and only saying one of those would mislead."""
+    log, client = audited
+    log.record(
+        _decision(
+            inputs=MarketInputs(
+                social_posts=["[@federalreserve 14:02] Statement"], social_degraded=True
+            )
+        )
+    )
+
+    body = client.get("/decisions").text
+
+    assert "Statement" in body
+    assert "This list is INCOMPLETE" in body
+
+
+def test_a_warning_colour_is_not_cancelled_by_the_class_beside_it():
+    """`class="note alert"` renders PEWTER, not amber, and nothing says so.
+
+    Both are single-class rules and `.note` is declared after `.alert`, so at
+    equal specificity the later one wins and the warning colour is silently
+    lost. Measured in Chromium at rgb(139,150,164) where amber was intended:
+    valid CSS, no error, the text still reads — it just stops looking like a
+    warning, which is the only job it has. Same family as the `.pill.seed`
+    collision and the `.rung.gate` one.
+
+    The fix is `.alert` on an inner element, and this is what keeps it there.
+    """
+    import re
+
+    css = re.sub(r"/\*.*?\*/", "", render.STYLES, flags=re.S)
+    # The collision is real: assert the ordering that causes it, so that a
+    # future reorder of the stylesheet retires this test honestly rather than
+    # leaving it passing for a reason that has gone away.
+    assert css.index(".alert{") < css.index(".note{")
+
+    for name, markup in (
+        ("settings", render.settings_page(load_rules(), _env(), chat_enabled=False)),
+        (
+            # Degraded WITH items, which is the branch that carries the
+            # "this list is incomplete" warning rather than replacing the list.
+            "decisions",
+            render._read(
+                _entry_for(
+                    _decision(
+                        inputs=MarketInputs(social_posts=["p"], social_degraded=True)
+                    )
+                )
+            ),
+        ),
+    ):
+        assert "INCOMPLETE" in markup or "X posts" in markup, name
+        assert 'class="note alert"' not in markup, name
+        assert 'class="alert note"' not in markup, name
+
+
+def test_the_feeds_stay_behind_the_cycles_own_disclosure(audited):
+    """The Decisions page measured 269 KB and 57,574px tall for forty cycles.
+    Everything added here sits inside `What it read`, which is a `<details>`
+    inside the cycle's own `<details>`, so it costs no layout until opened."""
+    log, client = audited
+    log.record(_decision(inputs=MarketInputs(headlines=["Fed holds rates steady"])))
+
+    body = client.get("/decisions").text
+    step = body[body.index("What it read") :]
+
+    # The headline is inside the step, and the step opens with a `<summary>`.
+    assert "Fed holds rates steady" in step
+    opener = body.rindex("<details", 0, body.index("What it read"))
+    assert " open" not in body[opener : body.index("What it read")]
+
+
 # ------------------------------------------------------------------ dreaming
 
 
@@ -867,7 +1128,7 @@ def test_the_dreamer_uses_its_own_instance_when_one_is_installed(journal, dreams
 
     asked: list[str] = []
 
-    def _ask(self, message, history=None, soul=None, operator=""):
+    def _ask(self, message, history=None, soul=None, operator="", briefing=""):
         asked.append(str(self.binary))
         return chat_mod.ChatReply(text="ok")
 
@@ -896,7 +1157,7 @@ def test_the_dreamer_falls_back_rather_than_refusing(journal, dreams, monkeypatc
 
     asked: list[str] = []
 
-    def _ask(self, message, history=None, soul=None, operator=""):
+    def _ask(self, message, history=None, soul=None, operator="", briefing=""):
         asked.append(str(self.binary))
         return chat_mod.ChatReply(text="ok")
 
@@ -1145,7 +1406,13 @@ def test_settings_shows_the_dream_schedule_without_claiming_it_is_running(client
 
 
 def test_settings_still_offers_no_way_to_change_anything(client):
-    """The dreaming card is display only, like every other card here."""
+    """The dreaming card is display only, like every other card here.
+
+    Asserted with the forge off, which is what this fixture is. The controls the
+    forge does add when it is on are pinned separately and by name in
+    `tests/test_settings_agent.py`, so a control appearing here is still a
+    control nobody decided on.
+    """
     body = client.get("/settings").text.lower()
 
     for control in ("<form", "<input", "<select", "contenteditable", "<button"):
