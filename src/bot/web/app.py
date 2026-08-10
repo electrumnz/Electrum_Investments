@@ -234,6 +234,7 @@ def build_app(
             ),
             orders,
             prices,
+            env=resolved_env,
         )
         return _page("Board", "/", body)
 
@@ -372,7 +373,15 @@ def build_app(
         # silent.
         answering = dreamer if (soul.name == GROGU and dreamer.available) else bridge
 
-        reply = answering.ask(str(payload.get("message", "")), history, soul=soul)
+        # The operator's name reaches the agent only from here, which is
+        # behind both the dashboard password and the chat token. The sign-in
+        # page never carries it. See `Env.operator_name`.
+        reply = answering.ask(
+            str(payload.get("message", "")),
+            history,
+            soul=soul,
+            operator=resolved_env.formal_name,
+        )
         return {"ok": reply.ok, "text": reply.text, "error": reply.error}
 
     @app.get("/healthz")

@@ -26,6 +26,7 @@ from __future__ import annotations
 import html
 import json
 from datetime import UTC, datetime
+from zoneinfo import ZoneInfo
 
 from ..audit import AuditView, DecisionEntry
 from ..config import DAY_NAMES, Env, Rules
@@ -443,6 +444,22 @@ nav a:hover::after,nav a[aria-current=page]::after{transform:scaleX(1)}
 @keyframes fx-ear-l{0%,100%{transform:rotate(-14deg)}50%{transform:rotate(-19deg)}}
 @keyframes fx-ear-r{0%,100%{transform:rotate(14deg)}50%{transform:rotate(19deg)}}
 
+/* The chain, drawn as one. Scrolls rather than wraps: a wrapped chain stops
+   reading as a sequence, which is the only thing the drawing is for. */
+.chainviz{display:block;height:62px;width:100%;max-width:100%;overflow:visible;
+  margin:0 0 .5rem}
+.chainviz .node{fill:var(--ink);stroke-width:1.5}
+.chainviz .node.checked{stroke:var(--patina)}
+.chainviz .node.open{stroke:var(--amber)}
+.chainviz .idx{fill:var(--pewter);font-family:var(--mono);font-size:11px;
+  text-anchor:middle}
+.chainviz .link{stroke-width:1.5}
+.chainviz .link.solid{stroke:var(--patina)}
+.chainviz .link.broken{stroke:var(--amber);opacity:.75}
+.chainviz .gapmark{fill:var(--amber);font-family:var(--mono);font-size:12px;
+  text-anchor:middle}
+.chain-scroll{overflow-x:auto;overflow-y:hidden}
+
 /* Thinking: the pad spins up and the eyes widen. Driven by a class the chat
    panel adds while a request is in flight, so it means "a call is open" and
    never "an idea is forming". */
@@ -534,6 +551,110 @@ nav a:hover::after,nav a[aria-current=page]::after{transform:scaleX(1)}
   background:rgba(22,27,34,.5)}
 .worked h3{margin-bottom:.5rem}
 
+/* ================================================== motion that MEANS things ==
+   Everything above this line is decoration: a starfield, a jump, panels that
+   materialise. It sets a mood and carries no information, which is why it is
+   built to be removable without loss.
+
+   Everything BELOW it is the opposite. These animations are the only way some
+   state reaches the operator at all, and each one is tied to a specific fact:
+
+     .tick        a figure changed, and which way
+     .stale       what you are reading is older than it looks
+     .fresh       this arrived since you last looked
+     .attn        this needs a decision
+     .link        whether the deck is actually connected
+
+   The rule that follows from that: a motion carrying information must still
+   have a non-motion channel. Reduced motion switches the ANIMATION off and
+   leaves the colour, the border and the text, because someone who asked for
+   less movement did not ask to be told less. Every rule here is paired.
+   ========================================================================== */
+
+/* ------------------------------------------------------------- a figure ticks */
+/* The flash is brief and the direction is the message. A green flash on a
+   falling number would be worse than no flash, so the class is set from the
+   sign of the delta and never from the fact that something happened. */
+.tick{transition:color .18s var(--ease)}
+.tick.up{animation:fx-tick-up 1100ms var(--ease)}
+.tick.down{animation:fx-tick-down 1100ms var(--ease)}
+@keyframes fx-tick-up{
+  0%{color:var(--gain);text-shadow:0 0 14px rgba(95,167,149,.55)}
+  100%{color:inherit;text-shadow:none}}
+@keyframes fx-tick-down{
+  0%{color:var(--loss);text-shadow:0 0 14px rgba(192,112,123,.5)}
+  100%{color:inherit;text-shadow:none}}
+
+/* The arrow is the non-motion channel. It persists after the flash has gone, so
+   a reader who arrived late, or who has motion switched off, still sees which
+   way the last move went. */
+.tick .dir{font-size:.7em;margin-left:.35em;opacity:.75}
+.tick.up .dir{color:var(--gain)}
+.tick.down .dir{color:var(--loss)}
+
+/* ------------------------------------------------------- waiting for a figure */
+/* Not a spinner. A spinner says "busy" and says nothing about what is coming,
+   so it reads the same whether the value is a second away or never arriving.
+   This holds the SHAPE of the number that is coming, at the width it will be,
+   so nothing reflows when it lands. */
+.pending{display:inline-block;min-width:5ch;border-radius:2px;
+  background:linear-gradient(90deg,rgba(41,49,60,.35) 25%,rgba(111,211,232,.16) 50%,
+    rgba(41,49,60,.35) 75%);
+  background-size:220% 100%;animation:fx-wait 1.4s ease-in-out infinite;
+  color:transparent;user-select:none}
+@keyframes fx-wait{0%{background-position:120% 0}100%{background-position:-20% 0}}
+
+/* ------------------------------------------------------------------- staleness */
+/* A figure that stopped updating must not keep looking current. This is the
+   `is_stale` rule from tailnet.py applied to pixels: a stale reading is
+   reported as stale rather than quietly presented as fresh. */
+.stale{opacity:.55}
+.stale::after{content:" stale";font-family:var(--mono);font-size:.6rem;
+  letter-spacing:.12em;text-transform:uppercase;color:var(--amber);
+  margin-left:.4rem;opacity:1}
+
+/* ------------------------------------------------ new since you were last here */
+/* The operator opens this two or three times a day, so "what changed" is the
+   real question. A left edge rather than a badge: it marks a run of rows at a
+   glance without adding a thing to read in each one. */
+.fresh{position:relative}
+.fresh::before{content:"";position:absolute;left:-1px;top:-1px;bottom:-1px;
+  width:2px;background:var(--holo);box-shadow:0 0 10px rgba(111,211,232,.5)}
+.fresh-tag{font-family:var(--mono);font-size:.5625rem;letter-spacing:.14em;
+  text-transform:uppercase;color:var(--holo);margin-left:.5rem}
+
+/* ------------------------------------------------------------ needs a decision */
+/* Reserved for things that need a person, and used sparingly on purpose. An
+   interface where several things pulse has taught its reader to ignore pulsing. */
+.attn{animation:fx-attn 2.4s ease-in-out infinite}
+@keyframes fx-attn{
+  0%,100%{box-shadow:0 0 0 0 rgba(192,138,62,.35)}
+  50%{box-shadow:0 0 0 5px rgba(192,138,62,0)}}
+
+/* ------------------------------------------------------------- the link itself */
+/* The reactor dot used to pulse unconditionally, which implied "live" on a page
+   that was frozen the moment it rendered. Now it reports the connection, and
+   the three states are visually distinct rather than three shades of the same
+   thing: lit and breathing, amber and slower, grey and still. */
+.live i{transition:background .3s var(--ease),box-shadow .3s var(--ease)}
+.live.link-live i{background:var(--holo)}
+.live.link-retry i{background:var(--amber);animation-duration:1.1s}
+.live.link-down i{background:var(--pewter);animation:none;box-shadow:none}
+.live .link-label{font-size:.5625rem;letter-spacing:.14em;margin-left:.4rem;
+  color:var(--pewter)}
+
+/* ------------------------------------------------- reduced motion, paired rules */
+/* The information survives; only the movement goes. A stale figure is still
+   marked stale, a fresh row still has its edge, a risen figure still shows its
+   arrow and holds its colour instead of flashing and fading. */
+@media (prefers-reduced-motion:reduce){
+  .tick.up{color:var(--gain)}
+  .tick.down{color:var(--loss)}
+  .pending{animation:none;background:rgba(41,49,60,.5)}
+  .attn{box-shadow:0 0 0 2px rgba(192,138,62,.45)}
+  .live.link-retry i{background:var(--amber)}
+}
+
 /* ------------------------------------------------------------------- gate */
 /* The sign-in screen, and the one the brief actually asked for: this is where
    the jump starts. It still reveals nothing about the account behind it — see
@@ -596,6 +717,10 @@ nav a:hover::after,nav a[aria-current=page]::after{transform:scaleX(1)}
 .fx-boot .sig{font-family:var(--serif);font-size:1.125rem;letter-spacing:.16em;
   color:var(--bone);margin-bottom:1.25rem;text-align:center}
 .fx-boot .sig span{color:var(--pewter)}
+/* The operator's name is the one warm thing on an otherwise clinical readout,
+   so it gets the accent rather than the muted treatment the wordmark's second
+   half takes. */
+.fx-boot .sig span.who{color:var(--holo);letter-spacing:.1em}
 .fx-boot ul{list-style:none;margin:0;padding:0}
 .fx-boot li{display:flex;gap:.75rem;align-items:baseline;color:var(--pewter);
   padding:.2rem 0;opacity:0}
@@ -1000,11 +1125,21 @@ SCRIPT = """
      not read — on a dashboard whose entire argument is that figures are
      measured rather than plausible. The execution mode is the single live
      value here and it is rendered by the server into a data attribute. */
+  /* The name reaches innerHTML, so it is escaped at the point of use rather
+     than trusted because the server escaped it into the attribute. Two cheap
+     escapes beat one assumption about who wrote the DOM. */
+  function esc(t) {
+    var d = document.createElement('div');
+    d.textContent = t;
+    return d.innerHTML;
+  }
+
   function boot(then) {
     if (store.get('mudhorn.booted') === '1') { then(); return; }
     store.set('mudhorn.booted', '1');
 
     var mode = body.getAttribute('data-mode') || 'PAPER';
+    var who = (body.getAttribute('data-operator') || '').trim();
     var lines = [
       ['Nav computer', 'READY'],
       ['Deck projection', 'ONLINE'],
@@ -1019,7 +1154,13 @@ SCRIPT = """
     for (var i = 0; i < lines.length; i++) {
       items += '<li><span>' + lines[i][0] + '</span><b>' + lines[i][1] + '</b></li>';
     }
-    el.innerHTML = '<div class="panel"><div class="sig">MUDHORN <span>CAPITAL</span></div>' +
+    /* The welcome is the one personal line here, and it can only ever be
+       built behind the login: the sign-in page is rendered without a
+       data-operator attribute at all. See the note on `Env.operator_name`. */
+    var sig = who
+      ? '<div class="sig">Welcome back, <span class="who">' + esc(who) + '</span></div>'
+      : '<div class="sig">MUDHORN <span>CAPITAL</span></div>';
+    el.innerHTML = '<div class="panel">' + sig +
                    '<div class="rule"><i></i></div><ul>' + items + '</ul></div>';
     body.appendChild(el);
     warpTo(0.25);
@@ -1197,7 +1338,7 @@ def shell(
 <meta name="robots" content="noindex">
 <link rel="icon" href="{FAVICON}">
 <title>{_e(title)} &middot; Mudhorn Capital</title><style>{STYLES}</style></head>
-<body data-mode="{_e(mode)}">
+<body data-mode="{_e(mode)}" data-operator="{_e(env.formal_name)}">
 <header class="bar"><div class="wrap">
   <a class="brand" href="/">{MARK} MUDHORN <span class="thin">CAPITAL</span></a>
   <nav>{nav}</nav>
@@ -1210,6 +1351,49 @@ def shell(
 {datetime.now(UTC).strftime('%Y-%m-%d %H:%M')} UTC.</footer>
 <script>{SCRIPT}</script>
 </body></html>"""
+
+
+# The operator's own timezone, for greetings ONLY.
+#
+# Everything else in this repository reasons in UTC on purpose — sessions, every
+# journal timestamp, every figure rendered on these pages — and none of that
+# changes. But "Good morning" is a statement about the reader's day, not about
+# the market's, and computing it in UTC would wish a New Zealander good evening
+# over breakfast. The conversion is confined to this one function and touches no
+# figure.
+OPERATOR_TZ = "Pacific/Auckland"
+
+
+def greeting(env: Env, *, now: datetime | None = None) -> str:
+    """A time-aware greeting, or an empty string when nobody said who to greet.
+
+    Empty is a real answer here. A deployment with no `OPERATOR_NAME` is a
+    supported configuration, and a greeting reading "Good morning, " would be
+    worse than none.
+    """
+    name = _e(env.greeting_name)
+    if not name:
+        return ""
+
+    stamp = now or datetime.now(UTC)
+    try:
+        local = stamp.astimezone(ZoneInfo(OPERATOR_TZ))
+    except Exception:
+        # A box without a timezone database still gets a greeting, just a
+        # less-well-judged one. Losing the salutation entirely because tzdata is
+        # missing would be a poor trade.
+        local = stamp
+
+    hour = local.hour
+    if hour < 5:
+        word = "You are up late"
+    elif hour < 12:
+        word = "Good morning"
+    elif hour < 18:
+        word = "Good afternoon"
+    else:
+        word = "Good evening"
+    return f"{word}, {name}"
 
 
 def head(eyebrow: str, title: str, asof: str = "", lede: str = "") -> str:
@@ -1320,7 +1504,14 @@ def board(
     consecutive_losses: int,
     orders: list[WorkingOrder] | None = None,
     prices: dict[str, float] | None = None,
+    env: Env | None = None,
 ) -> str:
+    """The account at a glance.
+
+    `env` is optional and only supplies the operator's name for the greeting, so
+    every existing caller keeps working and a deployment that never set
+    OPERATOR_NAME renders exactly as before.
+    """
     equity = account.equity_usd
     open_risk_pct = (account.open_risk_usd / equity * 100) if equity else 0.0
     largest = max(
@@ -1386,7 +1577,7 @@ def board(
     )
 
     return (
-        head("Account", "Board", f"as at {_when(datetime.now(UTC))}")
+        head(greeting(env) if env else "Account", "Board", f"as at {_when(datetime.now(UTC))}")
         + f'<div class="grid g4">{tiles}</div>'
         + '<section class="block"><h2>Equity</h2>'
         + _curve(curve)
@@ -2515,6 +2706,80 @@ def _hop(hop: Hop) -> str:
     return f'<li class="{state}">{_e(hop.claim)}{source}</li>'
 
 
+def _chain_diagram(dream: Dream) -> str:
+    """The chain drawn as a chain, so a reader can SEE where it breaks.
+
+    The ordered list below this says the same thing in words and is what anyone
+    actually reads. This is the shape of the argument at a glance, and it earns
+    its place by making one property visible that prose buries: a causal chain
+    is only as strong as its weakest link, and an unverified hop is a break in
+    it rather than a slightly weaker section.
+
+    So a connector into an unchecked hop is drawn BROKEN. Not thinner, not a
+    different colour with the same continuity — actually discontinuous, because
+    that is what an unverified link does to an argument. A reader who takes
+    nothing else from this page should take away that the line stops.
+
+    `role="img"` with a spoken summary, because everything here is also stated
+    in the list underneath and a screen reader should get the summary rather
+    than thirty positioned circles.
+    """
+    hops = dream.chain
+    if not hops:
+        return ""
+
+    # Geometry in a fixed viewBox, scaled by CSS. Nodes are evenly spaced and
+    # the whole thing is one row: a chain that wrapped would stop reading as a
+    # sequence, which is the only thing this drawing is for.
+    node_r = 13.0
+    gap = 104.0
+    left = 26.0
+    width = left * 2 + gap * max(len(hops) - 1, 1)
+    height = 62.0
+
+    parts: list[str] = []
+    for i, hop in enumerate(hops):
+        x = left + gap * i
+        if i:
+            # The connector belongs to the hop it arrives AT: it is that hop's
+            # claim that is or is not established.
+            prev_x = left + gap * (i - 1)
+            x1 = prev_x + node_r + 5
+            x2 = x - node_r - 5
+            if hop.checked:
+                parts.append(
+                    f'<line class="link solid" x1="{x1:.0f}" y1="26" '
+                    f'x2="{x2:.0f}" y2="26"/>'
+                )
+            else:
+                # Drawn as two stubs with a visible gap, rather than a dashed
+                # line. A dash still reads as continuous; a gap does not.
+                mid = (x1 + x2) / 2
+                parts.append(
+                    f'<line class="link broken" x1="{x1:.0f}" y1="26" '
+                    f'x2="{mid - 9:.0f}" y2="26"/>'
+                    f'<line class="link broken" x1="{mid + 9:.0f}" y1="26" '
+                    f'x2="{x2:.0f}" y2="26"/>'
+                    f'<text class="gapmark" x="{mid:.0f}" y="30">?</text>'
+                )
+        state = "checked" if hop.checked else "open"
+        parts.append(
+            f'<circle class="node {state}" cx="{x:.0f}" cy="26" r="{node_r:.0f}"/>'
+            f'<text class="idx" x="{x:.0f}" y="31">{i + 1}</text>'
+        )
+
+    checked = sum(1 for h in hops if h.checked)
+    label = (
+        f"A chain of {len(hops)} hops, of which {checked} are checked. "
+        "A broken connector marks a hop nobody has verified."
+    )
+    return (
+        f'<svg class="chainviz" viewBox="0 0 {width:.0f} {height:.0f}" '
+        f'preserveAspectRatio="xMinYMid meet" role="img" '
+        f'aria-label="{_e(label)}">' + "".join(parts) + "</svg>"
+    )
+
+
 def _dream(dream: Dream) -> str:
     """One mini-project, read top to bottom as an argument.
 
@@ -2547,6 +2812,7 @@ def _dream(dream: Dream) -> str:
     )
 
     if dream.chain:
+        out += _chain_diagram(dream)
         out += '<ol class="hops">' + "".join(_hop(h) for h in dream.chain) + "</ol>"
     else:
         out += '<p class="note">No chain recorded yet. Still a spark.</p>'

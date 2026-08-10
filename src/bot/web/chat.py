@@ -139,6 +139,7 @@ class HermesBridge:
         message: str,
         history: list[tuple[str, str]] | None = None,
         soul: Soul | None = None,
+        operator: str = "",
     ) -> ChatReply:
         """One Hermes turn, optionally in character.
 
@@ -161,7 +162,7 @@ class HermesBridge:
 
         prompt = _with_history(message, history or [])
         if soul is not None and soul.found:
-            prompt = f"{soul.prompt_prefix()}\n{prompt}"
+            prompt = f"{soul.prompt_prefix(operator)}\n{prompt}"
 
         # argv list, never a shell string: the message is untrusted input and
         # this process holds the broker credentials. No shell means no quoting

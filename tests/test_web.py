@@ -835,7 +835,7 @@ def test_the_dreamer_uses_its_own_instance_when_one_is_installed(journal, dreams
 
     asked: list[str] = []
 
-    def _ask(self, message, history=None, soul=None):
+    def _ask(self, message, history=None, soul=None, operator=""):
         asked.append(str(self.binary))
         return chat_mod.ChatReply(text="ok")
 
@@ -864,7 +864,7 @@ def test_the_dreamer_falls_back_rather_than_refusing(journal, dreams, monkeypatc
 
     asked: list[str] = []
 
-    def _ask(self, message, history=None, soul=None):
+    def _ask(self, message, history=None, soul=None, operator=""):
         asked.append(str(self.binary))
         return chat_mod.ChatReply(text="ok")
 

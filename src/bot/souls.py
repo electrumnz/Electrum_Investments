@@ -53,7 +53,7 @@ class Soul:
     def absent(cls, name: str) -> Soul:
         return cls(name=name, text="", found=False)
 
-    def prompt_prefix(self) -> str:
+    def prompt_prefix(self, operator: str = "") -> str:
         """What goes in front of the agent's own instructions.
 
         The framing sentence matters as much as the file. Without it the model
@@ -68,12 +68,24 @@ class Soul:
         """
         if not self.found:
             return ""
+
+        # Who is being spoken to. Empty on a deployment that never set
+        # OPERATOR_NAME, and the sentence is simply omitted rather than
+        # addressing a blank. It reaches the model only from behind the login,
+        # because that is the only place the name is rendered at all.
+        address = (
+            f"You are speaking to {operator.strip()}. Address them by name when "
+            "it is natural to, and never more than once in a reply.\n\n"
+            if operator.strip()
+            else ""
+        )
         return (
             "You have a character, described below. Speak in it.\n\n"
             "It shapes how you say things and never what is true. Figures, "
             "symbols, dates and quantities are quoted exactly as the tools "
             "returned them, and anything you cannot say in character you say "
             "plainly instead.\n\n"
+            f"{address}"
             f"--- begin character: {self.name} ---\n"
             f"{self.text.strip()}\n"
             f"--- end character: {self.name} ---\n"

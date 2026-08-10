@@ -106,6 +106,38 @@ class Env(BaseSettings):
     @property
     def dream_tier(self) -> ClaudeTier:
         return self.dream_claude_tier
+
+    # Who the operator is, for the interface and the two agents to address.
+    #
+    # In the ENVIRONMENT rather than the repository, and empty by default, for
+    # two reasons. A person's name is theirs and does not belong committed to a
+    # public GitHub repo; and every surface that uses it has to work without it,
+    # because a deployment that has not set it is a supported configuration
+    # rather than a broken one.
+    #
+    # **It is only ever rendered behind the login.** The sign-in page reveals
+    # nothing about the account by design — see `render.login_page` — and a name
+    # on it would tell an unauthenticated visitor whose account this is. That is
+    # a small disclosure for paper money and it is still a change to a property
+    # the page is built around, so it does not happen.
+    operator_name: str = Field(default="", alias="OPERATOR_NAME")
+    operator_formal: str = Field(default="", alias="OPERATOR_FORMAL")
+
+    @property
+    def greeting_name(self) -> str:
+        """What to call the operator, or empty when nobody said."""
+        return self.operator_name.strip()
+
+    @property
+    def formal_name(self) -> str:
+        """The more ceremonious form, for the moments that earn it.
+
+        Falls back to the plain name rather than to nothing: a surface that
+        wanted the formal address and got an empty string would render a
+        half-sentence.
+        """
+        return self.operator_formal.strip() or self.greeting_name
+
     decision_interval_seconds: int = Field(default=900, alias="DECISION_INTERVAL_SECONDS")
 
     @property
