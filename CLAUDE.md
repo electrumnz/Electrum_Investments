@@ -1859,17 +1859,98 @@ Arena failure shape with two models instead of one. A day is far slower than a
 price moves, which is the right speed for deciding whether a second-order
 hypothesis is worth acting on.
 
-Five caps. Six turns per exchange, two dreams per run (so twelve model calls at
-most), three exchanges per dream lifetime, and `TEXT_MAX_CHARS` per message.
+Six caps. Six turns per exchange, two dreams per run (so twelve model calls at
+most), `TEXT_MAX_CHARS` per message, and three counts over a dream's life:
+`MAX_EXCHANGES_PER_EPOCH` (3), `MAX_EXCHANGES_LIFETIME` (12), and the change
+gate below.
 
-**The fifth is the one that actually stops them talking forever:** a dream may
-only be conferred again if **something changed** since the last exchange — a
-condition fulfilled, a hop added or checked, an operator note, a vault move.
-A turn limit bounds one conversation and says nothing whatever about having the
-same conversation again tomorrow, politely, at cost, with every other cap still
-holding while they do it. It is the cap most likely to look redundant to
-somebody tidying up, which is why `has_something_changed` says so in its own
-docstring.
+**The change gate is the one that actually stops them talking forever:** a
+dream may only be conferred again if **something changed** since the last
+exchange — a condition fulfilled, a hop added or checked, an operator note, a
+vault move. A turn limit bounds one conversation and says nothing whatever
+about having the same conversation again tomorrow, politely, at cost, with
+every other cap still holding while they do it. It is the cap most likely to
+look redundant to somebody tidying up, which is why `has_something_changed`
+says so in its own docstring.
+
+**The per-dream count is an EPOCH now, not a lifetime, and that was a real
+defect.** It used to be three exchanges and then silence forever, so a dream
+the trader kept declining could never be reconsidered even after the world
+moved under it — which is the opposite of what the change gate exists for. New
+information opens a new epoch and the count starts again; the lifetime cap of
+12 is what keeps that bounded. **"Not until something changes" and "never
+again" are different facts**, so they are different outcomes and the second is
+logged at warning rather than sharing the first's quiet path.
+
+Both halves read one pure `change_signals`, rather than growing a second
+definition of what counts as new — the epoch takes the newest signal, the gate
+filters signals after the last exchange. The comparisons deliberately differ by
+one boundary (`>=` against `>`) and the docstring says why.
+
+**The hand-back is answered separately, on purpose.** `return_to_vault` stamps
+the dream and the marker turn at the same instant, so the change gate
+structurally cannot see it — and loosening that comparison to catch it would
+break the trap that says *the end of an exchange is not itself a change*.
+`Conference._handed_back_since_the_last_offer` reads the fact instead.
+
+### Symbiosis: two or three dreams fuse, and the parents survive
+
+`DreamStore.fuse` writes the child in one transaction; `plan_fusion` is the
+pure merge arithmetic beside it, split out the same way `promotion_for` is
+split from `promote`. The back-reference is **derived** through `children_of`
+rather than stored, for the same reason `Adoption.is_live` is computed: a third
+fact about the same thing is a third fact that can disagree with the other two.
+
+Three properties are load-bearing, and all three make a fusion *weaker* than
+the enthusiasm for it:
+
+- **A fusion is never better sourced than its worse parent.** A shared hop
+  arrives UNCHECKED even where one parent had sourced it, and
+  `verification_ceiling` caps the badge. A link whose sourcing is in dispute
+  must not take the flattering reading; the source stays on the parent.
+- **The child inherits ALL of both parents' conditions**, so fusing makes a
+  dream harder to promote rather than easier. A fusion is not an endorsement.
+- **An adopted parent is refused**, because a live grant points at it. Hand it
+  back first.
+
+A fusion has no `weakest_hop` and no verdict by design. That reads as *nobody
+has attacked this yet*, which is true, and must not be rendered as a gap.
+
+### A chat agent may raise a CONSIDERATION, and may not raise a dream
+
+The operator's rule, and it closes a hole rather than renaming a thing: *"Chat
+agents can't raise Dream, the agent can merely put it to consideration, hence
+the chat log."*
+
+A dream is the first link of a chain that ends in a live trading permission —
+dream → prophecy vault → dream vault → adopted → `grants.resolve_granted_symbols`
+→ a symbol `RiskGate` will now allow that is not in `config/rules.yaml`. A
+conversational surface holding a tool that inserts at the top of that chain
+means a signed-in user can talk a model into the first link. Every gate
+downstream still runs, so no rule breaks today — but **"it cannot create one"
+and "it can create one and the other steps catch it" are different claims, and
+only one is worth making.** Same reasoning that put the dreamer on its own
+Hermes instance with no MCP server.
+
+So `raise_consideration` writes **one audit-log line** and never opens
+`data/dreams.db`. The containment is structural rather than enforced: nothing
+in `dreaming.py` reads the audit log, so there is no code path that turns a
+consideration into a shelf row.
+
+- **It carries no `symbols`, no `asset_class_key` and no hops.** Those three
+  are what make a dream capable of becoming a permission; a consideration
+  holding them would be a dream wearing a different noun. A test asserts the
+  field overlap is empty, in the same shape as
+  `test_a_dream_cannot_describe_an_order`.
+- **The strongest test asserts `dreams.db` DOES NOT EXIST** after one is
+  raised — stronger than asserting an empty shelf, because it proves the store
+  was never opened.
+- **The dreamer decides.** A consideration is a note addressed to it, read on
+  its own run, and it may ignore one. The operator can point at something; the
+  thing that dreams still chooses.
+- **The chat log is the record**, which is what the operator meant by "hence
+  the chat log" — so it surfaces in the transcript and as something awaiting
+  the dreamer, never as a dream that exists.
 
 **The trading agent's side reaches no broker.** `TraderPowers` has exactly two
 public methods — adopt from the vault, hand back with a reason — and a test
