@@ -520,10 +520,12 @@ class ClockFace:
     one wearing a different time zone, which is the single-global-session bug
     the tape carried until now.
 
-    `exchange` empty means no exchange in that zone. Los Angeles is the case:
-    it is on the tape because the operator asked for US east and west, and
-    there is no exchange there. It shows the time and makes no claim about a
-    market, rather than borrowing New York's.
+    `exchange` empty means no exchange in that zone, and such a face shows the
+    time while making no claim about any market. Nothing uses that today —
+    every clock on the strip trades somewhere — but the shape keeps it
+    available, because the alternative when a zone has no exchange is to borrow
+    a neighbour's state, which is how a strip starts asserting a market is open
+    when it is not.
     """
 
     label: str
@@ -533,8 +535,13 @@ class ClockFace:
     #: information on a strip that repeats every ninety seconds — the hour is.
     code: str = ""
     exchange: str = ""
-    opens: time | None = None
-    closes: time | None = None
+    #: The exchange's regular sessions in ITS local time, as (open, close).
+    #: A tuple rather than one pair because Tokyo breaks for lunch — 11:30 to
+    #: 12:30 JST — and a single 09:00-15:30 window would show it trading
+    #: through an hour it is shut. That is a plausible wrong figure on a strip
+    #: whose whole job is orientation, which is the one thing this repository
+    #: refuses to render.
+    sessions: tuple[tuple[time, time], ...] = ()
 
     def at(self, now: datetime) -> datetime:
         return now.astimezone(ZoneInfo(self.zone))
@@ -568,12 +575,13 @@ class ClockFace:
         holiday out is a cosmetic error rather than an order into a shut
         market — and `session_calendar` covers the US case where it matters.
         """
-        if self.opens is None or self.closes is None:
+        if not self.sessions:
             return None
         local = self.at(now)
         if local.weekday() >= 5:
             return False
-        return self.opens <= local.timetz().replace(tzinfo=None) < self.closes
+        clock = local.timetz().replace(tzinfo=None)
+        return any(start <= clock < end for start, end in self.sessions)
 
 
 #: The four the operator asked for, ordered west-to-east from the market out.
@@ -582,18 +590,21 @@ class ClockFace:
 CLOCKS: tuple[ClockFace, ...] = (
     ClockFace(
         "New York", "America/New_York", is_market=True, code="NY",
-        exchange="NYSE", opens=REGULAR_START, closes=REGULAR_END,
+        exchange="NYSE", sessions=((REGULAR_START, REGULAR_END),),
     ),
-    # No exchange on the US west coast. It shows the time and says nothing
-    # about a market, rather than borrowing New York's state four hours early.
-    ClockFace("Los Angeles", "America/Los_Angeles", code="LA"),
+    ClockFace(
+        "Tokyo", "Asia/Tokyo", code="TYO", exchange="TSE",
+        # Two sessions, not one. The lunch break is 11:30-12:30 JST and is
+        # real; the afternoon close moved to 15:30 in November 2024.
+        sessions=((time(9, 0), time(11, 30)), (time(12, 30), time(15, 30))),
+    ),
     ClockFace(
         "Sydney", "Australia/Sydney", code="SYD",
-        exchange="ASX", opens=time(10, 0), closes=time(16, 0),
+        exchange="ASX", sessions=((time(10, 0), time(16, 0)),),
     ),
     ClockFace(
         "Auckland", "Pacific/Auckland", code="AKL",
-        exchange="NZX", opens=time(10, 0), closes=time(16, 45),
+        exchange="NZX", sessions=((time(10, 0), time(16, 45)),),
     ),
 )
 

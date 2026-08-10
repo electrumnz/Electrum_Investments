@@ -1919,11 +1919,44 @@ def test_each_clock_reports_its_own_exchange_not_new_yorks():
     by_label = {f.label: f for f in CLOCKS}
 
     assert by_label["New York"].exchange == "NYSE"
+    assert by_label["Tokyo"].exchange == "TSE"
     assert by_label["Sydney"].exchange == "ASX"
     assert by_label["Auckland"].exchange == "NZX"
-    # No exchange on the US west coast. It shows the time and nothing more.
-    assert by_label["Los Angeles"].exchange == ""
-    assert by_label["Los Angeles"].is_open(datetime(2026, 8, 10, 15, 0, tzinfo=UTC)) is None
+
+
+def test_tokyo_is_shut_over_its_lunch_break():
+    """The reason a face holds a TUPLE of sessions rather than one pair.
+
+    The TSE breaks 11:30-12:30 JST. A single 09:00-15:30 window would paint it
+    open through an hour it is shut — a plausible wrong figure on a strip whose
+    only job is orientation, which is the failure this repository is built to
+    refuse.
+    """
+    from bot.market_clock import CLOCKS
+
+    tokyo = next(f for f in CLOCKS if f.code == "TYO")
+
+    def at_jst(hour: int, minute: int = 0) -> datetime:
+        # 2026-08-11 is a Tuesday. JST is UTC+9, no daylight saving.
+        return datetime(2026, 8, 11, hour - 9, minute, tzinfo=UTC)
+
+    assert tokyo.is_open(at_jst(11, 0)) is True     # morning session
+    assert tokyo.is_open(at_jst(12, 0)) is False    # lunch
+    assert tokyo.is_open(at_jst(13, 0)) is True     # afternoon session
+    assert tokyo.is_open(at_jst(15, 45)) is False   # after the 15:30 close
+
+
+def test_a_face_with_no_exchange_makes_no_claim_about_a_market():
+    """Nothing on the strip uses this today — every clock trades somewhere —
+    but the shape keeps it, because the alternative when a zone has no exchange
+    is to borrow a neighbour's state, which is how a strip starts asserting a
+    market is open when it is not."""
+    from bot.market_clock import ClockFace
+
+    nowhere = ClockFace("Nowhere", "UTC", code="NWH")
+
+    assert nowhere.is_open(datetime(2026, 8, 10, 15, 0, tzinfo=UTC)) is None
+    assert nowhere.state(datetime(2026, 8, 10, 15, 0, tzinfo=UTC)) is None
 
 
 def test_the_exchanges_open_at_their_own_local_hours():
