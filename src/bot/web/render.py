@@ -3455,6 +3455,8 @@ def board(
     else:
         stamp = f"read {_when(read_at)}"
 
+    fixed = _fixed_reading_note(read_at)
+
     return (
         head(
             greeting(env) if env else "Account",
@@ -3469,9 +3471,44 @@ def board(
         + '<section class="block"><h2>Risk against the caps</h2>'
         + f'<div class="grid g2">{risk_cards}</div></section>'
         + '<section class="block"><h2>Open positions</h2>'
+        + fixed
         + _positions(account, open_trades, equity)
         + "</section>"
-        + _working_orders(orders or [], prices or {})
+        + _working_orders(orders or [], prices or {}, fixed_reading=fixed)
+    )
+
+
+def _fixed_reading_note(read_at: datetime | None) -> str:
+    """Which reading a section that does NOT repaint was built from.
+
+    The stamp under the page title is owned by the stream, so after the first
+    message it describes the reading the four TILES are showing. Four elements
+    on the Board carry `data-live`; the positions table, the resting orders, the
+    risk meters and the equity curve are server-rendered and cannot be
+    repainted, because the client may only update a figure the server already
+    put on the page.
+
+    So one timestamp was making a claim about two different readings at once —
+    true of the tiles under it and false of the tables below, with nothing on
+    screen to say which. That is the same failure as `as at <now>` over an
+    overnight snapshot, one layer in: a timestamp that describes the render
+    rather than the reading, arriving through the furniture.
+
+    The fix is not to make the stamp vaguer. Each section that cannot refresh
+    itself carries the reading it was built from, fixed, and says plainly that
+    it will not move until the page is reloaded. It deliberately carries no
+    `data-live-read`: the whole point is that this one does not change.
+    """
+    when = _when(read_at) if read_at else None
+    return (
+        '<p class="note" style="margin-bottom:.6rem">'
+        + (
+            f"Built from the broker reading taken {_e(when)}. "
+            if when
+            else "Built from a broker reading whose time is unknown. "
+        )
+        + "This section does not repaint — the four figures above it do. Reload "
+        "for a newer one.</p>"
     )
 
 
@@ -3530,7 +3567,12 @@ def _order_gap(o: WorkingOrder, price: float) -> float | None:
     return o.distance_to_fill(price)
 
 
-def _working_orders(orders: list[WorkingOrder], prices: dict[str, float]) -> str:
+def _working_orders(
+    orders: list[WorkingOrder],
+    prices: dict[str, float],
+    *,
+    fixed_reading: str = "",
+) -> str:
     """Orders resting at the broker, and how far the market is from them.
 
     Two kinds rest here and they are not the same thing. An entry is a limit
@@ -3544,7 +3586,8 @@ def _working_orders(orders: list[WorkingOrder], prices: dict[str, float]) -> str
     if not orders:
         return (
             '<section class="block"><h2>Pending orders</h2>'
-            '<div class="scroll" role="region" tabindex="0" '
+            + fixed_reading
+            + '<div class="scroll" role="region" tabindex="0" '
             'aria-label="Pending orders"><p class="empty">Nothing resting at '
             "the broker. Every order either filled or was never sent.</p>"
             "</div></section>"
@@ -3611,16 +3654,24 @@ def _working_orders(orders: list[WorkingOrder], prices: dict[str, float]) -> str
 
     return (
         '<section class="block"><h2>Pending orders</h2>'
-        '<div class="scroll"><table><caption>"Needs" is how far the market still '
+        + fixed_reading
+        # The caption is already the sentence that describes this table, so it
+        # is what names the scroll region — `aria-labelledby` rather than an
+        # `aria-label` repeating it, which would be two names to keep in step.
+        + '<div class="scroll" role="region" tabindex="0" '
+        'aria-labelledby="ord-cap"><table>'
+        '<caption id="ord-cap">"Needs" is how far the market still '
         "has to move — to the limit for a resting entry, to the trigger for a "
         "stop leg. A stop leg is the other half of the bracket every entry goes "
         "out as, so one resting here is the hard stop doing its job; a trigger "
         "reading &ldquo;unknown&rdquo; means the broker did not report the level "
         "and it cannot be checked against the journal.</caption>"
-        "<thead><tr><th>Symbol</th><th>Side</th><th>Status</th><th class=r>Qty</th>"
-        "<th class=r>Trigger / limit</th><th class=r>Market</th>"
-        "<th class=r>Needs</th>"
-        f"<th>Submitted</th></tr></thead><tbody>{rows}</tbody></table></div></section>"
+        "<thead><tr><th scope=col>Symbol</th><th scope=col>Side</th>"
+        "<th scope=col>Status</th><th scope=col class=r>Qty</th>"
+        "<th scope=col class=r>Trigger / limit</th><th scope=col class=r>Market</th>"
+        "<th scope=col class=r>Needs</th>"
+        "<th scope=col>Submitted</th></tr></thead>"
+        f"<tbody>{rows}</tbody></table></div></section>"
     )
 
 
@@ -3683,8 +3734,9 @@ def _positions(
 ) -> str:
     if not account.open_positions:
         return (
-            '<div class="scroll"><p class="empty">Nothing open. Most days the '
-            "correct action is none.</p></div>"
+            '<div class="scroll" role="region" tabindex="0" '
+            'aria-label="Open positions"><p class="empty">Nothing open. Most '
+            "days the correct action is none.</p></div>"
         )
 
     by_symbol = {t.symbol: t for t in open_trades}
@@ -3723,12 +3775,17 @@ def _positions(
         )
 
     return (
-        '<div class="scroll"><table><caption>A stop reading "unknown" means the '
+        '<div class="scroll" role="region" tabindex="0" '
+        'aria-labelledby="pos-cap"><table>'
+        '<caption id="pos-cap">A stop reading "unknown" means the '
         "position is held at the broker with no journal entry, so its risk cannot "
         "be counted. That is reported rather than guessed at.</caption>"
-        "<thead><tr><th>Symbol</th><th>Side</th><th class=r>Qty</th>"
-        "<th class=r>Entry</th><th class=r>Now</th><th class=r>Stop</th>"
-        "<th class=r>At risk</th><th class=r>Unrealised</th></tr></thead>"
+        "<thead><tr><th scope=col>Symbol</th><th scope=col>Side</th>"
+        "<th scope=col class=r>Qty</th>"
+        "<th scope=col class=r>Entry</th><th scope=col class=r>Now</th>"
+        "<th scope=col class=r>Stop</th>"
+        "<th scope=col class=r>At risk</th>"
+        "<th scope=col class=r>Unrealised</th></tr></thead>"
         f"<tbody>{''.join(rows)}</tbody></table></div>"
     )
 
@@ -3932,7 +3989,14 @@ def _read(entry: DecisionEntry) -> str:
         )
         parts += (
             '<div class="rung"><span class="lbl">Indicators</span>'
-            '<div class="scroll" style="margin-top:.4rem"><table><tbody>'
+            # Named with an `aria-label` rather than a caption id: this renders
+            # once per cycle and the Decisions page shows forty, so an id would
+            # be forty duplicates of the same one. It sits inside a collapsed
+            # `<details>`, so the tab stop only exists once a reader has opened
+            # the step it belongs to.
+            '<div class="scroll" role="region" tabindex="0" '
+            'aria-label="Indicator readings the model was shown" '
+            'style="margin-top:.4rem"><table><tbody>'
             f"{rows}</tbody></table></div></div>"
         )
 
@@ -4104,10 +4168,14 @@ def trades_page(recent: list[Trade], report: JournalReport) -> str:
         )
 
     body += (
-        '<div class="scroll" style="margin-top:1.5rem"><table>'
-        "<thead><tr><th>Symbol</th><th>Held</th><th class=r>Qty</th>"
-        "<th class=r>Entry</th><th class=r>Stop</th><th class=r>Exit</th>"
-        "<th class=r>At risk</th><th class=r>Fees</th><th class=r>Result</th>"
+        '<div class="scroll" role="region" tabindex="0" '
+        'aria-label="Closed trades" style="margin-top:1.5rem"><table>'
+        "<thead><tr><th scope=col>Symbol</th><th scope=col>Held</th>"
+        "<th scope=col class=r>Qty</th>"
+        "<th scope=col class=r>Entry</th><th scope=col class=r>Stop</th>"
+        "<th scope=col class=r>Exit</th>"
+        "<th scope=col class=r>At risk</th><th scope=col class=r>Fees</th>"
+        "<th scope=col class=r>Result</th>"
         f"</tr></thead><tbody>{''.join(rows)}</tbody></table></div>"
     )
     return body
@@ -4179,9 +4247,14 @@ def analytics_page(report: JournalReport) -> str:
         )
         body += (
             f'<section class="block"><h2>{_e(title)}</h2>'
-            '<div class="scroll"><table><thead><tr><th>Group</th>'
-            "<th class=r>Trades</th><th class=r>Win rate</th><th class=r>Net</th>"
-            "<th>Reading</th>"
+            # Three of these render on one page, so the name carries the
+            # heading — "By strategy", "By asset class", "By weekday" — rather
+            # than three regions all called "Breakdown".
+            f'<div class="scroll" role="region" tabindex="0" '
+            f'aria-label="{_e(title)}"><table><thead><tr><th scope=col>Group</th>'
+            "<th scope=col class=r>Trades</th><th scope=col class=r>Win rate</th>"
+            "<th scope=col class=r>Net</th>"
+            "<th scope=col>Reading</th>"
             f"</tr></thead><tbody>{rows}</tbody></table></div></section>"
         )
     return body

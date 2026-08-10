@@ -18,6 +18,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
+from bot.audit import DecisionEntry
 from bot.config import Env, load_rules
 from bot.dreaming import DreamStore, DreamSummary
 from bot.journal import Journal
@@ -2258,7 +2259,9 @@ def test_the_pending_orders_caption_no_longer_claims_limit_orders_only():
     """It was true when nothing sent a stop to the broker. Every entry is a
     bracket now, so a stop leg always rests there."""
     body = render._working_orders([_order(limit_price=641.20)], {"SPY": 648.02})
-    caption = body[body.index("<caption>") : body.index("</caption>")]
+    # `<caption` rather than `<caption>`: it carries an id now, because it is
+    # what names the scroll region around it via `aria-labelledby`.
+    caption = body[body.index("<caption") : body.index("</caption>")]
 
     assert "stop leg" in caption
     assert "limit orders only" not in (render._working_orders.__doc__ or "")
@@ -2489,3 +2492,378 @@ def test_the_browser_script_parses_as_javascript():
     done = subprocess.run([node, "--check", path], capture_output=True, text=True)
 
     assert done.returncode == 0, done.stderr
+
+
+# --------------------------------------- accessibility and platform integration
+#
+# The section above pins fixes found by driving the deck in a browser. These pin
+# fixes found by MEASURING it — contrast ratios computed rather than eyeballed,
+# and markup checked against what a screen reader or a keyboard actually gets.
+# Same reason for existing: none of it is visible from a rendered page, and a
+# palette edit or one forgotten attribute puts it back in silence.
+
+
+def _relative_luminance(hex_colour: str) -> float:
+    """WCAG 2.1 relative luminance. Six-digit hex only, which is all `:root` has."""
+    raw = hex_colour.lstrip("#")
+    channels = [int(raw[i : i + 2], 16) / 255 for i in (0, 2, 4)]
+    linear = [
+        c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4 for c in channels
+    ]
+    return 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2]
+
+
+def _contrast(a: str, b: str) -> float:
+    la, lb = _relative_luminance(a), _relative_luminance(b)
+    lighter, darker = max(la, lb), min(la, lb)
+    return (lighter + 0.05) / (darker + 0.05)
+
+
+def _token(name: str) -> str:
+    """The value of a `--custom-property` as `:root` actually declares it.
+
+    Read out of `STYLES` rather than restated here, so this measures the
+    stylesheet that ships instead of a copy of it that can drift.
+    """
+    marker = f"--{name}:"
+    start = render.STYLES.index(marker) + len(marker)
+    return render.STYLES[start : render.STYLES.index(";", start)].strip()
+
+
+def test_the_contrast_ratios_that_were_measured_stay_measured():
+    """Three failures found by computing the ratios, not by looking.
+
+    `--rust` at 3.48:1 on graphite was the label colour of the CRITICAL banner —
+    11px uppercase mono at .14em tracking, which is small text needing 4.5:1. The
+    most severe state on the deck had the least readable heading, which is a
+    warning that did not happen. The border keeps `--rust`, because a 3px rail is
+    a non-text boundary and 3:1 is the bar it has to clear.
+
+    An inline link was `--bone` — the body colour — underlined in `--slate` at
+    1.47:1 on ink. Neither channel distinguished it from the prose around it.
+
+    `--pewter` cleared 4.5:1 at 4.81:1, on a formula that does not model reverse
+    polarity and is known to overstate contrast on a dark ground, at 10px. Lifted
+    once rather than auditing the ~40 rules that read it.
+
+    WCAG 2 numbers, deliberately: they are the ones that can be computed
+    deterministically today. APCA is a WCAG 3 draft and is the argument for
+    headroom, not the acceptance test.
+    """
+    ink, graphite = _token("ink"), _token("graphite")
+
+    # Text on the panel ground, so the small-text bar applies: 4.5:1.
+    assert _contrast(_token("rust-text"), graphite) >= 4.5
+    assert _contrast(_token("pewter"), graphite) >= 4.5
+    # The link underline is the only channel saying "link", so it has to clear
+    # the 3:1 that applies to a meaningful non-text mark, and it clears 4.5.
+    assert _contrast(_token("pewter"), ink) >= 4.5
+    # The border rust is a rail, not text. 3:1, and it is allowed to stay where
+    # it is — splitting the token is what let the text half move.
+    assert _contrast(_token("rust"), graphite) >= 3.0
+
+    # The two are different colours, or the split has been undone by a tidy-up.
+    assert _token("rust") != _token("rust-text")
+
+
+def test_the_critical_banner_label_uses_the_text_weight_rust():
+    """The one place the split actually has to land. `--rust` on this element is
+    3.48:1 at 11px; it is the most severe state the deck can show."""
+    assert ".banner.crit b{color:var(--rust-text)}" in render.STYLES
+    # And the border it is paired with keeps the darker one, which is correct
+    # for a 3px rail and is what makes the two tokens worth having.
+    assert ".banner.crit{border-left-color:var(--rust)}" in render.STYLES
+
+
+def test_an_inline_link_is_distinguishable_from_the_prose_around_it():
+    """Body-coloured text with a 1.47:1 underline is not a link by any channel.
+
+    WCAG 1.4.1 failing in the direction where there is no colour difference
+    either, so there was nothing left to fall back on.
+    """
+    rule = next(d for d in _css_blocks("\na") if "text-decoration-color" in d)
+    assert "text-decoration-color:var(--pewter)" in rule
+    assert "text-underline-offset" in rule
+    assert "var(--slate)" not in rule
+
+
+def test_the_document_tells_the_platform_it_is_dark():
+    """`color-scheme` is the only thing that reaches the chrome the platform
+    draws itself: the chat `<textarea>`, the sign-in password field, every
+    scrollbar, `::selection`, and the paint that happens BEFORE this stylesheet
+    applies. Without it a phone on a slow link flashes white and a white input
+    sits inside a graphite panel, with the stylesheet entirely correct."""
+    assert "color-scheme:dark" in render.STYLES
+
+    for markup in (
+        render.shell("Board", "/", "", env=_env()),
+        render.login_page(env=_env()),
+    ):
+        # Paints the browser's own chrome to match the deck.
+        assert '<meta name="theme-color" content="#0B0E12">' in markup
+        # Not a layout preference: this is the precondition for
+        # `env(safe-area-inset-*)` resolving to anything but zero, and without it
+        # the safe-area padding below is dead code on the hardware that needs it.
+        assert "viewport-fit=cover" in markup
+
+    assert "env(safe-area-inset-bottom" in render.STYLES
+    assert "env(safe-area-inset-left" in render.STYLES
+    # iOS inflates text in a rotated viewport, and what it inflates hardest is a
+    # wide table — which is every table here, in columns aligned on purpose.
+    assert "text-size-adjust:100%" in render.STYLES
+
+
+def test_a_horizontal_table_scroll_does_not_drag_the_page_with_it():
+    """The second cause of the operator's "weird scrolling stuff", and a
+    different one from the 1px bracket overflow already fixed.
+
+    A touch drag that reaches the end of a scrolled box CHAINS into the nearest
+    scrollable ancestor, which is the document — so swiping a wide table sideways
+    on a phone walks the whole deck, and pulling inside the chat log bounces the
+    page.
+    """
+    assert any(
+        "overscroll-behavior:contain" in d for d in _css_blocks(".scroll,.chat .log")
+    )
+
+
+# ------------------------------------------------------------ table semantics
+
+
+def _table_markup(journal: Journal) -> list[tuple[str, str]]:
+    """Every piece of markup in the repository that emits a `<th>` or a
+    `.scroll`, named so a failure says which one.
+
+    Built from the render functions directly rather than from a page, because
+    the Board's tables need a broker holding a position and the point here is
+    the markup, not the plumbing.
+    """
+    from bot.metrics import build_report
+    from bot.models import AccountSnapshot, OrderStatus, Position
+
+    account = AccountSnapshot(
+        equity_usd=100_000.0,
+        cash_usd=50_000.0,
+        buying_power_usd=100_000.0,
+        open_positions=[
+            Position(
+                symbol="SPY",
+                direction=Direction.SELL,
+                qty=21,
+                entry_price=773.324285,
+                opened_at=ENTRY,
+                current_price=770.0,
+                unrealised_pnl_usd=69.81,
+            )
+        ],
+    )
+    order = WorkingOrder(
+        order_id="o-1",
+        symbol="SPY",
+        direction=Direction.BUY,
+        qty=21,
+        limit_price=641.20,
+        stop_price=None,
+        order_type="limit",
+        status=OrderStatus.NEW,
+        submitted_at=ENTRY,
+        filled_qty=0.0,
+    )
+
+    _closed_trade(journal, 200.0, minutes=0, mae=-40.0, mfe=300.0)
+    _closed_trade(journal, -100.0, minutes=120)
+    trades = journal.closed_trades()
+    report = build_report(trades)
+
+    inputs = MarketInputs(indicators={"SPY": "close 580.12, sma20 574.30, atr 6.41"})
+    entry = _decision(rationale="Nothing met the conditions.", inputs=inputs)
+
+    return [
+        ("pending orders", render._working_orders([order], {"SPY": 648.02})),
+        ("pending orders, empty", render._working_orders([], {})),
+        ("positions", render._positions(account, trades, 100_000.0)),
+        ("positions, empty", render._positions(
+            account.model_copy(update={"open_positions": []}), [], 100_000.0
+        )),
+        ("trades", render.trades_page(trades, report)),
+        ("analytics", render.analytics_page(report)),
+        ("what it read", render._read(_entry_for(entry))),
+    ]
+
+
+def _entry_for(decision: Decision) -> DecisionEntry:
+    return DecisionEntry(timestamp=decision.timestamp, decision=decision)
+
+
+def test_every_column_header_names_its_scope(journal):
+    """Twenty column headers, zero `scope`, across four `<thead>` blocks.
+
+    On a multi-column financial table that is the difference between hearing
+    "773.32" and hearing "SPY, Entry, 773.32". A `<th>` in a single header row is
+    usually inferred correctly, but inference is not the guarantee, and one of
+    these tables emits a two-column body with no header row at all — so the ones
+    that DO have headers had better say what they head.
+    """
+    import re
+
+    for name, markup in _table_markup(journal):
+        for tag in re.findall(r"<th\b[^>]*>", markup):
+            assert "scope=" in tag, f"{name}: {tag}"
+
+
+def test_every_scroll_region_is_named_and_reachable(journal):
+    """`.scroll` is `overflow-x:auto`, so it is a scroll container — and a
+    keyboard user on Safari or Firefox could not reach one, because neither
+    makes such a container focusable on its own.
+
+    The tab stop is DELIBERATE, and it is not the junk one that came from 1px of
+    phantom bracket overflow: that one had no name and no reason. Whether any
+    given wrapper actually scrolls depends on the viewport, which the server
+    cannot see — the same table scrolls on a phone and does not on the deck — so
+    the stop is unconditional, and every one of them is named.
+    """
+    import re
+
+    seen = 0
+    for name, markup in _table_markup(journal):
+        for tag in re.findall(r'<div class="scroll"[^>]*>', markup):
+            seen += 1
+            assert 'tabindex="0"' in tag, f"{name}: {tag}"
+            assert 'role="region"' in tag, f"{name}: {tag}"
+
+            label = re.search(r'aria-labelledby="([^"]+)"', tag)
+            if label:
+                # The name has to point at something that is actually there, or
+                # the region is anonymous and the tab stop IS junk.
+                assert f'id="{label.group(1)}"' in markup, f"{name}: {tag}"
+            else:
+                assert re.search(r'aria-label="[^"]+"', tag), f"{name}: {tag}"
+
+    assert seen >= 7, "a scroll wrapper stopped being covered by this test"
+
+
+def test_a_right_aligned_cell_gets_tabular_figures_without_being_asked():
+    """The alignment a reader scans a column of money by was held by discipline:
+    every `.r` cell also carries `.num`, which supplies the tabular figures. One
+    forgotten `num` puts a column on proportional digits, the decimal points stop
+    lining up, and nothing anywhere reports it."""
+    assert any("font-variant-numeric:tabular-nums" in d for d in _css_blocks("td.r"))
+
+
+def test_a_coloured_figure_always_carries_its_sign(journal):
+    """Colour is never the only channel, and the sign is the other one.
+
+    `_cls()` puts `pos` or `neg` on a cell and the stylesheet colours it. A cell
+    added with `_cls(...)` and a plain `_money(...)` would be green or red and
+    nothing else — invisible to a colour-blind reader, to a monochrome screenshot
+    and to a screen reader alike.
+
+    The sign is preferred to a CSS pseudo-element arrow deliberately: `content`
+    is announced by several screen readers and lands in copy-paste in some
+    browsers, so an arrow would add a stray glyph to a figure that already has an
+    accessible channel.
+    """
+    import re
+
+    checked = 0
+    for name, markup in _table_markup(journal):
+        for tag, inner in re.findall(
+            r'(<(?:td|b)\b[^>]*class="[^"]*\b(?:pos|neg)\b[^"]*"[^>]*>)(.{0,120}?)'
+            r"</(?:td|b)>",
+            markup,
+            re.S,
+        ):
+            checked += 1
+            assert "+" in inner or "-" in inner, f"{name}: {tag}{inner}"
+
+    assert checked, "no coloured figure rendered; the fixture stopped exercising one"
+
+
+def test_the_marquee_is_named_reachable_and_read_once():
+    """Three separate things, all about the same strip.
+
+    The run is emitted twice so `translateX(-50%)` loops seamlessly, which is a
+    statement about pixels and about nothing a non-visual reader is being told —
+    so exactly one copy is in the accessibility tree.
+
+    `role="marquee"` carries an implicit `aria-live="off"`, which is what these
+    cells need: they repaint every few seconds and announcing that would never
+    stop. The role REQUIRES an accessible name, so the label is load-bearing
+    rather than decoration.
+
+    `tabindex="0"` is the reduced-motion half. With the animation off the strip
+    becomes an ordinary horizontal scroller, and neither Safari nor Firefox makes
+    a scroll container focusable on its own — the whole watchlist would be
+    mouse-only in the mode chosen by somebody asking for less movement.
+    """
+    import re
+
+    from bot.market_clock import market_state
+
+    body = render.ticker_tape(
+        market_state(datetime(2026, 8, 10, 15, 0, tzinfo=UTC)),
+        [_quote("SPY", last=580.0, prev=574.0)],
+    )
+
+    view = re.search(r'<div class="view"[^>]*>', body)
+    assert view, body[:400]
+    assert 'role="marquee"' in view.group(0)
+    assert re.search(r'aria-label="[^"]+"', view.group(0)), view.group(0)
+    assert 'tabindex="0"' in view.group(0)
+
+    # One copy read, one copy hidden. Both halves, or the marquee either snaps
+    # back visually or is read twice.
+    assert body.count('<div class="marquee-run">') == 1
+    assert body.count('aria-hidden="true"') == 1
+
+    # `aria-hidden` must never wrap a focusable element — a keyboard user can
+    # reach one and a screen reader cannot describe where they landed. The cells
+    # are spans today and the tooltip is a `title` attribute, so this holds; it
+    # would silently stop holding the day a cell becomes a button.
+    hidden = body[body.index('<div class="marquee-run dup"') :]
+    for focusable in ("<a ", "<a>", "<button", "tabindex", "<input", "<select"):
+        assert focusable not in hidden, focusable
+
+    # The outline is inset on this element alone. `:focus-visible` draws at +3px
+    # everywhere else and `.tape` is `overflow:hidden`, so an outside ring here
+    # is clipped away to nothing.
+    assert any(
+        "outline-offset:-3px" in d for d in _css_blocks(".tape .view:focus-visible")
+    )
+
+
+def test_a_section_the_stream_cannot_repaint_carries_its_own_reading(
+    journal, dreams, client
+):
+    """One stamp was describing two different readings at once.
+
+    Four elements on the Board carry `data-live`. The positions table, the
+    resting orders, the risk meters and the equity curve are server-rendered and
+    cannot be repainted — the client may only update a figure the server already
+    put on the page. So after the first stream message the stamp under the title
+    described the TILES while sitting above tables from an older reading, with
+    nothing on screen saying which was which.
+
+    The fix is not a vaguer stamp. Each section that cannot refresh itself says
+    which reading it was built from, and says that it will not move.
+    """
+    body = client.get("/").text
+
+    assert body.count("This section does not repaint") == 2
+    assert "Reload for a newer one." in body
+    # Fixed on purpose: the whole claim is that this one does NOT change, so it
+    # must not be marked for the stream.
+    for chunk in body.split("This section does not repaint"):
+        assert not chunk.endswith("data-live-read")
+
+    positions = body.index("<h2>Open positions</h2>")
+    orders = body.index("<h2>Pending orders</h2>")
+    for start in (positions, orders):
+        assert "does not repaint" in body[start : start + 700]
+
+
+def test_the_fixed_reading_note_says_unknown_rather_than_guessing():
+    """A caller that cannot say when the broker was read must not be handed a
+    time by default. Same rule as the stamp it sits under."""
+    assert "time is unknown" in render._fixed_reading_note(None)
+    assert "taken 04 May 2026" in render._fixed_reading_note(ENTRY)
