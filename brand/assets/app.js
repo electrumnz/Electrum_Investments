@@ -455,19 +455,15 @@
 
   /* --------------------------------------------------------------- chrome */
 
-  /* Straight from the fixture. There used to be a sign-in form that stashed a
-     display name in sessionStorage, and this read it with a fallback — but the
-     form checked nothing, gated nothing and let every page through anyway, so
-     it was removed as a gate-shaped ornament. Reading a key that nothing
-     writes any more would just be a branch that can never be taken. */
-  function currentOperator() {
-    return DATA.operator.name;
-  }
+  /* The masthead used to carry "Operator / Sign out" and this mounted the name
+     into it. Both have gone. The sign-in form went first, as a gate-shaped
+     ornament in front of a committed fixture; the session chrome outlived it by
+     a release and was the same mistake in smaller type. There is no session on
+     this site, nothing to sign out of, and a control implying otherwise suggests
+     the invented figures behind it belong to somebody.
 
-  function mountWhoami() {
-    var node = document.querySelector('[data-whoami]');
-    if (node) node.textContent = currentOperator();
-  }
+     `DATA.operator` stays in the fixture. It is the generator's, it costs
+     nothing, and the site simply no longer reads it. */
 
   function ready(fn) {
     if (document.readyState !== 'loading') fn();
@@ -486,8 +482,7 @@
     rHistogram: rHistogram, sparkline: sparkline,
     ratio: ratio, absent: absent,
     stat: stat, meter: meter, pips: pips,
-    currentOperator: currentOperator, ready: ready
+    ready: ready
   };
 
-  ready(mountWhoami);
 })();

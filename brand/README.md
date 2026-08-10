@@ -41,7 +41,7 @@ It holds limits rather than secrets and is already public in this repository.
 
 | File | What it is |
 | --- | --- |
-| `index.html` | Sign-in shell. Prefilled, accepts anything, gates nothing. |
+| `index.html` | Launch pad. No form, no session, no gate: one link into the demonstration, which fx.js turns into a jump to lightspeed. |
 | `overview.html` | Equity curve, open positions, P&L, risk against the caps, stand-down state. |
 | `trades.html` | Filterable journal. Every trade carries the reasoning recorded against it. |
 | `analytics.html` | Win rate, profit factor, expectancy, R distribution, drawdown, excursion capture. |

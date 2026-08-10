@@ -2547,6 +2547,7 @@ def dreaming_page(
     token: str,
     hermes_available: bool,
     soul_found: bool,
+    isolated: bool = False,
 ) -> str:
     """The dreamer's deck: what it is thinking about, and a way to talk to it.
 
@@ -2567,15 +2568,40 @@ def dreaming_page(
 
     # Ahead of everything, including the counts. The single most important fact
     # about this page is what it is not.
+    #
+    # Two claims, deliberately separated, because only the first is structural
+    # and an earlier version of this banner ran them together and overstated the
+    # second. The dream RECORDS below cannot describe an order. The CHAT PANEL
+    # at the bottom is an agent, and what it can reach depends on which Hermes
+    # instance is answering — which is a deployment fact this process can check
+    # and therefore must state rather than assume.
     body += (
         '<div class="banner warn"><b>Nothing here is a proposal</b>'
-        "The dreamer has no order path. It produces hypotheses, never trades: "
-        "no quantity, no entry, no stop, no side, and no route to the broker. "
-        "The decision loop proposes and <code>src/bot/risk.py</code> vets what "
-        "it proposes, and this agent is in neither. An idea that matures into "
-        "something worth acting on is read by a person and acted on through the "
-        "ordinary machinery, in their own time.</div>"
+        "Everything below is speculation. A dream carries no quantity, no entry, "
+        "no stop and no side, so nothing recorded here can describe an order at "
+        "all: the decision loop proposes and <code>src/bot/risk.py</code> vets "
+        "what it proposes, and none of this is in either path. An idea worth "
+        "acting on is read by a person and acted on through the ordinary "
+        "machinery, in their own time.</div>"
     )
+
+    if enabled and hermes_available:
+        body += (
+            '<div class="banner ok"><b>The dreamer runs on its own agent</b>'
+            "Its Hermes instance is separate from the one behind Chat, with its "
+            "own memory and its own tool registry, so it has no broker tool to "
+            "reach for. That is a structure rather than an instruction.</div>"
+            if isolated
+            else '<div class="banner warn"><b>Sharing the account agent</b>'
+            "No separate dreamer instance is installed, so the panel below talks "
+            "to the same Hermes as Chat and can reach the same tools, including "
+            "the order tools. Every one of those still runs the risk gate first, "
+            "so the operator's limits hold either way, but keeping a speculative "
+            "agent away from the broker is currently a sentence in "
+            "<code>souls/grogu.md</code> rather than a missing tool. "
+            "<code>deploy/run-dream.sh</code> is the second instance; see the "
+            "setup notes in its header.</div>"
+        )
 
     if not soul_found:
         body += (
@@ -2647,8 +2673,15 @@ def dreaming_page(
                 "Pick a commodity nobody is talking about and find its second order.",
                 "What would break the last idea you kept?",
             ],
-            footnote="Ideas here are speculation and are recorded as such. Nothing "
-            "said in this panel reaches the broker, the journal or the risk gate.",
+            footnote=(
+                "Ideas here are speculation and are recorded as such. Nothing "
+                "said in this panel is written to the journal or becomes a "
+                "proposal."
+                if isolated
+                else "Ideas here are speculation and are recorded as such. This "
+                "panel shares the account agent's tools, so treat it as the same "
+                "privilege as Chat until a separate dreamer instance is installed."
+            ),
             avatar=True,
         )
         + "</section>"

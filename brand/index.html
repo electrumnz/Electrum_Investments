@@ -3,31 +3,36 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Sign in &middot; Mudhorn Capital</title>
+<title>Mudhorn Capital</title>
 <meta name="description" content="Demonstration interface for Mudhorn Capital, a private paper-trading vehicle. Every figure shown is synthetic.">
 <meta name="robots" content="noindex">
 <link rel="icon" href="assets/mark.svg" type="image/svg+xml">
 <link rel="stylesheet" href="assets/app.css">
 </head>
-<body class="signin-page">
+<body class="launch-page">
 
 <!-- ==========================================================================
-     THIS FORM IS NOT AUTHENTICATION.
+     THERE IS NO LOGIN ON THIS SITE, AND THERE MUST NOT BE ONE.
 
-     It is a prototype shell. The credentials are prefilled, any submission is
-     accepted, nothing is validated, nothing is sent anywhere, and no session is
-     created. The only thing it does is put a display name in sessionStorage so
-     the masthead has something to show.
+     This is the launch pad: one link into the demonstration. It went through
+     two rounds of removal and both are worth remembering, because the shape
+     keeps growing back.
 
-     It is deliberately not a gate either: every page in this app is reachable
-     directly without going through here, and the page below says so out loud. A
-     sign-in screen that turned people away would imply the site holds something
-     worth protecting, and it does not. Every figure behind it is invented.
+     First the form. It was prefilled, accepted anything, validated nothing and
+     let every page through regardless, while stashing a display name in
+     sessionStorage. A gate-shaped ornament in front of a committed fixture of
+     invented numbers.
 
-     Real authentication would be the prerequisite for ever putting live account
-     data on a public URL, not a follow-up. That is not what this is, and the
-     live dashboard in src/bot/web/ stays bound to 127.0.0.1 precisely because
-     it has no login. See CLAUDE.md, "One directory is published".
+     Then the session chrome it left behind: an "Operator / Sign out" control in
+     the masthead of five pages, offering to end a session that never existed.
+     The same mistake in smaller type, and worse in one way, because a sign-out
+     control implies the figures behind it are somebody's.
+
+     The reasoning is the same both times. A gate implies there is something
+     worth protecting, and every figure here is synthetic. Real authentication
+     is the PREREQUISITE for putting live account data on a public URL, never a
+     follow-up, and the live dashboard has one of its own on a different host.
+     See CLAUDE.md, "One directory is published".
      ========================================================================== -->
 
 <div class="demo-banner">
@@ -37,8 +42,8 @@
   </div>
 </div>
 
-<main class="signin-main">
-  <div class="signin-card">
+<main class="launch-main">
+  <div class="launch-card">
     <svg class="mark" viewBox="0 0 64 64" width="56" height="56" role="img" aria-label="Mudhorn Capital signet mark">
       <path fill-rule="evenodd" d="M32 2a30 30 0 1 0 0 60 30 30 0 0 0 0-60Zm0 8a22 22 0 1 1 0 44 22 22 0 0 1 0-44Z"/>
       <path d="M32 17 47 45h-9.4L32 34.2 26.4 45H17L32 17Z"/>
@@ -46,17 +51,6 @@
 
     <h1>MUDHORN <span>CAPITAL</span></h1>
     <p class="tagline">Earned, not handed over</p>
-
-    <!-- The prefilled form that used to sit here has gone. It checked nothing,
-         accepted anything, and let every page through regardless — a
-         gate-shaped ornament implying there was something behind it worth
-         protecting, when the whole interface runs on a committed fixture of
-         invented numbers. A plain link says the same thing honestly and in
-         fewer words.
-
-         The REAL account does have a real login, and it is not on this host:
-         it is a Python app on the trading box, behind a server-side password.
-         Hence the second link below going somewhere else entirely. -->
 
     <p class="note" style="margin-bottom:1.75rem">A worked demonstration of the
       operator interface, running on a committed fixture. Every figure is
@@ -89,10 +83,6 @@
   </div>
 </footer>
 
-<!-- The submit handler that lived here has gone with the form. It bound to
-     getElementById('signin'), which now returns null, so leaving it would have
-     thrown a TypeError into the console on every load of the landing page —
-     dead code that still makes noise. -->
 <script src="assets/demo-data.js"></script>
 <script src="assets/app.js"></script>
 <script src="assets/fx.js"></script>

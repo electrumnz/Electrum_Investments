@@ -625,6 +625,26 @@ signed-in user types can be read as a flag.
 agents at once, alongside whichever soul the request injected, and the model
 would receive two characters and pick.
 
+**One instance is enough for the souls, and not enough for the tools.** The
+account agent's Hermes registers this repo's MCP server, which exposes
+`place_order`. Sharing it means the only thing keeping a *speculative* agent
+away from the broker is the sentence in `souls/grogu.md` telling it not to —
+prose, where this repository uses a structure everywhere else. `RiskGate.evaluate`
+still runs on every order path, so the operator's four rules hold either way,
+but "it has no broker tool" and "it has one and was asked nicely" are different
+claims and only one is worth making.
+
+So `deploy/run-dream.sh` runs a second Hermes from its own `HERMES_HOME`, whose
+registry must not contain the bot's MCP server. When it is absent the dreamer
+falls back to the shared instance and **the Dreaming page says so in a banner** —
+it does not quietly claim an isolation it does not have. Same rule as
+`calendar_degraded` and the tailnet status: report the weaker fact rather than
+imply the stronger one.
+
+This was a real overclaim, caught after shipping. The banner originally read
+"no route to the broker", which is true of the dream *records* and was false of
+the chat panel on the same page. `tests/test_web.py` now pins both wordings.
+
 The soul name arrives in the request body and `load_soul` builds a path from it,
 so the route validates it against a fixed set first. An unknown name falls back
 to the account agent rather than erroring: the worst case of getting it wrong is

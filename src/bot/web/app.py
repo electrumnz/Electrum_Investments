@@ -53,7 +53,7 @@ from ..souls import GROGU, YODA, load_soul
 from ..tailnet import read as read_tailnet_status
 from . import render
 from .auth import COOKIE_NAME, SESSION_TTL_SECONDS, SessionStore
-from .chat import HermesBridge
+from .chat import DREAMER_BINARY, HermesBridge
 
 
 def build_app(
@@ -69,6 +69,11 @@ def build_app(
     touch a real journal or broker."""
     app = FastAPI(title="Mudhorn Capital", docs_url=None, redoc_url=None)
     bridge = HermesBridge()
+    # The dreamer's own instance when one is installed, so a speculative agent
+    # has no broker tool at all rather than one it was asked not to use. See
+    # DREAMER_BINARY. Absent, `/dreaming` falls back to `bridge` and the page
+    # says which it is rather than claiming the stronger arrangement.
+    dreamer = HermesBridge(binary=DREAMER_BINARY)
 
     resolved_env = env or Env()
     resolved_env.assert_paper_only()
@@ -272,7 +277,11 @@ def build_app(
                 DreamSummary.of(recent),
                 enabled=bool(resolved_env.dashboard_chat_token),
                 token=resolved_env.dashboard_chat_token,
-                hermes_available=bridge.available,
+                # Either instance can serve the panel, so it is available
+                # if either is. Which one, and what that means for its reach, is
+                # rendered explicitly rather than left to be assumed.
+                hermes_available=dreamer.available or bridge.available,
+                isolated=dreamer.available,
                 soul_found=load_soul(GROGU).found,
             ),
         )
@@ -356,7 +365,14 @@ def build_app(
         requested = str(payload.get("soul", YODA)).lower()
         soul = load_soul(requested if requested in {YODA, GROGU} else YODA)
 
-        reply = bridge.ask(str(payload.get("message", "")), history, soul=soul)
+        # The dreamer gets its own instance when there is one. Falling back
+        # to the shared bridge keeps the panel working on a box that has not had
+        # the second Hermes installed; the page it is embedded in states that
+        # this is what is happening, so the fallback is disclosed rather than
+        # silent.
+        answering = dreamer if (soul.name == GROGU and dreamer.available) else bridge
+
+        reply = answering.ask(str(payload.get("message", "")), history, soul=soul)
         return {"ok": reply.ok, "text": reply.text, "error": reply.error}
 
     @app.get("/healthz")

@@ -183,7 +183,7 @@
      on the site that must be visible the instant the page paints, because it is
      the label saying every figure here is invented. */
   var PANELS = '.page-head,.card,.chart-frame,.callout,.table-wrap,.yaml,' +
-               '.signin-card,section.block > h2,.result-count';
+               '.launch-card,section.block > h2,.result-count';
 
   function finish(el) {
     el.classList.remove('fx-in');

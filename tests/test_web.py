@@ -18,7 +18,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from bot.config import Env, load_rules
-from bot.dreaming import DreamStore
+from bot.dreaming import DreamStore, DreamSummary
 from bot.journal import Journal
 from bot.models import (
     Decision,
@@ -756,8 +756,99 @@ def test_the_dreaming_page_leads_with_what_it_is_not(client):
     body = client.get("/dreaming").text
 
     assert "Nothing here is a proposal" in body
-    assert "no quantity, no entry, no stop, no side" in body
+    assert "no quantity, no entry, no stop and no side" in body
     assert "risk.py" in body
+
+
+def test_the_page_does_not_claim_an_isolation_it_does_not_have():
+    """The banner used to say the dreamer had "no route to the broker".
+
+    True of the dream RECORDS, which carry no order fields. Not true of the chat
+    panel on the same page: without a separate instance it talks to the same
+    Hermes as Chat and can reach the same order tools. The risk gate still runs
+    on every one of them, so the operator's limits hold — but "it has no broker
+    tool" and "it has one and was asked nicely" are different claims, and the
+    page must make the one that is actually true today.
+    """
+    from bot.web.render import dreaming_page
+
+    shared = dreaming_page(
+        [], DreamSummary.of([]), enabled=True, token="t",
+        hermes_available=True, soul_found=True, isolated=False,
+    )
+    assert "Sharing the account agent" in shared
+    assert "including the order tools" in shared
+    assert "souls/grogu.md" in shared
+    assert "runs on its own agent" not in shared
+
+    isolated = dreaming_page(
+        [], DreamSummary.of([]), enabled=True, token="t",
+        hermes_available=True, soul_found=True, isolated=True,
+    )
+    assert "runs on its own agent" in isolated
+    assert "no broker tool to reach for" in isolated
+    assert "Sharing the account agent" not in isolated
+
+
+def test_the_dreamer_uses_its_own_instance_when_one_is_installed(journal, dreams, monkeypatch):
+    """A speculative agent should have no broker tool, not one it was told not
+    to use. When the second Hermes is absent the panel still works, and the page
+    above it says so rather than implying the stronger arrangement."""
+    from bot.web import chat as chat_mod
+
+    env = Env(_env_file=None)  # type: ignore[call-arg]
+    env.dashboard_chat_token = "tok"
+
+    asked: list[str] = []
+
+    def _ask(self, message, history=None, soul=None):
+        asked.append(str(self.binary))
+        return chat_mod.ChatReply(text="ok")
+
+    monkeypatch.setattr(chat_mod.HermesBridge, "ask", _ask)
+    # Both instances present: the dreamer gets its own.
+    monkeypatch.setattr(chat_mod.HermesBridge, "available", property(lambda self: True))
+
+    app = build_app(
+        journal=journal, rules=load_rules(), env=env,
+        dreams=dreams, force_mock=True
+    )
+    client = TestClient(app)
+    client.post("/chat", json={"token": "tok", "message": "hi", "soul": "grogu"})
+    client.post("/chat", json={"token": "tok", "message": "hi", "soul": "yoda"})
+
+    assert asked[0].endswith("run-dream.sh")
+    assert asked[1].endswith("run-chat.sh")
+
+
+def test_the_dreamer_falls_back_rather_than_refusing(journal, dreams, monkeypatch):
+    """A box without the second instance still gets a working panel."""
+    from bot.web import chat as chat_mod
+
+    env = Env(_env_file=None)  # type: ignore[call-arg]
+    env.dashboard_chat_token = "tok"
+
+    asked: list[str] = []
+
+    def _ask(self, message, history=None, soul=None):
+        asked.append(str(self.binary))
+        return chat_mod.ChatReply(text="ok")
+
+    monkeypatch.setattr(chat_mod.HermesBridge, "ask", _ask)
+    # Only the account instance exists.
+    monkeypatch.setattr(
+        chat_mod.HermesBridge,
+        "available",
+        property(lambda self: self.binary == chat_mod.DEFAULT_BINARY),
+    )
+
+    app = build_app(
+        journal=journal, rules=load_rules(), env=env,
+        dreams=dreams, force_mock=True
+    )
+    TestClient(app).post("/chat", json={"token": "tok", "message": "hi", "soul": "grogu"})
+
+    assert asked == [str(chat_mod.DEFAULT_BINARY)]
 
 
 def test_an_empty_deck_shows_a_worked_example_marked_as_one(client):
