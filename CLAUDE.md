@@ -2377,9 +2377,11 @@ data/dreams.db          Speculative notes AND the live symbol grants an adopted
 deploy/                 VPS provisioning: bootstrap.sh + systemd units. The unit
                         runs the loop WITHOUT --execute; enabling it is a
                         drop-in (mudhorn-bot-execute.conf), never an edit to
-                        the unit, which bootstrap.sh would overwrite. src/ and
-                        config/ stay root-owned so the service account cannot
-                        edit its own limits.
+                        the unit, which bootstrap.sh would overwrite. src/,
+                        config/ and souls/ stay root-owned so the service
+                        account cannot edit its own limits -- or its own
+                        safety rails, which souls.py reads from disk at call
+                        time.
                         backup-journal.sh + mudhorn-backup.timer snapshot the
                         journal hourly with sqlite3 .backup, never cp — and the
                         audit log with plain gzip, which IS correct for

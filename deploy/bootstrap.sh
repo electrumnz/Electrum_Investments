@@ -91,7 +91,17 @@ chmod 600 "$APP_DIR/.env"
 # written by root, and handing it to the service account to save a wrapper would
 # trade that for nothing. A bot that can rewrite its own limits with its own
 # hands is what this line exists to prevent.
-chown -R root:root "$APP_DIR/src" "$APP_DIR/config" "$APP_DIR/deploy"
+#
+# `souls/` is here for the same reason and was MISSING, which is worth stating
+# rather than quietly adding. Each soul's `## What to avoid` section is a
+# safety rail — never propose a trade, never state a figure you did not read,
+# never learn from the track record — and `souls.py` reads these files from
+# disk at call time, so whatever is on the box at that moment is what reaches
+# the model. Left writable by the service account, the rails are editable by
+# the thing they restrain. Nothing is known to have exploited that; it was
+# simply never on the list.
+chown -R root:root "$APP_DIR/src" "$APP_DIR/config" "$APP_DIR/deploy" \
+  "$APP_DIR/souls"
 chown -R "$APP_USER:$APP_USER" "$APP_DIR/data" "$APP_DIR/audit" "$APP_DIR/backups"
 
 echo "==> systemd units"
