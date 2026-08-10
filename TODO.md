@@ -1186,9 +1186,33 @@ each is a bug that reached a user once:
 
 ### Also outstanding on the interface
 
-- **Mobile scroll.** *"Scroll is a bit sucky on mobile in some places."* The
-  `.scroll::after` phantom-overflow fix landed; this is a separate report and
-  needs driving on a real narrow viewport rather than reasoning about.
+- **Mobile scroll — DRIVEN, and most of the hypotheses are disproved.**
+  *"Scroll is a bit sucky on mobile in some places."* Audited at 390px and
+  320px against a local instance of the current code, with the journal seeded
+  so the tables actually had rows to overflow with. What was checked and what
+  came back:
+
+  | Suspected | Measured |
+  |---|---|
+  | Horizontal page overflow | **None**, 390px and 320px, on Board, Trades, Analytics, Decisions |
+  | The six full-viewport `.fx` layers eating touches | **`pointer-events:none`** on every one |
+  | Tables trapping a sideways swipe | Table reflows to exactly fit (288/288 at 320px); the `.scroll` wrapper carries `overscroll-behavior: contain`, which is the correct setting |
+  | The ticker tape's 5,120px strip | Correct in both motion modes — `overflow-x:hidden` while it marquees, `auto` and arrow-scrollable under `prefers-reduced-motion` |
+
+  **The one real finding is touch target size.** The eight nav links render
+  32px tall against the 44px minimum, in a horizontal row. That is not scroll,
+  but it produces the same experience: a tap that misses reads as a page that
+  ignored you, and on a bar this cramped it happens repeatedly.
+
+  **What could NOT be measured, stated rather than glossed:** synthesized touch
+  gestures do not take effect in this container — `scrollTo` and a wheel event
+  both scroll the page, and `Input.synthesizeScrollGesture` with
+  `gestureSourceType: touch` moves nothing. So scroll *feel* — momentum, rubber
+  banding, a gesture that starts on one element and is claimed by another —
+  is not testable from here and needs a real device. My first pass measured a
+  mouse drag instead and got "moved 0" on a 9,146px page, which would have been
+  a fabricated bug had it been reported; a mouse drag selects text, it does not
+  scroll.
 - **The fusion card.** Symbiosis has a backend; what the operator asked for is
   the moment two dreams become one thing — *"like a cartoon where two creatures
   would combine into a special creature"* — with the **animation paused until
