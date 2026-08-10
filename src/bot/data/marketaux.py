@@ -94,7 +94,26 @@ def _parse(payload: Any) -> list[str]:
     for article in articles:
         if not isinstance(article, dict):
             continue
-        title = str(article.get("title") or "").strip()
+        # `" ".join(...split())` rather than `.strip()`, and the difference is
+        # a prompt-injection channel rather than tidiness.
+        #
+        # `.strip()` removes leading and trailing whitespace and leaves an
+        # EMBEDDED newline intact. `context.py` renders each headline as
+        # `f"- {h}"` into a markdown document the model reads, so a title
+        # carrying a newline can close the bullet and open its own `##`
+        # section — and the section it would most usefully forge is
+        # "Gate verdicts (previous cycle)", which the prompt tells the model
+        # is deterministic and not to be argued with.
+        #
+        # This is NOT a gate bypass and must not be described as one:
+        # `RiskGate` reads no prompt and no headline widens a cap. It is a
+        # steering channel into the half the gate deliberately does not
+        # second-guess — direction, symbol, entry, where the stop goes.
+        #
+        # `data/xfeed.py` was already safe here, but only by ACCIDENT: it
+        # normalises whitespace for formatting reasons, with nothing saying
+        # that is load-bearing and no test pinning it. Both are pinned now.
+        title = " ".join(str(article.get("title") or "").split())
         if not title:
             continue
 
