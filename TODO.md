@@ -51,37 +51,34 @@ Windows to test in: after hours 16:00–20:00 New York, pre-market 04:00–09:30
 
 ---
 
-## 2. Journal row 1 is wrong, and the journal cannot express why
+## 2. Journal row 1 has the wrong entry price
 
-**The order PARTIALLY filled: 3 shares of 21, at 773.43.** The journal says
-21 @ 772.84 — wrong on both quantity and price, because it was written by hand
-from the proposal before anything filled.
+**Corrected from an earlier reading in this file.** A poll returned
+`FILLED 3.0` and was written down as a partial fill; it was a snapshot taken
+mid-fill. The order completed in full — **21 shares at an average of
+773.324285** — and the stop leg is resting at the broker as a buy-to-cover of
+21, which is the OTO behaving exactly as designed. Rule 3 holds at the broker.
 
-    journal claims   21 x (820 - 772.84) = $990.36
-    actually filled   3 x (820 - 773.43) = $139.71
-    still working    18 shares, which is not risk yet
+What is actually wrong is smaller. Row 1 was hand-written from the proposal
+before anything filled, so it carries the limit rather than the fill:
 
-`open_risk_usd` is what the 2% total-risk cap counts against, so the cap is
-currently measuring against a figure seven times the real exposure. Erring
-towards overstatement is the safe direction and it is still a number that does
-not describe the account.
+    journal      21 x (820 - 772.840000) = $990.36   (0.99% of equity)
+    actual       21 x (820 - 773.324285) = $980.19   (0.98% of equity)
 
-**The deeper gap: a partial fill has no representation here.** `record_fill`
-records the proposal's quantity, and `Trade` carries one `qty` and one
-`entry_price`. An order that fills 3 now and 18 later — or 3 and never the rest
-— cannot be written down accurately at all. Reconciliation against the broker
-is the only thing that could correct it, and the hand-written row means
-`reconcile` has a journal entry it will treat as authoritative.
+`open_risk_usd` is what the 2% total-risk cap counts against, so it is
+overstated by $10.17 — the safe direction, and still a figure that does not
+describe the account. Correct the entry price on row 1.
 
-Three things to do, in order:
+Confirm the stop leg's trigger price while doing it. `WorkingOrder` does not
+carry a stop price, so the output above shows `limit_price=None` and says
+nothing about whether the trigger is 820. Read it from Alpaca directly.
 
-1. Find out what the one resting SPY order actually is. If it is the remaining
-   18 shares of the entry, **there is no stop at the broker** and the 3 filled
-   shares are unprotected. If it is the stop leg, the balance was cancelled.
-2. Correct row 1 to the real filled quantity and price.
-3. Decide whether `record_fill` should record only what filled, and what
-   happens when the rest fills later. That is a design question about `Trade`,
-   not a patch.
+**The general lesson, which outlives this row:** a fill is not atomic, and a
+single poll during one is a reading rather than an outcome. The journal is
+written from the proposal, so nothing reconciles quantity or price against what
+the broker actually did unless `reconcile` is given the chance. Worth deciding
+whether `record_fill` should wait for a terminal order state instead of
+recording at submission.
 
 ## 3. The dashboard shows "no quote" on all sixteen
 
