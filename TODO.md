@@ -51,23 +51,37 @@ Windows to test in: after hours 16:00–20:00 New York, pre-market 04:00–09:30
 
 ---
 
-## 2. Correct trade id 1's entry price
+## 2. Journal row 1 is wrong, and the journal cannot express why
 
-**The order has filled**, and the journal says 772.84 — which was the *limit*,
-not the fill. It was journalled by hand because the schema migration landed
-after the order did, so nothing has reconciled the two.
+**The order PARTIALLY filled: 3 shares of 21, at 773.43.** The journal says
+21 @ 772.84 — wrong on both quantity and price, because it was written by hand
+from the proposal before anything filled.
 
-`open_risk_usd` counts `|entry − stop| × qty`, and that figure is what the 2%
-total-risk cap measures against. The recorded number is therefore wrong by
-however far the open printed from 772.84. Read the real fill off the position
-and correct row 1.
+    journal claims   21 x (820 - 772.84) = $990.36
+    actually filled   3 x (820 - 773.43) = $139.71
+    still working    18 shares, which is not risk yet
 
-Worth checking at the same time: whether a stop is actually resting at 820. It
-went as an OTO, so Alpaca should have created the stop leg when the entry
-filled. If it did not, rule 3 is true at sizing time and false at the broker,
-and the bracket work is wrong.
+`open_risk_usd` is what the 2% total-risk cap counts against, so the cap is
+currently measuring against a figure seven times the real exposure. Erring
+towards overstatement is the safe direction and it is still a number that does
+not describe the account.
 
----
+**The deeper gap: a partial fill has no representation here.** `record_fill`
+records the proposal's quantity, and `Trade` carries one `qty` and one
+`entry_price`. An order that fills 3 now and 18 later — or 3 and never the rest
+— cannot be written down accurately at all. Reconciliation against the broker
+is the only thing that could correct it, and the hand-written row means
+`reconcile` has a journal entry it will treat as authoritative.
+
+Three things to do, in order:
+
+1. Find out what the one resting SPY order actually is. If it is the remaining
+   18 shares of the entry, **there is no stop at the broker** and the 3 filled
+   shares are unprotected. If it is the stop leg, the balance was cancelled.
+2. Correct row 1 to the real filled quantity and price.
+3. Decide whether `record_fill` should record only what filled, and what
+   happens when the rest fills later. That is a design question about `Trade`,
+   not a patch.
 
 ## 3. The dashboard shows "no quote" on all sixteen
 
