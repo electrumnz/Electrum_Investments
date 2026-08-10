@@ -63,12 +63,14 @@ consequence.**
 
 Direction, symbol, entry, where the stop goes, whether the exit is a hard
 target or a trail — all the agent's. Nothing in `risk.py` second-guesses any of
-it. `_stops_on_correct_side` checks only that a stop is on the LOSING side of
-entry, because a stop below entry on a short is not a stop, it is a target;
-that is a correctness check, not a view on placement.
+it. `_stops_on_correct_side` checks only which SIDE of entry each level sits
+on — the stop on the losing side, and the take-profit on the winning side when
+one was given at all — because a stop below entry on a short is not a stop, it
+is a target. That is a correctness check, not a view on placement.
 
 What the gate measures is what the choice COSTS: `|entry − stop| × qty` against
-the per-trade cap, the total, the concentration limit and buying power. Put the
+the per-trade cap, the portfolio total, that class's own total where one is
+set, the concentration limit and buying power. Put the
 stop wherever the thesis says; the size follows from it, and a wider stop buys
 a smaller position rather than more risk.
 
@@ -154,6 +156,28 @@ it. That is the point.
 windows, symbol lists, strategy and **that class's own risk limits** live there;
 the account-wide rules (2% total risk, stand-down, daily loss, margin) stay
 global.
+
+**A class can also cap its own TOTAL open risk**, via
+`max_class_total_risk_pct`, which is separate from the per-trade cap and from
+the portfolio-wide 2%. Crypto is set to 0.5%, which makes it effectively one
+full-size crypto position at a time — intended, rather than an accident of the
+two numbers meeting. Three properties, each pinned by a test that proves it
+REJECTS:
+
+- **Unrealised profit does not offset open risk.** Risk is
+  `|entry - stop| * qty`, what the position loses if the stop fills, and being
+  up today does not change what the stop costs. Netting a paper gain against a
+  real stop distance would make the cap loosest exactly when the class had
+  already run.
+- **At the cap, an existing position must be CLOSED to open another.** The gate
+  does not size the new trade down to fit, and the rejection message says so —
+  a bare number would not carry the consequence.
+- **An unknown REFUSES.** A held position in the class with no journal row has
+  an unknowable planned stop, so the class total cannot be established, and the
+  gate rejects rather than counting the unknown as zero. **This is the first
+  gate in the repo that fails closed on missing data**, and it is a deliberate
+  departure from the usual "report the gap, do not refuse" — worth knowing
+  before assuming the older rule still holds everywhere.
 
 **A per-class limit OVERRIDES the portfolio one, in either direction.**
 `account:` is the default, not a ceiling. Set a class to 3% and that class gets
@@ -550,6 +574,11 @@ Miss it and the cap silently has nothing to count. This was a real bug, fixed in
 `14b88c8`. A held position with no journal entry has an unknowable stop, so its
 risk is reported as **missing** rather than guessed at.
 
+**One gate now goes further and REFUSES on that missing figure** — the per-class
+total-risk cap, where an unknown in the class means the cap cannot be enforced
+at all. Reporting is still the rule everywhere else; that one is the stated
+exception, not the new default.
+
 ### A resting stop whose level nobody can read is most of the way to no stop
 
 `WorkingOrder` carries `limit_price` and no `stop_price`. So a stop leg resting
@@ -569,10 +598,17 @@ Add `stop_price` to `WorkingOrder` before trusting a displayed stop.
 Two surfaces, and confusing them is the mistake to avoid.
 
 `src/bot/web/` renders **live** journal, broker and audit state, on seven pages:
-Board, Decisions, Trades, Analytics, Dreaming, Settings, Chat. It has no login *because*
-it binds to `127.0.0.1` and is reached over Tailscale. That is where operator
-features belong, and building one there needs no auth because nothing is
-published.
+Board, Decisions, Trades, Analytics, Chat, Dreaming, Settings — that is the nav
+order, and Chat sits ahead of Dreaming because Chat is the dominant page. It
+binds to `127.0.0.1` and is usually reached over Tailscale, and it **now sits
+behind a shared password** (`src/bot/web/auth.py`, enforced as middleware), so
+it may be exposed publicly. See "One directory is published" for what that gate
+is and is not.
+
+That middleware is the reason a new route is refused by default: opening one
+takes a deliberate edit to `OPEN_PATHS` *and* a classification in
+`tests/test_auth.py`, which enumerates the routes from the application rather
+than from a hand-maintained list.
 
 `brand/` is public and **every figure on it is invented**. It is a shop window.
 
@@ -1041,7 +1077,12 @@ sma20 574.30, atr 6.41"` — so it is indexed as searchable text and no figure i
 extracted from it. Reversing prose into numbers would produce a value nobody
 can check, which is the failure `indicators.py` exists to prevent arriving from
 the other direction. If numeric history is wanted, the fix is to record numbers
-in `MarketInputs`, which only starts paying from the day it ships.
+in `MarketInputs` — which has since been done, so `IndicatorSnapshot` records
+the figures as numbers beside the rendered line and `insight.py` indexes them.
+The rendered line is still never parsed back; the numbers come from the
+recording, not from the prose. That change only pays from the day it shipped,
+so cycles recorded before it have prose about figures and no figures, and
+nothing recovers them.
 
 **None of this goes into the prompt.** It is an operator surface, reached
 through the dashboard and through chat. Feeding a queryable track record back
@@ -1215,9 +1256,14 @@ schedule onto. The stream starts the poller when a browser subscribes.
 the sign-in page opened it too — it inlines `SCRIPT` like every other page — and
 took a 401, because `/live` sits behind the same password as the pages that
 render an account. One pointless request and one console error per view of the
-login form. It has a second effect worth keeping: Decisions, Trades, Settings
-and Chat have no live figures either, so a session that never opens the Board
-never talks to Alpaca at all.
+login form.
+
+**That guard used to mean a session which never opened the Board never talked
+to Alpaca at all, and it does not any more.** The ticker tape carries
+`data-live` targets and the tape is on every page, so any page now keeps the
+poller warm. That was a deliberate trade rather than a regression: the old
+property was about an unattended box, and the poller's own idle stop is what
+protects the overnight case. A render still costs no network.
 
 **The client may only UPDATE a figure the server already rendered**, never be
 what reveals one. Same rule as the projection layer. Every value is in the
@@ -1226,7 +1272,7 @@ served — one page-load old and honest about it — rather than an empty box.
 
 **That bug was invisible to the test suite.** 731 tests, `ruff` and `mypy
 --strict` were all green while the login page 401ed on every view. It took
-driving the thing in a browser. Same shape as the `.gitignore` finding below: a
+driving the thing in a browser. Same shape as the `.gitignore` finding above: a
 green local suite says nothing about what actually happens.
 
 ### A visit is a sitting, and the marker never advances to now
@@ -1457,16 +1503,37 @@ direction as `HermesBridge.available`.
 damages two of the three largest sesame producers, making the third, which has
 no cicadas, the marginal supplier into a shortage it did not experience.
 
-**`Dream` carries no quantity, no entry price, no stop, no side and no symbol.**
-`OrderProposal` requires all of them and validates `stop_loss_price`, so nothing
-turns one into the other without somebody adding fields and validation by hand.
-`tests/test_dreaming.py` asserts that overlap stays empty. This is the whole
-safety argument and it is deliberately not a matter of discipline: a
-speculative-idea generator wired to an execution path is the Alpha Arena failure
-with extra steps, and confidence is what this module produces most of.
+**`Dream` carries no quantity, no entry price, no stop, no side, and no
+`symbol` field an order builder could read.** `OrderProposal` requires all of
+them and validates `stop_loss_price`, so nothing turns one into the other
+without somebody adding fields and validation by hand.
+`tests/test_dreaming.py::test_a_dream_cannot_describe_an_order` asserts that
+overlap stays empty. This is the whole safety argument and it is deliberately
+not a matter of discipline: a speculative-idea generator wired to an execution
+path is the Alpha Arena failure with extra steps, and confidence is what this
+module produces most of.
+
+**It does carry `symbols` and `asset_class_key`, and those are a PERMISSION
+rather than an instruction.** They name what an adopting trading agent may
+trade outside the normal allowlist. The distinction that keeps the guarantee
+intact is exact and is worth stating rather than trusting: the overlap test
+checks `symbol`, singular, which is the field an order needs — and `symbols`,
+plural, is a list of subjects that grants entry to the allowlist and nothing
+else. Every gate in `RiskGate.evaluate` still runs on anything traded under
+one, under its own class's limits. That is the design, not a loophole in the
+test.
+
+`Dream.asset_class_key` is deliberately NOT called `asset_class`, because
+`OrderProposal` already has a field by that name and the blanket assertion that
+the two types share no field name at all is worth more than the tidier word.
+They are different things anyway: one is the `AssetClass` enum the broker
+adapter switches on, the other a key into the `instruments:` block of
+`config/rules.yaml`.
 
 `instruments` names what a dream is *about* and is free text on purpose, so it
-cannot be read as a ticker the bot trades.
+cannot be read as a ticker the bot trades. **Do not collapse it into
+`symbols`.** Two fields exist because one must never be readable as a
+permission and the other is exactly that.
 
 **Verification is counted, never claimed.** A model asked to rate its own
 sourcing rates it generously, so the badge is arithmetic over the `checked`
@@ -1596,7 +1663,7 @@ outside the box, and getting it wrong yields an agent with almost no tools.
 Root Directory `brand`, so every push redeploys). It is static, and it reads no
 journal, no broker and no credential.
 
-It is now a six-page app — sign-in shell, overview, trades, analytics, rules,
+It is now a six-page app — landing page, overview, trades, analytics, rules,
 about — rather than a single identity page, and **that made the rule matter more
 rather than less.** Everything it renders comes from `brand/assets/demo-data.js`,
 a committed fixture generated by `scripts/generate_demo_data.py`. There is no
@@ -1721,9 +1788,11 @@ TODO.md                 The work list. Ordered by what blocks, with the
                         reasoning kept beside each item, and the live account
                         state at the top. Read before starting anything.
 config/rules.yaml       Trading limits. Enforced in code. The only place to change behaviour.
-                        `instruments:` carries each class's own limits, which may only
-                        ever tighten the global ones. `watchlist:` is DISPLAY ONLY and
-                        is deliberately not `allowed_symbols`.
+                        `instruments:` carries each class's own limits, and a value
+                        there OVERRIDES the global one IN EITHER DIRECTION — `account:`
+                        is the default, not a ceiling, and nothing refuses a looser
+                        value. `watchlist:` is DISPLAY ONLY and is deliberately not
+                        `allowed_symbols`.
 src/bot/
   risk.py               The risk gate. The load-bearing file in this repo.
   reconcile.py          Squares journal against broker each cycle. Populates open risk.
@@ -1757,7 +1826,8 @@ src/bot/
   intraday.py           Five-minute bars: did price CLOSE beyond a level or only wick
                         through it, on what volume, and was it reclaimed. The
                         distinction trend_break turns on.
-  mcp_server.py         MCP tools: check_order, place_order, get_risk_status,
+  mcp_server.py         MCP tools: check_order, place_order, close_position,
+                        get_risk_status, review_watches,
                         get_recent_news, get_recent_decisions, query_history,
                         describe_history, search_news, ...
   models.py             Domain models. Quantities are shares/coin units, never "lots".
@@ -1803,7 +1873,8 @@ src/bot/
                         Shown headlines, posts and what CLOSED; never shown
                         profit and loss.
   web/                  Operator command centre: Board, Decisions, Trades,
-                        Analytics, Dreaming, Chat, Settings. Binds 127.0.0.1.
+                        Analytics, Chat, Dreaming, Settings. Binds 127.0.0.1, and sits
+                        behind auth.py's shared password so it MAY be exposed.
                         live.py streams the account over SSE from ONE poller,
                         so a render costs no network and a cold start says
                         unknown rather than zero. seen.py answers "what changed
@@ -1817,9 +1888,12 @@ src/bot/
                         layer: starfield, hyperspace jump, panel materialisation.
 souls/                  Character files for the two agents, in the SOUL.md shape.
                         yoda.md answers about the account; grogu.md dreams.
+  main.py               CLI: smoketest, loop, dream, reindex.
+  grants.py             Turns a live dream adoption into the symbol permission the
+                        risk gate is handed. Applies the enabled-class hard block
+                        and answers {} on ANY failure, so the caller fails closed.
 data/dreams.db          Speculative notes. NOT the journal, NOT backed up.
                         Gitignored.
-  main.py               CLI: `electrum-bot smoketest`, `electrum-bot loop`.
 deploy/                 VPS provisioning: bootstrap.sh + systemd units. The unit
                         runs the loop WITHOUT --execute; enabling it is a
                         drop-in (mudhorn-bot-execute.conf), never an edit to
@@ -1856,7 +1930,7 @@ reference/              Third-party projects we borrow from. See reference/STATU
 ## Running it
 
 ```sh
-.venv/bin/python -m pytest              # full suite (868 tests)
+.venv/bin/python -m pytest              # full suite
 electrum-bot smoketest --mock           # no credentials needed
 electrum-bot smoketest                  # needs Alpaca paper keys
 electrum-bot dream                      # one lateral-thinking step; places nothing
@@ -1894,16 +1968,17 @@ The list below is the older deferred set and is duplicated there.
   Settings has no edit control today and `tests/test_web.py` enforces that, so
   this is a deliberate change to that rule rather than an addition beside it.
 - **Let the agent choose its exit type.** `OrderProposal.take_profit_price` is
-  a single fixed price and it is REQUIRED, so the agent cannot express a
-  trailing stop even though that is often the right exit — it is forced to name
-  a level. Alpaca supports trailing stops natively, so this is a model and
-  adapter change rather than a strategy one. The exit is the agent's decision;
-  the model should be able to carry the decision it actually made.
-  Two things make this worth doing rather than leaving: a required field the
-  agent does not care about gets filled with something arbitrary, and since
-  entries became GTC brackets that arbitrary number is no longer a journal note
-  — **it is a live order resting at the broker.** An invented target is now an
-  exit somebody did not choose.
+  **optional now** — `None` sends an OTO (entry plus stop) rather than a
+  bracket, so nobody has to invent a level to satisfy a validator, and the
+  journal migration `_drop_planned_target_not_null` exists because of that
+  change. What is still missing is a **trailing** stop: the field is one fixed
+  price, so the agent cannot express a trail even where that is the right exit.
+  Alpaca supports trailing stops natively, so this is a model and adapter
+  change rather than a strategy one. The exit is the agent's decision; the
+  model should be able to carry the decision it actually made.
+  Worth knowing while doing it: the system prompt in `claude_client.py` still
+  lists `take_profit_price` among the fields each proposal "needs", which has
+  not caught up with the field becoming optional.
 - **An exit review, grading the PLAN and never the profit.** Nothing currently
   records *why* a position closed: `record_exit` takes a price, a time and a
   realised figure, and stop-hit, target-hit, closed-by-hand and expiry are
@@ -1950,4 +2025,5 @@ The list below is the older deferred set and is duplicated there.
   is the operator's to build and is the genuinely hard part.
 - Option *trading*. Greeks, spreads and assignment are deferred; only expiry
   safety exists.
-- A backtesting harness and a dashboard. Both sketched in `docs/HANDOFF.md`.
+- A backtesting harness. Sketched in `docs/HANDOFF.md`. (The dashboard is
+  BUILT — see "The command centre is the real product".)
