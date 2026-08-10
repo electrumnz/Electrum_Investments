@@ -9,6 +9,7 @@ because one rationale came back 34 characters over a 500-character cap, and the
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import Any
 
 import pytest
 from pydantic import ValidationError
@@ -76,7 +77,7 @@ def test_an_empty_rationale_is_still_refused():
 @pytest.mark.parametrize("field", ["reasoning", "waiting_for"])
 def test_assessment_prose_truncates_too(field):
     """Same reasoning, and there is one assessment per symbol every cycle."""
-    values = {"reasoning": "Watching for a break.", "waiting_for": ""}
+    values: dict[str, Any] = {"reasoning": "Watching for a break.", "waiting_for": ""}
     values[field] = "B" * (RATIONALE_MAX_CHARS + 100)
 
     assessment = SymbolAssessment(symbol="QQQ", stance=Stance.WATCH, **values)

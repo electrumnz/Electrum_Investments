@@ -30,6 +30,7 @@ from .data.finnhub import FinnhubCalendar
 from .data.marketaux import MarketauxNews
 from .data.news import EmptyNews, NewsFeed
 from .data.xfeed import XFeed
+from .indicators import snapshot as snapshot_indicators
 from .indicators import summarise as summarise_indicators
 from .intraday import summarise as summarise_intraday
 from .journal import Journal
@@ -373,6 +374,14 @@ def cmd_loop(
                     for symbol, ind in sorted(indicators.items())
                 },
                 symbols_without_history=no_history,
+                # Numbers as well as the rendered line. This is the half a
+                # stored trigger can be checked against, and it is the half
+                # that cannot be backfilled: a cycle recorded before it existed
+                # has no figures, only prose about them.
+                readings={
+                    symbol: snapshot_indicators(ind)
+                    for symbol, ind in sorted(indicators.items())
+                },
                 intraday={
                     symbol: summarise_intraday(view)
                     for symbol, view in sorted(intraday.items())

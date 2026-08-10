@@ -71,13 +71,21 @@ import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 import structlog
 
-from .models import Decision
+from .models import (
+    AssessmentTrigger,
+    Decision,
+    IndicatorSnapshot,
+    TriggerField,
+    TriggerOp,
+)
+from .triggers import DEFAULT_HORIZON_DAYS as TRIGGER_HORIZON_DAYS
+from .triggers import CycleReadings, WatchReport, grade_watch
 
 log = structlog.get_logger(__name__)
 
@@ -87,7 +95,7 @@ DEFAULT_AUDIT_DIR = Path("audit")
 # Bump this on any schema change. There is no migration path and there is not
 # meant to be one: a mismatch drops every table and replays the audit log,
 # which is cheap and cannot lose anything the log still holds.
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -125,6 +133,12 @@ CREATE TABLE IF NOT EXISTS assessments (
     stance       TEXT NOT NULL,
     reasoning    TEXT NOT NULL DEFAULT '',
     waiting_for  TEXT NOT NULL DEFAULT '',
+    -- The machine-checkable half of a watch. NULL means the model named no
+    -- condition, or the record predates structured triggers; `triggers.py`
+    -- counts those two separately because they are different failures.
+    trigger_field TEXT,
+    trigger_op    TEXT,
+    trigger_value REAL,
     PRIMARY KEY (ts, symbol)
 );
 CREATE INDEX IF NOT EXISTS idx_assess_symbol ON assessments (symbol, ts);
@@ -183,6 +197,27 @@ CREATE TABLE IF NOT EXISTS readings (
 );
 CREATE INDEX IF NOT EXISTS idx_readings_symbol ON readings (symbol, ts);
 
+-- The same daily figures as numbers. Every column is nullable because every
+-- one of them can genuinely be unavailable, and a stored zero would be read
+-- back as a real reading. This is what a trigger is graded against and what a
+-- chart is drawn from; `readings.summary` above is what a person reads.
+CREATE TABLE IF NOT EXISTS numeric_readings (
+    ts       TEXT NOT NULL,
+    symbol   TEXT NOT NULL,
+    close    REAL,
+    sma_20   REAL,
+    sma_200  REAL,
+    atr_14   REAL,
+    volume_ratio REAL,
+    distance_from_sma_20_atr REAL,
+    swing_high REAL,
+    swing_low  REAL,
+    highest_close REAL,
+    lowest_close  REAL,
+    PRIMARY KEY (ts, symbol)
+);
+CREATE INDEX IF NOT EXISTS idx_numeric_symbol ON numeric_readings (symbol, ts);
+
 -- One row per (cycle, item). Deduping happens at query time with GROUP BY, so
 -- re-indexing a line can never inflate a count.
 CREATE TABLE IF NOT EXISTS news_sightings (
@@ -222,6 +257,7 @@ _TABLES = [
     "rejections",
     "position_plans",
     "readings",
+    "numeric_readings",
     "news_sightings",
     "events",
 ]
@@ -465,10 +501,17 @@ class InsightIndex:
         )
 
         for a in decision.assessments:
+            trigger = a.trigger
             conn.execute(
-                "INSERT OR REPLACE INTO assessments "
-                "(ts, symbol, stance, reasoning, waiting_for) VALUES (?, ?, ?, ?, ?)",
-                (ts, a.symbol, a.stance.value, a.reasoning, a.waiting_for),
+                "INSERT OR REPLACE INTO assessments (ts, symbol, stance, "
+                "reasoning, waiting_for, trigger_field, trigger_op, trigger_value) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    ts, a.symbol, a.stance.value, a.reasoning, a.waiting_for,
+                    trigger.field.value if trigger else None,
+                    trigger.op.value if trigger else None,
+                    trigger.value if trigger else None,
+                ),
             )
 
         for i, p in enumerate(decision.proposals):
@@ -527,6 +570,20 @@ class InsightIndex:
                 "VALUES (?, ?, 'daily', ?)",
                 (ts, symbol, summary),
             )
+        for symbol, snap in inputs.readings.items():
+            conn.execute(
+                "INSERT OR REPLACE INTO numeric_readings (ts, symbol, close, "
+                "sma_20, sma_200, atr_14, volume_ratio, "
+                "distance_from_sma_20_atr, swing_high, swing_low, "
+                "highest_close, lowest_close) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    ts, symbol, snap.close, snap.sma_20, snap.sma_200,
+                    snap.atr_14, snap.volume_ratio,
+                    snap.distance_from_sma_20_atr, snap.swing_high,
+                    snap.swing_low, snap.highest_close, snap.lowest_close,
+                ),
+            )
         for symbol, summary in inputs.intraday.items():
             conn.execute(
                 "INSERT OR REPLACE INTO readings (ts, symbol, kind, summary) "
@@ -548,6 +605,74 @@ class InsightIndex:
                     )
 
     # -------------------------------------------------------------- reading
+
+    def watch_report(
+        self, *, days: int = 30, horizon_days: float = TRIGGER_HORIZON_DAYS
+    ) -> WatchReport:
+        """Grade every watch in the window against the cycles that followed it.
+
+        The reading side is a plain query; the grading is `triggers.py`, which
+        is pure. Nothing here estimates a price, a fill or a profit.
+        """
+        since = (datetime.now(UTC) - timedelta(days=days)).isoformat()
+        report = WatchReport()
+
+        with self._connect() as conn:
+            watches = conn.execute(
+                "SELECT ts, symbol, waiting_for, trigger_field, trigger_op, "
+                "trigger_value FROM assessments "
+                "WHERE stance = 'watch' AND ts >= ? ORDER BY ts",
+                (since,),
+            ).fetchall()
+            if not watches:
+                return report
+
+            # Everything from the oldest watch onward, since a trigger is
+            # graded against what came after it.
+            oldest = str(watches[0]["ts"])
+            cycles = _cycle_readings(conn, oldest)
+            report.cycles_with_numeric_readings = sum(1 for c in cycles if c.readings)
+            report.cycles_without_numeric_readings = sum(
+                1 for c in cycles if not c.readings
+            )
+
+        for row in watches:
+            stated_at = _aware(str(row["ts"]))
+            if row["trigger_field"] is None:
+                # Split on what the row actually shows: whether any condition
+                # was described at all. Naming nothing is a quality problem;
+                # prose without a checkable form is a coverage gap. The cause
+                # of the second — an old record or a skipped field — is not
+                # recoverable from here, so it is not claimed.
+                if str(row["waiting_for"] or "").strip():
+                    report.watches_with_prose_only += 1
+                else:
+                    report.watches_naming_nothing += 1
+                continue
+
+            try:
+                trigger = AssessmentTrigger(
+                    field=TriggerField(str(row["trigger_field"])),
+                    op=TriggerOp(str(row["trigger_op"])),
+                    value=float(row["trigger_value"]),
+                )
+            except (ValueError, TypeError):
+                report.watches_with_prose_only += 1
+                continue
+
+            later = [c for c in cycles if c.at > stated_at]
+            report.outcomes.append(
+                grade_watch(
+                    symbol=str(row["symbol"]),
+                    stated_at=stated_at,
+                    trigger=trigger,
+                    waiting_for=str(row["waiting_for"]),
+                    later=later,
+                    horizon_days=horizon_days,
+                )
+            )
+
+        return report
 
     def describe(self) -> dict[str, Any]:
         """Schema and row counts, so a caller can write a query without guessing."""
@@ -578,6 +703,63 @@ class InsightIndex:
                 "view for deduped items with first_seen/last_seen."
             ),
         }
+
+
+def _aware(value: str) -> datetime:
+    parsed = datetime.fromisoformat(value)
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+
+
+_SNAPSHOT_FIELDS = (
+    "close",
+    "sma_20",
+    "sma_200",
+    "atr_14",
+    "volume_ratio",
+    "distance_from_sma_20_atr",
+    "swing_high",
+    "swing_low",
+    "highest_close",
+    "lowest_close",
+)
+
+
+def _cycle_readings(conn: sqlite3.Connection, since: str) -> list[CycleReadings]:
+    """Every cycle from `since` onward, with its numeric figures and proposals.
+
+    Ascending, because a trigger is graded forward in time from the moment it
+    was written.
+    """
+    readings: dict[str, dict[str, IndicatorSnapshot]] = {}
+    for row in conn.execute(
+        "SELECT * FROM numeric_readings WHERE ts >= ? ORDER BY ts", (since,)
+    ):
+        ts = str(row["ts"])
+        readings.setdefault(ts, {})[str(row["symbol"])] = IndicatorSnapshot(
+            **{name: row[name] for name in _SNAPSHOT_FIELDS}
+        )
+
+    proposed: dict[str, set[str]] = {}
+    for row in conn.execute(
+        "SELECT ts, symbol FROM proposals WHERE ts >= ?", (since,)
+    ):
+        proposed.setdefault(str(row["ts"]), set()).add(str(row["symbol"]))
+
+    # Driven by the cycle list rather than by the readings, so a cycle that
+    # recorded no numeric figures still appears — as one that could not settle
+    # a trigger, which is a different fact from one where the trigger failed.
+    stamps = [
+        str(r["ts"])
+        for r in conn.execute("SELECT ts FROM cycles WHERE ts >= ? ORDER BY ts", (since,))
+    ]
+    return [
+        CycleReadings(
+            at=_aware(ts),
+            readings=readings.get(ts, {}),
+            proposed_symbols=proposed.get(ts, set()),
+        )
+        for ts in stamps
+    ]
 
 
 # ------------------------------------------------------------- open querying

@@ -35,7 +35,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .models import Bar
+from .models import Bar, IndicatorSnapshot
 
 # Periods. These are the ones config/rules.yaml and strategy.py actually name;
 # adding more would be inventing questions nobody asked.
@@ -298,6 +298,36 @@ def render(indicators: Indicators) -> list[str]:
         )
 
     return lines
+
+
+def snapshot(indicators: Indicators) -> IndicatorSnapshot:
+    """The same figures as `summarise`, as numbers rather than as a sentence.
+
+    Both are recorded, and neither is redundant. `summarise` is what a person
+    reads when re-opening a cycle from three months ago; this is what a stored
+    trigger is later checked against and what a chart is drawn from.
+
+    The alternative — keeping only the rendered line and parsing figures back
+    out of it when they are needed — is the failure this module exists to
+    prevent, arriving from the other direction: a number recovered from prose
+    is a number nobody can check.
+
+    `None` survives, deliberately. `sma_200` over 40 bars is not zero and is
+    not the last close; it is unavailable, and a trigger measured against it
+    must come back unknown rather than false.
+    """
+    return IndicatorSnapshot(
+        close=indicators.last_close,
+        sma_20=indicators.sma_20,
+        sma_200=indicators.sma_200,
+        atr_14=indicators.atr_14,
+        volume_ratio=indicators.volume_ratio,
+        distance_from_sma_20_atr=indicators.distance_from_sma_20_atr,
+        swing_high=indicators.swing_high,
+        swing_low=indicators.swing_low,
+        highest_close=indicators.highest_close,
+        lowest_close=indicators.lowest_close,
+    )
 
 
 def summarise(indicators: Indicators) -> str:

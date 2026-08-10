@@ -33,6 +33,7 @@ from .news_history import render as render_news
 from .options import alerts_for_positions, parse_occ_symbol, render_alerts
 from .risk import RiskGate
 from .stand_down import describe
+from .triggers import render as render_watches
 
 server = MCPServer(
     name="electrum-bot",
@@ -793,6 +794,70 @@ def query_history(sql: str, limit: int = 50) -> dict[str, Any]:
             "More rows matched than were returned; add LIMIT or narrow the "
             "query." if result.truncated else ""
         ),
+    }
+
+
+@server.tool()
+def review_watches(days: int = 30, horizon_days: float = 5.0) -> dict[str, Any]:
+    """Score the bot's own watch list: did each trigger fire, and did it act?
+
+    A `watch` stance says "not yet, and here is what would change that". This
+    checks each of those conditions against the figures recorded on later
+    cycles, and reports whether a proposal followed.
+
+    **This measures plan-following, not profit.** No estimate of what a trade
+    would have made appears here and none should be inferred: that would need
+    a fill, a size and an intraday path all assumed. What makes a trigger worth
+    scoring is that it was written down BEFORE the fact.
+
+    Read `readout` before summarising. Three distinctions in it matter:
+
+    - `fired` with `acted: false` is the interesting case — the bot named a
+      condition, the condition happened, and nothing followed.
+    - `unknown` is not `not_fired`. It means the figure the trigger names was
+      unavailable every time it was checked, so nothing can be concluded.
+    - `pending` is not `not_fired` either. The horizon has not elapsed yet.
+
+    If `can_grade_anything` is false, the evidence is absent — that is NOT the
+    same as every watch having been honoured, and must not be reported as a
+    clean record.
+
+    Args:
+        days: How far back to collect watches (default 30).
+        horizon_days: How long a watch stays live before it expires unscored
+            (default 5). A trigger that fires three weeks later is not the
+            setup that was described.
+    """
+    _session.insight.refresh()
+    report = _session.insight.watch_report(days=days, horizon_days=horizon_days)
+
+    def _outcome(o: Any) -> dict[str, Any]:
+        return {
+            "symbol": o.symbol,
+            "stated_at": o.stated_at.isoformat(timespec="minutes"),
+            "trigger": o.trigger.render(),
+            "waiting_for": o.waiting_for,
+            "verdict": o.verdict.value,
+            "fired_at": o.fired_at.isoformat(timespec="minutes") if o.fired_at else None,
+            "fired_value": o.fired_value,
+            "acted": o.acted,
+            "cycles_checked": o.cycles_checked,
+        }
+
+    return {
+        "window_days": days,
+        "horizon_days": horizon_days,
+        "can_grade_anything": report.can_grade_anything,
+        "graded": report.graded,
+        "fired": len(report.fired),
+        "fired_without_a_proposal": len(report.missed),
+        "watches_naming_nothing": report.watches_naming_nothing,
+        "watches_with_prose_only": report.watches_with_prose_only,
+        "cycles_with_numeric_readings": report.cycles_with_numeric_readings,
+        "cycles_without_numeric_readings": report.cycles_without_numeric_readings,
+        "missed": [_outcome(o) for o in report.missed],
+        "outcomes": [_outcome(o) for o in report.outcomes],
+        "readout": render_watches(report),
     }
 
 

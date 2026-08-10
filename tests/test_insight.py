@@ -518,3 +518,121 @@ def test_bound_parameters_are_values_not_syntax(tmp_path):
     assert miss.ok
     assert miss.rows == []
     assert len(rows(index, "SELECT ts FROM cycles")) == 1
+
+
+# ------------------------------------------------------------ watch grading
+
+
+def _watch(symbol: str, level: float, *, prose: str = "waiting", trigger=True):
+    from bot.models import AssessmentTrigger, TriggerField, TriggerOp
+
+    return SymbolAssessment(
+        symbol=symbol,
+        stance=Stance.WATCH,
+        reasoning="Stretched below the 20-day; volume has not confirmed yet.",
+        waiting_for=prose,
+        trigger=(
+            AssessmentTrigger(
+                field=TriggerField.CLOSE, op=TriggerOp.BELOW, value=level
+            )
+            if trigger
+            else None
+        ),
+    )
+
+
+def _readings(symbol: str, close: float) -> MarketInputs:
+    from bot.models import IndicatorSnapshot
+
+    return MarketInputs(readings={symbol: IndicatorSnapshot(close=close)})
+
+
+def test_a_trigger_survives_the_round_trip_into_the_index(tmp_path):
+    index = build(tmp_path, cycle(assessments=[_watch("SPY", 641.20)]))
+
+    row = rows(
+        index,
+        "SELECT symbol, trigger_field, trigger_op, trigger_value FROM assessments",
+    )[0]
+    assert row == {
+        "symbol": "SPY",
+        "trigger_field": "close",
+        "trigger_op": "below",
+        "trigger_value": 641.20,
+    }
+
+
+def test_numeric_readings_are_indexed_as_numbers(tmp_path):
+    """Distinct from `readings.summary`, which is prose and stays prose."""
+    index = build(tmp_path, cycle(inputs=_readings("SPY", 580.12)))
+
+    row = rows(index, "SELECT symbol, close, sma_200 FROM numeric_readings")[0]
+    assert row["close"] == 580.12
+    # Unavailable survives as NULL rather than becoming a plausible zero.
+    assert row["sma_200"] is None
+
+
+def test_a_watch_whose_trigger_fires_and_is_ignored_is_reported(tmp_path):
+    """End to end: written on one cycle, graded against the ones after it."""
+    index = build(
+        tmp_path,
+        cycle(minutes_ago=200, assessments=[_watch("SPY", 641.20)]),
+        cycle(minutes_ago=100, inputs=_readings("SPY", 645.00)),
+        cycle(minutes_ago=50, inputs=_readings("SPY", 639.00)),
+        cycle(minutes_ago=1, inputs=_readings("SPY", 638.00)),
+    )
+
+    report = index.watch_report(days=30, horizon_days=1.0)
+
+    assert report.graded == 1
+    assert len(report.fired) == 1
+    assert len(report.missed) == 1
+
+    missed = report.missed[0]
+    assert missed.symbol == "SPY"
+    assert missed.fired_value == 639.00
+    assert missed.acted is False
+
+
+def test_a_watch_acted_on_is_not_reported_as_missed(tmp_path):
+    index = build(
+        tmp_path,
+        cycle(minutes_ago=200, assessments=[_watch("SPY", 641.20)]),
+        cycle(
+            minutes_ago=50,
+            inputs=_readings("SPY", 639.00),
+            proposals=[proposal("SPY")],
+            verdicts=[RiskVerdict.approve()],
+        ),
+    )
+
+    report = index.watch_report(days=30, horizon_days=1.0)
+
+    assert len(report.fired) == 1
+    assert report.missed == []
+
+
+def test_a_watch_with_no_trigger_is_counted_apart_from_one_naming_nothing(tmp_path):
+    index = build(
+        tmp_path,
+        cycle(
+            assessments=[
+                _watch("SPY", 0, prose="waiting for more confirmation", trigger=False),
+                _watch("QQQ", 0, prose="", trigger=False),
+            ]
+        ),
+    )
+
+    report = index.watch_report(days=30)
+
+    assert report.watches_with_prose_only == 1
+    assert report.watches_naming_nothing == 1
+    assert report.graded == 0
+
+
+def test_an_empty_watch_report_does_not_read_as_a_clean_record(tmp_path):
+    index = build(tmp_path, cycle(notes="held"))
+    report = index.watch_report(days=30)
+
+    assert report.can_grade_anything is False
+    assert report.graded == 0

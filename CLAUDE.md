@@ -642,6 +642,60 @@ through the dashboard and through chat. Feeding a queryable track record back
 to the model is the thing `metrics.py` is already kept away from, and a
 counterfactual one — "the trigger fired and we did not act" — is noisier still.
 
+### A watch is graded now, so it has to be written in a checkable form
+
+`waiting_for` is prose — "SPY closing below 641.20, roughly 1 ATR under the
+20-day" — and prose cannot be scored. So a watch was an opinion with no
+consequence and the stance meant nothing.
+
+`SymbolAssessment.trigger` carries the same condition as `field`, `op` and
+`value`; `src/bot/triggers.py` grades it against later cycles. Both halves are
+kept: the sentence is what a person reads, the trigger is what code checks.
+
+**The threshold is a number and never the name of another figure.** "Above the
+20-day" re-checked next week tests a level the model never saw, because the
+average moved. A number pins the claim to the moment it was made, which is the
+entire point of pre-registering one.
+
+**This is the piece that could not be backfilled**, and the same is true of
+`MarketInputs.readings` — the daily figures as numbers rather than as the
+rendered line. A cycle recorded before those shipped has prose about figures
+and no figures, and nothing recovers them later. That is why they went in ahead
+of the index, which is fully retroactive.
+
+**What is measured is plan-following, not profit.** No counterfactual P&L is
+computed and none should be added: "you missed $2,400" assumes the fill, the
+size and the intraday path. What makes a trigger worth scoring is that it was
+written down first.
+
+Four verdicts, and the distinctions are the whole value:
+
+- **`unknown` is not `not_fired`.** The figure named was unavailable every time
+  it was checked. `IndicatorSnapshot` keeps `None` rather than a zero for
+  exactly this reason.
+- **`pending` is not `not_fired` either.** The horizon has not elapsed, so
+  nothing is settled. Precedence matters: an unelapsed window is `pending`
+  whether or not a reading has been seen, or "we have not looked yet" becomes
+  "we looked and found nothing".
+- **`followed_through` is three-valued.** A watch that never fired is not a
+  follow-through failure, and reporting it as one would count a correct wait
+  against the bot.
+- **`can_grade_anything` is separate from an empty list**, the same as
+  `has_cycles` in `news_history`. No graded watches because nothing was
+  recorded and no graded watches because every watch was honoured are opposite
+  findings.
+
+A watch with prose but no trigger and a watch naming nothing at all are counted
+apart, and the counter deliberately **does not** claim to know why a trigger is
+missing: a record predating this feature is indistinguishable from a model that
+skipped the field, so it is named for what can be observed.
+
+**Never put an unescaped `{` in `SYSTEM_PROMPT_TEMPLATE`.** It is rendered with
+`.format(rules_summary=...)`, so an example written as `{field: "close"}` is
+read as a placeholder and raises `KeyError: 'field'` — taking down the model
+call, the smoketest and the loop together. Double the braces. Same shape as the
+`render.STYLES` backslash trap, and `tests/test_strategy.py` guards it.
+
 ### A bare `.gitignore` directory pattern matches at every depth
 
 `.gitignore` once carried a bare `data/`, meant for the SQLite journal at the
@@ -911,6 +965,11 @@ src/bot/
                         resting orders live here.
   indicators.py         Averages, ATR, volume ratio, swing levels. Pure functions over
                         daily bars. Computed in Python so the model never derives them.
+                        `snapshot()` records them as NUMBERS alongside the rendered
+                        line, which is what a stored trigger is graded against.
+  triggers.py           Grades the watch list: did the named condition fire, and
+                        did anything follow. Plan-following, never counterfactual
+                        P&L. Operator surface only — it must not reach the prompt.
   intraday.py           Five-minute bars: did price CLOSE beyond a level or only wick
                         through it, on what volume, and was it reclaimed. The
                         distinction trend_break turns on.
@@ -983,7 +1042,7 @@ reference/              Third-party projects we borrow from. See reference/STATU
 ## Running it
 
 ```sh
-.venv/bin/python -m pytest              # full suite (540 tests)
+.venv/bin/python -m pytest              # full suite (568 tests)
 electrum-bot smoketest --mock           # no credentials needed
 electrum-bot smoketest                  # needs Alpaca paper keys
 electrum-bot loop                       # proposes and vets; places nothing
