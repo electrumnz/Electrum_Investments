@@ -2293,19 +2293,48 @@ def chat_page(*, enabled: bool, token: str, hermes_available: bool) -> str:
         token=token,
         soul="yoda",
         who="Yoda",
-        intro="Ask about the account, the journal, open risk or a particular "
-        "decision. I read the same journal this dashboard renders, through the "
-        "MCP tools, and every order path behind me runs the risk gate first.",
-        placeholder="Ask about the account, a trade, or a rejection",
+        intro="Ask about the account, the journal, open risk, a particular "
+        "decision, or the news the bot has read. I reach the same journal and "
+        "audit log this dashboard renders, through the MCP tools, and every "
+        "order path behind me runs the risk gate first.",
+        placeholder="Ask about the account, a trade, a rejection, or the news",
         suggestions=[
             "What is my open risk right now, and how close is it to the cap?",
             "Why was the last proposal rejected?",
+            "What news has the bot seen today, and how old is it?",
+            "Which rejection reason has fired most often, and on what?",
+            "How many times have we watched a symbol without naming a trigger?",
             "Summarise this week's trades and what closed them.",
             "Is anything expiring soon that needs action?",
         ],
         footnote="Turns are replayed for continuity but this is not a long-lived "
         "session. Hermes keeps its own memory; the dashboard does not.",
+        extra_notes=ACCOUNT_AGENT_NOTES,
     )
+
+
+# Notes specific to the ACCOUNT agent, not the dreamer. Both describe reach:
+# what Yoda can and cannot see. Grogu has neither the news recording nor the
+# insight index, so putting these on the shared panel would describe tools the
+# dreamer does not have.
+#
+# Raw HTML rather than escaped text, and it is a module constant for that
+# reason: nothing user-supplied reaches it.
+ACCOUNT_AGENT_NOTES = """
+  <p class="note"><b>News here is a recording, not a search.</b> Hermes has no
+  web access, deliberately. What it can read is what the trading loop was shown
+  and wrote down each cycle &mdash; headlines, posts from watched accounts and
+  earnings windows &mdash; with the age of each attached. Asking does not fetch
+  anything: the Marketaux free tier is 100 requests a day against a loop that
+  wakes 96 times, so that quota belongs to the loop.</p>
+  <p class="note"><b>The whole history is searchable, not just recent days.</b>
+  Every cycle, assessment, rejection reason and headline is indexed into
+  <code>data/insight.db</code>, and Hermes queries it with read-only SQL. So
+  &ldquo;what did we decide about AAPL in March&rdquo; and &ldquo;which rule
+  refuses proposals most often&rdquo; are answerable. The index is derived from
+  <code>audit/</code> and rebuilt from it, so the log stays the record and the
+  index is only ever a faster way to read it.</p>
+"""
 
 
 def chat_panel(
@@ -2318,6 +2347,7 @@ def chat_panel(
     suggestions: list[str],
     footnote: str,
     avatar: bool = False,
+    extra_notes: str = "",
 ) -> str:
     """One conversation panel, used by both agents.
 
@@ -2329,6 +2359,11 @@ def chat_panel(
     `soul` travels in the request body and is the only thing that picks the
     character. It is validated server-side against a fixed set, so a value typed
     into the console cannot name an arbitrary file.
+
+    `extra_notes` is raw HTML for things true of ONE agent's reach — the account
+    agent's news recording and searchable history, which the dreamer does not
+    have. Describing them on the shared panel would credit the dreamer with
+    tools it cannot reach.
     """
     chips = "".join(
         f'<button type="button" data-q="{_e(q)}">{_e(q)}</button>' for q in suggestions
@@ -2345,7 +2380,7 @@ def chat_panel(
       aria-label="Message"></textarea>
     <button class="btn" id="send" type="submit">Send</button>
   </div>
-  <p class="note">{_e(footnote)}</p>
+  <p class="note">{_e(footnote)}</p>{extra_notes}
 </div>
 <script>
 (function () {{

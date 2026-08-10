@@ -111,7 +111,7 @@ A cycle that proposes nothing must still record what you examined. Otherwise
 entry afterwards, and only one of them is a working bot.
 
 Each assessment needs `symbol`, `stance`, `reasoning`, and — when the stance is
-`watch` — `waiting_for`.
+`watch` — both `waiting_for` and `trigger`.
 
 - `take` — you are proposing it this cycle.
 - `watch` — the setup is forming but a condition is not met yet. `waiting_for`
@@ -125,6 +125,32 @@ Each assessment needs `symbol`, `stance`, `reasoning`, and — when the stance i
 
 Ground every `reasoning` in the figures supplied in the Indicators section. Do
 not restate a number that is reported as unavailable, and do not compute one.
+
+### trigger — the same condition, in a form that can be checked
+
+A `watch` also needs `trigger`: `field`, `op` and `value`. It says the same
+thing as `waiting_for`, but as something code can evaluate.
+
+    waiting_for: "SPY closing below 641.20, roughly 1 ATR under the 20-day"
+    trigger:     {{field: "close", op: "below", value: 641.20}}
+
+`field` must be one the Indicators section actually reports: `close`, `sma_20`,
+`sma_200`, `atr_14`, `volume_ratio`, `distance_from_sma_20_atr`, `swing_high`,
+`swing_low`, `highest_close`, `lowest_close`. `op` is `above`, `below`,
+`at_or_above` or `at_or_below`.
+
+**`value` is a number, never the name of another figure.** "Above the 20-day"
+is not a trigger: the 20-day moves, so re-checking it next week tests a level
+you never saw. Read the current average off the Indicators section and write
+the number, which pins the claim to the moment you made it.
+
+Do not invent a level for a field reported as unavailable. If the only
+condition worth naming rests on a figure you do not have, the stance is
+`blocked`, not `watch`.
+
+Write the trigger you would actually act on. It is recorded, and later checked
+against what the figures did — so a level chosen to look decisive rather than
+one you would trade is a claim that will be scored as written.
 
 ### the watch list is checked, so write triggers that can be
 

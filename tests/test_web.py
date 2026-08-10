@@ -271,6 +271,40 @@ def test_chat_page_says_why_it_is_off_rather_than_rendering_nothing(client):
     assert "risks action rather than" in body
 
 
+def test_chat_page_says_what_its_news_actually_is():
+    """The operator asked for news and got a refusal, which read as a fault.
+
+    It was neither: Hermes has no web access on purpose, and what it can read
+    is the loop's own recording. The page has to say so, and has to say the age
+    matters — a recorded headline offered as current is the confident partial
+    answer this project exists to avoid.
+
+    Rendered directly rather than fetched, because the live panel only appears
+    once Hermes is installed and this asserts on the copy, not the wiring.
+    """
+    import re
+
+    from bot.web.render import chat_page
+
+    # Collapsed, because the copy is hard-wrapped in the template and a phrase
+    # split across two source lines is the same sentence to a reader.
+    body = re.sub(r"\s+", " ", chat_page(enabled=True, token="tok", hermes_available=True))
+
+    assert "recording, not a search" in body
+    assert "no web access" in body
+    assert "age of each attached" in body
+    # The quota is the reason it cannot simply fetch, and it belongs on the page
+    # rather than only in a docstring somebody would have to go looking for.
+    assert "100 requests a day" in body
+
+    # And the searchable history, which is a different claim from the window:
+    # the page has to say the index is derived or somebody will treat a stale
+    # index as the record.
+    assert "whole history is searchable" in body
+    assert "read-only SQL" in body
+    assert "rebuilt from it" in body
+
+
 def test_settings_shows_the_limits_without_offering_to_change_them(client):
     """A settings screen that could widen a limit would be used to widen one
     during a losing run, which is exactly when the limit is doing its job."""
@@ -1068,3 +1102,34 @@ def test_settings_still_offers_no_way_to_change_anything(client):
 
     for control in ("<form", "<input", "<select", "contenteditable", "<button"):
         assert control not in body, f"settings page carries a {control}"
+
+
+def test_the_dreamer_is_not_credited_with_the_account_agent_tools(client):
+    """The two panels share an implementation but not a reach.
+
+    The account agent has the news recording and the searchable history index;
+    the dreamer has neither, and ideally runs on a separate Hermes with no
+    broker tools at all. The shared `chat_panel` therefore takes the notes about
+    those tools as a per-caller argument rather than baking them in — describing
+    them on the Dreaming page would credit the dreamer with tools it cannot
+    reach, which is the same class of overclaim as the "no route to the broker"
+    banner that had to be corrected.
+    """
+    from bot.web.render import chat_page, dreaming_page
+
+    # Rendered directly with chat enabled: the default client fixture has no
+    # DASHBOARD_CHAT_TOKEN, so both routes show their "chat is off" branch and
+    # neither panel exists to compare.
+    chat = chat_page(enabled=True, token="t", hermes_available=True)
+    dreaming = dreaming_page(
+        [], DreamSummary.of([]), enabled=True, token="t",
+        hermes_available=True, soul_found=True, isolated=False,
+    )
+
+    assert "News here is a recording" in chat
+    assert "insight.db" in chat
+    assert 'var SOUL = "yoda"' in chat
+
+    assert "News here is a recording" not in dreaming
+    assert "insight.db" not in dreaming
+    assert 'var SOUL = "grogu"' in dreaming
