@@ -62,10 +62,16 @@
       operator interface, running on a committed fixture. Every figure is
       invented. Nothing here reads a broker, a journal or an account.</p>
 
+    <!-- The launch pad. assets/fx.js turns this into a jump to lightspeed and
+         overview.html completes it on arrival, but it is an ordinary link
+         first: with the script absent, blocked or broken it still goes
+         straight there. An entrance that can fail closed is not an entrance. -->
     <a class="btn primary" href="overview.html"
        style="display:block;text-align:center;text-decoration:none">
       Open the demonstration
     </a>
+
+    <p class="standby"><i></i>Nav computer standing by</p>
 
     <p class="note" style="text-align:center;margin-top:1.75rem">
       <a href="about.html">What this is</a> &middot;
@@ -89,5 +95,6 @@
      dead code that still makes noise. -->
 <script src="assets/demo-data.js"></script>
 <script src="assets/app.js"></script>
+<script src="assets/fx.js"></script>
 </body>
 </html>

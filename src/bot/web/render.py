@@ -29,7 +29,14 @@ from datetime import UTC, datetime
 
 from ..audit import AuditView, DecisionEntry
 from ..config import DAY_NAMES, Env, Rules
-from ..dreaming import Dream, DreamSummary, DreamVerdict, Hop
+from ..dreaming import (
+    THIN_LEDGER_THRESHOLD,
+    Dream,
+    DreamLedger,
+    DreamSummary,
+    DreamVerdict,
+    Hop,
+)
 from ..metrics import JournalReport, render_excursions, render_summary
 from ..models import AccountSnapshot, StandDownState, Trade, WorkingOrder
 from ..options import ExpiryAlert
@@ -442,9 +449,13 @@ nav a:hover::after,nav a[aria-current=page]::after{transform:scaleX(1)}
 .dream>.top h3{font-size:1.0625rem;margin:0}
 .dream>.top .when{margin-left:auto;font-family:var(--mono);font-size:.6875rem;
   color:var(--pewter)}
-.dream .seed{padding:.875rem 1.125rem;border-bottom:1px solid var(--slate);
+/* `.spark`, not `.seed`. The stage pills are named after the stages, so a
+   `.dream .seed` rule here also matched <span class="pill seed"> and dressed the
+   stage badge as a full-width paragraph. Scope by element role, never by a word
+   that is also a state name. */
+.dream .spark{padding:.875rem 1.125rem;border-bottom:1px solid var(--slate);
   font-family:var(--serif);font-size:.9375rem;color:var(--bone)}
-.dream .seed .from{display:block;margin-top:.4rem;font-family:var(--mono);
+.dream .spark .from{display:block;margin-top:.4rem;font-family:var(--mono);
   font-size:.625rem;letter-spacing:.12em;text-transform:uppercase;
   color:var(--pewter)}
 .dream .body{padding:.875rem 1.125rem}
@@ -825,8 +836,21 @@ SCRIPT = """
   /* Armed before anything else can throw. Hiding a panel takes BOTH
      `html.fx-ready` and a per-element `fx-panel` class, added together in one
      synchronous block below, and this clears them shortly afterwards whatever
-     happened in between. */
-  window.setTimeout(settleAll, 2600);
+     happened in between.
+
+     It is re-armed rather than cancelled once setup succeeds, and the two
+     durations do different jobs. The short one catches a throw between hiding
+     and playing, which is the case that would leave a figure invisible with
+     nothing coming to fix it. The long one is the last resort for panels the
+     observer owns: settling those after two and a half seconds would force
+     everything below the fold visible before anyone scrolled to it, so the
+     reveal-on-scroll could never happen at all. */
+  var guard = window.setTimeout(settleAll, 2600);
+
+  function rearm(ms) {
+    window.clearTimeout(guard);
+    guard = window.setTimeout(settleAll, ms);
+  }
 
   function play(list) {
     for (var i = 0; i < list.length; i++) {
@@ -858,7 +882,7 @@ SCRIPT = """
     doc.classList.add('fx-ready');
     play(above);
 
-    if (!below.length) return;
+    if (!below.length) { rearm(3000); return; }
     if ('IntersectionObserver' in window) {
       var io = new IntersectionObserver(function (entries) {
         var batch = [];
@@ -871,8 +895,13 @@ SCRIPT = """
         if (batch.length) play(batch);
       }, { rootMargin: '0px 0px -8% 0px' });
       for (var k = 0; k < below.length; k++) io.observe(below[k]);
+      /* Setup succeeded, so the observer owns these. Push the backstop out far
+         enough that scrolling to a panel is what reveals it, and never remove
+         it: a page left open still ends up wholly visible. */
+      rearm(20000);
     } else {
       play(below);
+      rearm(3000);
     }
   }
 
@@ -2351,7 +2380,7 @@ def _dream(dream: Dream) -> str:
         f'<span class="pill {verification}">{_e(str(verification))}</span>'
         f'<span class="when">{_e(_when(dream.updated_at))}</span>'
         "</div>"
-        f'<div class="seed">{_e(dream.seed)}'
+        f'<div class="spark">{_e(dream.seed)}'
         + (
             f'<span class="from">Sparked by {_e(dream.origin)}</span>'
             if dream.origin
@@ -2408,6 +2437,73 @@ def _dream(dream: Dream) -> str:
         )
 
     return out + "</div></article>"
+
+
+def _ledger(ledger: DreamLedger) -> str:
+    """The consolidation pass, rendered for the operator and nobody else.
+
+    This is the one form of learning the repository allows: facts about the
+    dreamer's REASONING, which are true regardless of how any trade went, rather
+    than facts about returns, which are a forty-sample coin flip a model would
+    confidently overfit to. Same loop as `metrics.py` and the Analytics page,
+    and it terminates in the same place, which is a person.
+    """
+    if not ledger.dreams:
+        return ""
+
+    def rate(value: float | None) -> str:
+        # `n/a`, never `0%`. An empty store has not scored nought for sourcing;
+        # it has no evidence either way, and the two must not read alike.
+        return "n/a" if value is None else f"{value:.0f}%"
+
+    thin = (
+        '<p class="note" style="margin-top:.875rem">Computed over '
+        f"{ledger.resolved} resolved chain(s). Below "
+        f"{THIN_LEDGER_THRESHOLD} this is a thin sample and every rate above is "
+        "noise, which is stated here for the same reason the Analytics page "
+        "states it: a rate without its sample count gets believed anyway.</p>"
+        if ledger.sample_is_thin
+        else ""
+    )
+
+    flags = ""
+    if ledger.untriggered_keeps:
+        flags += (
+            f'<p class="note">{ledger.untriggered_keeps} kept idea(s) name no '
+            "trigger. Those are notes rather than watches.</p>"
+        )
+    if ledger.unattacked:
+        flags += (
+            f'<p class="note">{ledger.unattacked} chain(s) have no stated weakest '
+            "hop, so nobody has tried to break them yet.</p>"
+        )
+
+    return (
+        '<section class="block"><h2>What it has learned about its own thinking</h2>'
+        '<p class="note" style="max-width:68ch;margin-bottom:1rem">Counted over the '
+        "chains below. Deliberately nothing about what any idea would have "
+        "earned: the dreamer does not learn from profit and loss, because forty "
+        "trades is noise and a model shown three losses will confidently change "
+        "approach. These are facts about the reasoning, true regardless of how a "
+        "trade went, and they reach you rather than it.</p>"
+        '<div class="grid g4">'
+        + stat("Hops sourced", rate(ledger.sourcing_rate), "of every hop recorded")
+        + stat(
+            "Chains dropped",
+            rate(ledger.drop_rate),
+            "of those resolved. High is healthy",
+        )
+        + stat(
+            "Median chain",
+            "n/a" if ledger.median_hops is None else f"{ledger.median_hops:g}",
+            "hops. Two is the minimum it aims for",
+        )
+        + stat("Resolved", str(ledger.resolved), f"of {ledger.dreams} recorded")
+        + "</div>"
+        + flags
+        + thin
+        + "</section>"
+    )
 
 
 WORKED_EXAMPLE = """
@@ -2498,6 +2594,8 @@ def dreaming_page(
         + stat("Dropped", str(summary.dropped), "broke on inspection")
         + "</div>"
     )
+
+    body += _ledger(DreamLedger.of(dreams))
 
     body += '<section class="block"><h2>Thoughts</h2>'
     if dreams:

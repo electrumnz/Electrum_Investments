@@ -234,3 +234,102 @@ def test_the_summary_counts_what_is_there():
     assert summary.parked == 1
     # a, c and d have no checked hops at all.
     assert summary.unverified == 3
+
+
+# ------------------------------------------------------------------ ledger
+
+
+def test_the_ledger_counts_reasoning_and_never_returns():
+    """The one form of learning this repository allows.
+
+    Anthropic's Dreaming consolidates an agent's memory from its own past
+    sessions. Applied to a trading account that means learning from profit and
+    loss, which is forbidden here: forty trades is noise and a model shown three
+    losses will confidently change approach. So the consolidation pass counts
+    properties of the REASONING, which are true regardless of how any trade
+    went, and there is no outcome sample to overfit to.
+    """
+    from bot.dreaming import DreamLedger
+
+    ledger_fields = set(DreamLedger.__dataclass_fields__)
+    money = {"pnl", "pnl_usd", "realised", "return_pct", "win_rate", "expectancy",
+             "profit_factor", "r_multiple"}
+
+    assert ledger_fields & money == set()
+
+
+def test_the_ledger_reports_rates_as_unavailable_rather_than_zero():
+    """An empty store has not scored nought for sourcing; it has no evidence.
+
+    Same rule as the tailnet status and as `metrics.py`: the absence of a figure
+    must not render as the worst possible value of it.
+    """
+    from bot.dreaming import DreamLedger
+
+    empty = DreamLedger.of([])
+
+    assert empty.sourcing_rate is None
+    assert empty.drop_rate is None
+    assert empty.median_hops is None
+
+
+def test_the_ledger_counts_sourcing_and_drops():
+    from bot.dreaming import DreamLedger
+
+    ledger = DreamLedger.of([
+        Dream(title="a", seed="s", stage=DreamStage.VERDICT, verdict=DreamVerdict.DROP,
+              chain=[Hop("x", True, "ref"), Hop("y")]),
+        Dream(title="b", seed="s", stage=DreamStage.VERDICT, verdict=DreamVerdict.KEEP,
+              chain=[Hop("x", True, "ref"), Hop("y", True, "ref")]),
+        Dream(title="c", seed="s", chain=[Hop("x")]),
+    ])
+
+    assert ledger.dreams == 3
+    assert ledger.resolved == 2
+    assert ledger.sourcing_rate == pytest.approx(60.0)   # 3 checked of 5 hops
+    assert ledger.drop_rate == pytest.approx(50.0)       # 1 dropped of 2 resolved
+    assert ledger.median_hops == 2
+
+
+def test_the_ledger_flags_a_kept_idea_with_no_trigger():
+    """A watch with no named trigger is a note. Same rule the Decisions page
+    applies to the decision loop's own watches."""
+    from bot.dreaming import DreamLedger
+
+    ledger = DreamLedger.of([
+        Dream(title="a", seed="s", stage=DreamStage.VERDICT, verdict=DreamVerdict.KEEP),
+        Dream(title="b", seed="s", stage=DreamStage.VERDICT, verdict=DreamVerdict.KEEP,
+              trigger="the brood map"),
+    ])
+
+    assert ledger.untriggered_keeps == 1
+
+
+def test_the_ledger_flags_a_chain_nobody_attacked():
+    from bot.dreaming import DreamLedger
+
+    ledger = DreamLedger.of([
+        Dream(title="a", seed="s", chain=[Hop("x")]),
+        Dream(title="b", seed="s", chain=[Hop("x")], weakest_hop="x is assumed"),
+    ])
+
+    assert ledger.unattacked == 1
+
+
+def test_a_thin_ledger_says_so():
+    """A rate without its sample count gets believed anyway."""
+    from bot.dreaming import THIN_LEDGER_THRESHOLD, DreamLedger
+
+    few = [
+        Dream(title=str(i), seed="s", stage=DreamStage.VERDICT,
+              verdict=DreamVerdict.DROP)
+        for i in range(3)
+    ]
+    many = [
+        Dream(title=str(i), seed="s", stage=DreamStage.VERDICT,
+              verdict=DreamVerdict.DROP)
+        for i in range(THIN_LEDGER_THRESHOLD)
+    ]
+
+    assert DreamLedger.of(few).sample_is_thin
+    assert not DreamLedger.of(many).sample_is_thin

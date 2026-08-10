@@ -901,3 +901,49 @@ def test_the_soul_name_from_a_request_body_cannot_name_an_arbitrary_file(
 
     assert seen, "the route did not consult the soul loader at all"
     assert seen[-1] == expected
+
+
+def test_no_stylesheet_rule_collides_with_a_state_badge():
+    """A `.pill` modifier must not double as a layout class.
+
+    The stage badges are named after the states they show, so a rule written as
+    `.dream .seed { padding: ... }` for the spark paragraph ALSO matched
+    `<span class="pill seed">` and rendered the badge as a full-width block.
+    Nothing warned: it is valid CSS that silently styles the wrong element, and
+    it is only visible if somebody looks at the page.
+
+    This flags the shape rather than the instance. A rule whose final compound
+    selector is a bare `.name` that is also a pill modifier, and which sets a
+    LAYOUT property, is the collision. Colour-only overlaps are deliberate and
+    harmless: `.loss` means the same red wherever it lands.
+    """
+    import re
+
+    from bot.web.render import STYLES
+
+    # Strip comments first, so prose in them cannot look like a selector.
+    css = re.sub(r"/\*.*?\*/", "", STYLES, flags=re.S)
+
+    modifiers = set(re.findall(r"\.pill\.([a-z-]+)", css))
+    assert modifiers, "no pill modifiers found; has the badge markup changed?"
+
+    layout = (
+        "display", "padding", "margin", "position", "width", "height",
+        "font-size", "font-family", "border-bottom", "border-left", "grid",
+        "flex",
+    )
+
+    offenders = []
+    for selectors, block in re.findall(r"([^{}]+)\{([^{}]*)\}", css):
+        if not any(f"{prop}:" in block for prop in layout):
+            continue
+        for selector in selectors.split(","):
+            final = selector.strip().split()[-1] if selector.strip() else ""
+            # A bare `.name` — no element, no second class to narrow it.
+            if re.fullmatch(r"\.([a-z-]+)", final) and final[1:] in modifiers:
+                offenders.append((selector.strip(), final))
+
+    assert not offenders, (
+        "these rules restyle a state badge as a side effect: "
+        f"{offenders}. Scope by element role, not by a word that is also a state."
+    )

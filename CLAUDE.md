@@ -203,8 +203,8 @@ risk is reported as **missing** rather than guessed at.
 
 Two surfaces, and confusing them is the mistake to avoid.
 
-`src/bot/web/` renders **live** journal, broker and audit state, on six pages:
-Board, Decisions, Trades, Analytics, Settings, Chat. It has no login *because*
+`src/bot/web/` renders **live** journal, broker and audit state, on seven pages:
+Board, Decisions, Trades, Analytics, Dreaming, Settings, Chat. It has no login *because*
 it binds to `127.0.0.1` and is reached over Tailscale. That is where operator
 features belong, and building one there needs no auth because nothing is
 published.
@@ -560,6 +560,128 @@ A session is grouped by **UTC date**, which is exactly right for US equities
 be wrong for a market whose session spans midnight UTC, which is CME Globex if a
 second broker ever arrives.
 
+### The projection layer must fail to VISIBLE, and it is built that way
+
+Both surfaces carry a starfield, a hyperspace jump on navigation, HUD bracket
+corners and panels that materialise: `render.STYLES` plus `render.SCRIPT` on the
+dashboard, `brand/assets/app.css` plus `brand/assets/fx.js` on the public site.
+Same engine twice, the same split those two design systems already live with.
+
+It is decoration, and the whole design is about making sure it stays that way.
+
+**Nothing is hidden unless the script said so.** Hiding a panel takes BOTH
+`html.fx-ready` and a per-element `fx-panel` class, and they are added together
+in one synchronous block. JavaScript off, a script that threw, a blocked file:
+all render the plain page with every figure visible. The obvious arrangement —
+hide in CSS, reveal in JS — fails to a **blank page**, on the one surface whose
+job is making problems visible. Never invert this.
+
+**The settle timer is armed before anything can throw, and re-armed rather than
+cancelled.** Two durations doing different jobs: 2.6s catches a throw between
+hiding and playing, and 20s is the last resort for panels the IntersectionObserver
+owns. Settling those at 2.6s would force everything below the fold visible before
+anyone scrolled to it, so the reveal could never happen at all. `settleAll`
+queries the DOM rather than a list built earlier, because it must not depend on
+any of the code between it and the failure it is catching.
+
+**`prefers-reduced-motion` switches the layer off, not down.** Both the
+stylesheet and the script check it; the script never starts the canvas, never
+adds the class and never builds the boot overlay, so the work is not done rather
+than done invisibly. A full-screen radial starfield accelerating to lightspeed
+is close to a worked example of a vestibular trigger.
+
+**The boot readout names parts of the INTERFACE, never the account.** "Risk gate
+armed" would be stating a fact it has not read, on a dashboard whose whole
+argument is that figures are measured rather than plausible. The execution mode
+is the one live value on it and the server renders it into a data attribute.
+
+**On the public site the demo banner is not in the panel list.** It is plain
+HTML in all six files so the label saying every figure is invented cannot depend
+on a script having run, and giving it an entry animation would undo that.
+
+**A `.pill` modifier must not double as a layout class.** The stage badges are
+named after the states they show, so `.dream .seed { padding: ... }` written for
+the spark paragraph also matched `<span class="pill seed">` and rendered the
+badge as a full-width block. Valid CSS, silently styling the wrong element, and
+invisible unless somebody looks. `tests/test_web.py` now fails the build on the
+shape rather than the instance.
+
+### Two agents, two souls, and Hermes only holds one
+
+`souls/yoda.md` answers about the account on `/chat`; `souls/grogu.md` dreams on
+`/dreaming`. Both follow the `SOUL.md` convention down to the headings
+(`## Personality`, `## Style`, `## What to avoid`).
+
+**Hermes loads exactly one soul, from `$HERMES_HOME/SOUL.md`.** Not the working
+directory, no CLI flag, no environment variable to point at another file, and
+`/personality` is a session overlay rather than a second soul. One instance, one
+character. This repository needs two on one instance chosen per request, so
+`HermesBridge.ask` prepends the selected soul to the prompt **on stdin**, which
+is the only mechanism that can vary per call — and is where it has to go anyway,
+because the sudoers rule permits `run-chat.sh` with no arguments so nothing a
+signed-in user types can be read as a flag.
+
+**Do not install either file as `~/.hermes/SOUL.md`.** It would apply to both
+agents at once, alongside whichever soul the request injected, and the model
+would receive two characters and pick.
+
+The soul name arrives in the request body and `load_soul` builds a path from it,
+so the route validates it against a fixed set first. An unknown name falls back
+to the account agent rather than erroring: the worst case of getting it wrong is
+the wrong voice, and refusing the question would be the larger failure.
+
+**A soul shapes the framing and never touches a figure.** Both files carry that
+first and `souls.py` restates it in the prefix that actually reaches the model,
+because these are read from disk at call time and could be edited on the box. A
+missing soul degrades to a voiceless prompt rather than raising — same failure
+direction as `HermesBridge.available`.
+
+### The dreamer has no order path, and that is structural
+
+`src/bot/dreaming.py` produces second-order hypotheses: the cicada brood that
+damages two of the three largest sesame producers, making the third, which has
+no cicadas, the marginal supplier into a shortage it did not experience.
+
+**`Dream` carries no quantity, no entry price, no stop, no side and no symbol.**
+`OrderProposal` requires all of them and validates `stop_loss_price`, so nothing
+turns one into the other without somebody adding fields and validation by hand.
+`tests/test_dreaming.py` asserts that overlap stays empty. This is the whole
+safety argument and it is deliberately not a matter of discipline: a
+speculative-idea generator wired to an execution path is the Alpha Arena failure
+with extra steps, and confidence is what this module produces most of.
+
+`instruments` names what a dream is *about* and is free text on purpose, so it
+cannot be read as a ticker the bot trades.
+
+**Verification is counted, never claimed.** A model asked to rate its own
+sourcing rates it generously, so the badge is arithmetic over the `checked`
+flags on each hop. An empty chain reads as `unverified` rather than `sourced`:
+the good outcome must not be what an absence of evidence looks like, which is
+the same rule as the tailnet status reporting `unknown`.
+
+**This is NOT Anthropic's "Dreaming", and the difference is the dangerous part.**
+That one, a research preview from May 2026, consolidates an agent's memory from
+its own past session transcripts so it learns from its mistakes. Applied to a
+trading account, "learn from what happened last time" means learning from profit
+and loss, which this repository forbids: forty trades is noise and a model shown
+three losses will confidently change approach.
+
+So `DreamLedger` is the shape consolidation is allowed to take here. It counts
+how often the dreamer sources a hop, drops a chain, names a trigger — facts
+about the **reasoning**, true regardless of how any trade went, with no outcome
+sample to overfit to. It reaches the operator on the Dreaming page and stops
+there, exactly as `metrics.py` reaches Analytics and stops there.
+
+**`data/dreams.db` is its own file, not the journal.** Losing every dream costs
+some speculative notes; `backup-journal.sh` covers the one irreplaceable file
+and deliberately does not cover this. Keeping them apart also means no query can
+read a hypothesis as a position.
+
+**Tests must not write to `data/` or `audit/`, and a fixture now enforces it.**
+A session-scoped autouse guard in `tests/conftest.py` fails the suite if either
+directory gains a file. `DreamStore` landing is exactly how that regressed: a
+new store, a new `build_app` default, and one call site nobody updated.
+
 ### Hermes ships a large surface, and both ways of trimming it fail quietly
 
 `deploy/hermes-config.yaml` disables 25 toolsets and all 77 bundled skills.
@@ -766,10 +888,21 @@ src/bot/
   tailnet.py            Is the Tailscale link still going to be there next week.
                         Warns at ten days, and says "unknown" rather than "fine"
                         when the check itself has stopped.
+  souls.py              Loads the character files in souls/. Degrades to a
+                        voiceless prompt rather than taking a page down.
+  dreaming.py           Second-order hypotheses: Dream, Hop, the stage machine
+                        and the store. Carries NO order fields, which is the
+                        whole reason it may sit beside an order path.
   web/                  Operator command centre: Board, Decisions, Trades,
-                        Analytics, Settings, Chat. Binds 127.0.0.1. Read-only
-                        apart from POST /chat, which is off unless
+                        Analytics, Dreaming, Settings, Chat. Binds 127.0.0.1.
+                        Read-only apart from POST /chat, which is off unless
                         DASHBOARD_CHAT_TOKEN is set.
+                        render.STYLES and render.SCRIPT carry the projection
+                        layer: starfield, hyperspace jump, panel materialisation.
+souls/                  Character files for the two agents, in the SOUL.md shape.
+                        yoda.md answers about the account; grogu.md dreams.
+data/dreams.db          Speculative notes. NOT the journal, NOT backed up.
+                        Gitignored.
   main.py               CLI: `electrum-bot smoketest`, `electrum-bot loop`.
 deploy/                 VPS provisioning: bootstrap.sh + systemd units. The unit
                         runs the loop WITHOUT --execute; enabling it is a
@@ -804,7 +937,7 @@ reference/              Third-party projects we borrow from. See reference/STATU
 ## Running it
 
 ```sh
-.venv/bin/python -m pytest              # full suite (477 tests)
+.venv/bin/python -m pytest              # full suite (525 tests)
 electrum-bot smoketest --mock           # no credentials needed
 electrum-bot smoketest                  # needs Alpaca paper keys
 electrum-bot loop                       # proposes and vets; places nothing

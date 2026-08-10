@@ -41,6 +41,30 @@ most of, so it is kept the furthest from the account of anything in the repo.
 proxy. It is a subject, not an instruction, and it is deliberately free text so
 that it cannot be mistaken for a symbol the bot trades.
 
+## This is not Anthropic's "Dreaming", and the difference matters
+
+Anthropic shipped a feature called Dreaming as a research preview in May 2026:
+a memory *consolidation* pass that reads an agent's own session transcripts and
+folds corrections, preferences and recurring patterns back into its memory files
+between sessions. Same word, different machine. That one is about an agent
+learning from its own mistakes; this one is about generating second-order
+hypotheses.
+
+The overlap is real and it is the dangerous part, so it is worth being explicit.
+"Learn from what happened last time" applied to a trading account means learning
+from profit and loss, and this repository forbids that deliberately: forty
+trades is noise, a model shown three losses will confidently change approach,
+and that is the Alpha Arena failure exactly. `souls/grogu.md` says it in the
+character file and `DreamLedger` is the shape learning is allowed to take here.
+
+**Consolidation over reasoning quality, never over returns.** `DreamLedger`
+counts how often the dreamer sources a hop, how often it drops a chain, how
+often it names a trigger. Those are facts about the thinking, they are true
+regardless of how any trade went, and there is no sample of outcomes to overfit
+to. They reach the operator on the Dreaming page and stop there, exactly as
+`metrics.py` reaches the Analytics page and stops there. The loop that closes is
+journal to figures to a human to a commit, at human speed, with an audit trail.
+
 ## Why the store is its own file
 
 `data/dreams.db`, not `data/journal.db`. The journal is the only irreplaceable
@@ -385,6 +409,84 @@ class DreamStore:
             instruments=instruments,
             created_at=_dt(row["created_at"]),
             updated_at=_dt(row["updated_at"]),
+        )
+
+
+# Below this many resolved dreams, every rate here is noise. Same reasoning and
+# roughly the same threshold as `PerformanceSummary.sample_is_thin`: a drop rate
+# computed over four chains says nothing, and a figure presented without its
+# sample count gets believed anyway.
+THIN_LEDGER_THRESHOLD = 12
+
+
+@dataclass(frozen=True)
+class DreamLedger:
+    """What the dreamer has learned about its own thinking.
+
+    This is the consolidation pass, and it is deliberately narrow. It counts
+    properties of the REASONING — was a hop sourced, was a chain attacked, was a
+    trigger named — and never touches what any idea would have earned. See the
+    module docstring: consolidation over reasoning quality is safe because the
+    facts are true regardless of how a trade went, and there is no outcome
+    sample to overfit to.
+
+    It reaches the operator through the Dreaming page and stops there. Nothing
+    here is fed back to the model, for the same reason `metrics.py` is not.
+
+    Every rate is `None` rather than zero when there is nothing to divide by.
+    A sourcing rate of "0%" on an empty store reads as a damning result; "n/a"
+    reads as the absence of evidence it actually is.
+    """
+
+    dreams: int
+    resolved: int
+    sourcing_rate: float | None
+    drop_rate: float | None
+    median_hops: float | None
+    untriggered_keeps: int
+    unattacked: int
+
+    @property
+    def sample_is_thin(self) -> bool:
+        return self.resolved < THIN_LEDGER_THRESHOLD
+
+    @classmethod
+    def of(cls, dreams: list[Dream]) -> DreamLedger:
+        hops = [hop for d in dreams for hop in d.chain]
+        resolved = [d for d in dreams if d.verdict is not None]
+        lengths = sorted(len(d.chain) for d in dreams if d.chain)
+
+        median: float | None = None
+        if lengths:
+            middle = len(lengths) // 2
+            median = (
+                float(lengths[middle])
+                if len(lengths) % 2
+                else (lengths[middle - 1] + lengths[middle]) / 2
+            )
+
+        return cls(
+            dreams=len(dreams),
+            resolved=len(resolved),
+            sourcing_rate=(
+                sum(1 for h in hops if h.checked) / len(hops) * 100 if hops else None
+            ),
+            # A dreamer that never drops anything is not attacking its chains,
+            # which is the failure this number exists to make visible. High is
+            # healthy here, which is why it is labelled rather than left to be
+            # read as a defect rate.
+            drop_rate=(
+                sum(1 for d in resolved if d.verdict is DreamVerdict.DROP)
+                / len(resolved)
+                * 100
+                if resolved
+                else None
+            ),
+            median_hops=median,
+            untriggered_keeps=sum(
+                1 for d in dreams if d.verdict is DreamVerdict.KEEP and not d.trigger
+            ),
+            unattacked=sum(1 for d in dreams if d.chain and not d.weakest_hop),
         )
 
 
