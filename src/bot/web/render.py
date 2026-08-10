@@ -2089,7 +2089,8 @@ SCRIPT = """
      `.focus()` on the body silently does nothing — it is not focusable, no
      error is raised, and the strand happens anyway. So the return is CHECKED
      rather than assumed, and the fallback puts focus on the main region the
-     way a skip link would. */
+     way a skip link would.
+
      `preventScroll` on both calls, and it is not a nicety. Focusing an element
      scrolls it into view by default, and the element focus came FROM is
      frequently not the element the reader is looking at — the shortcut is

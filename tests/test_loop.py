@@ -528,6 +528,32 @@ def test_vault_separates_what_is_claimed_from_what_is_in_force(
     assert "Actually in force:         none" in out
 
 
+def test_vault_names_an_adoption_whose_grant_is_already_dead(
+    monkeypatch, tmp_path, capsys
+):
+    """The `dream-expired-holding` state, said out loud rather than left silent.
+
+    The dream is still on the adopted shelf, its own 90-day TTL still has
+    months to run, and the permission it implies died days ago. A readout that
+    printed only the shelf count would let a reader take the grant to be in
+    force, which is the confident-wrong-figure failure in a new place.
+    """
+    store = _dream_store(monkeypatch, tmp_path)
+    dream_id = _vaulted(store)
+    assert store.adopt(
+        dream_id, at=datetime.now(UTC) - timedelta(days=5), ttl_days=1
+    ).ok
+
+    with structlog.testing.capture_logs() as logs:
+        assert main_mod.cmd_vault(load_rules()) == 0
+
+    out = capsys.readouterr().out
+    assert "ALREADY lapsed" in out
+    assert "Any position" in out
+    line = next(e for e in logs if e["event"] == "vault_listed")
+    assert line["grants_already_lapsed"] == 1
+
+
 def test_vault_expire_withdraws_a_lapsed_grant_and_deletes_nothing(
     monkeypatch, tmp_path, capsys
 ):

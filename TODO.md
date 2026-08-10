@@ -837,6 +837,42 @@ this is a deliberate change to that rule rather than an addition beside it.
 
 ---
 
+## Measured accessibility failures in the shipped palette
+
+Computed WCAG 2.1 relative-luminance ratios, not eyeballed. Three fail.
+
+- **`--rust #B3524A` on graphite is 3.48:1 and fails AA for text** — and it is
+  the colour of `.banner.crit b`, at 11px uppercase mono with wide tracking.
+  **The most severe state on the deck has the least readable heading**, which
+  is a warning that did not happen. Split the token: keep `--rust` for borders
+  and rails, add `--rust-text #CF7A70` (5.50:1) for the label.
+- **An inline link is invisible as a link.** `a{color:var(--bone)}` is the body
+  colour and `text-decoration-color:var(--slate)` is 1.47:1. That is WCAG 1.4.1
+  failing in the direction where there is no colour channel either. Use
+  `--pewter` for the underline (5.37:1) with `text-underline-offset`.
+- **`--pewter` at 10px is thin.** 4.81:1 clears WCAG 2, but WCAG 2 is known to
+  overstate contrast in dark mode and APCA would score a 10px weight-400 face
+  well under its body minimum. Lift the token to `#8B96A4` (5.76:1) rather than
+  auditing the forty rules that use it.
+
+**And `color-scheme: dark` is absent entirely**, so every native control —
+the chat textarea, the password field, scrollbars, and the paint that happens
+before the stylesheet applies — renders in light chrome inside a graphite deck.
+One declaration fixes all of it. `theme-color` and `viewport-fit=cover` belong
+in the same edit, and `overscroll-behavior: contain` on `.scroll` and
+`.chat .log` is very likely a **second, separate cause** of the reported
+scrolling trouble: a horizontal table scroll chaining into a page scroll on
+touch is a different fault from the 1px bracket overflow.
+
+Full research pass with sources, ranked and costed, is in the session
+scratchpad as `inspiration.md` — including cross-document view transitions for
+the hyperspace jump (viable, but the Cmd+K palette navigates programmatically
+so it would get no transition, which is worse than not having it), `@property`
+on `--mag` so the tape rail eases rather than snaps, and a **static render
+harness** so the deck can be looked at in a browser without credentials. That
+last one is how TODO item 7(d) — the exchange glow nobody has ever seen — ever
+gets closed.
+
 ## Working with several agents in one tree
 
 Learned the hard way, twice in one session, and it costs real work each time.
