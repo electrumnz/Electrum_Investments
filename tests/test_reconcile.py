@@ -332,3 +332,58 @@ def test_equity_is_snapshotted_each_cycle(journal, broker, rules):
     reconcile(journal, broker, rules, now=NOW)
     curve = journal.equity_curve()
     assert curve == [("2026-05-04", PAPER_EQUITY)]
+
+
+# ---------------------------------------------------- provenance on a fill
+
+
+def test_a_fill_under_a_dream_grant_records_which_dream(journal):
+    """Provenance, never endorsement.
+
+    It is passed in rather than looked up here, because whether the grant was
+    what let the proposal through is the risk gate's finding and travels on the
+    verdict. The journal is the only place it is stored, and the Board's `dream`
+    and `dream-expired-holding` tags are derived from it — a tag a model decided
+    to apply would be a tag that can be argued into existence.
+    """
+    trade_id = record_fill(
+        journal,
+        _proposal(),
+        OrderResult(accepted=True, order_id="x1", filled_price=580.0, filled_qty=83),
+        execution_mode=ExecutionMode.PAPER,
+        now=NOW,
+        dream_id=17,
+    )
+    assert trade_id is not None
+
+    assert journal.open_trades()[0].dream_id == 17
+
+
+def test_an_ordinary_fill_carries_no_dream(journal):
+    """The default, and it must stay the default: every trade in a symbol
+    `config/rules.yaml` already allows is nobody's dream."""
+    record_fill(
+        journal,
+        _proposal(),
+        OrderResult(accepted=True, order_id="x1", filled_price=580.0, filled_qty=83),
+        execution_mode=ExecutionMode.PAPER,
+        now=NOW,
+    )
+
+    assert journal.open_trades()[0].dream_id is None
+
+
+def test_a_dream_id_does_not_survive_a_refused_order(journal):
+    """A rejection journals nothing at all, so there is no half-record of a
+    permission that was never used."""
+    assert (
+        record_fill(
+            journal,
+            _proposal(),
+            OrderResult(accepted=False, error="rejected by broker"),
+            execution_mode=ExecutionMode.PAPER,
+            dream_id=17,
+        )
+        is None
+    )
+    assert journal.open_trades() == []

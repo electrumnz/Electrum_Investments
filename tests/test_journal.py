@@ -11,7 +11,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from bot.journal import Journal
+from bot.journal import SCHEMA, Journal
 from bot.models import (
     AssetClass,
     Direction,
@@ -37,6 +37,7 @@ def _trade(
     strategy: str = "mean_reversion",
     asset_class: AssetClass = AssetClass.EQUITY,
     entry_time: datetime = ENTRY,
+    dream_id: int | None = None,
 ) -> Trade:
     return Trade(
         symbol=symbol,
@@ -50,6 +51,7 @@ def _trade(
         planned_target=590.0,
         rationale="Test trade.",
         execution_mode=ExecutionMode.PAPER,
+        dream_id=dream_id,
     )
 
 
@@ -283,6 +285,35 @@ def test_equity_is_one_row_per_day(journal):
     assert curve[0] == ("2026-05-04", 101_000.0)  # last write for the day wins
 
 
+# ------------------------------------------------------------- migrations
+#
+# Every test above builds its journal from scratch, so every one of them always
+# gets the shape `SCHEMA` currently describes. That is exactly why the suite is
+# blind to a missing migration, and why these two build the OLD table by hand.
+
+
+def _schema_without_dream_id() -> str:
+    """`journal.SCHEMA` as it stood before trades could come from a dream.
+
+    Derived from the real schema rather than pasted, so the rest of the table
+    stays in step with it and only the column under test differs. The comment
+    block goes with the column: a stray `-- dream_id` in the DDL would make the
+    check below pass on the comment rather than on the column.
+    """
+
+    start = SCHEMA.index("    -- The adopted dream whose grant")
+    end = SCHEMA.index("    dream_id          INTEGER\n") + len(
+        "    dream_id          INTEGER\n"
+    )
+    without = SCHEMA[:start] + SCHEMA[end:]
+    # The column before it carried the comma that separated the two.
+    return without.replace("    exit_order_id     TEXT,\n)", "    exit_order_id     TEXT\n)")
+
+
+def _columns(conn) -> set[str]:
+    return {str(row[1]) for row in conn.execute("PRAGMA table_info(trades)")}
+
+
 def test_an_old_journal_is_migrated_to_allow_a_trade_with_no_target(tmp_path):
     """`CREATE TABLE IF NOT EXISTS` does NOTHING to a table that already exists.
 
@@ -303,7 +334,6 @@ def test_an_old_journal_is_migrated_to_allow_a_trade_with_no_target(tmp_path):
     """
     import sqlite3
 
-    from bot.journal import SCHEMA
 
     path = tmp_path / "legacy.db"
     old = SCHEMA.replace("planned_target    REAL,", "planned_target    REAL    NOT NULL,")
@@ -361,3 +391,121 @@ def test_the_migration_is_idempotent(tmp_path):
         )
     )
     assert len(journal.open_trades()) == 1
+
+
+def test_an_old_journal_is_migrated_to_carry_a_dream_id(tmp_path):
+    """The same trap as the test above, and it has already been paid for once.
+
+    `CREATE TABLE IF NOT EXISTS` does NOTHING to a table that already exists, so
+    adding `dream_id` to `SCHEMA` changes what a fresh journal gets and nothing
+    whatever about the one on the droplet. The suite cannot see that on its own:
+    every other test here builds its journal in a `tmp_path` and therefore always
+    gets the new shape, which is how 866 green tests once sat over a database
+    that could not store what the models allowed — found by placing a real order
+    and having the journal write fail AFTER the broker call.
+
+    So this builds the OLD schema by hand, which is the only way to exercise a
+    migration at all.
+    """
+    import sqlite3
+
+    path = tmp_path / "legacy.db"
+    conn = sqlite3.connect(path)
+    conn.executescript(_schema_without_dream_id())
+    assert "dream_id" not in _columns(conn), (
+        "the hand-built schema still has the column, so this would prove nothing"
+    )
+    conn.execute(
+        "INSERT INTO trades (symbol, asset_class, strategy, direction, qty, "
+        "entry_time, entry_price, planned_stop, planned_target) VALUES "
+        "('QQQ','us_equity','manual','buy',5,'2026-08-01T00:00:00+00:00',500,490,520)"
+    )
+    conn.commit()
+    conn.close()
+
+    journal = Journal(path)          # the migration runs on open
+
+    # The existing row survived, and reads back with no dream behind it — which
+    # is the truth about every trade placed before grants existed.
+    held = journal.open_trades()
+    assert [t.symbol for t in held] == ["QQQ"]
+    assert held[0].dream_id is None
+
+    # And the column is usable, which is the half the models now depend on.
+    journal.record_entry(_trade(symbol="TSLA", dream_id=41))
+    written = journal.open_trade_for("TSLA")
+    assert written is not None
+    assert written.dream_id == 41
+
+
+def test_the_dream_id_migration_is_idempotent(tmp_path):
+    """It runs on every open, so a database already in the right shape must pay
+    one PRAGMA and stop rather than altering the table again — which SQLite
+    would refuse with `duplicate column name`."""
+    path = tmp_path / "fresh.db"
+    Journal(path)
+    journal = Journal(path)          # second open, already migrated
+
+    journal.record_entry(_trade(dream_id=7))
+    assert journal.open_trades()[0].dream_id == 7
+
+
+def test_both_migrations_run_on_a_journal_that_predates_both(tmp_path):
+    """The interaction, because the older migration REBUILDS the table.
+
+    `_drop_planned_target_not_null` copies the old table's column list into a
+    table freshly created from `SCHEMA`, so it has to leave a journal that then
+    satisfies the newer migration rather than one that needs it a second time.
+    A database old enough to need both is exactly the one on the droplet.
+    """
+    import sqlite3
+
+    path = tmp_path / "ancient.db"
+    old = _schema_without_dream_id().replace(
+        "planned_target    REAL,", "planned_target    REAL    NOT NULL,"
+    )
+    conn = sqlite3.connect(path)
+    conn.executescript(old)
+    assert "dream_id" not in _columns(conn)
+    conn.execute(
+        "INSERT INTO trades (symbol, asset_class, strategy, direction, qty, "
+        "entry_time, entry_price, planned_stop, planned_target) VALUES "
+        "('SPY','us_equity','manual','sell',21,'2026-08-10T13:37:40+00:00',"
+        "773.324285,820,900)"
+    )
+    conn.commit()
+    conn.close()
+
+    journal = Journal(path)
+
+    # History intact. A migration that dropped rows to fix a constraint would be
+    # a far worse trade than either constraint.
+    survivors = journal.open_trades()
+    assert [t.symbol for t in survivors] == ["SPY"]
+    assert survivors[0].dream_id is None
+
+    # Both new shapes work: no target, and a dream behind the permission.
+    journal.record_entry(
+        Trade(
+            symbol="TSLA",
+            strategy="unspecified",
+            direction=Direction.BUY,
+            qty=3,
+            entry_time=ENTRY,
+            entry_price=420.0,
+            planned_stop=415.0,
+            planned_target=None,
+            dream_id=12,
+            rationale="Granted by an adopted dream, with no pre-committed target.",
+        )
+    )
+    written = journal.open_trade_for("TSLA")
+    assert written is not None
+    assert written.dream_id == 12
+    assert written.planned_target is None
+
+
+def test_a_trade_with_no_dream_reads_back_as_none(journal):
+    """The ordinary case, and the one that must not become a plausible zero."""
+    journal.record_entry(_trade())
+    assert journal.open_trades()[0].dream_id is None

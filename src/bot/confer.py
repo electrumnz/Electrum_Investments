@@ -1,0 +1,1191 @@
+"""The conference: the dreamer offers a dream, the trading agent decides.
+
+`dreaming.py` holds the vaults and the transcript. `dreamer.py` fills the
+workbench. This is the third piece: the two agents actually talking, on one
+dream, in a bounded exchange whose whole record is written to
+`dream_messages` where a human can read it.
+
+The shape of one exchange:
+
+    dreamer  offer     here is the chain, here is what it claims, here is the
+                       hop I would attack first
+    trader   question  what would kill it? what does adopting it actually buy?
+    dreamer  answer    ...
+    trader   note      accept / decline / park, with a reason
+
+The dreamer speaks on the even turns and the trading agent on the odd ones,
+dreamer first, and the trading agent is the one that reaches a verdict. That
+asymmetry is the same one `DreamStore.move` enforces: the agent with a route to
+the broker gets the smaller set of verbs, and here it gets the decision because
+the decision is about whether IT will take responsibility for a symbol.
+
+## Why this is its own module and its own command
+
+**It runs on the DREAM TIMER, once a day. Never on the loop's fifteen-minute
+pulse.** Ninety-six unattended negotiations a day, on the same process that
+proposes orders, is the Alpha Arena failure shape with two models instead of
+one — six frontier models traded real money on confident prose and every US
+flagship finished underwater. A day is far slower than a price moves, which is
+exactly the right speed for deciding whether a second-order hypothesis is worth
+acting on.
+
+Keeping it in its own module and behind its own entry point is the same
+structural argument that keeps `dreamer.py` out of `cmd_loop`: a separation
+that is a file boundary survives a refactor, and a separation that is a comment
+does not.
+
+## What the trading agent's side can and cannot do here
+
+**It cannot place an order.** Nothing in this module imports a broker, an
+`OrderProposal`, the MCP server or the risk gate, and `tests/test_confer.py`
+asserts that. Its only powers are the two `DreamStore` already enforces for the
+`TRADER` actor, and they are collected on `TraderPowers` so the list is
+readable rather than scattered: adopt a dream out of the vault, or hand an
+adopted one back with a stated reason.
+
+An adoption is a **permission and not an order**. It widens what may be
+considered; `RiskGate.evaluate` still runs on anything actually traded under it,
+the four operator rules still hold, and the size still follows from the stop.
+See the `dreaming.py` module docstring, which is where that argument lives.
+
+## The five caps, and why the fifth is the one that matters
+
+Four of them bound a conversation. The fifth bounds the *series* of them, and
+without it the other four are decoration:
+
+- `MAX_TURNS_PER_EXCHANGE` — six turns, three each.
+- `MAX_DREAMS_PER_RUN` — two dreams a day.
+- `MAX_EXCHANGES_PER_DREAM` — three exchanges, lifetime.
+- `TEXT_MAX_CHARS` — reused from `dreaming.py`, not redefined here.
+- `has_something_changed` — a dream may only be conferred AGAIN if something
+  changed since the last exchange.
+
+Read `has_something_changed`'s own docstring before touching any of it. A turn
+limit bounds one conversation and says nothing whatever about having the same
+conversation again tomorrow, politely, at cost, with every other cap still
+holding while it happens.
+
+## Failure
+
+Same rule as the decision loop's model call and the dreamer's, learned the same
+way: a `ValidationError` out of the SDK killed a live cycle once and systemd
+restarted it straight into the same failure. A failed call here ends the
+exchange, writes a note saying so, and returns `ConferOutcome.CALL_FAILED`.
+
+**It is never recorded as a completed exchange that decided nothing.** A failure
+before the opening offer writes no `offer` message and no agent turn, so it
+consumes neither the dream's three exchanges nor its eligibility, and tomorrow's
+run tries again. A cycle that could not get a decision must not be recorded as
+one that decided to do nothing.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Sequence
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from enum import StrEnum
+from typing import Any, Protocol
+
+import anthropic
+import structlog
+from pydantic import BaseModel, Field
+
+from .claude_client import CallUsage, ClaudeClient
+from .config import Env, Rules
+from .dreaming import (
+    DREAMER,
+    TEXT_MAX_CHARS,
+    TRADER,
+    Dream,
+    DreamMessage,
+    DreamStore,
+    MoveResult,
+    Vault,
+    VaultCaps,
+)
+from .souls import GROGU, YODA, load_soul
+
+log = structlog.get_logger(__name__)
+
+
+# ---------------------------------------------------------------- the caps
+#
+# All five are here, with the reasoning, so that somebody tidying up can see
+# what each one is for before deciding one of them is redundant.
+
+# Six turns, three each. Enough to make the case, ask the one question that
+# would kill it, answer, and reach a verdict.
+#
+# **Hard stop, no extension.** A conversation that has not converged in six
+# turns is not one turn away from converging; it is two agents that disagree,
+# and the honest record of that is an exchange that ended without a verdict.
+# An extension mechanism would be a cap that can be argued with, and the whole
+# reason the caps are numbers rather than judgement is that neither party here
+# is a person.
+MAX_TURNS_PER_EXCHANGE = 6
+
+# Two dreams conferred per daily run. So a run costs at most twelve model calls
+# on top of the dream step itself and the bill is predictable — which is the
+# point, because an unpredictable bill on an unattended timer is discovered a
+# month later.
+#
+# Skipped dreams do NOT count against this. A skip costs no model call, so
+# counting it would make a quiet day eat the budget of a busy one.
+MAX_DREAMS_PER_RUN = 2
+
+# Three exchanges per dream, for its whole life. If the two of them cannot agree
+# in three conferences the dream parks: a fourth would be the same argument
+# again, and a fourth in a different order is still the same argument.
+#
+# Counted off the transcript rather than from a counter column, deliberately.
+# A counter is a second fact about the same thing and eventually disagrees with
+# the first, which is the reasoning that keeps `Adoption.is_live` computed; and
+# a column would need a migration in `dreaming.SCHEMA`, which this module has no
+# business owning.
+MAX_EXCHANGES_PER_DREAM = 3
+
+# The fourth cap is `TEXT_MAX_CHARS`, imported from `dreaming.py` rather than
+# redefined. `DreamStore.add_message` already trims to it, so a long turn is
+# stored short rather than lost — prose truncates, and nothing structural goes
+# through that path. A second cap here would be a second number to keep in step
+# with the first, and the one that is wrong would be the one nobody is reading.
+#
+# The fifth is `has_something_changed`, below.
+
+
+# Who says what. `DREAMER` and `TRADER` come from `dreaming.py` so there is one
+# spelling of each in the repository.
+#
+# `CONFERENCE` is this module narrating itself: a call that failed, a turn cap
+# reached, an adoption the store refused. It is deliberately NOT `OPERATOR` —
+# an operator note is one of the things that makes a dream worth reopening, so
+# a machine note wearing the operator's name would trip the change gate on its
+# own writing and the two agents would talk forever about nothing.
+CONFERENCE = "conference"
+
+# The speakers whose turns mark an exchange as having happened. See
+# `last_agent_turn_at`.
+AGENT_SPEAKERS = frozenset({DREAMER, TRADER})
+
+
+class TraderVerdict(StrEnum):
+    """What the trading agent decided about an offered dream.
+
+    Three, and none of them is a trade. The most this can produce is a symbol
+    permission with an expiry on it.
+    """
+
+    # Take it: `DreamStore.adopt` moves it to ADOPTED and writes the grant.
+    ACCEPT = "accept"
+    # Not for me. The dream stays in the vault, where the dreamer can rework it
+    # or offer it again once something has changed.
+    DECLINE = "decline"
+    # Neither of us is going to settle this today. Also leaves it in the vault:
+    # the trading agent may not move a dream anywhere, and pretending otherwise
+    # here would be this module routing around `DreamStore.move`.
+    PARK = "park"
+
+
+class ConferOutcome(StrEnum):
+    """How one dream's turn in a conference ended.
+
+    Every value is an ordinary answer. `NOTHING_NEW` and `EXCHANGES_EXHAUSTED`
+    are the two that cost no model call at all, and they are the two that make
+    the whole arrangement affordable.
+    """
+
+    ADOPTED = "adopted"
+    DECLINED = "declined"
+    PARKED = "parked"
+    # Six turns and no verdict. Recorded as its own outcome rather than folded
+    # into `PARKED`, because "they could not agree" and "they agreed to leave
+    # it" are different facts about the dreamer and about the trader.
+    TURNS_EXHAUSTED = "turns_exhausted"
+    # The trading agent said accept and `DreamStore.adopt` refused — a full
+    # adopted vault, no symbols, an unresolved class. Not a failure of the
+    # conversation, and it must not be reported as one.
+    ADOPTION_REFUSED = "adoption_refused"
+    CALL_FAILED = "call_failed"
+    NOTHING_NEW = "nothing_new"
+    EXCHANGES_EXHAUSTED = "exchanges_exhausted"
+
+
+# The outcomes that cost nothing, because no model was called. Named rather than
+# inlined so `ExchangeResult.conferred` and the per-run cap read off one list.
+SKIPPED_OUTCOMES = frozenset({ConferOutcome.NOTHING_NEW, ConferOutcome.EXCHANGES_EXHAUSTED})
+
+
+@dataclass(frozen=True)
+class Change:
+    """Whether a dream is worth conferring again, and what changed.
+
+    The reasons are prose for a person and are the whole value of the type: a
+    bare `False` on the Dreaming page reads as a bug, and "nothing has changed
+    since the exchange on 14 May" reads as the working system it is.
+    """
+
+    changed: bool
+    reasons: tuple[str, ...] = ()
+
+    def __bool__(self) -> bool:
+        return self.changed
+
+    @property
+    def summary(self) -> str:
+        return "; ".join(self.reasons) if self.reasons else "nothing new to discuss"
+
+
+@dataclass(frozen=True)
+class ExchangeResult:
+    """What happened to one dream in one run.
+
+    Carries the usage of every call made, rather than a total, so a caller can
+    report the cost of a run and the number of calls separately. A run that made
+    six cheap calls and one that made one expensive one are different things to
+    know about an unattended timer.
+    """
+
+    dream_id: int
+    outcome: ConferOutcome
+    turns: int = 0
+    detail: str = ""
+    usage: tuple[CallUsage, ...] = ()
+
+    @property
+    def conferred(self) -> bool:
+        """Whether a model was actually called about this dream."""
+        return self.outcome not in SKIPPED_OUTCOMES
+
+    @property
+    def cost_usd(self) -> float:
+        return sum(u.estimated_cost_usd for u in self.usage)
+
+
+@dataclass(frozen=True)
+class ConferenceReport:
+    """One run. Pure arithmetic over the exchanges.
+
+    `considered` is separate from `len(exchanges)` on purpose, and it is the
+    same rule as `news_history.has_cycles` and `WatchReport.can_grade_anything`:
+    an empty report because the vault is empty and an empty report because
+    everything in it was skipped are opposite findings that produce identical
+    lists. A caller handed only a list reaches for the wrong reading every time.
+    """
+
+    exchanges: tuple[ExchangeResult, ...] = ()
+    considered: int = 0
+
+    @property
+    def conferred(self) -> int:
+        return sum(1 for e in self.exchanges if e.conferred)
+
+    @property
+    def skipped(self) -> int:
+        return sum(1 for e in self.exchanges if not e.conferred)
+
+    @property
+    def adopted(self) -> int:
+        return sum(1 for e in self.exchanges if e.outcome is ConferOutcome.ADOPTED)
+
+    @property
+    def calls(self) -> int:
+        return sum(len(e.usage) for e in self.exchanges)
+
+    @property
+    def cost_usd(self) -> float:
+        return sum(e.cost_usd for e in self.exchanges)
+
+
+# ------------------------------------------------- reading the transcript back
+
+
+def last_agent_turn_at(messages: Sequence[DreamMessage]) -> datetime | None:
+    """When the last exchange ended, or `None` if the two have never spoken.
+
+    **The marker is the last AGENT turn, never simply the last message**, and
+    that distinction is the whole reason this is a function rather than
+    `messages[-1].at`.
+
+    An operator note posted after an exchange is one of the five things that
+    makes a dream worth reopening. Taking the last message of any kind would
+    move the marker past the very event it exists to notice, so the note would
+    silence itself and the operator would be the only participant who could not
+    restart the conversation. Same shape as `seen.py`, where the marker advances
+    to the PREVIOUS request rather than to now, for the same reason: a marker
+    must not swallow the thing it is measuring against.
+
+    `CONFERENCE` notes are excluded for the mirror-image reason — this module
+    writing "the call failed" must not read as the two of them having talked.
+    """
+    for message in reversed(list(messages)):
+        if message.speaker in AGENT_SPEAKERS:
+            return message.at
+    return None
+
+
+def exchanges_so_far(messages: Sequence[DreamMessage]) -> int:
+    """How many exchanges this dream has already had.
+
+    Counted as the number of opening `offer` turns from the dreamer, because an
+    exchange is defined by its opening: every conversation this module starts
+    writes exactly one, and a conversation that never got that far never
+    happened. A failed first call therefore costs the dream nothing, which is
+    what "never recorded as a completed exchange that decided nothing" means in
+    practice.
+
+    An offer written by hand from the Dreaming page counts too. That is the
+    conservative direction — it can only make this module talk less — and it is
+    also the honest reading, since an offer is an offer whoever wrote it.
+    """
+    return sum(1 for m in messages if m.speaker == DREAMER and m.kind == "offer")
+
+
+def has_something_changed(
+    dream: Dream,
+    since: datetime | None,
+    *,
+    messages: Sequence[DreamMessage] = (),
+) -> Change:
+    """**The cap that actually stops them talking forever.** Read this one.
+
+    Every other cap bounds a single conversation. None of them says anything
+    about having the same conversation again tomorrow — politely, at cost, six
+    turns each time, with every individual limit satisfied on every pass. Two
+    agents re-litigating an unchanged dream every day until one of them is
+    switched off is a system that is working exactly as specified and is
+    obviously broken, and it is the failure mode this function exists for.
+
+    It is also the cap most likely to look redundant to somebody tidying up
+    later, because the other four are visible in the code and this one is
+    visible only in a bill. Do not remove it, and do not soften it into a
+    cooldown: a cooldown says "wait a while and have the same argument", which
+    is the same failure with a delay in front of it.
+
+    A dream qualifies again when one of five things has happened since `since`:
+
+    - **A condition was fulfilled.** The prophecy did something.
+    - **The dream itself was edited** — a hop added, a `checked` flag flipped,
+      the chain reworked, a thought recorded. Observed through `updated_at`,
+      which every write path in `DreamStore.save` and `move` stamps. Detecting
+      hop-level deltas directly would need a snapshot of the chain taken at the
+      last exchange, and a second copy of a dream is a second thing that can
+      disagree with the dream. One stamp, one answer.
+    - **A new voice.** An operator note, or anything from a speaker that is
+      neither of the two conferring agents nor this module narrating itself.
+    - **A vault move.** `vault_entered_at` is what expiry is measured from and
+      is set only by a move, so it is the honest signal for one.
+    - There has never been an exchange at all, which is `since is None`.
+
+    Comparisons are STRICT. That is not fussiness: `DreamStore.return_to_vault`
+    writes its `return` message and stamps `updated_at` and `vault_entered_at`
+    with the same moment, so a non-strict test would report a change created by
+    the end of the exchange itself and hand the two agents a fresh round
+    immediately. The same is true of `adopt`.
+
+    Pure. No store, no clock, no network — everything it needs is the dream and
+    the transcript the caller already read.
+    """
+    if since is None:
+        return Change(True, ("no exchange on this dream yet",))
+
+    reasons: list[str] = []
+
+    fulfilled = [
+        c
+        for c in dream.conditions
+        if c.fulfilled and c.fulfilled_at is not None and c.fulfilled_at > since
+    ]
+    if fulfilled:
+        reasons.append(
+            f"{len(fulfilled)} condition(s) fulfilled since the last exchange"
+        )
+
+    if dream.vault_entered_at > since:
+        reasons.append(f"moved into {dream.vault} since the last exchange")
+
+    if dream.updated_at > since:
+        reasons.append("the dream was edited since the last exchange")
+
+    # Anything that is not one of the two agents and is not this module talking
+    # to itself. Written as an exclusion rather than as `speaker == OPERATOR` so
+    # that a second dreamer — the intended direction, and why `DreamMessage`
+    # keeps `speaker` open — counts as the new voice it is.
+    voices = sorted(
+        {
+            m.speaker
+            for m in messages
+            if m.at > since and m.speaker not in AGENT_SPEAKERS and m.speaker != CONFERENCE
+        }
+    )
+    if voices:
+        reasons.append(f"new message(s) from {', '.join(voices)}")
+
+    return Change(bool(reasons), tuple(reasons))
+
+
+# ------------------------------------------------ what the trading agent may do
+
+
+class TraderPowers:
+    """Everything the trading agent's side of a conference is able to do.
+
+    Two methods, and the list being short is the point rather than an accident
+    of what has been needed so far. `DreamStore` already refuses the trading
+    agent every other verb — it cannot delete, it cannot archive, it cannot move
+    a dream between the dreamer's shelves — so this class is not the guarantee.
+    It is the readable statement of the guarantee, in one place, so that "the
+    conference cannot place an order" is a claim somebody can check in ten
+    seconds instead of by reading the whole module.
+
+    **There is no broker here, no `OrderProposal`, and no route to one.** An
+    adoption grants a symbol permission with an expiry; it does not open a
+    position, it does not size one, and everything that decides whether a
+    considered trade actually happens is untouched. `tests/test_confer.py`
+    asserts both the method list and the absence of the imports, because a class
+    that grew a third method quietly is exactly how this stops being true.
+    """
+
+    def __init__(self, store: DreamStore) -> None:
+        self._store = store
+
+    def adopt(
+        self,
+        dream_id: int,
+        *,
+        at: datetime,
+        caps: VaultCaps | None = None,
+    ) -> MoveResult:
+        """Take a dream out of the vault. Refusals come back, never raised."""
+        return self._store.adopt(dream_id, at=at, caps=caps)
+
+    def hand_back(self, dream_id: int, *, reason: str, at: datetime) -> MoveResult:
+        """Return an adopted dream to the vault, saying why.
+
+        Not reachable from an exchange, which only ever confers dreams sitting
+        IN the vault. It is here because it is the trading agent's other power
+        and a list of powers that omitted one would be a list nobody could
+        trust. A caller reviewing adopted dreams uses it.
+        """
+        return self._store.return_to_vault(dream_id, reason=reason, at=at)
+
+
+# ------------------------------------------------------------------- the turns
+
+
+class DreamerTurn(BaseModel):
+    """One turn from the dreamer's side.
+
+    Text only. The KIND of the turn — offer, answer — is decided by this module
+    from where the turn sits in the exchange, never by the model, because a
+    speaker that chose its own label could write "accept" on its own turn and
+    the transcript would misreport who decided what.
+    """
+
+    text: str = Field(
+        description=(
+            "Your turn, in a few sentences. Make the case, or answer what you "
+            "were asked. No numbers you were not shown."
+        )
+    )
+
+
+class TraderTurn(BaseModel):
+    """One turn from the trading agent's side, and possibly the verdict."""
+
+    text: str = Field(
+        description=(
+            "Your turn, in a few sentences. Either the question you need "
+            "answered, or the reasoning behind your verdict."
+        )
+    )
+    verdict: TraderVerdict | None = Field(
+        default=None,
+        description=(
+            "null to keep asking. accept to take the dream and grant its "
+            "symbols. decline to leave it in the vault. park to stop for now. "
+            "On your last turn you must choose one."
+        ),
+    )
+
+
+class TurnCaller(Protocol):
+    """The one seam a model call goes through.
+
+    Everything else in this module is pure or is a store write, so a test can
+    drive every cap — six turns, two dreams, three exchanges, the change gate —
+    with a stub that returns canned turns and never touches the network.
+    `ClaudeClient` satisfies this.
+    """
+
+    def confer(
+        self, prompt: str, output_format: type[BaseModel]
+    ) -> tuple[Any, CallUsage]: ...
+
+
+DREAMER_SYSTEM_PROMPT = """\
+You are the dreamer, offering one of your dreams to the trading agent.
+
+The dream is already written. You are not extending it here and you are not
+allowed to add to the chain in this conversation: you are explaining what it
+claims, what it rests on, and what would break it, so that somebody who has to
+answer for the consequence can decide whether to take it.
+
+How to be useful:
+
+- Lead with what the dream would let the trading agent DO, which is very
+  little: adopting it grants permission to consider some symbols for a while.
+  It does not propose a position and it never could.
+- Name the weakest hop yourself, before you are asked. Confidence in a chain is
+  the minimum across its links, and a chain presented as stronger than its
+  weakest hop is the one failure that would make this whole arrangement not
+  worth having.
+- Say which hops are unchecked. An unchecked hop is an honest output.
+- NEVER state a number you were not shown in this conversation. No production
+  figures, market shares, prices, correlations or percentages. A plausible
+  fabricated statistic is the most dangerous thing you can produce here,
+  because it is the part nobody thinks to check.
+- Answer the question you were actually asked. If the answer is "I cannot check
+  that", say so — it is a better answer than a confident one, and the trading
+  agent declining for a stated reason is a perfectly good outcome.
+- Short. A turn is a few sentences.
+
+You have no view on position size, entry, stop or direction, and no way to
+express one. That is the trading agent's work and it does not begin until long
+after this conversation.
+"""
+
+TRADER_SYSTEM_PROMPT = """\
+You are the trading agent, deciding whether to adopt a dream out of the vault.
+
+**What adopting actually does, and it is less than it sounds.** It adds the
+dream's symbols to what you may consider, for as long as the adoption is alive,
+and it does nothing else. It does not open a position. It does not size one. It
+is not a view on direction, entry or stop, and it is not evidence for a trade.
+Every gate still applies to anything you later propose in those symbols — the
+per-trade risk cap, the total-risk cap, concentration, session, concurrency,
+cooldown, and a required stop that the size is computed from. The risk gate is
+deterministic code and cannot be argued with.
+
+**You cannot place an order in this conversation and there is no path to one.**
+Your only moves are: accept the dream, decline it, or park it.
+
+The dream you are shown is SPECULATIVE BY CONSTRUCTION. It arrives with a
+verification badge counted from how many of its hops name a source, and with
+its weakest hop stated. Read both before the chain, not after. An unverified
+chain that reads persuasively is exactly the thing the badge exists for.
+
+How to decide:
+
+- Ask the ONE question that would kill it, not three that would decorate it.
+  You have three turns; a question you already know the answer to wastes one.
+- A dream is worth adopting when the symbols it names are ones you would
+  plausibly want to consider and the chain is not obviously broken. It is not
+  worth adopting because it is interesting. Interesting is the dreamer's job.
+- Decline for a stated reason. A decline is a normal outcome and a frequent one,
+  and the record of why is worth more than a reluctant acceptance.
+- Park when neither of you is going to settle it today.
+- NEVER state a number you were not shown.
+- Short. A turn is a few sentences.
+
+Doing nothing is a valid and frequently correct output. Two agents agreeing to
+adopt something neither of them would act on is the worst available result,
+because it spends a slot the account has no room for.
+"""
+
+
+def render_dream(dream: Dream) -> str:
+    """The dream as both agents see it.
+
+    **The chain never appears without its verification badge and its weakest
+    hop.** They are rendered above it rather than below, because a reader who
+    stops early must stop having read the qualification rather than the claim.
+    An unqualified chain reads as established fact, and the whole reason
+    `Hop.checked` exists is that some of those sentences were invented.
+    """
+    out: list[str] = [
+        f"Dream {dream.id}: {dream.title}",
+        f"  spark: {dream.seed}",
+        f"  verification: {dream.verification} "
+        f"({sum(1 for h in dream.chain if h.checked)} of {len(dream.chain)} hops sourced)",
+        f"  weakest hop: {dream.weakest_hop or 'NOT NAMED — nobody has attacked this yet'}",
+    ]
+    if dream.instruments:
+        out.append(f"  about: {', '.join(dream.instruments)}")
+    out.append(
+        "  symbols claimed: "
+        + (", ".join(dream.symbols) if dream.symbols else "none — nothing to grant")
+    )
+    out.append(f"  instrument class: {dream.asset_class_key or 'UNRESOLVED'}")
+
+    if dream.chain:
+        out.append("  chain:")
+        for index, hop in enumerate(dream.chain, 1):
+            mark = f"checked — {hop.source}" if hop.checked else "UNCHECKED"
+            out.append(f"    hop {index} ({mark}): {hop.claim}")
+    else:
+        out.append("  chain: empty, so nothing here has been made checkable")
+
+    if dream.conditions:
+        out.append("  conditions:")
+        for condition in dream.conditions:
+            state = "met" if condition.fulfilled else "not met"
+            shape = "checkable" if condition.is_checkable else "prose only"
+            out.append(f"    [{state}, {shape}] {condition.text}")
+    else:
+        # `all_conditions_met` is False on an empty list on purpose, and the
+        # sentence has to say the same thing: no conditions is not all
+        # conditions met.
+        out.append("  conditions: none were ever pre-registered on this dream")
+
+    if dream.trigger:
+        out.append(f"  trigger: {dream.trigger}")
+    return "\n".join(out)
+
+
+def render_transcript(messages: Sequence[DreamMessage]) -> str:
+    """Everything said about this dream so far, oldest first.
+
+    The whole history rather than the current exchange, because the interesting
+    part of a negotiation is usually where somebody changed their mind, and an
+    agent shown only today's turns would ask a question it was answered last
+    month. Bounded by the caps above rather than by a slice here: three
+    exchanges of six turns is a short document.
+    """
+    if not messages:
+        return "Nothing has been said about this dream yet."
+    return "\n".join(
+        f"[{m.at:%d %b %H:%M}] {m.speaker} ({m.kind}): {m.text}" for m in messages
+    )
+
+
+def render_classes(rules: Rules) -> str:
+    """Which instrument classes are open, for the trading agent's side.
+
+    Disabled classes are NAMED rather than omitted, which is the opposite of
+    what `build_system_prompt` does for the decision loop and is deliberate.
+    There, listing a disabled class only invites proposals for it. Here the
+    trading agent is being asked whether to grant a symbol permission, and a
+    grant in a blocked class is the one thing that must never happen, so it has
+    to be able to see the block rather than infer it from an absence.
+    """
+    lines: list[str] = []
+    for name, instrument in sorted(rules.instruments.items()):
+        if instrument.enabled:
+            lines.append(f"  {name} — ENABLED ({len(instrument.allowed_symbols)} listed symbols)")
+        else:
+            lines.append(f"  {name} — BLOCKED. No dream may grant a symbol here.")
+    return "\n".join(lines) if lines else "  none configured"
+
+
+def _turn_prompt(
+    dream: Dream,
+    messages: Sequence[DreamMessage],
+    *,
+    instruction: str,
+    classes: str = "",
+) -> str:
+    blocks = [render_dream(dream), "", "Conversation so far:", render_transcript(messages)]
+    if classes:
+        blocks += ["", "Instrument classes:", classes]
+    blocks += ["", instruction]
+    return "\n".join(blocks)
+
+
+class Conference:
+    """One run of the agent-to-agent conference.
+
+    Takes the store rather than reaching for one, exactly as `Dreamer` does, so
+    a test never touches `data/`. Takes its two clients too, so every cap is
+    exercised offline.
+    """
+
+    def __init__(
+        self,
+        env: Env,
+        rules: Rules,
+        store: DreamStore,
+        *,
+        dreamer_client: TurnCaller | None = None,
+        trader_client: TurnCaller | None = None,
+    ) -> None:
+        self._rules = rules
+        self._store = store
+        self._powers = TraderPowers(store)
+        self._dreamer = dreamer_client or self._build(env, GROGU, DREAMER_SYSTEM_PROMPT)
+        self._trader = trader_client or self._build(env, YODA, TRADER_SYSTEM_PROMPT)
+
+    @staticmethod
+    def _build(env: Env, soul_name: str, system: str) -> TurnCaller:
+        """One client per speaker, because they are two different characters.
+
+        A missing soul degrades to a voiceless prompt rather than raising, which
+        is `souls.py`'s own rule: a character is decoration on a surface whose
+        job is to keep working, and an unreadable file on the box must not stop
+        two agents talking.
+
+        **Not cached, same as the dreamer, and it is a closer call here.** A 1h
+        cache write bills at 2x base input and a read at 0.1x, so caching pays
+        only from the third call to the same party. An exchange that ends on the
+        trader's first turn — an immediate accept or decline, which is a normal
+        and desirable outcome — makes exactly one call per party and would pay
+        double for the privilege. Runs are a day apart, so nothing carries over
+        between them. The conservative choice is the one that cannot be worse
+        than 2x.
+        """
+        soul = load_soul(soul_name)
+        prompt = f"{soul.prompt_prefix()}\n{system}" if soul.found else system
+        return ClaudeClient(env, prompt, tier=env.dream_tier, cache_system=False)
+
+    # ------------------------------------------------------------- the run
+
+    def run(
+        self, *, now: datetime | None = None, caps: VaultCaps | None = None
+    ) -> ConferenceReport:
+        """Confer up to `MAX_DREAMS_PER_RUN` dreams out of the vault.
+
+        Candidates are the dreams in `Vault.VAULT`, which is the only shelf the
+        trading agent can see, **longest-waiting first**. `DreamStore.in_vault`
+        answers newest-first, so the order is reversed: an offer nobody has
+        answered is the one worth answering, and taking the newest first would
+        let a productive dreamer starve its own older offers indefinitely.
+
+        Skips cost no model call and are recorded in the report and in the log
+        rather than in the transcript. That is on purpose: a `note` written
+        every day saying "nothing has changed" would fill the record a human
+        reads with the exact noise the change gate exists to prevent, and would
+        do it in the one place where the noise is permanent.
+        """
+        stamp = now or datetime.now(UTC)
+        candidates = list(reversed(self._store.in_vault(Vault.VAULT)))
+
+        results: list[ExchangeResult] = []
+        conferred = 0
+        for dream in candidates:
+            if conferred >= MAX_DREAMS_PER_RUN:
+                break
+            if dream.id is None:  # pragma: no cover - in_vault only returns saved rows
+                continue
+
+            result = self._consider(dream, now=stamp, caps=caps)
+            results.append(result)
+            if result.conferred:
+                conferred += 1
+
+        report = ConferenceReport(exchanges=tuple(results), considered=len(candidates))
+        log.info(
+            "conference_complete",
+            considered=report.considered,
+            conferred=report.conferred,
+            skipped=report.skipped,
+            adopted=report.adopted,
+            calls=report.calls,
+            cost_usd=round(report.cost_usd, 4),
+        )
+        return report
+
+    def _consider(
+        self, dream: Dream, *, now: datetime, caps: VaultCaps | None
+    ) -> ExchangeResult:
+        """Apply the two free caps, then confer if both pass."""
+        dream_id = int(dream.id or 0)
+        messages = self._store.messages(dream_id)
+
+        held = exchanges_so_far(messages)
+        if held >= MAX_EXCHANGES_PER_DREAM:
+            log.info(
+                "confer_skipped",
+                dream_id=dream_id,
+                reason="exchanges_exhausted",
+                exchanges=held,
+            )
+            return ExchangeResult(
+                dream_id=dream_id,
+                outcome=ConferOutcome.EXCHANGES_EXHAUSTED,
+                detail=(
+                    f"{held} exchanges already, which is the lifetime cap. A "
+                    "fourth would be the same argument again."
+                ),
+            )
+
+        change = has_something_changed(
+            dream, last_agent_turn_at(messages), messages=messages
+        )
+        if not change:
+            log.info("confer_skipped", dream_id=dream_id, reason="nothing_new")
+            return ExchangeResult(
+                dream_id=dream_id,
+                outcome=ConferOutcome.NOTHING_NEW,
+                detail=change.summary,
+            )
+
+        return self.confer_once(dream, now=now, caps=caps)
+
+    # -------------------------------------------------------- one exchange
+
+    def confer_once(
+        self, dream: Dream, *, now: datetime, caps: VaultCaps | None = None
+    ) -> ExchangeResult:
+        """One bounded exchange on one dream. Never raises.
+
+        Turns alternate, dreamer first, up to `MAX_TURNS_PER_EXCHANGE`. The
+        exchange ends EARLY on accept, decline or park; it ends on a failed call
+        with `CALL_FAILED`; and it ends at the turn cap with `TURNS_EXHAUSTED`.
+
+        **Every ending is written to the transcript, including the ones that
+        decided nothing.** A dream the trading agent kept declining is a fact
+        about the dreamer worth having, and a conversation that ran out of turns
+        is a fact about both of them. Storing only the exchanges that concluded
+        would leave a record that flatters everyone in it.
+        """
+        dream_id = int(dream.id or 0)
+        usage: list[CallUsage] = []
+        turns = 0
+
+        for index in range(MAX_TURNS_PER_EXCHANGE):
+            speaks_first = index % 2 == 0
+            messages = self._store.messages(dream_id)
+
+            try:
+                if speaks_first:
+                    turn_text, verdict, spent = self._dreamer_turn(
+                        dream, messages, opening=index == 0
+                    )
+                else:
+                    turn_text, verdict, spent = self._trader_turn(
+                        dream,
+                        messages,
+                        # The trading agent gets one turn after each of the
+                        # dreamer's, so its LAST is the final turn of the
+                        # exchange. It is told so, because a model that does not
+                        # know it is out of turns writes another question.
+                        final=index >= MAX_TURNS_PER_EXCHANGE - 1,
+                    )
+                usage.append(spent)
+            except _TurnFailed as failure:
+                self._note(
+                    dream_id,
+                    f"The exchange ended after {turns} turn(s): the model call "
+                    f"failed ({failure.detail}). Nothing was decided.",
+                    at=now,
+                )
+                log.warning(
+                    "confer_call_failed",
+                    dream_id=dream_id,
+                    turns=turns,
+                    error=failure.detail,
+                )
+                return ExchangeResult(
+                    dream_id=dream_id,
+                    outcome=ConferOutcome.CALL_FAILED,
+                    turns=turns,
+                    detail=failure.detail,
+                    usage=tuple(usage),
+                )
+
+            turns += 1
+            self._store.add_message(
+                dream_id,
+                speaker=DREAMER if speaks_first else TRADER,
+                kind=_kind_for(index, verdict),
+                text=turn_text,
+                at=now,
+            )
+
+            if verdict is not None:
+                return self._settle(
+                    dream_id,
+                    verdict,
+                    turns=turns,
+                    usage=usage,
+                    now=now,
+                    caps=caps,
+                )
+
+        self._note(
+            dream_id,
+            f"Six turns and no verdict. The exchange is closed; "
+            f"{MAX_EXCHANGES_PER_DREAM - exchanges_so_far(self._store.messages(dream_id))} "
+            "exchange(s) remain on this dream.",
+            at=now,
+        )
+        log.info("confer_turns_exhausted", dream_id=dream_id, turns=turns)
+        return self._closing(
+            ExchangeResult(
+                dream_id=dream_id,
+                outcome=ConferOutcome.TURNS_EXHAUSTED,
+                turns=turns,
+                detail="six turns, no verdict",
+                usage=tuple(usage),
+            ),
+            now=now,
+        )
+
+    # ------------------------------------------------------------- verdicts
+
+    def _settle(
+        self,
+        dream_id: int,
+        verdict: TraderVerdict,
+        *,
+        turns: int,
+        usage: list[CallUsage],
+        now: datetime,
+        caps: VaultCaps | None,
+    ) -> ExchangeResult:
+        """Act on the trading agent's verdict, within its two powers.
+
+        `decline` and `park` move nothing, and that is not an omission. The
+        trading agent may not move a dream between the dreamer's shelves —
+        `DreamStore.move` refuses it by actor — so a park here is a state of the
+        conversation and never a state of the vault. Implementing it as a move
+        would be this module routing around the store, which is the one thing
+        the store's actor rules exist to prevent.
+        """
+        if verdict is not TraderVerdict.ACCEPT:
+            outcome = (
+                ConferOutcome.DECLINED
+                if verdict is TraderVerdict.DECLINE
+                else ConferOutcome.PARKED
+            )
+            log.info("confer_verdict", dream_id=dream_id, verdict=str(verdict))
+            return self._closing(
+                ExchangeResult(
+                    dream_id=dream_id,
+                    outcome=outcome,
+                    turns=turns,
+                    detail=f"the trading agent chose to {verdict}",
+                    usage=tuple(usage),
+                ),
+                now=now,
+            )
+
+        result = self._powers.adopt(dream_id, at=now, caps=caps)
+        if not result.ok:
+            # A refusal is an ordinary answer — a full adopted vault is a normal
+            # Tuesday — so it is recorded and reported rather than raised, and
+            # it is NOT reported as a failed conversation. The two of them
+            # agreed; the store had no room.
+            self._note(
+                dream_id,
+                "The trading agent accepted, and the store refused the "
+                f"adoption: {result.detail}",
+                at=now,
+            )
+            log.info(
+                "confer_adoption_refused",
+                dream_id=dream_id,
+                refusals=[str(r) for r in result.refusals],
+            )
+            return self._closing(
+                ExchangeResult(
+                    dream_id=dream_id,
+                    outcome=ConferOutcome.ADOPTION_REFUSED,
+                    turns=turns,
+                    detail=result.detail,
+                    usage=tuple(usage),
+                ),
+                now=now,
+            )
+
+        log.info("confer_adopted", dream_id=dream_id, turns=turns)
+        return ExchangeResult(
+            dream_id=dream_id,
+            outcome=ConferOutcome.ADOPTED,
+            turns=turns,
+            detail=result.detail,
+            usage=tuple(usage),
+        )
+
+    def _closing(self, result: ExchangeResult, *, now: datetime) -> ExchangeResult:
+        """Say once, at the moment it becomes true, that a dream has parked.
+
+        Written here rather than on the next run's skip, because "this was the
+        third exchange" is a fact with a moment attached and the skip path has
+        no way to know whether it has already said so. One note, at the boundary
+        — the same reasoning as the tailnet banner naming the command that
+        clears it: a warning that repeats teaches an operator to ignore it.
+
+        An adopted dream never reaches here: it has left the vault, so it is not
+        a candidate again and the sentence would be false.
+        """
+        held = exchanges_so_far(self._store.messages(result.dream_id))
+        if held >= MAX_EXCHANGES_PER_DREAM:
+            self._note(
+                result.dream_id,
+                f"That was exchange {held} of {MAX_EXCHANGES_PER_DREAM}. This "
+                "dream parks: the two of them will not confer it again. The "
+                "dreamer can still rework it, and the operator can still act "
+                "on it.",
+                at=now,
+            )
+            log.info("confer_dream_parked", dream_id=result.dream_id, exchanges=held)
+        return result
+
+    # ---------------------------------------------------------------- calls
+    #
+    # Both return the same triple — the turn's text, the verdict if there is
+    # one, and what the call cost — so the exchange loop treats the two speakers
+    # identically and the only asymmetry left is that one of them can decide.
+
+    def _dreamer_turn(
+        self, dream: Dream, messages: Sequence[DreamMessage], *, opening: bool
+    ) -> tuple[str, TraderVerdict | None, CallUsage]:
+        instruction = (
+            "Offer this dream to the trading agent. Say what it claims, what it "
+            "rests on, and what would break it first."
+            if opening
+            else "Answer the trading agent's last turn. Do not add to the chain."
+        )
+        turn, usage = self._call(
+            self._dreamer,
+            _turn_prompt(dream, messages, instruction=instruction),
+            DreamerTurn,
+        )
+        # The dreamer never carries a verdict. It offers; the agent that has to
+        # answer for the consequence is the one that decides, which is the same
+        # asymmetry `DreamStore.move` enforces from the other direction.
+        return str(turn.text), None, usage
+
+    def _trader_turn(
+        self, dream: Dream, messages: Sequence[DreamMessage], *, final: bool
+    ) -> tuple[str, TraderVerdict | None, CallUsage]:
+        instruction = (
+            "This is your LAST turn. You must set a verdict: accept, decline or "
+            "park. A question here is a wasted turn and the exchange closes "
+            "without a decision."
+            if final
+            else "Ask the one question that would settle this, or set a verdict "
+            "now if you already know."
+        )
+        turn, usage = self._call(
+            self._trader,
+            _turn_prompt(
+                dream,
+                messages,
+                instruction=instruction,
+                classes=render_classes(self._rules),
+            ),
+            TraderTurn,
+        )
+        verdict = turn.verdict
+        return str(turn.text), verdict if isinstance(verdict, TraderVerdict) else None, usage
+
+    def _call(
+        self, client: TurnCaller, prompt: str, schema: type[BaseModel]
+    ) -> tuple[Any, CallUsage]:
+        """One model call, with every failure turned into `_TurnFailed`.
+
+        The broad `except` is the same decision as `fetch_market_ticks` and
+        `Dreamer.run_once`, taken for the same reason: there is no exception
+        from an HTTP client or a schema validator worth crashing a scheduled job
+        over, and an unanticipated one is exactly the case where crashing is
+        worst. This runs unattended on a timer, and the thing it would take down
+        is not this exchange — it is whatever else the command was going to do.
+        """
+        try:
+            turn, usage = client.confer(prompt, schema)
+        except (anthropic.APIError, ValueError, RuntimeError) as exc:
+            raise _TurnFailed(str(exc)) from exc
+        except Exception as exc:
+            raise _TurnFailed(repr(exc)) from exc
+        if turn is None:  # pragma: no cover - the client raises instead
+            raise _TurnFailed("the model returned no parsable turn")
+        return turn, usage
+
+    def _note(self, dream_id: int, text: str, *, at: datetime) -> None:
+        """This module narrating itself into the transcript.
+
+        Speaker `CONFERENCE`, never `OPERATOR` and never one of the agents, so
+        it cannot be mistaken for a turn and cannot move the change gate's
+        marker. See `last_agent_turn_at`.
+        """
+        self._store.add_message(
+            dream_id, speaker=CONFERENCE, kind="note", text=text, at=at
+        )
+
+
+class _TurnFailed(Exception):
+    """A model call that did not produce a turn. Never escapes this module."""
+
+    def __init__(self, detail: str) -> None:
+        super().__init__(detail)
+        self.detail = detail
+
+
+def _kind_for(index: int, verdict: TraderVerdict | None) -> str:
+    """Which `MESSAGE_KINDS` badge a turn gets.
+
+    Decided from the turn's position and never by the model, so a speaker cannot
+    mislabel its own turn.
+
+    A verdict turn is a `note` rather than a new kind. `MESSAGE_KINDS` is the
+    vocabulary the operator named — question, answer, offer, accept, return,
+    note — and `accept` in it means the handover itself, which
+    `DreamStore.adopt` writes for us so the transcript is complete even when
+    neither agent thought to narrate it. Writing a second `accept` here would
+    put two of them in the record for one event.
+    """
+    if index == 0:
+        return "offer"
+    if index % 2 == 0:
+        return "answer"
+    return "note" if verdict is not None else "question"
+
+
+def run_conference(
+    env: Env,
+    rules: Rules,
+    store: DreamStore,
+    *,
+    now: datetime | None = None,
+    caps: VaultCaps | None = None,
+    dreamer_client: TurnCaller | None = None,
+    trader_client: TurnCaller | None = None,
+) -> ConferenceReport:
+    """One daily conference. **This is what a CLI command calls.**
+
+    Deliberately the only entry point, and deliberately not reachable from
+    `cmd_loop`. See the module docstring: the separation between "decides once a
+    day whether a hypothesis is worth a permission" and "proposes orders every
+    fifteen minutes" is a file boundary and a command boundary, because those
+    survive a refactor and a comment does not.
+
+    Never raises on a model failure. A store error propagates, as it does in
+    `Dreamer`, because a caller that cannot read the vault has nothing useful to
+    report either.
+    """
+    return Conference(
+        env,
+        rules,
+        store,
+        dreamer_client=dreamer_client,
+        trader_client=trader_client,
+    ).run(now=now, caps=caps)
+
+
+__all__ = [
+    "AGENT_SPEAKERS",
+    "CONFERENCE",
+    "MAX_DREAMS_PER_RUN",
+    "MAX_EXCHANGES_PER_DREAM",
+    "MAX_TURNS_PER_EXCHANGE",
+    "TEXT_MAX_CHARS",
+    "Change",
+    "ConferOutcome",
+    "Conference",
+    "ConferenceReport",
+    "DreamerTurn",
+    "ExchangeResult",
+    "TraderPowers",
+    "TraderTurn",
+    "TraderVerdict",
+    "TurnCaller",
+    "exchanges_so_far",
+    "has_something_changed",
+    "last_agent_turn_at",
+    "render_classes",
+    "render_dream",
+    "render_transcript",
+    "run_conference",
+]

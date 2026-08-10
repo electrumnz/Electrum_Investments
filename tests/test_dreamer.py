@@ -14,7 +14,16 @@ import pytest
 
 from bot.claude_client import CallUsage
 from bot.config import Env, Rules
-from bot.dreamer import CARRY_FORWARD, Dreamer, DreamHop, DreamStep, build_prompt
+from bot.dreamer import (
+    CARRY_FORWARD,
+    SCOPE,
+    Dreamer,
+    DreamHop,
+    DreamStep,
+    build_prompt,
+    class_key_for_symbol,
+    scope_symbols,
+)
 from bot.dreaming import Dream, DreamStage, DreamStore, DreamVerdict, Hop
 from bot.journal import Journal
 from bot.models import Direction, Trade

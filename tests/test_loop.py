@@ -309,3 +309,114 @@ def test_nothing_is_executed_without_the_execute_flag(monkeypatch, tmp_path):
 
     assert any(e["event"] == "dry_run_no_orders_will_be_placed" for e in logs)
     assert _heartbeat(logs)["executed"] == 0
+
+
+# --------------------------------------------------------- dream symbol grants
+
+
+def test_the_heartbeat_states_which_symbols_a_dream_is_widening(monkeypatch, tmp_path):
+    """A permission in force that is never stated is a permission nobody can
+    audit.
+
+    On the cycle line for the same reason `stops_breached` is: an empty list
+    every cycle is a stated fact, where silence is also what an outage looks
+    like.
+    """
+    logs = _run_one_cycle(
+        monkeypatch,
+        tmp_path,
+        ClaudeDecision(market_assessment="Quiet, and nothing adopted.", proposals=[]),
+    )
+
+    beat = _heartbeat(logs)
+    assert beat["granted_symbols"] == []
+
+
+def test_an_adopted_dream_reaches_the_heartbeat(monkeypatch, tmp_path):
+    """End to end through the wiring the loop actually uses: a dream adopted in
+    the store shows up as a symbol the allowlist has been widened by."""
+    from datetime import UTC, datetime
+
+    from bot.dreaming import DREAMER, Dream, Vault
+
+    store = DreamStore(tmp_path / "dreams.db")
+    dream_id = store.save(
+        Dream(title="t", seed="s", symbols=["TSLA"], asset_class_key="us_equity")
+    )
+    assert store.move(dream_id, Vault.VAULT, by=DREAMER)
+    assert store.adopt(dream_id, at=datetime.now(UTC)).ok
+
+    logs = _run_one_cycle(
+        monkeypatch,
+        tmp_path,
+        ClaudeDecision(market_assessment="Quiet, with one dream adopted.", proposals=[]),
+    )
+
+    beat = _heartbeat(logs)
+    assert beat["granted_symbols"] == ["TSLA"]
+
+
+def test_a_broken_dream_store_costs_the_grants_and_not_the_cycle(monkeypatch, tmp_path):
+    """Same rule as `fetch_market_ticks` catching broadly, for the same reason.
+
+    An exception out of the store would end the decision loop — the journal
+    stops being reconciled and open positions stop being watched, with real
+    orders resting at the broker and nothing on screen to say the bot has gone.
+    A store that will not open costs the permissions and nothing else.
+    """
+
+    def _explode() -> DreamStore:
+        raise RuntimeError("unable to open database file")
+
+    monkeypatch.setattr(main_mod, "DreamStore", _explode)
+
+    logs = _run_one_cycle(
+        monkeypatch,
+        tmp_path,
+        ClaudeDecision(market_assessment="Quiet, with the store unavailable.", proposals=[]),
+    )
+
+    beat = _heartbeat(logs)
+    assert beat["granted_symbols"] == []
+    assert [e for e in logs if e["event"] == "dream_store_unavailable"]
+
+
+def test_grants_switched_off_never_open_the_store(monkeypatch, tmp_path):
+    """`allow_symbol_grants: false` is the one-word revert, and it has to mean
+    the store is not touched at all."""
+    opened: list[str] = []
+
+    def _record() -> DreamStore:
+        opened.append("opened")
+        return DreamStore(tmp_path / "dreams.db")
+
+    monkeypatch.setattr(main_mod, "DreamStore", _record)
+
+    def _stop(_seconds: float) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(time, "sleep", _stop)
+    monkeypatch.setattr(main_mod, "Journal", lambda: Journal(tmp_path / "journal.db"))
+    monkeypatch.setattr(main_mod, "AuditLog", lambda: AuditLog(tmp_path / "audit"))
+    monkeypatch.setattr(
+        main_mod,
+        "ClaudeClient",
+        lambda *a, **k: _StubClaude(
+            ClaudeDecision(market_assessment="Grants are off.", proposals=[])
+        ),
+    )
+
+    rules = load_rules()
+    rules.loop.skip_model_call_when_all_markets_closed = False
+    rules.dreaming.allow_symbol_grants = False
+
+    with structlog.testing.capture_logs() as logs:
+        assert main_mod.cmd_loop(
+            Env(_env_file=None),  # type: ignore[call-arg]
+            rules,
+            execute=False,
+            force_mock=True,
+        ) == 0
+
+    assert opened == []
+    assert _heartbeat(logs)["granted_symbols"] == []

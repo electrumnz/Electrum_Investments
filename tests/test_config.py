@@ -393,3 +393,54 @@ def test_the_shipped_rules_close_the_weekend_for_equities():
     assert equities.session_days_utc == [0, 1, 2, 3, 4]
     assert 5 not in equities.session_days_utc  # Saturday
     assert 6 not in equities.session_days_utc  # Sunday
+
+
+# ------------------------------------------------------------- the dreaming block
+
+
+def test_symbol_grants_default_to_off_in_the_model():
+    """The half of the asymmetry that protects a caller who never heard of this.
+
+    A `Rules` built with no `dreaming:` block — an older deployment, a test
+    fixture, a config nobody has updated — grants nothing at all. Fails closed,
+    the same rule as `FinnhubCalendar.is_degraded` and `stops_unchecked`: an
+    unknown is never treated as a permission.
+    """
+    from bot.config import DreamingRules
+
+    assert DreamingRules().allow_symbol_grants is False
+
+
+def test_the_shipped_config_turns_symbol_grants_on():
+    """The other half. A decision somebody made belongs in a file that can be
+    read and reverted in one line, not in a default nobody sees."""
+    rules = Rules.load(REPO_ROOT / "config" / "rules.yaml")
+
+    assert rules.dreaming.allow_symbol_grants is True
+    assert rules.dreaming.max_granted_symbols > 0
+
+
+def test_the_configured_vault_numbers_match_the_value_objects():
+    """The numbers live in the file and the dataclasses keep their own defaults
+    for callers that pass nothing. This is what stops the two drifting into two
+    different answers to the same question."""
+    from bot.config import DreamingRules
+    from bot.dreaming import VaultCaps, VaultTTLs
+
+    defaults = DreamingRules()
+
+    assert defaults.vault_caps() == VaultCaps()
+    assert defaults.vault_ttls() == VaultTTLs()
+
+
+def test_the_shipped_vault_caps_match_the_position_cap():
+    """An adopted dream the account has no slot to trade is a promise it cannot
+    keep. The two numbers are related by intent rather than by code, so the
+    relationship is asserted rather than left to a comment."""
+    rules = Rules.load(REPO_ROOT / "config" / "rules.yaml")
+
+    assert rules.dreaming.caps.adopted == rules.account.max_concurrent_positions
+    # The archive is uncapped on purpose: the only alternative to archiving a
+    # dream when the archive is full is deleting it.
+    assert rules.dreaming.caps.archive is None
+    assert rules.dreaming.ttl_days.archive is None
