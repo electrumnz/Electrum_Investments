@@ -356,12 +356,21 @@ class AlpacaBroker:
         quote = quotes.get(symbol)
         if quote is None:
             raise RuntimeError(f"No quote returned for {symbol}")
-        return Tick(
-            symbol=symbol,
-            bid=float(quote.bid_price),
-            ask=float(quote.ask_price),
-            timestamp=quote.timestamp,
-        )
+        try:
+            return Tick(
+                symbol=symbol,
+                bid=float(quote.bid_price),
+                ask=float(quote.ask_price),
+                timestamp=quote.timestamp,
+            )
+        except ValueError as exc:
+            # `Tick` refuses a one-sided quote — see its docstring for the
+            # SPY-at-half-price incident. Re-raised as RuntimeError because
+            # that is what every caller already catches for "no usable quote":
+            # `check_order` catches `(KeyError, RuntimeError)`, and letting a
+            # `ValidationError` past it would turn a thin book into a crashed
+            # tool rather than a named missing symbol.
+            raise RuntimeError(f"Unusable quote for {symbol}: {exc}") from exc
 
     def get_daily_bars(self, symbol: str, lookback: int = DEFAULT_BAR_LOOKBACK) -> list[Bar]:
         """Daily bars, oldest first, for the indicators in `src/bot/indicators.py`.

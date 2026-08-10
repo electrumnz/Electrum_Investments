@@ -12,7 +12,7 @@ from __future__ import annotations
 from datetime import datetime
 from enum import StrEnum
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 # Free text the model writes and nothing downstream parses. Generous, because
 # the prompt now asks for a stance on every symbol and a plan for every
@@ -89,10 +89,46 @@ class TradeOutcome(StrEnum):
 
 
 class Tick(BaseModel):
+    """A two-sided quote. **Both sides must be real prices.**
+
+    That constraint is the whole point of this class, and it was learned the
+    expensive way. `mid` is `(bid + ask) / 2`, so a quote with a missing side
+    does not fail — it returns HALF THE REAL PRICE, and half a price looks
+    exactly like a price.
+
+    Observed live: Alpaca's free tier is IEX-only, IEX often has no bid in the
+    pre-market, and SPY came back as `bid=0, ask=771.64`. `mid` was 385.82
+    against a true 773.26. Nothing raised. That figure then fed position
+    sizing, the limit price, the gate's own sanity check, the ticker tape and
+    unrealised P&L — every one of them agreeing with itself while being
+    twice out.
+
+    802 tests were green over it, because `MockBroker` always seeds both sides.
+    It took a real quote and somebody checking the price against a second
+    source. So the guard lives HERE, at the point of construction, rather than
+    in whichever caller happens to remember: a `Tick` that exists is a `Tick`
+    whose `mid` means something.
+    """
+
     symbol: str
     bid: float
     ask: float
     timestamp: datetime
+
+    @model_validator(mode="after")
+    def _both_sides_are_real(self) -> Tick:
+        # Zero is the value a missing side actually arrives as — not None, not
+        # an error. Negative is nonsense from any feed. Either way the quote is
+        # one-sided and a midpoint cannot be computed from it.
+        if self.bid <= 0 or self.ask <= 0:
+            raise ValueError(
+                f"one-sided quote for {self.symbol}: bid={self.bid}, "
+                f"ask={self.ask}. A midpoint from this would be half the real "
+                "price, so the quote is refused rather than halved. Thin or "
+                "pre-market books do this; the symbol is reported as having no "
+                "quote."
+            )
+        return self
 
     @property
     def mid(self) -> float:

@@ -43,6 +43,27 @@ rejection is final. If a rejection looks wrong, the fix is to change
 
 ---
 
+## Who decides what
+
+**The agent has full control of the trade. The gate controls only the
+consequence.**
+
+Direction, symbol, entry, where the stop goes, whether the exit is a hard
+target or a trail — all the agent's. Nothing in `risk.py` second-guesses any of
+it. `_stops_on_correct_side` checks only that a stop is on the LOSING side of
+entry, because a stop below entry on a short is not a stop, it is a target;
+that is a correctness check, not a view on placement.
+
+What the gate measures is what the choice COSTS: `|entry − stop| × qty` against
+the per-trade cap, the total, the concentration limit and buying power. Put the
+stop wherever the thesis says; the size follows from it, and a wider stop buys
+a smaller position rather than more risk.
+
+So the honest answer to "is this stop any good" is **not the gate's to give and
+not this file's either**. The useful answer is arithmetic: this stop implies
+this size, and it fits or it does not. Offering an opinion on placement dressed
+up as a limit is how a rule nobody agreed to gets added.
+
 ## The operator's four rules
 
 These are the point of the project. Everything else is scaffolding. Do not
@@ -1625,6 +1646,17 @@ for a while and agree with them.
   covering each limit: what it is, why it sits there, and the goal it serves.
   Settings has no edit control today and `tests/test_web.py` enforces that, so
   this is a deliberate change to that rule rather than an addition beside it.
+- **Let the agent choose its exit type.** `OrderProposal.take_profit_price` is
+  a single fixed price and it is REQUIRED, so the agent cannot express a
+  trailing stop even though that is often the right exit — it is forced to name
+  a level. Alpaca supports trailing stops natively, so this is a model and
+  adapter change rather than a strategy one. The exit is the agent's decision;
+  the model should be able to carry the decision it actually made.
+  Two things make this worth doing rather than leaving: a required field the
+  agent does not care about gets filled with something arbitrary, and since
+  entries became GTC brackets that arbitrary number is no longer a journal note
+  — **it is a live order resting at the broker.** An invented target is now an
+  exit somebody did not choose.
 - **An exit review, grading the PLAN and never the profit.** Nothing currently
   records *why* a position closed: `record_exit` takes a price, a time and a
   realised figure, and stop-hit, target-hit, closed-by-hand and expiry are
