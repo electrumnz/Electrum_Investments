@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from dataclasses import fields
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -1241,3 +1241,268 @@ def test_the_ledger_flags_a_prophecy_that_promises_nothing():
 
     assert ledger.conditionless_prophecies == 1
     assert ledger.fulfilled_not_offered == 1
+
+
+# ------------------------------------- an adoption may only narrow the offer
+
+
+def test_adoption_cannot_grant_a_symbol_the_dream_never_claimed(store):
+    """Any dream in the vault was a blank cheque, and the tool hands the fields
+    to a model.
+
+    `adopt` took `symbols` and `asset_class` as given, so a dream about sesame
+    supply chains could be adopted as a permission to trade anything — the id
+    was the only thing being checked. `mcp_server.adopt_dream` exposes both
+    arguments, so this was one tool call from a self-granted symbol.
+    """
+    dream_id = _vaulted(store, symbols=["SPY"])
+
+    result = store.adopt(dream_id, symbols=["NVDA"])
+
+    assert result.refused
+    assert MoveRefusal.SYMBOLS_NOT_OFFERED in result.refusals
+    assert store.granted_symbols(datetime(2026, 6, 1, tzinfo=UTC)) == {}
+    loaded = store.get(dream_id)
+    assert loaded is not None
+    assert loaded.vault is Vault.VAULT
+
+
+def test_a_dream_claiming_nothing_cannot_be_adopted_into_a_permission(store):
+    """The blank cheque in its purest form: no symbols, no class, both invented
+    at the moment of adoption."""
+    bare = store.save(Dream(title="a perfectly ordinary dream", seed="s"))
+    store.move(bare, Vault.VAULT, by=DREAMER)
+
+    result = store.adopt(bare, symbols=["BTC/USD"], asset_class="us_equity")
+
+    assert result.refused
+    assert MoveRefusal.SYMBOLS_NOT_OFFERED in result.refusals
+    assert MoveRefusal.CLASS_NOT_OFFERED in result.refusals
+
+
+def test_adoption_cannot_choose_a_different_class_from_the_dreams(store):
+    """The class decides which limits the symbols face, so picking one at
+    adoption is picking the caps rather than accepting them."""
+    dream_id = _vaulted(store, symbols=["SPY"], asset_class_key="us_equity")
+
+    result = store.adopt(dream_id, asset_class="crypto")
+
+    assert result.refused
+    assert MoveRefusal.CLASS_NOT_OFFERED in result.refusals
+
+
+def test_adoption_may_take_less_than_the_dream_offers(store):
+    """Narrowing is the trading agent being careful and must stay allowed."""
+    at = datetime(2026, 6, 1, tzinfo=UTC)
+    dream_id = _vaulted(store, symbols=["SPY", "QQQ", "AAPL"])
+
+    result = store.adopt(dream_id, symbols=["qqq"], at=at)
+
+    assert result.ok, result.detail
+    assert store.adoptions(dream_id)[0].symbols_granted == ["QQQ"]
+
+
+def test_restating_the_dreams_own_class_is_not_an_override(store):
+    at = datetime(2026, 6, 1, tzinfo=UTC)
+    dream_id = _vaulted(store, symbols=["SPY"], asset_class_key="us_equity")
+
+    assert store.adopt(dream_id, asset_class="us_equity", at=at).ok
+    assert store.granted_symbols(at + timedelta(days=1)) == {"SPY": "us_equity"}
+
+
+# ------------------------------------------------- one event, one transaction
+
+
+def test_an_interrupted_adoption_leaves_no_grant_behind(store, monkeypatch):
+    """`adopt` claimed to be one event and was three connections.
+
+    A failure between them left a live symbol permission on a dream still
+    sitting in the VAULT — a grant no page describes, which `return_to_vault`
+    then refuses to close with `WRONG_VAULT`, leaving deletion as the only exit.
+    """
+    dream_id = _vaulted(store, symbols=["SPY"])
+    at = datetime(2026, 6, 1, tzinfo=UTC)
+
+    def boom(*args, **kwargs):
+        raise OSError("the box died between two writes")
+
+    monkeypatch.setattr(DreamStore, "_apply_move", boom)
+    with pytest.raises(OSError):
+        store.adopt(dream_id, at=at)
+
+    assert store.adoptions(dream_id) == []
+    assert store.granted_symbols(at) == {}
+    loaded = store.get(dream_id)
+    assert loaded is not None
+    assert loaded.vault is Vault.VAULT
+
+
+def test_a_grant_needs_the_dream_to_still_be_on_the_adopted_shelf(store):
+    """`save()` deliberately bypasses `move`, so `dream.vault` can be set by
+    hand — and the grant join only checked that the dream EXISTED."""
+    at = datetime(2026, 6, 1, tzinfo=UTC)
+    dream_id = _vaulted(store, symbols=["SPY"])
+    assert store.adopt(dream_id, at=at).ok
+    assert store.granted_symbols(at) == {"SPY": "us_equity"}
+
+    dream = store.get(dream_id)
+    assert dream is not None
+    dream.vault = Vault.ARCHIVE
+    store.save(dream)
+
+    assert store.granted_symbols(at) == {}
+
+
+# ------------------------------------------------- one definition of "live"
+
+
+def test_a_grant_written_in_new_zealand_time_expires_when_it_expires(store):
+    """The permission path compared ISO timestamps as TEXT.
+
+    `adopt` wrote whatever offset the caller's `at` carried, and the dream timer
+    runs on `Pacific/Auckland` by design — so a `+13:00` stamp sorted as though
+    it were thirteen hours later than it was, and `granted_symbols` reported a
+    lapsed grant as live while `Adoption.is_live` correctly said expired. Two
+    answers, and the permission one was the lenient one.
+    """
+    nz = timezone(timedelta(hours=13))
+    at = datetime(2026, 6, 1, 16, 0, tzinfo=UTC)
+    dream_id = _vaulted(store, symbols=["SPY"])
+
+    store.adopt(dream_id, at=at.astimezone(nz), ttl_days=1)
+
+    six_hours_past_expiry = at + timedelta(days=1, hours=6)
+    adoption = store.adoptions(dream_id)[0]
+    assert adoption.is_live(six_hours_past_expiry) is False
+    assert store.granted_symbols(six_hours_past_expiry) == {}
+    # And still live before it lapses, so the test is about the offset rather
+    # than about expiry being broken in general.
+    assert store.granted_symbols(at + timedelta(hours=1)) == {"SPY": "us_equity"}
+
+
+def test_every_stamp_this_store_writes_is_utc(store):
+    """Text ordering is only instant ordering when every row shares an offset."""
+    nz = timezone(timedelta(hours=13))
+    at = datetime(2026, 6, 1, 16, 0, tzinfo=UTC)
+    dream_id = _vaulted(store, symbols=["SPY"])
+    store.adopt(dream_id, at=at.astimezone(nz), ttl_days=1)
+
+    with sqlite3.connect(store.path) as conn:
+        row = conn.execute(
+            "SELECT adopted_at, expires_at FROM adoptions"
+        ).fetchone()
+    assert row[0].endswith("+00:00")
+    assert row[1].endswith("+00:00")
+
+
+def test_an_adoption_with_no_expiry_grants_nothing(store):
+    """`adopt` always writes one, so a NULL is hand-edited or migrated — and a
+    permission nobody set an end on is exactly the one that should not outlive
+    everybody who remembers it."""
+    at = datetime(2026, 6, 1, tzinfo=UTC)
+    dream_id = _vaulted(store, symbols=["SPY"])
+    store.adopt(dream_id, at=at)
+    with sqlite3.connect(store.path) as conn:
+        conn.execute("UPDATE adoptions SET expires_at=NULL")
+
+    assert store.adoptions(dream_id)[0].is_live(at) is False
+    assert store.granted_symbols(at) == {}
+
+
+def test_a_naive_now_is_read_as_utc_rather_than_raising(store):
+    """`is_live` sits in the decision cycle's path. A `TypeError` out of it is
+    the shape `claude.propose` was wrapped for."""
+    at = datetime(2026, 6, 1, tzinfo=UTC)
+    dream_id = _vaulted(store, symbols=["SPY"])
+    store.adopt(dream_id, at=at, ttl_days=10)
+
+    adoption = store.adoptions(dream_id)[0]
+    assert adoption.is_live((at + timedelta(days=1)).replace(tzinfo=None)) is True
+    assert adoption.is_live((at + timedelta(days=30)).replace(tzinfo=None)) is False
+
+
+# ------------------------------------------ the adopted shelf counts LIVE grants
+
+
+def test_an_expired_adoption_stops_occupying_a_slot(store):
+    """Three expiries used to brick the shelf permanently.
+
+    The cap exists because `caps.adopted` matches `max_concurrent_positions`: an
+    adoption is a promise the trading agent may act on it. A dream whose grant
+    lapsed is no longer such a promise, and counting it left nothing adoptable
+    while `delete` refused an ADOPTED dream and `move` refused every actor.
+    """
+    caps = VaultCaps(adopted=3)
+    at = datetime(2026, 6, 1, tzinfo=UTC)
+    for i in range(3):
+        assert store.adopt(
+            _vaulted(store, title=f"held-{i}"), caps=caps, at=at, ttl_days=30
+        ).ok
+    fourth = _vaulted(store, title="fourth")
+
+    assert store.adopt(fourth, caps=caps, at=at, ttl_days=30).refused
+
+    long_after = at + timedelta(days=200)
+    assert store.granted_symbols(long_after) == {}
+    assert store.has_room(Vault.ADOPTED, now=long_after, caps=caps) is True
+    assert store.adopt(fourth, caps=caps, at=long_after).ok
+
+
+def test_a_live_adoption_still_fills_its_slot(store):
+    """The other half, so the test is about liveness rather than about the cap
+    having been removed."""
+    caps = VaultCaps(adopted=3)
+    at = datetime(2026, 6, 1, tzinfo=UTC)
+    for i in range(3):
+        store.adopt(_vaulted(store, title=f"held-{i}"), caps=caps, at=at, ttl_days=90)
+    fourth = _vaulted(store, title="fourth")
+
+    result = store.adopt(fourth, caps=caps, at=at + timedelta(days=1))
+
+    assert result.refused
+    assert MoveRefusal.FULL in result.refusals
+    assert store.has_room(Vault.ADOPTED, now=at + timedelta(days=1), caps=caps) is False
+
+
+def test_the_other_shelves_still_count_rows_rather_than_grants(store):
+    """Only ADOPTED has grants behind it. A vault cap counts what is on it."""
+    caps = VaultCaps(vault=2)
+    for i in range(2):
+        _vaulted(store, title=f"offer-{i}")
+    third = store.save(Dream(title="third", seed="s"))
+
+    result = store.move(third, Vault.VAULT, by=DREAMER, caps=caps)
+
+    assert result.refused
+    assert MoveRefusal.FULL in result.refusals
+
+
+# ------------------------------------------------- the shelf answers by WAITING
+
+
+def test_a_shelf_is_ordered_by_when_a_dream_ARRIVED_not_when_it_changed(store):
+    """`confer` reverses this list to answer the longest-waiting offer first.
+
+    Ordered by `updated_at` that reversal answered the least recently EDITED
+    first, which is a different dream: one shelved 150 days ago and touched this
+    morning sorted as the newest thing here and went to the back of the queue —
+    the starvation the reversal exists to prevent, with the code that prevents
+    it still in place.
+    """
+    old = store.save(Dream(title="waiting since March", seed="s"))
+    store.move(old, Vault.VAULT, by=DREAMER, at=datetime(2026, 3, 1, tzinfo=UTC))
+    new = store.save(Dream(title="offered yesterday", seed="s"))
+    store.move(new, Vault.VAULT, by=DREAMER, at=datetime(2026, 5, 31, tzinfo=UTC))
+
+    # The old one is edited today, which moves `updated_at` and must not move
+    # its place in the queue.
+    touched = store.get(old)
+    assert touched is not None
+    touched.updated_at = datetime(2026, 6, 1, tzinfo=UTC)
+    store.save(touched)
+
+    shelf = store.in_vault(Vault.VAULT)
+
+    assert [d.title for d in shelf] == ["offered yesterday", "waiting since March"]
+    # Which is what `confer` reverses to get longest-waiting first.
+    assert next(d.title for d in reversed(shelf)) == "waiting since March"

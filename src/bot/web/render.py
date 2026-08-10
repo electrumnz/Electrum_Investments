@@ -399,11 +399,32 @@ section.block>h2{margin-bottom:.75rem}
    nothing is worse than no difference at all.
    Not the gain/loss pair: this is a state, not a direction, and borrowing the
    P&L colours would make a shut market read as a losing one. */
-/* Colour AND glow, so the state survives being read by someone who cannot
-   separate the two hues — the glow is a second channel, not decoration.
+/* Colour, glow, a SHAPE and a word — four channels, and the last two are the
+   ones that survive not being able to read colour at all.
+   The glow was described here as the second channel, and it is not one: it is
+   luminance around a hue, so greyscale, a low-contrast screen and a screen
+   reader all get exactly the same nothing out of it as they get out of the
+   colour. Measured on the live deck with NYSE genuinely open — `mkt-live`
+   against three `mkt-closed`, no text, no glyph and no tooltip anywhere on the
+   badge — while the instrument cells one element across already carried a
+   `title`.
+   So: the pip is FILLED for a live session, half-filled out of hours and an
+   empty ring when the market is shut, which is a difference in ink rather than
+   in colour; and the state is spelt in micro-type beside it. A zone with no
+   exchange gets neither, because it is making no claim to mark.
    Not the gain/loss pair: this is a state, not a direction, and borrowing the
    P&L colours would make a shut exchange read as a losing one. */
-.tape .clk .mkt{font-size:.625rem;letter-spacing:.1em;font-weight:600}
+.tape .clk .mkt{display:inline-flex;align-items:center;gap:.28rem;
+  font-size:.625rem;letter-spacing:.1em;font-weight:600}
+.tape .clk .mkt .pip{width:6px;height:6px;border-radius:50%;flex:none;
+  border:1px solid currentColor;background:transparent}
+.tape .clk .mkt .st{font-size:.5rem;letter-spacing:.06em;font-weight:400;
+  opacity:.85}
+.tape .clk .mkt-live .pip{background:currentColor}
+/* Half filled: current from the bottom up, so "partly" is legible as ink
+   rather than as a tint. */
+.tape .clk .mkt-ooh .pip{
+  background:linear-gradient(to top,currentColor 50%,transparent 50%)}
 .tape .clk .mkt-live{color:var(--patina);
   text-shadow:0 0 8px rgba(78,140,125,.75),0 0 16px rgba(78,140,125,.35)}
 .tape .clk .mkt-ooh{color:var(--amber);
@@ -633,7 +654,35 @@ tr.why .quote{border-left:2px solid var(--patina);padding-left:.875rem;
   stroke-linejoin:round;stroke-linecap:round}
 .curve .area{fill:color-mix(in srgb,var(--patina) 14%,transparent);stroke:none}
 .curve .base{stroke:var(--slate);stroke-width:1;stroke-dasharray:3 4}
-.curve .tick{fill:var(--pewter);font-family:var(--mono);font-size:10px}
+/* The axis labels are HTML, not SVG text, and that is the entire fix rather
+   than a preference.
+   The chart is drawn in a `viewBox="0 0 1000 240"` user space and stretched to
+   whatever the card is wide, so EVERYTHING inside the SVG scales with it —
+   including type. `font-size:10px` on an SVG `text` means ten USER units, so
+   the rendered size is 10 x (container / 1000): legible 14px on a 1440 deck,
+   and a measured 4.00px at 390 wide, where the container is 358. Unreadable,
+   and unreadable in the direction nobody notices, because the deck it is built
+   on is the wide one.
+   Bumping the user-space size in a media query is the workaround, and it has
+   to be re-tuned at every width the card can take. Taking the labels out of
+   the scaled coordinate system fixes it once: `.plot` is a positioning context
+   the same size as the SVG, the labels are absolutely placed in it as
+   PERCENTAGES of that box — which is exactly what a user-space coordinate is,
+   so they still track the data — and their type is CSS px, which is not
+   scaled by anything. */
+.curve .plot{position:relative}
+.curve .lab{position:absolute;left:0;font-family:var(--mono);font-size:.625rem;
+  line-height:1.1;color:var(--pewter);pointer-events:none;
+  /* Over the area fill at the top of the range, so a background is what keeps
+     it readable rather than luck about where the curve happens to sit. */
+  background:var(--graphite);padding:0 .25rem;border-radius:2px}
+/* The dates sit BELOW the plot in normal flow, not inside it. At 390 the plot
+   is 86px tall and three rows of 10px type do not fit in it; stacking the two
+   value labels inside and the two dates under is the only arrangement that
+   never collides. */
+.curve .axis{display:flex;justify-content:space-between;gap:1rem;
+  margin:.4rem 0 0;font-family:var(--mono);font-size:.625rem;
+  color:var(--pewter)}
 
 .readout{font-family:var(--mono);font-size:.75rem;color:var(--pewter);
   background:var(--graphite);border:1px solid var(--slate);border-radius:2px;
@@ -645,6 +694,21 @@ tr.why .quote{border-left:2px solid var(--patina);padding-left:.875rem;
   margin-bottom:1rem}
 .cycle>.head{display:flex;gap:.875rem;align-items:baseline;flex-wrap:wrap;
   padding:.875rem 1.125rem;border-bottom:1px solid var(--slate)}
+/* The head line is a `<summary>`, so it is the control that opens the cycle.
+   `display:flex` already suppresses the browser's own marker in Chromium —
+   the triangle needs `display:list-item` — so `list-style` and the WebKit
+   pseudo-element are belt and braces for the engines that keep it anyway, and
+   the glyph below is ours. Same arrangement as `details.step` further down;
+   two copies because the two are styled from opposite directions and merging
+   them would tie the trail's layout to the feed block's. */
+.cycle>summary{cursor:pointer;list-style:none}
+.cycle>summary::-webkit-details-marker{display:none}
+/* Literal characters, never CSS hex escapes — see the note on
+   `details.step summary::before`. */
+.cycle>summary::before{content:"▸";color:var(--pewter);font-size:.75rem}
+.cycle[open]>summary::before{content:"▾"}
+.cycle>summary:hover{background:rgba(78,140,125,.05)}
+.cycle>summary:hover .when{color:var(--bone)}
 .cycle>.head .when{font-family:var(--mono);font-size:.8125rem}
 .cycle>.head .cost{margin-left:auto;font-family:var(--mono);font-size:.6875rem;
   color:var(--pewter)}
@@ -670,6 +734,12 @@ tr.why .quote{border-left:2px solid var(--patina);padding-left:.875rem;
 .considered .chain{margin-top:.4rem;border-left-color:var(--slate)}
 .feed{margin:.3rem 0 0;padding-left:1.1rem;font-size:.8125rem;color:var(--pewter)}
 .feed li{margin:.15rem 0}
+/* Newer / range / older. Ordinary links, so the trail is reachable with the
+   script blocked and every page of it is a URL somebody can bookmark. */
+.pager{display:flex;align-items:baseline;justify-content:space-between;
+  gap:1rem;flex-wrap:wrap;margin-top:1.25rem;padding-top:1rem;
+  border-top:1px solid var(--slate);font-family:var(--mono);font-size:.75rem}
+.pager .range{color:var(--pewter)}
 details.step summary{cursor:pointer;list-style:none}
 details.step summary::-webkit-details-marker{display:none}
 /* Literal characters, never CSS hex escapes. STYLES is an ordinary Python
@@ -1112,6 +1182,12 @@ nav a:hover::after,nav a[aria-current=page]::after{transform:scaleX(1)}
 .live.link-live i{background:var(--holo)}
 .live.link-retry i{background:var(--amber);animation-duration:1.1s}
 .live.link-down i{background:var(--pewter);animation:none;box-shadow:none}
+/* A fourth state, because "signed out" is not a degree of "reconnecting".
+   RECONNECTING says wait; this says the wait is over and there is something
+   for the operator to do, so it is the one link state that is coloured like a
+   problem and carries an instruction rather than a status word. */
+.live.link-out i{background:var(--rust);animation:none;box-shadow:none}
+.live.link-out .link-label{color:var(--rust)}
 .live .link-label{font-size:.5625rem;letter-spacing:.14em;margin-left:.4rem;
   color:var(--pewter)}
 
@@ -1839,7 +1915,7 @@ SCRIPT = """
 
   function setLink(state, label) {
     if (!link) return;
-    link.classList.remove('link-live', 'link-retry', 'link-down');
+    link.classList.remove('link-live', 'link-retry', 'link-down', 'link-out');
     link.classList.add('link-' + state);
     var tag = link.querySelector('.link-label');
     if (tag) tag.textContent = label || '';
@@ -2079,8 +2155,38 @@ SCRIPT = """
       try { paint(JSON.parse(e.data)); } catch (err) { /* a torn frame is not worth a page */ }
     };
     /* EventSource reconnects by itself, so this reports rather than retries.
-       Writing our own backoff on top would fight the browser's. */
-    es.onerror = function () { setLink('retry', 'reconnecting'); };
+       Writing our own backoff on top would fight the browser's.
+
+       But it does not always reconnect, and the difference matters more than
+       it looks. Per the spec a transport failure is "reestablish", leaving
+       readyState at CONNECTING; a response that is not 200 text/event-stream
+       is "fail the connection" — one error event, readyState CLOSED, and no
+       further attempt ever. A lapsed session takes the second path, because
+       `/live` answers 401 to a non-HTML Accept, which is correct for an API
+       caller and invisible from here: EventSource exposes no status.
+
+       So a signed-out Board sat on amber RECONNECTING indefinitely with the
+       last-good figures still on screen and nothing saying the operator was
+       signed out. Waiting was the one thing that could not help.
+
+       CLOSED tells us it is permanent. `/session` tells us whether it is
+       permanent because of authentication — it is behind the same gate, so it
+       answers 401 in exactly the case that matters and 200 otherwise. Any
+       other outcome, including the fetch itself failing, stays on the weaker
+       claim: reporting "signed out" at somebody whose Wi-Fi dropped would send
+       them to re-enter a password they never lost. */
+    es.onerror = function () {
+      if (es.readyState !== 2) { setLink('retry', 'reconnecting'); return; }
+      setLink('retry', 'checking');
+      if (!window.fetch) { setLink('down', 'stream closed'); return; }
+      window.fetch('/session', {
+        credentials: 'same-origin',
+        headers: { 'Accept': 'application/json' }
+      }).then(function (r) {
+        if (r.status === 401) setLink('out', 'signed out - reload to sign in');
+        else setLink('down', 'stream closed - reload');
+      }).catch(function () { setLink('down', 'stream closed'); });
+    };
     es.onopen = function () { setLink('live', ''); };
   }
 
@@ -3026,6 +3132,19 @@ VENUE_TITLES: dict[VenueState, str] = {
     VenueState.CLOSED: "market shut - this is the last session's close",
 }
 
+#: The same three states in micro-type on the clock badge itself.
+#:
+#: Short because it sits beside a four-letter exchange code on a strip with
+#: sixteen instruments on it, and a word rather than a glyph because this is
+#: the channel that has to survive greyscale, a screen reader and somebody who
+#: cannot separate green from amber. The tooltip carries the full sentence from
+#: VENUE_TITLES; this carries enough to act on without one.
+VENUE_WORDS: dict[VenueState, str] = {
+    VenueState.LIVE: "open",
+    VenueState.OUT_OF_HOURS: "ext",
+    VenueState.CLOSED: "shut",
+}
+
 def _tape_cell(quote: TickerQuote, *, venue: VenueState, kind: str) -> str:
     """One instrument on the tape.
 
@@ -3130,9 +3249,22 @@ def _tape_clock(
             "for this exchange)"
         )
         title = f"{face.label} — {VENUE_TITLES[state]}{caveat}"
+    # A pip and a word, not only a colour and a glow.
+    #
+    # Both are omitted where there is no exchange: a badge that said "shut"
+    # for Los Angeles would be asserting a session that does not exist there,
+    # which is the confident wrong answer this file refuses everywhere else.
+    # The pip is `aria-hidden` because the word beside it says the same thing
+    # in text, and a screen reader announcing an empty span twice is noise.
+    mark = (
+        ""
+        if state is None
+        else '<i class="pip" aria-hidden="true"></i>'
+    )
+    word = "" if state is None else f'<span class="st">{VENUE_WORDS[state]}</span>'
     return (
         f'<span class="clk" data-tz="{_e(face.zone)}" title="{_e(title)}">'
-        f'<span class="{cls}">{_e(label)}</span>'
+        f'<span class="{cls}">{mark}{_e(label)}{word}</span>'
         f'<span class="t">{local:%H:%M:%S}</span></span>'
     )
 
@@ -3632,7 +3764,13 @@ def _working_orders(
             else ""
         )
         submitted = _when(o.submitted_at) if o.submitted_at else "unknown"
-        status = o.status.value.replace("_", " ")
+        # The broker's own word when it gave one, never the bucket it fell
+        # into. `OrderStatus.OTHER` is a truthful answer to "which of our seven
+        # is this" and an unusable one on a Board: the live stop leg holding
+        # the operator's third rule up rendered as OTHER, indistinguishable
+        # from a status this build has never seen. Alpaca calls it `held`, and
+        # `held` is a thing an operator can act on.
+        status = (o.broker_status or o.status.value).replace("_", " ")
 
         # A value and its qualifier travel inside ONE element. Under 760px each
         # `td` becomes a `space-between` flex row with the label injected as
@@ -3704,8 +3842,20 @@ def _curve(points: list[tuple[str, float]]) -> str:
         f"Equity from {_money(values[0])} to {_money(values[-1])} across "
         f"{len(points)} marks."
     )
+    # The two value labels as PERCENTAGES of the plot box rather than as SVG
+    # text at a user-space font size. The percentage is the user-space
+    # coordinate divided by the viewBox, so each label still sits exactly where
+    # it did; what changes is that its TYPE is no longer scaled with the
+    # drawing. See the `.curve .lab` comment in STYLES for the measurement.
+    #
+    # The high label hangs by its bottom edge and the low one by its top, so
+    # each is pushed away from the reading it names rather than over it, and
+    # neither can be clipped by the plot's own edge at a narrow width.
+    hi_from_bottom = (height - (y(hi_v) - 3.0)) / height * 100
+    lo_from_top = (y(lo_v) + 3.0) / height * 100
     return (
-        f'<div class="curve"><svg viewBox="0 0 {width:.0f} {height:.0f}" role="img" '
+        '<div class="curve"><div class="plot">'
+        f'<svg viewBox="0 0 {width:.0f} {height:.0f}" role="img" '
         f'preserveAspectRatio="none" aria-label="{_e(label)}">'
         f'<path class="area" d="{area}"/>'
         f'<line class="base" x1="8" x2="{width - 8:.0f}" y1="{base:.1f}" y2="{base:.1f}"/>'
@@ -3718,12 +3868,12 @@ def _curve(points: list[tuple[str, float]]) -> str:
         f'cy="{y(values[-1]):.1f}" r="9"/>'
         f'<circle class="head" cx="{x(len(points) - 1):.1f}" '
         f'cy="{y(values[-1]):.1f}" r="3.5"/>'
-        f'<text class="tick" x="8" y="{y(hi_v) - 5:.1f}">{_money(hi_v)}</text>'
-        f'<text class="tick" x="8" y="{y(lo_v) + 13:.1f}">{_money(lo_v)}</text>'
-        f'<text class="tick" x="8" y="{height - 8:.0f}">{_e(points[0][0][:10])}</text>'
-        f'<text class="tick" x="{width - 8:.0f}" y="{height - 8:.0f}" '
-        f'text-anchor="end">{_e(points[-1][0][:10])}</text>'
         "</svg>"
+        f'<span class="lab" style="bottom:{hi_from_bottom:.2f}%">{_money(hi_v)}</span>'
+        f'<span class="lab" style="top:{lo_from_top:.2f}%">{_money(lo_v)}</span>'
+        "</div>"
+        f'<p class="axis"><span>{_e(points[0][0][:10])}</span>'
+        f"<span>{_e(points[-1][0][:10])}</span></p>"
         f'<p class="note" style="margin:.75rem 0 0">The dashed line is where this '
         f"curve started. {len(points)} marks recorded.</p></div>"
     )
@@ -3793,20 +3943,58 @@ def _positions(
 # ---------------------------------------------------------------- decisions
 
 
-def decisions(view: AuditView, *, shown: int = 40) -> str:
+#: Cycles rendered on one page of the trail.
+#:
+#: The loop wakes 96 times a day, so this is well under a full session and the
+#: page has to say so out loud — see `decisions`.
+DECISIONS_PER_PAGE = 40
+
+
+def decisions(view: AuditView, *, shown: int = DECISIONS_PER_PAGE, page: int = 1) -> str:
     """The agent's decision trail: proposal, gate ruling, outcome.
 
     This is the only surface on which a REJECTED proposal is visible at all. It
     never becomes a trade, so it reaches neither the journal nor the broker, and
     the reasoning behind a refusal exists nowhere else.
+
+    **The header states what is WITHHELD, and there is a route to it.** It used
+    to print `len(view.decisions)` — the total in the view — above
+    `view.decisions[:shown]`. Those coincided on the day it was measured, at 40
+    of 40, so the page said "40 cycles" and showed forty. The loop wakes 96
+    times a day: on the next full session the header would have said 96 with 56
+    missing, no "showing 40 of 96" anywhere, and no way to reach the rest. On
+    the page whose entire reason to exist is that a rejected proposal is
+    visible nowhere else, a silent truncation is the worst available bug — the
+    reasoning does not merely look wrong, it looks like it was never recorded.
+
+    Paging is a plain `?page=` link rather than an infinite scroll: it is a URL
+    an operator can bookmark and hand to somebody, it needs no JavaScript, and
+    it cannot lose its place.
     """
+    total = len(view.decisions)
+    page = max(1, page)
+    start = (page - 1) * shown
+    # A page past the end walks back to the last real one rather than rendering
+    # an empty section under a header claiming cycles exist. `?page=99` is a
+    # typo, not a request to be told nothing.
+    if start >= total and total:
+        page = (total + shown - 1) // shown
+        start = (page - 1) * shown
+    window = view.decisions[start : start + shown]
+    end = start + len(window)
+
     lede = (
         "Every pass of the loop, newest first: what the model assessed, what it "
         "proposed, what the risk gate ruled and on which grounds, and what "
         "actually reached the broker. A rejected proposal appears here and "
         "nowhere else."
     )
-    body = head("Trail", "Decisions", f"{len(view.decisions)} cycles", lede)
+    count = (
+        f"{total} cycles"
+        if total <= shown
+        else f"showing {start + 1}-{end} of the newest {total}"
+    )
+    body = head("Trail", "Decisions", count, lede)
 
     if view.is_degraded:
         body += banners(StandDownState(), [], [], audit=view)
@@ -3821,10 +4009,52 @@ def decisions(view: AuditView, *, shown: int = 40) -> str:
         return body
 
     body += '<section class="block">'
-    for entry in view.decisions[:shown]:
-        body += _cycle(entry)
+    body += (
+        '<p class="note">Each cycle is folded behind its head line; open one to '
+        "read what it considered and how the gate ruled. The newest is open "
+        "already."
+        + (
+            ""
+            if total <= shown
+            else " Older cycles than the window above are still on disk in "
+            "<code>audit/</code> and reachable through the history tools."
+        )
+        + "</p>"
+    )
+    for i, entry in enumerate(window):
+        # Only the first on the page. Every cycle open is what made this 57,574
+        # pixels tall at 390 wide; every cycle shut would make the newest one —
+        # the reason anybody opened the page — cost a click as well.
+        body += _cycle(entry, expanded=i == 0)
     body += "</section>"
+    body += _pager(page=page, start=start, end=end, total=total, shown=shown)
     return body
+
+
+def _pager(*, page: int, start: int, end: int, total: int, shown: int) -> str:
+    """Newer / older, and the range in words between them.
+
+    Rendered even on a single page, where both links are absent and the line
+    still states the range. A control that appears only once there is something
+    to page through teaches an operator that the page has no more — which is
+    the claim this whole change exists to stop the header making.
+    """
+    if total <= shown:
+        return ""
+    newer = (
+        f'<a href="/decisions?page={page - 1}">&larr; Newer</a>'
+        if page > 1
+        else '<span class="muted">&larr; Newer</span>'
+    )
+    older = (
+        f'<a href="/decisions?page={page + 1}">Older &rarr;</a>'
+        if end < total
+        else '<span class="muted">Older &rarr;</span>'
+    )
+    return (
+        f'<nav class="pager" aria-label="Decision pages">{newer}'
+        f'<span class="range">{start + 1}-{end} of {total}</span>{older}</nav>'
+    )
 
 
 STANCE_PILL = {
@@ -4006,7 +4236,7 @@ def _read(entry: DecisionEntry) -> str:
     )
 
 
-def _cycle(entry: DecisionEntry) -> str:
+def _cycle(entry: DecisionEntry, *, expanded: bool = False) -> str:
     d = entry.decision
     pill = {
         "executed": "ok",
@@ -4024,14 +4254,27 @@ def _cycle(entry: DecisionEntry) -> str:
             + f" &middot; ${d.estimated_cost_usd:.4f}"
         )
 
+    # `<details>`, and the head line is its `<summary>`.
+    #
+    # 40 cycles rendered open measured 57,574px tall at 390 wide — roughly 68
+    # phone screens for ONE day of a loop that wakes 96 times. Collapsed, the
+    # same page is a scannable list of head lines and every cycle is still one
+    # click away with its rejection reasons intact.
+    #
+    # `<details>` rather than a script, deliberately: the projection layer's
+    # rule is that nothing may be hidden unless the script said so, and this is
+    # hidden by the browser with no script involved at all. JavaScript off, a
+    # throw, a blocked file — the summaries still expand. Printing expands them
+    # too in browsers that honour it, which a JS accordion does not.
     out = (
-        '<article class="cycle"><div class="head">'
+        f'<details class="cycle"{" open" if expanded else ""}>'
+        '<summary class="head">'
         f'<span class="when">{_e(_when(entry.timestamp))}</span>'
         f'<span class="pill {pill}">{entry.outcome}</span>'
         f'<span class="note">{_count(len(d.proposals), "proposal")}, '
         f"{entry.approved} approved, {entry.rejected} rejected</span>"
         + (f'<span class="cost">{cost}</span>' if cost else "")
-        + "</div>"
+        + "</summary>"
     )
 
     if d.notes:
@@ -4049,17 +4292,29 @@ def _cycle(entry: DecisionEntry) -> str:
 
     for i, proposal in enumerate(d.proposals):
         verdict = entry.verdict_for(i)
+        # Built as its own value first, never as a ternary trailing a
+        # multi-part f-string. Adjacent string literals concatenate BEFORE the
+        # conditional binds, so `a b if cond else c d e` is `(a b)` against
+        # `(c d e)` — and this one had eaten half the row in each direction: a
+        # proposal WITH a target rendered no "risks" figure and no closing
+        # `</div>`, and one without lost its `<b>` heading and opened a
+        # `</span>` that was never opened. The same trap is called out by name
+        # in `_working_orders`, which is where the shape was recognised.
+        levels = (
+            f"limit {proposal.limit_price:,.4f}, stop "
+            f"{proposal.stop_loss_price:,.4f}, target "
+            f"{proposal.take_profit_price:,.4f}"
+            if proposal.take_profit_price is not None
+            # Said out loud rather than left blank. An empty cell reads as a
+            # missing figure; "no target" is a decision.
+            else f"limit {proposal.limit_price:,.4f}, stop "
+            f"{proposal.stop_loss_price:,.4f}, no target"
+        )
         out += '<div class="step"><div class="what">'
         out += (
             f"<b>{_e(proposal.direction.value.upper())} {proposal.qty:g} "
             f"{_e(proposal.symbol)}</b>"
-            f'<span class="note">limit {proposal.limit_price:,.4f}, stop '
-            f"{proposal.stop_loss_price:,.4f}, target "
-            f"{proposal.take_profit_price:,.4f}</span>"
-            if proposal.take_profit_price is not None
-            # Said out loud rather than left blank. An empty cell reads as a
-            # missing figure; "no target" is a decision.
-            else "no target</span>"
+            f'<span class="note">{levels}</span>'
             f'<span class="note">risks {_money(proposal.risk_usd)}</span>'
             "</div>"
         )
@@ -4111,7 +4366,7 @@ def _cycle(entry: DecisionEntry) -> str:
 
         out += "</div></div>"
 
-    return out + "</article>"
+    return out + "</details>"
 
 
 # ------------------------------------------------------------------- trades
@@ -4189,6 +4444,19 @@ def analytics_page(report: JournalReport) -> str:
     pf = f"{s.profit_factor:.2f}" if s.profit_factor is not None else "n/a"
     er = f"{s.expectancy_r:+.2f}R" if s.expectancy_r is not None else "n/a"
 
+    # An empty sample answers "n/a", never a number.
+    #
+    # Profit factor already did this and the other three did not, so a journal
+    # with nothing closed rendered `Win rate 0%  0W / 0L`, `Expectancy $0.00`
+    # and `Net $0.00` beside it — three figures that look measured, on the one
+    # page whose strapline says a wrong metric gets believed and then acted on.
+    # 0% is not "unmeasured", it is "everything lost"; $0.00 is not
+    # "unmeasured", it is "broke even". Measured on the live deck.
+    #
+    # The gate is `PerformanceSummary.is_empty` rather than `trade_count == 0`
+    # spelled out four times, so the question is asked in one place and the
+    # answer cannot drift between cards.
+    none_yet = "no closed trades yet"
     body = head(
         "Measurement",
         "Analytics",
@@ -4198,19 +4466,27 @@ def analytics_page(report: JournalReport) -> str:
     )
     body += (
         '<div class="grid g4" style="margin-top:1.5rem">'
-        + stat("Win rate", f"{s.win_rate:.0%}", f"{s.wins}W / {s.losses}L")
+        + stat(
+            "Win rate",
+            "n/a" if s.is_empty else f"{s.win_rate:.0%}",
+            none_yet if s.is_empty else f"{s.wins}W / {s.losses}L",
+        )
         + stat("Profit factor", pf, _e(s.health))
         + stat(
             "Expectancy",
-            _money(s.expectancy_usd, sign=True),
-            f"per trade, {er}",
-            _cls(s.expectancy_usd),
+            "n/a" if s.is_empty else _money(s.expectancy_usd, sign=True),
+            none_yet if s.is_empty else f"per trade, {er}",
+            # No gain/loss colour either. A green or red "n/a" would put the
+            # figure back in the one channel that survives not being read.
+            "" if s.is_empty else _cls(s.expectancy_usd),
         )
         + stat(
             "Net",
-            _money(s.total_pnl_usd, sign=True),
-            f"max drawdown {_money(s.max_drawdown_usd)}",
-            _cls(s.total_pnl_usd),
+            "n/a" if s.is_empty else _money(s.total_pnl_usd, sign=True),
+            none_yet
+            if s.is_empty
+            else f"max drawdown {_money(s.max_drawdown_usd)}",
+            "" if s.is_empty else _cls(s.total_pnl_usd),
         )
         + "</div>"
     )
@@ -5341,7 +5617,32 @@ def dreaming_page(
 # -------------------------------------------------------------------- login
 
 
-def login_page(*, env: Env, error: str = "") -> str:
+def not_found_page(path: str) -> str:
+    """A mistyped URL, inside the deck rather than as a JSON object.
+
+    `GET /definitely-not-a-page` while signed in returned
+    `{"detail":"Not Found"}` — no nav, no styling, no way back but the browser
+    button, on a surface where every other page is themed and every other page
+    carries the nav. Measured on the live site.
+
+    It says which path was asked for and nothing about which paths exist. The
+    nav in the shell already names every page an operator can reach, so listing
+    them again here would be the same information twice, and a 404 that
+    enumerates routes is a route list served to whoever asked for a wrong one.
+    """
+    # `head` escapes what it is given, so the raw path goes in. Escaping it
+    # here as well would render `&lt;` at an operator who typed `<`.
+    return head(
+        "404",
+        "No such page",
+        path,
+        "Nothing is served at that path. The nav above is every page this deck "
+        "has; if you followed a link from somewhere, it is out of date rather "
+        "than broken.",
+    )
+
+
+def login_page(*, env: Env, error: str = "", next_path: str = "") -> str:
     """The gate. Deliberately says nothing about the account behind it.
 
     No equity, no positions, no symbol list, not even whether a trade has ever
@@ -5349,9 +5650,22 @@ def login_page(*, env: Env, error: str = "") -> str:
     repository, so an unauthenticated visitor learns nothing they could not
     read there. That is the whole job of a sign-in screen and it is easy to
     lose by putting a friendly summary above the form.
+
+    `next_path` rides through as a hidden field so a deep link survives the
+    sign-in. **It is validated by the caller against the application's own
+    routes before it ever gets here** — an unchecked `next` on a login form is
+    the textbook open redirect, and this page has no way to check one. It is
+    rendered escaped into a value attribute regardless, because a page that
+    depends on its caller having been careful should still not be the thing
+    that breaks when the caller was not.
     """
     mode = "paper" if env.alpaca_paper_trade else "LIVE"
     message = f'<p class="err" role="alert">{_e(error)}</p>' if error else ""
+    carry = (
+        f'<input type="hidden" name="next" value="{_e(next_path)}">'
+        if next_path
+        else ""
+    )
     return f"""<!doctype html>
 <html lang="en-GB"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
@@ -5375,6 +5689,7 @@ def login_page(*, env: Env, error: str = "") -> str:
   </div>
   {message}
   <form method="post" action="/login">
+    {carry}
     <label for="password" class="eyebrow">Password</label>
     <input id="password" name="password" type="password"
       autocomplete="current-password" required autofocus>

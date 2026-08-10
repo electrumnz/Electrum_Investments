@@ -79,6 +79,26 @@ class PerformanceSummary:
         return self.trade_count < THIN_SAMPLE_THRESHOLD
 
     @property
+    def is_empty(self) -> bool:
+        """No closed trades, so every figure on this object is a DEFAULT.
+
+        Worth a name because the defaults are not neutral: `win_rate` is 0.0,
+        which formats as "0%" and reads as *everything lost*; `expectancy_usd`
+        and `total_pnl_usd` are 0.0, which read as *broke even*. Three
+        plausible wrong figures on the page whose own strapline is that a wrong
+        metric is worse than no metric, because it gets believed and then acted
+        on. Measured on the live deck with an empty journal.
+
+        `profit_factor` was already right — it is `None` when undefined,
+        deliberately not 0.0 and deliberately not `inf`, "because both read as
+        a real number and one of them reads as terrible". The other three
+        cannot be `None` without every caller learning to handle it, so the
+        distinction is carried here instead and a renderer asks before it
+        formats.
+        """
+        return self.trade_count == 0
+
+    @property
     def health(self) -> str:
         """Plain reading of profit factor, hedged when the sample is thin."""
         if self.trade_count == 0:

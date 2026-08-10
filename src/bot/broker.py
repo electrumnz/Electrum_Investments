@@ -650,6 +650,19 @@ class AlpacaBroker:
             # `.value` when there is one and normalise what is left.
             raw_type = getattr(o, "order_type", None) or getattr(o, "type", None)
             order_type = str(getattr(raw_type, "value", raw_type) or "").lower()
+            # The status gets the same `.value`-first treatment, and it is not
+            # cosmetic: `alpaca.trading.enums.OrderStatus` is a `(str, Enum)`,
+            # so `str()` on a member yields "OrderStatus.HELD" rather than
+            # "held". `_order_status` lowercases and looks that up, misses on
+            # EVERY status including the ones it knows, and returns OTHER — so
+            # the whole mapping table was dead against the real SDK and every
+            # resting order on the Board read "OTHER". Observed on the live
+            # stop leg. The raw word is carried alongside the bucket for the
+            # reason `WorkingOrder.broker_status` gives.
+            raw_status = getattr(o, "status", None)
+            broker_status = str(
+                getattr(raw_status, "value", raw_status) or ""
+            ).lower().strip()
             orders.append(
                 WorkingOrder(
                     order_id=str(o.id),
@@ -659,7 +672,8 @@ class AlpacaBroker:
                     limit_price=float(limit_price) if limit_price else None,
                     stop_price=float(stop_price) if stop_price else None,
                     order_type=order_type,
-                    status=_order_status(str(getattr(o, "status", ""))),
+                    status=_order_status(broker_status),
+                    broker_status=broker_status,
                     submitted_at=getattr(o, "submitted_at", None),
                     filled_qty=float(getattr(o, "filled_qty", 0) or 0),
                 )

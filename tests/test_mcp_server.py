@@ -14,10 +14,27 @@ from bot import mcp_server
 from bot.audit import AuditLog
 from bot.broker import MockBroker
 from bot.config import load_rules
+from bot.dreaming import DREAMER, Dream, Vault
 from bot.journal import Journal
-from bot.risk import RiskGate
+from bot.risk import NewsWindow, RiskGate
 
 from .conftest import INSIDE_SESSION, PAPER_EQUITY
+
+
+class _FixedCalendar:
+    """An earnings calendar that answers with exactly these windows.
+
+    `StaticCalendar` filters against the wall clock, and the gate's clock here
+    is pinned to a fixed session moment — so a real feed stub would answer
+    "nothing upcoming" and the blackout tests would pass for the wrong reason.
+    """
+
+    def __init__(self, windows: list[NewsWindow] | None = None) -> None:
+        self._windows = list(windows or [])
+
+    def upcoming_windows(self, *, lookahead_minutes: int) -> list[NewsWindow]:
+        del lookahead_minutes
+        return list(self._windows)
 
 
 @pytest.fixture(autouse=True)
@@ -52,6 +69,11 @@ def wired_session(monkeypatch, tmp_path):
     # The dream store follows the same rule as the journal and the index: its
     # path comes from the session, so the suite never opens `data/dreams.db`.
     session._dreams_path = tmp_path / "dreams.db"
+    # The earnings calendar the news blackout reads. Injected rather than built,
+    # for the reason every other store here is: `build_calendar_feed` would read
+    # the environment and, on a box with a Finnhub key, reach the network — and
+    # no test may do that. Empty by default; a blackout test replaces it.
+    session._calendar = _FixedCalendar()
     session._gate = RiskGate(
         rules, equity_at_session_start=PAPER_EQUITY, now=INSIDE_SESSION
     )
@@ -877,3 +899,94 @@ def test_the_dream_tools_are_not_an_order_path():
         used = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
         used |= {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)}
         assert not (used & forbidden), f"{tool} reaches {sorted(used & forbidden)}"
+
+
+# ---------------------------------- the blackout gate applies on THIS path too
+
+
+def test_the_earnings_blackout_refuses_an_order_placed_here(wired_session):
+    """It never had, and nothing said so.
+
+    `check_order` ran the gate with no `news_windows` at all, so
+    `RiskGate._news_blackout` could not fire on an order placed by the operator
+    or through chat — while firing on every order the loop proposed. One rule in
+    `config/rules.yaml`, enforced on one path, with the Settings page saying it
+    applied to the account.
+    """
+    wired_session._calendar = _FixedCalendar(
+        [NewsWindow(timestamp=INSIDE_SESSION, affected_symbols=frozenset({"SPY"}))]
+    )
+
+    result = mcp_server.check_order(**_good_args())
+
+    assert not result["approved"]
+    assert any("news blackout" in r for r in result["reasons"])
+
+
+def test_an_order_inside_a_blackout_is_not_placed(wired_session):
+    """The refusal has to survive the whole `place_order` path, not only the
+    check that reports on it."""
+    wired_session._calendar = _FixedCalendar(
+        [NewsWindow(timestamp=INSIDE_SESSION, affected_symbols=frozenset({"SPY"}))]
+    )
+
+    result = mcp_server.place_order(**_good_args())
+
+    assert result["placed"] is False
+    assert wired_session.broker.get_account().open_positions == []
+    assert wired_session.journal.open_trades() == []
+
+
+def test_a_window_on_another_symbol_does_not_hold_this_order(wired_session):
+    """The other half, so the test is about the blackout rather than about the
+    calendar refusing everything."""
+    wired_session._calendar = _FixedCalendar(
+        [NewsWindow(timestamp=INSIDE_SESSION, affected_symbols=frozenset({"AAPL"}))]
+    )
+
+    assert mcp_server.check_order(**_good_args())["approved"]
+
+
+# ------------------------------------- adopting cannot grant an unclaimed symbol
+
+
+def test_adopt_dream_cannot_invent_the_symbols_it_grants(wired_session):
+    """The tool hands `symbols` and `asset_class` to a model, and the store took
+    both as given — so any dream in the vault was a token for granting yourself
+    anything, one tool call away.
+
+    The lock is in `DreamStore.adopt` rather than here, which is what makes it
+    hold for the conference, the CLI and whatever calls it next.
+    """
+    store = wired_session.dreams
+    dream_id = store.save(
+        Dream(title="a perfectly ordinary equity dream", seed="s")
+    )
+    store.move(dream_id, Vault.VAULT, by=DREAMER)
+
+    result = mcp_server.adopt_dream(
+        dream_id=dream_id, symbols=["BTC/USD"], asset_class="us_equity"
+    )
+
+    assert result["ok"] is False
+    assert "symbols_not_offered" in result["refusals"]
+    assert mcp_server.dream_vault_status()["symbols_in_force"] == {}
+
+
+def test_adopt_dream_still_takes_the_dreams_own_claim(wired_session):
+    """The narrowing rule must not break the ordinary case."""
+    store = wired_session.dreams
+    dream_id = store.save(
+        Dream(
+            title="rare earth refiners",
+            seed="s",
+            symbols=["MP"],
+            asset_class_key="us_equity",
+        )
+    )
+    store.move(dream_id, Vault.VAULT, by=DREAMER)
+
+    result = mcp_server.adopt_dream(dream_id=dream_id)
+
+    assert result["ok"] is True, result
+    assert result["symbols_in_force"] == {"MP": "us_equity"}

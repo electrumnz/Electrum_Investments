@@ -242,14 +242,32 @@ def test_only_two_dreams_are_conferred_in_a_run(rules, store):
 
 def test_the_longest_waiting_offer_is_answered_first(rules, store):
     """An offer nobody answered is the one worth answering. Newest-first would
-    let a productive dreamer starve its own older offers indefinitely."""
+    let a productive dreamer starve its own older offers indefinitely.
+
+    **The two clocks are set apart on purpose, and this test could not tell them
+    apart before.** `_vaulted` moved and saved at one moment, so
+    `vault_entered_at` and `updated_at` agreed for every dream and any ORDER BY
+    over either gave the same answer — the query could be rewritten to the wrong
+    clock and this stayed green. It was on the wrong clock: `in_vault` sorted by
+    `updated_at`, so the oldest offer, edited this morning, was answered LAST.
+    Here the longest-waiting dream is also the most recently EDITED one, which
+    is the case that separates them.
+    """
     oldest = _vaulted(store, at=BASE, title="oldest")
     middle = _vaulted(store, at=BASE + timedelta(hours=1), title="middle")
-    _vaulted(store, at=BASE + timedelta(hours=2), title="newest")
+    newest = _vaulted(store, at=BASE + timedelta(hours=2), title="newest")
+
+    # The dreamer reworks its oldest offer, newest-edit-first order would put it
+    # at the front of the shelf and therefore at the BACK of the queue.
+    touched = store.get(oldest)
+    assert touched is not None
+    touched.updated_at = BASE + timedelta(hours=6)
+    store.save(touched)
 
     report = _conference(rules, store, trader=_declines()).run(now=LATER)
 
     assert [e.dream_id for e in report.exchanges] == [oldest, middle]
+    assert newest not in [e.dream_id for e in report.exchanges]
 
 
 def test_a_skip_costs_no_model_call_and_does_not_use_up_the_run(rules, store):
@@ -848,3 +866,96 @@ def test_the_whole_history_is_shown_rather_than_only_this_exchange(rules, store)
 def test_a_change_with_no_reasons_reads_as_nothing_new():
     assert Change(False).summary == "nothing new to discuss"
     assert bool(Change(True, ("something",))) is True
+
+
+# ------------------------- a refusal by the STORE is not the dream's own fault
+
+
+def test_a_dream_the_shelf_refused_is_reconsidered_once_a_slot_frees(rules, store):
+    """The change gate measures the DREAM; this blocker was the STORE.
+
+    An exchange ending `ADOPTION_REFUSED` leaves the dream in the vault with
+    nothing about it altered, so `has_something_changed` said no — and said no
+    again every day after, including after an adoption expired and the shelf had
+    room. The two agents had agreed and the answer was never revisited.
+    """
+    dream_id = _vaulted(store)
+    accepts = _Speaker(verdict=TraderVerdict.ACCEPT, text="taking it")
+
+    full = _conference(rules, store, trader=accepts).run(
+        now=LATER, caps=VaultCaps(adopted=0)
+    )
+    assert [e.outcome for e in full.exchanges] == [ConferOutcome.ADOPTION_REFUSED]
+
+    # Nothing about the dream has changed; only the shelf has.
+    again = _conference(rules, store, trader=accepts).run(
+        now=LATER + timedelta(days=1), caps=VaultCaps(adopted=3)
+    )
+
+    assert [e.outcome for e in again.exchanges] == [ConferOutcome.ADOPTED]
+    dream = store.get(dream_id)
+    assert dream is not None and dream.vault is Vault.ADOPTED
+
+
+def test_a_refused_dream_is_still_skipped_while_the_shelf_stays_full(rules, store):
+    """Deliberately narrow. Re-testing on a blocker that has NOT cleared would
+    buy a model call a day to be told the same thing, which is the fifth cap
+    being routed around rather than honoured."""
+    _vaulted(store)
+    accepts = _Speaker(verdict=TraderVerdict.ACCEPT, text="taking it")
+    caps = VaultCaps(adopted=0)
+
+    _conference(rules, store, trader=accepts).run(now=LATER, caps=caps)
+    again = _conference(rules, store, trader=accepts).run(
+        now=LATER + timedelta(days=1), caps=caps
+    )
+
+    assert [e.outcome for e in again.exchanges] == [ConferOutcome.NOTHING_NEW]
+
+
+def test_a_dream_declined_on_its_merits_is_not_reconsidered_for_free(rules, store):
+    """The re-test is about a full shelf, never about a verdict. A trader that
+    said no is not owed another conversation tomorrow."""
+    _vaulted(store)
+
+    _conference(rules, store, trader=_declines()).run(now=LATER)
+    again = _conference(rules, store, trader=_declines()).run(
+        now=LATER + timedelta(days=1)
+    )
+
+    assert [e.outcome for e in again.exchanges] == [ConferOutcome.NOTHING_NEW]
+
+
+# ------------------------------------- the numbers come from the file, not code
+
+
+def test_the_conference_takes_its_caps_from_the_rules_file(rules, store):
+    """`vault_caps()` had no production caller, so `caps.vault: 1` admitted
+    three. A limit an operator can read has to be the limit that applies."""
+    tightened = rules.model_copy(deep=True)
+    tightened.dreaming.caps.adopted = 0
+    _vaulted(store)
+    accepts = _Speaker(verdict=TraderVerdict.ACCEPT, text="taking it")
+
+    report = _conference(tightened, store, trader=accepts).run(now=LATER)
+
+    assert [e.outcome for e in report.exchanges] == [ConferOutcome.ADOPTION_REFUSED]
+
+
+def test_the_grant_expires_on_the_files_clock_rather_than_the_dataclass_default(
+    rules, store
+):
+    """`TraderPowers.adopt` had no `ttl_days` at all, so every conference-made
+    grant took the dataclass's 90 days and `ttl_days.adopted` in the file
+    applied to nothing."""
+    shortened = rules.model_copy(deep=True)
+    shortened.dreaming.ttl_days.adopted = 7
+    dream_id = _vaulted(store)
+    accepts = _Speaker(verdict=TraderVerdict.ACCEPT, text="taking it")
+
+    _conference(shortened, store, trader=accepts).confer_once(
+        store.get(dream_id), now=LATER
+    )
+
+    adoption = store.adoptions(dream_id)[0]
+    assert adoption.expires_at == LATER + timedelta(days=7)

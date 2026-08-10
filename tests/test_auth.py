@@ -42,7 +42,7 @@ PROTECTED = [
 # returns, and `/logout` and `/openapi.json` are not pages. The refusal tests
 # are safe on all three precisely because the middleware answers before the
 # route runs.
-REFUSED = [*PROTECTED, "/live", "/logout", "/openapi.json"]
+REFUSED = [*PROTECTED, "/live", "/logout", "/openapi.json", "/session"]
 
 # The only routes an unauthenticated request may reach, each for a stated
 # reason. `test_no_route_escapes_the_lists` is what makes this file complete
@@ -109,7 +109,10 @@ def test_every_page_is_refused_without_a_session(guarded, path):
     r = guarded.get(path, headers={"accept": "text/html"})
 
     assert r.status_code == 303
-    assert r.headers["location"] == "/login"
+    # The requested path rides along so a deep link survives the sign-in, so
+    # the assertion is on where the redirect GOES rather than on the exact
+    # string. `/` carries no `next` because it is already the fallback.
+    assert r.headers["location"].split("?")[0] == "/login"
 
 
 @pytest.mark.parametrize("path", REFUSED)
@@ -251,11 +254,23 @@ def test_the_login_page_redirects_away_when_no_password_is_configured(unguarded)
 
 
 def test_healthz_stays_open_so_a_probe_still_works(guarded):
-    """It reports liveness and a trade count, nothing about positions or money."""
+    """It reports liveness and trade counts, nothing about positions or money.
+
+    Both counts are NAMED. It used to answer `{"ok": true, "trades": 0}` with a
+    21-share short resting at the broker: literally correct, because the figure
+    counts closed trades, and it reads as "this bot has never traded". A
+    monitoring key that can only ever say what has finished is the confident
+    partial answer this repository refuses everywhere else, arriving through
+    the one route that is deliberately unauthenticated.
+
+    What must stay true is the second half — this is an open route, so a count
+    is the most it may ever carry. No symbol, no size, no money.
+    """
     r = guarded.get("/healthz")
 
     assert r.status_code == 200
-    assert set(r.json()) == {"ok", "trades"}
+    assert set(r.json()) == {"ok", "closed_trades", "open_trades"}
+    assert "trades" not in r.json(), "the unqualified key is what read as a claim"
 
 
 # ---------------------------------------------------------------- the store
@@ -287,3 +302,143 @@ def test_an_expired_session_is_refused_and_dropped():
 
     assert not store.is_valid(token)
     assert store._sessions == {}
+
+
+# ------------------------------------------------ a deep link survives the gate
+
+
+def test_the_requested_path_rides_through_the_sign_in(guarded):
+    """A bookmark or a shared link is the normal way into a page that is not
+    the Board, and every one of them used to land on the Board."""
+    refused = guarded.get("/trades", headers={"accept": "text/html"})
+    assert refused.headers["location"] == "/login?next=/trades"
+
+    form = guarded.get("/login?next=/trades")
+    assert 'name="next" value="/trades"' in form.text
+
+    signed_in = guarded.post("/login", data={"password": PASSWORD, "next": "/trades"})
+    assert signed_in.status_code == 303
+    assert signed_in.headers["location"] == "/trades"
+
+
+def test_the_board_carries_no_next_because_it_is_already_the_fallback(guarded):
+    assert guarded.get("/", headers={"accept": "text/html"}).headers["location"] == "/login"
+
+
+@pytest.mark.parametrize(
+    "hostile",
+    [
+        "https://evil.example/steal",
+        "//evil.example/steal",
+        "http://evil.example",
+        "/../../etc/passwd",
+        "/not-a-route",
+        "javascript:alert(1)",
+        "",
+    ],
+)
+def test_a_next_that_is_not_one_of_our_own_routes_falls_back_to_the_board(
+    guarded, hostile
+):
+    """An unchecked `next` is the textbook open redirect on a login form.
+
+    It turns this sign-in page into the front door to somebody else's, wearing
+    the operator's URL and whatever trust they place in it. The check is
+    against the application's OWN routes — enumerated, not listed by hand, for
+    the same reason `test_no_route_escapes_the_lists` enumerates them.
+
+    The fallback is the Board, which is where every sign-in landed before any
+    of this existed. Getting it wrong costs the deep link, never an error page.
+    """
+    r = guarded.post("/login", data={"password": PASSWORD, "next": hostile})
+
+    assert r.status_code == 303
+    assert r.headers["location"] == "/"
+
+
+def test_the_form_field_is_revalidated_and_not_trusted_because_we_put_it_there(guarded):
+    """The redirect writes it, the browser holds it, the form posts it back.
+
+    Everything between the two is the client's to edit, so the value is checked
+    again on the way out rather than believed because this app produced it.
+    """
+    import inspect
+
+    from bot.web import app as app_module
+
+    source = inspect.getsource(app_module.build_app)
+    assert source.count("_safe_next(") >= 3, "one of the three checks is missing"
+
+
+def test_the_gate_and_the_stream_are_not_landing_places(guarded):
+    """Both are real GET routes, and neither is somewhere to be sent.
+
+    `/login` would bounce forever and `/live` is an endless event stream a
+    browser told to navigate to it would sit on with nothing on screen.
+    """
+    for path in ("/login", "/logout", "/live"):
+        r = guarded.post("/login", data={"password": PASSWORD, "next": path})
+        assert r.headers["location"] == "/", path
+        guarded.get("/logout")
+
+
+# ----------------------------------------------------------- a mistyped URL
+
+
+def test_a_wrong_path_gets_the_deck_not_raw_json(guarded):
+    """`{"detail":"Not Found"}` with no nav and no styling, on a deck where
+    every other surface is themed."""
+    guarded.post("/login", data={"password": PASSWORD})
+
+    r = guarded.get("/definitely-not-a-page", headers={"accept": "text/html"})
+
+    assert r.status_code == 404
+    assert "No such page" in r.text
+    assert "/definitely-not-a-page" in r.text
+    # The nav is the point: there has to be a way back that is not the browser
+    # button.
+    assert 'href="/decisions"' in r.text
+    assert "MUDHORN" in r.text
+
+
+def test_an_api_client_still_gets_json_for_a_wrong_path(guarded):
+    """The same split the auth middleware already makes correctly. Answering
+    markup to a caller that asked for JSON turns a clear 404 into something it
+    has to parse to understand."""
+    guarded.post("/login", data={"password": PASSWORD})
+
+    r = guarded.get("/definitely-not-a-page", headers={"accept": "application/json"})
+
+    assert r.status_code == 404
+    assert r.json() == {"detail": "Not Found"}
+
+
+# ------------------------------------------- the session probe the Board needs
+
+
+def test_the_session_probe_answers_401_when_signed_out(guarded):
+    """`EventSource` cannot see an HTTP status, so a stream refused after a
+    session lapses looks exactly like the network dropping. This route is how
+    the Board finds out which it was."""
+    r = guarded.get("/session", headers={"accept": "application/json"})
+
+    assert r.status_code == 401
+
+
+def test_the_session_probe_answers_200_when_signed_in(guarded):
+    guarded.post("/login", data={"password": PASSWORD})
+
+    r = guarded.get("/session", headers={"accept": "application/json"})
+
+    assert r.status_code == 200
+    assert r.json() == {"signed_in": True}
+
+
+def test_the_session_probe_carries_nothing_about_the_account(guarded):
+    """The useful answer is the status code. A probe that grew a payload would
+    be a second surface serving the account, reached from a page's script."""
+    guarded.post("/login", data={"password": PASSWORD})
+    body = guarded.get("/session", headers={"accept": "application/json"}).text
+
+    for leak in ("equity", "Equity", "SPY", "100,000", "position"):
+        assert leak not in body

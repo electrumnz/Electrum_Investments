@@ -103,7 +103,10 @@ SWITCHED_OFF = "switched_off"
 UNAVAILABLE = "unavailable"
 OVER_CAP = "over_cap"
 
-_DEGRADED_STATES = frozenset({UNAVAILABLE, OVER_CAP})
+# Public, because the loop has to answer the same question for the case where
+# there is no store to ask at all — and two spellings of "is this degraded"
+# is how the heartbeat and the resolver come to disagree.
+DEGRADED_STATES = frozenset({UNAVAILABLE, OVER_CAP})
 
 
 @dataclass(frozen=True)
@@ -128,7 +131,7 @@ class GrantResolution:
         every deployment that does not use dreams look broken. It is still named
         in `state`, so the two are distinguishable on the heartbeat.
         """
-        return self.state in _DEGRADED_STATES
+        return self.state in DEGRADED_STATES
 
 
 class GrantSource(Protocol):

@@ -374,11 +374,25 @@ fire for one.** The gate's logic is fine; its input is narrowed. Mutating
 pre-filtered windows, which looks fixed and behaves inconsistently — worse
 than the open gap. It closes with the prompt-side work, not before.
 
-### An adversarial audit broke it: seven holes, three serious
+### An adversarial audit broke it: seven holes, three serious — ALL CLOSED
 
 Run against the permission path with working reproductions, not by reading.
 **166 tests were green over every one of them.** The probes live in the
-session scratchpad; each is being fixed with a test that fails without the fix.
+session scratchpad; every one is now fixed, with a test that was verified to
+FAIL when the fix is reverted.
+
+The list below is kept as written, because the shape of each hole is worth
+more than a tick. What changed, in one line each: the class block is derived
+from `Rules.true_class_key` and checked against the SYMBOL in both `grants.py`
+and `RiskGate._resolve_class` (1); `DreamStore.adopt` refuses an override that
+widens the dream's own claim, with `SYMBOLS_NOT_OFFERED` and
+`CLASS_NOT_OFFERED` (2); `_class_symbols` counts an open position by its true
+class rather than by the grants in force now (3); every stamp is written UTC
+and `Adoption.is_live` is the only definition of live (4); the grant join
+requires `d.vault = 'adopted'` and `adopt` does all four writes in one
+transaction (5); `check_order` is handed `news_windows` from a calendar the MCP
+session builds once (6); a NULL `expires_at` reads as expired and the
+provenance guard covers the arithmetic as well as the query (7).
 
 1. **CRITICAL — the class hard-block tested the CLAIMED key, never the
    symbol.** An adoption saying `BTC/USD` under `us_equity` was a live
@@ -429,6 +443,47 @@ idempotent and preserve rows; and the auth surface refuses every route
 including `/live` and `/openapi.json`, with forged cookies rejected and the
 rate limit unmovable by `X-Forwarded-For`.
 
+### A second audit found six more, and they are closed too
+
+Independent of the first, over the same path. Two of the seven above were
+confirmed a second time, which is the useful part: the same holes found twice
+by different routes.
+
+- **HIGH — an expired adoption bricked an ADOPTED slot permanently.**
+  `_is_full(ADOPTED)` counted rows on the shelf rather than LIVE grants, so
+  three expiries filled it forever: `delete` refuses an adopted dream, `move`
+  refuses every actor, and `expired()` only marks. It counts live adoptions
+  now, and `DreamStore.has_room` exposes the same arithmetic to a caller that
+  wants to ask before spending a model call. Deleting is still refused, and the
+  refusal now names `return_to_vault` and `electrum-bot vault-expire` — the
+  adoption rows are the only record that a permission existed, and deleting the
+  dream takes them with it.
+- **MEDIUM — the `dreaming:` block in `config/rules.yaml` was read by
+  nothing.** `vault_caps()` and `vault_ttls()` had no production caller on the
+  conference path, so `caps.vault: 1` still admitted three and every
+  conference-made grant took the dataclass's 90 days. `Conference._caps` fills
+  from the file, `TraderPowers.adopt` gained `ttl_days`, and the anti-drift
+  test loads the actual file instead of comparing two sets of code defaults —
+  which agreed with each other by construction and said nothing about the file.
+- **MEDIUM — "longest-waiting offer first" was ordered by the wrong clock.**
+  `in_vault` sorted on `updated_at`, so a dream shelved 150 days ago and edited
+  this morning was answered LAST. It sorts on `vault_entered_at` now, and the
+  test that covered it could not tell the clocks apart because its fixture set
+  both to the same moment — it now sets them deliberately at odds.
+- **MEDIUM — an adoption the store refused was never retried.** The change gate
+  measures the DREAM and the blocker was the SHELF, so a dream both agents
+  agreed on was skipped `nothing_new` forever, including after a slot freed.
+  The refusal note carries its own message kind and `_consider` re-tests it
+  when — and only when — the shelf actually has room.
+- **LOW-MEDIUM — a failed grant resolution looked exactly like "nothing
+  adopted".** `resolve_grants` returns a `GrantResolution` naming which of the
+  five states produced the empty mapping, and the heartbeat carries
+  `grants_degraded` and `grant_state` beside `calendar_degraded`.
+- **LOW — the runtime-directory guard in `tests/conftest.py` went blind after
+  the first offence.** It diffed a file LISTING, so once `data/dreams.db`
+  existed a test writing rows into it was invisible. It fingerprints size and
+  mtime now, so it catches a file that grew as well as one that arrived.
+
 ### One bypass was found and CLOSED, recorded so it is not reopened
 
 Three gates measure "how much of this class am I already carrying" by symbol
@@ -440,13 +495,19 @@ to the allowlist *and* a silent exemption from three limits — including the
 crypto 0.5% total the operator wrote in their own words.
 
 `RiskGate._class_symbols` now unions `allowed_symbols` with the symbols
-currently granted under that class and hands the set to all three. The four
-tests covering it were verified to FAIL when the union is reverted, which is
-the only way to know a test is doing its job.
+currently granted under that class **and with every open position whose true
+class is this one**, and hands the set to all three. The tests covering it were
+verified to FAIL when each union is reverted, which is the only way to know a
+test is doing its job.
 
-Consequence worth knowing rather than guarding against: a position still held
-under a **lapsed** grant drops back out of those counts. Not a regression — it
-was never in them — and the same shape as `dream-expired-holding`.
+That last clause is a correction to what this section used to say. It read
+"a position still held under a **lapsed** grant drops back out of those counts.
+Not a regression — it was never in them", and a second audit measured the
+opposite: before adoption existed a position in an unlisted symbol could not
+exist at all, and the trading agent picks the moment because `return_to_vault`
+is one of its two powers. Handing a dream back moved $1,200 of live class risk
+out of a $1,500 class cap and turned a rejection into an approval with nothing
+closed and nothing about the exposure changed.
 
 ### Still to decide
 

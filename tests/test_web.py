@@ -2826,8 +2826,17 @@ def test_the_marquee_is_named_reachable_and_read_once():
 
     # One copy read, one copy hidden. Both halves, or the marquee either snaps
     # back visually or is read twice.
+    #
+    # Counted on the RUN WRAPPERS rather than on every `aria-hidden` in the
+    # strip. A bare count of the attribute was measuring the wrong thing and
+    # went off the moment anything inside a cell was hidden from the
+    # accessibility tree for its own reasons — which is what the clock badges
+    # now do, marking a decorative pip beside the state word that carries the
+    # same fact in text. The claim being made here is about the duplicate run,
+    # so that is what is counted.
     assert body.count('<div class="marquee-run">') == 1
-    assert body.count('aria-hidden="true"') == 1
+    assert body.count('<div class="marquee-run dup" aria-hidden="true">') == 1
+    assert len(re.findall(r'<div class="marquee-run[^"]*"', body)) == 2
 
     # `aria-hidden` must never wrap a focusable element — a keyboard user can
     # reach one and a screen reader cannot describe where they landed. The cells
@@ -2880,3 +2889,331 @@ def test_the_fixed_reading_note_says_unknown_rather_than_guessing():
     time by default. Same rule as the stamp it sits under."""
     assert "time is unknown" in render._fixed_reading_note(None)
     assert "taken 04 May 2026" in render._fixed_reading_note(ENTRY)
+
+
+# ------------------------------------- an empty sample must not look like a result
+
+
+def test_analytics_never_prints_a_win_rate_with_no_closed_trades(client):
+    """`Win rate 0%` on an empty journal reads as "everything lost".
+
+    Measured on the live deck with one open position and nothing closed:
+
+        WIN RATE      0%      0W / 0L
+        PROFIT FACTOR n/a     no closed trades yet
+        EXPECTANCY    $0.00   per trade, n/a
+        NET           $0.00   max drawdown $0.00
+
+    Profit factor was the only one of the four that was right. The other three
+    are `PerformanceSummary` defaults formatted as though they were
+    measurements, on the page whose own strapline is that a wrong metric is
+    worse than no metric because it gets believed and then acted on.
+    """
+    body = client.get("/analytics").text
+    card = body[body.index("Win rate") : body.index("Profit factor")]
+
+    assert "0%" not in card, "an empty sample rendered a percentage"
+    assert "n/a" in card
+    assert "no closed trades yet" in card
+
+
+def test_analytics_never_prints_a_dollar_result_with_no_closed_trades(client):
+    """Expectancy and Net are the same defect one step milder.
+
+    `$0.00` is not "unmeasured", it is "broke even" — a figure an operator can
+    read as a flat month rather than as an empty journal.
+    """
+    body = client.get("/analytics").text
+    tiles = body[body.index("Expectancy") : body.index("Headline")]
+
+    assert "$0.00" not in tiles, "an empty sample rendered a dollar result"
+    assert "+$0.00" not in tiles
+    assert tiles.count("n/a") >= 2
+    assert "max drawdown" not in tiles, "a drawdown of nothing is not a drawdown"
+
+
+def test_analytics_prints_the_real_figures_once_something_has_closed(client, journal):
+    """The gate is emptiness, not a general reluctance to state a number.
+
+    One closed winner is a genuine, terrible-sample, honestly-reported 100%,
+    and withholding it would swap one wrong reading for another.
+    """
+    _closed_trade(journal, 200.0)
+    body = client.get("/analytics").text
+    card = body[body.index("Win rate") : body.index("Profit factor")]
+
+    assert "100%" in card
+    assert "1W / 0L" in card
+    assert "no closed trades yet" not in card
+
+
+# ------------------------------------------- the curve's labels are not scaled type
+
+
+def test_equity_curve_labels_are_html_not_svg_text(journal):
+    """SVG `text` inside a stretched viewBox is sized in USER units.
+
+    The chart is `viewBox="0 0 1000 240"` drawn at whatever the card is wide,
+    so `font-size:10px` on an SVG label renders at 10 x (container / 1000):
+    14px on a 1440 deck and a measured **4.00px** at 390 wide, where the
+    container is 358. Unreadable, and unreadable in the direction nobody
+    notices, because the deck it is designed on is the wide one.
+
+    A media-query bump is a workaround that has to be re-tuned at every width.
+    Taking the labels out of the scaled coordinate system fixes it once.
+    """
+    curve = render._curve([("2026-08-09", 100_000.0), ("2026-08-10", 99_998.62)])
+
+    svg = curve[curve.index("<svg") : curve.index("</svg>")]
+    assert "<text" not in svg, "an axis label is back inside the scaled viewBox"
+
+    # And the labels are still on the page, in CSS pixels.
+    assert "$100,000.00" in curve
+    assert "2026-08-09" in curve
+    assert any(
+        "font-size:.625rem" in d for d in _css_blocks(".curve .lab")
+    ), "the value labels are not sized in CSS px"
+    assert any(
+        "font-size:.625rem" in d for d in _css_blocks(".curve .axis")
+    ), "the date labels are not sized in CSS px"
+
+
+def test_equity_curve_labels_track_the_data_they_name(journal):
+    """Percentages of the plot box, which is what a user-space coordinate IS.
+
+    The point of moving them out of the SVG was the type size, not the
+    placement, so a label must still sit against the reading it names — the
+    high label above the high, the low label below the low.
+    """
+    curve = render._curve(
+        [("2026-08-09", 100.0), ("2026-08-10", 200.0), ("2026-08-11", 150.0)]
+    )
+    import re
+
+    hi = re.search(r'class="lab" style="bottom:([\d.]+)%"', curve)
+    lo = re.search(r'class="lab" style="top:([\d.]+)%"', curve)
+    assert hi and lo, curve
+
+    # The high label is anchored from the bottom and the low from the top, so
+    # each is pushed AWAY from its reading and neither can be clipped by the
+    # plot's own edge at a narrow width.
+    assert 50.0 < float(hi.group(1)) < 100.0
+    assert 50.0 < float(lo.group(1)) < 100.0
+
+
+# --------------------------------------- the trail says what it is not showing
+
+
+def _cycles(n: int) -> list[DecisionEntry]:
+    return [
+        DecisionEntry(
+            timestamp=datetime(2026, 5, 4, 15, 0, tzinfo=UTC) + timedelta(minutes=i),
+            decision=_decision(notes=f"cycle {i}"),
+        )
+        for i in range(n)
+    ]
+
+
+def test_the_trail_states_what_it_is_withholding():
+    """It printed the total in the view above a slice of it.
+
+    `len(view.decisions)` over `view.decisions[:shown]`. Those coincided at 40
+    of 40 on the day it was measured, so the header said "40 cycles" and showed
+    forty. The loop wakes 96 times a day: on a full session that header says 96
+    with 56 missing, no "showing 40 of 96" and no route to the rest — on the
+    page whose whole reason to exist is that a rejected proposal is visible
+    nowhere else.
+    """
+    from bot.audit import AuditView
+
+    body = render.decisions(AuditView(decisions=_cycles(96)))
+
+    assert "96 cycles" not in body, "the header claims cycles it is not showing"
+    assert "showing 1-40 of the newest 96" in body
+    assert "1-40 of 96" in body
+
+
+def test_the_trail_offers_a_route_to_the_older_cycles():
+    from bot.audit import AuditView
+
+    view = AuditView(decisions=_cycles(96))
+
+    first = render.decisions(view)
+    assert '/decisions?page=2' in first
+    assert '/decisions?page=0' not in first
+
+    second = render.decisions(view, page=2)
+    assert "showing 41-80 of the newest 96" in second
+    assert '/decisions?page=1' in second
+    assert '/decisions?page=3' in second
+
+    # The last page offers nothing older, rather than a link to an empty one.
+    last = render.decisions(view, page=3)
+    assert "showing 81-96 of the newest 96" in last
+    assert '/decisions?page=4' not in last
+
+
+def test_a_page_past_the_end_walks_back_rather_than_rendering_nothing():
+    """`?page=99` is a typo, not a request to be told the trail is empty."""
+    from bot.audit import AuditView
+
+    body = render.decisions(AuditView(decisions=_cycles(96)), page=99)
+
+    assert "showing 81-96 of the newest 96" in body
+
+
+def test_every_cycle_but_the_newest_is_folded_away():
+    """40 cycles rendered open measured 57,574px tall at 390 wide.
+
+    Roughly 68 phone screens for one day. `<details>` rather than a script,
+    because the projection layer's rule is that nothing may be hidden unless
+    the script said so — and this is hidden by the browser with no script
+    involved, so it survives JavaScript being off exactly as the plain page
+    does.
+    """
+    from bot.audit import AuditView
+
+    body = render.decisions(AuditView(decisions=_cycles(5)))
+
+    assert body.count("<details class=\"cycle\"") == 5
+    assert body.count("<details class=\"cycle\" open>") == 1
+    assert body.count("<summary class=\"head\">") == 5
+    # And it stays reachable without JavaScript: no click handler, no hidden
+    # attribute, no inline display:none.
+    assert "<article class=\"cycle\"" not in body
+
+
+def test_a_proposal_with_a_target_still_renders_its_risk_and_closes_its_box(audited):
+    """A ternary trailing a multi-part f-string ate half the row.
+
+    Adjacent string literals concatenate BEFORE the conditional binds, so
+    `a b if cond else c d e` is `(a b)` against `(c d e)`. A proposal WITH a
+    target rendered no "risks" figure and never closed its `<div>`; one without
+    lost its `<b>` heading and opened a `</span>` that was never opened. The
+    same trap is called out by name in `_working_orders`, which is where the
+    shape was first recognised.
+    """
+    log, client = audited
+    log.record(_decision(proposals=[_proposal()], verdicts=[RiskVerdict.approve()]))
+
+    body = client.get("/decisions").text
+    step = body[body.rindex('<div class="step">') :]
+    step = step[: step.index("</details>")]
+
+    assert "target 590.0000" in step
+    assert "risks" in step, "the risk figure was eaten by the ternary"
+    assert step.count("<div") == step.count("</div>"), step
+
+
+# ------------------------------------- the exchange badge is not colour alone
+
+
+def test_the_exchange_badge_carries_a_word_and_a_shape_not_only_a_colour():
+    """A glow is not a second channel; it is luminance around a hue.
+
+    Measured live with NYSE genuinely open: `class="mkt mkt-live"`, a teal
+    `text-shadow`, and `title: null`. Greyscale, a low-contrast screen and a
+    screen reader all got the same nothing out of it that the colour gave
+    them — while the instrument cells one element across already carried a
+    `title`.
+    """
+    from bot.market_clock import market_state
+
+    body = render.ticker_tape(
+        market_state(datetime(2026, 8, 10, 15, 0, tzinfo=UTC)),
+        [_quote("SPY", last=580.0, prev=574.0)],
+    )
+
+    # The state in text, on the badge itself.
+    assert '<span class="st">open</span>' in body
+    assert '<span class="st">shut</span>' in body
+    # And a tooltip in the same voice as the instrument cells.
+    assert 'title="New York — regular session, trading now"' in body
+    # The pip is a SHAPE: filled, half filled, or an empty ring.
+    assert body.count('<i class="pip" aria-hidden="true"></i>') == 8
+    assert any("background:currentColor" in d for d in _css_blocks(".mkt-live .pip"))
+    assert any("background:transparent" in d for d in _css_blocks(".mkt .pip"))
+
+
+def test_a_zone_with_no_exchange_makes_no_state_claim():
+    """A badge saying "shut" for a zone with no exchange asserts a session
+    that does not exist there.
+
+    All four configured clocks carry an exchange today, so this is driven
+    against `_tape_clock` directly rather than through the strip: the state is
+    reachable — `ClockFace.state` returns `None` whenever `sessions` is empty —
+    and it should keep behaving when the operator asks for a fifth zone.
+    """
+    from bot.market_clock import ClockFace
+
+    face = ClockFace("Los Angeles", "America/Los_Angeles", code="LAX")
+    now = datetime(2026, 8, 10, 15, 0, tzinfo=UTC)
+    badge = render._tape_clock(face, face.at(now), now, None)
+
+    assert "mkt-bare" in badge
+    assert "pip" not in badge
+    assert 'class="st"' not in badge
+    assert "no exchange in this zone" in badge
+
+
+# ---------------------------------------- a resting order's status is the broker's
+
+
+def test_a_resting_order_shows_the_brokers_own_status_word(client, poller, journal):
+    """`OTHER` is a truthful bucket and an unusable readout.
+
+    The live GTC stop leg holding the operator's third rule up rendered as
+    `OTHER` — indistinguishable from a status this build has never seen.
+    Alpaca calls it `held`, which is a thing an operator can act on.
+    """
+    from bot.models import OrderStatus
+
+    order = WorkingOrder(
+        order_id="abc",
+        symbol="SPY",
+        direction=Direction.BUY,
+        qty=21,
+        stop_price=820.0,
+        order_type="stop",
+        status=OrderStatus.OTHER,
+        broker_status="held",
+    )
+    body = render._working_orders([order], {"SPY": 774.42})
+
+    assert ">held<" in body
+    assert ">other<" not in body
+
+
+def test_an_order_with_no_broker_word_falls_back_to_the_bucket():
+    """`MockBroker` and anything constructed by hand say nothing, and a blank
+    status cell would be worse than a coarse one."""
+    order = WorkingOrder(
+        order_id="abc", symbol="SPY", direction=Direction.BUY, qty=3, limit_price=570.0
+    )
+    body = render._working_orders([order], {"SPY": 574.0})
+
+    assert ">new<" in body
+
+
+# ------------------------------- a lapsed session is not a network outage
+
+
+def test_the_stream_client_tells_a_401_from_a_dropped_connection():
+    """`EventSource` exposes no HTTP status, so the two look identical.
+
+    A refused-with-401 stream is a PERMANENT failure per the spec — one error
+    event, `readyState` CLOSED, no further attempt — while a transport failure
+    leaves readyState at CONNECTING and the browser retries. The Board settled
+    on amber RECONNECTING forever with the last-good figures on screen and
+    nothing saying the operator was signed out.
+    """
+    script = render.SCRIPT
+
+    assert "es.readyState !== 2" in script, "a permanent failure is not distinguished"
+    assert "'/session'" in script, "nothing asks whether the session is the reason"
+    assert "signed out - reload to sign in" in script
+    # And the weaker claim is what a failed probe falls back to. Telling
+    # somebody whose Wi-Fi dropped that they are signed out sends them to
+    # re-enter a password they never lost.
+    assert "stream closed" in script
+    assert any("background:var(--rust)" in d for d in _css_blocks(".live.link-out i"))

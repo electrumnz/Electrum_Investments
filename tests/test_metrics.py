@@ -278,3 +278,44 @@ def test_report_on_empty_journal_is_safe():
     assert report.overall.trade_count == 0
     assert report.excursions.sampled_trades == 0
     assert report.by_strategy == {}
+
+
+# ------------------------------------------------- an empty sample is not a result
+
+
+def test_an_empty_summary_knows_its_figures_are_defaults():
+    """`is_empty` exists because the defaults are not neutral.
+
+    `win_rate` defaults to 0.0, which formats as "0%" and reads as *everything
+    lost*. `expectancy_usd` and `total_pnl_usd` default to 0.0, which read as
+    *broke even*. All three are plausible wrong figures rather than absent
+    ones, and a renderer with no way to ask the question will print them.
+
+    `profit_factor` was already right — `None` when undefined, "deliberately
+    not inf and not 0.0, because both read as a real number and one of them
+    reads as terrible". This is that distinction made available for the three
+    that cannot be `None` without every caller learning to handle it.
+    """
+    s = summarise([])
+
+    assert s.is_empty
+    assert s.trade_count == 0
+    # The trap, stated: every one of these formats as something believable.
+    assert f"{s.win_rate:.0%}" == "0%"
+    assert s.expectancy_usd == 0.0
+    assert s.total_pnl_usd == 0.0
+    assert s.profit_factor is None
+
+
+def test_one_closed_trade_is_no_longer_empty():
+    """The threshold is one trade, not the thin-sample threshold.
+
+    These are different questions and must not be conflated: `sample_is_thin`
+    says the figures are noise, and `is_empty` says there are no figures. A
+    single trade produces a real, terrible, honestly-reported 100% or 0%.
+    """
+    s = summarise([_trade(200.0)])
+
+    assert not s.is_empty
+    assert s.sample_is_thin
+    assert s.trade_count == 1

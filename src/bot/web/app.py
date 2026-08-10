@@ -32,6 +32,7 @@ import argparse
 import sqlite3
 from datetime import UTC, datetime
 from typing import Any
+from urllib.parse import quote
 
 # Module level, not inside `build_app`, and that matters rather than being
 # tidiness. `from __future__ import annotations` turns every annotation into a
@@ -39,7 +40,7 @@ from typing import Any
 # imported inside the function it is unresolvable, so FastAPI falls back to
 # treating `request: Request` as a query parameter and every such route answers
 # 422 "field required". Nothing warns; the route simply stops working.
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 
 from ..audit import AuditLog
@@ -55,6 +56,14 @@ from ..tailnet import read as read_tailnet_status
 from . import live, render, seen
 from .auth import COOKIE_NAME, SESSION_TTL_SECONDS, SessionStore
 from .chat import DREAMER_BINARY, HermesBridge
+
+#: How many cycles the Decisions reader pulls behind one page of the trail.
+#:
+#: Wider than `render.DECISIONS_PER_PAGE` on purpose, so paging back is a slice
+#: of something already read rather than a second walk of the log. The reader
+#: stops as soon as it has this many and takes the newest dated file first, so
+#: the cost is bounded by this number and not by how much history exists.
+DECISION_WINDOW = 200
 
 
 def build_app(
@@ -88,6 +97,48 @@ def build_app(
     # takes a deliberate edit to the allowlist below.
     OPEN_PATHS = frozenset({"/login", "/healthz"})
 
+    # Neither is a landing place: `/login` is the gate itself, and `/live` is
+    # an endless event stream that a browser told to navigate to it would sit
+    # on forever. Everything else this app serves over GET is fair game.
+    NOT_A_DESTINATION = frozenset({"/login", "/logout", "/live"})
+
+    def _safe_next(raw: str | None) -> str:
+        """Where to send the operator after signing in, checked first.
+
+        Signing in from a deep link used to land on the Board unconditionally,
+        which is the normal path for a bookmark or a link somebody was sent.
+        Carrying the requested path fixes that and introduces the classic
+        vulnerability of a login form in the same move: `?next=https://evil`
+        makes this sign-in page the front door to somebody else's, wearing the
+        operator's URL and their trust in it.
+
+        So the value is honoured only when it is one of THIS application's own
+        GET routes. Enumerated from `app.routes` rather than listed by hand,
+        for the reason `tests/test_auth.py` gives about `/live`: a
+        hand-maintained list of paths fails silently on the one somebody
+        forgot, and a new page should be reachable through a deep link the day
+        it is added rather than the day somebody remembers this function.
+
+        Anything unrecognised — an absolute URL, a protocol-relative `//host`,
+        a traversal, a route that does not exist — falls back to the Board,
+        which is where every sign-in used to land anyway. The failure mode is
+        the old behaviour, not an error page.
+        """
+        if not raw or not raw.startswith("/") or raw.startswith("//"):
+            return "/"
+        path = raw.split("?", 1)[0].split("#", 1)[0]
+        # `getattr` rather than attribute access: `app.routes` is typed as
+        # `list[BaseRoute]`, and `path` and `methods` live on the subclasses.
+        # The same shape `tests/test_auth.py` uses to enumerate them.
+        known = {
+            str(getattr(r, "path", ""))
+            for r in app.routes
+            if isinstance(getattr(r, "path", None), str)
+            and "GET" in (getattr(r, "methods", None) or set())
+            and "{" not in str(getattr(r, "path", ""))
+        }
+        return path if path in known - NOT_A_DESTINATION else "/"
+
     @app.middleware("http")
     async def require_session(request: Request, call_next: Any) -> Any:
         if not sessions.required or request.url.path in OPEN_PATHS:
@@ -98,7 +149,14 @@ def build_app(
         # on. Redirecting an API client to HTML would show up as a confusing
         # 200 full of markup.
         if request.method == "GET" and "text/html" in request.headers.get("accept", ""):
-            return RedirectResponse("/login", status_code=303)
+            # The requested path rides along so the sign-in returns the
+            # operator to what they asked for. `_safe_next` is what makes that
+            # safe, and it runs again on the way out — the value is not
+            # trusted merely because this code put it there, because a form
+            # field is under the client's control between the two.
+            wanted = _safe_next(request.url.path)
+            target = "/login" if wanted == "/" else f"/login?next={quote(wanted)}"
+            return RedirectResponse(target, status_code=303)
         return JSONResponse({"error": "authentication required"}, status_code=401)
     resolved_rules = rules or load_rules()
     resolved_journal = journal or Journal()
@@ -219,17 +277,25 @@ def build_app(
         )
 
     @app.get("/login", response_class=HTMLResponse)
-    def login_form(request: Request) -> Any:
+    def login_form(
+        request: Request, next_path: str = Query("", alias="next")
+    ) -> Any:
+        wanted = _safe_next(next_path)
         if not sessions.required:
-            return RedirectResponse("/", status_code=303)
+            return RedirectResponse(wanted, status_code=303)
         if sessions.is_valid(request.cookies.get(COOKIE_NAME)):
-            return RedirectResponse("/", status_code=303)
-        return HTMLResponse(render.login_page(env=resolved_env))
+            return RedirectResponse(wanted, status_code=303)
+        return HTMLResponse(render.login_page(env=resolved_env, next_path=wanted))
 
     @app.post("/login", response_class=HTMLResponse)
     async def login(request: Request) -> Any:
         if not sessions.required:
             return RedirectResponse("/", status_code=303)
+
+        form = await request.form()
+        # Re-validated here rather than trusted because the redirect put it in
+        # the form. Everything between the two is the client's to edit.
+        wanted = _safe_next(str(form.get("next", "")))
 
         client = request.client.host if request.client else "unknown"
         if sessions.throttled(client):
@@ -239,20 +305,24 @@ def build_app(
                 render.login_page(
                     env=resolved_env,
                     error="Too many attempts. Wait five minutes and try again.",
+                    next_path=wanted,
                 ),
                 status_code=429,
             )
 
-        form = await request.form()
         if not sessions.check_password(str(form.get("password", ""))):
             sessions.record_failure(client)
             return HTMLResponse(
-                render.login_page(env=resolved_env, error="Incorrect password."),
+                render.login_page(
+                    env=resolved_env,
+                    error="Incorrect password.",
+                    next_path=wanted,
+                ),
                 status_code=401,
             )
 
         sessions.clear_attempts(client)
-        response = RedirectResponse("/", status_code=303)
+        response = RedirectResponse(wanted, status_code=303)
         response.set_cookie(
             COOKIE_NAME,
             sessions.issue(),
@@ -359,8 +429,25 @@ def build_app(
         return _page("Board", "/", body)
 
     @app.get("/decisions", response_class=HTMLResponse)
-    def decisions() -> str:
-        return _page("Decisions", "/decisions", render.decisions(audit.read(limit=60)))
+    def decisions(page: int = 1) -> str:
+        """The trail, paged.
+
+        The reader's window is deliberately wider than one page. It used to be
+        `limit=60` against 40 rendered, so twenty cycles were read, counted in
+        the header and never shown, and there was no way to ask for them. The
+        loop wakes 96 times a day, so a page of 40 is under half a session and
+        the rest has to be reachable rather than merely counted.
+
+        `AuditLog.read` stops as soon as it has `limit` decisions and walks the
+        dated files newest first, so the wider window costs a parse of files
+        that are on disk anyway — measured at tens of milliseconds — and buys
+        several pages of history behind one read.
+        """
+        return _page(
+            "Decisions",
+            "/decisions",
+            render.decisions(audit.read(limit=DECISION_WINDOW), page=page),
+        )
 
     @app.get("/trades", response_class=HTMLResponse)
     def trades() -> str:
@@ -522,9 +609,66 @@ def build_app(
         )
         return {"ok": reply.ok, "text": reply.text, "error": reply.error}
 
+    @app.get("/session")
+    def session_check() -> dict[str, Any]:
+        """Is this browser still signed in? The route exists for the answer 401.
+
+        It carries nothing — the useful reply is the status code, and the
+        middleware produces it before this function ever runs.
+
+        `EventSource` cannot see an HTTP status: a stream refused with 401
+        after a session lapses looks to the client exactly like a network
+        outage, so the Board settled on amber RECONNECTING forever with the
+        last-good figures still on screen and nothing saying the operator was
+        signed out. The browser tells us the failure was PERMANENT rather than
+        transient (`readyState === CLOSED`); this is how the page finds out it
+        was permanent because of authentication, rather than guessing.
+
+        Deliberately not `/healthz`, which is open by design so a monitor can
+        reach it — an open route can never answer this question.
+        """
+        return {"signed_in": True}
+
     @app.get("/healthz")
     def healthz() -> dict[str, Any]:
-        return {"ok": True, "trades": len(resolved_journal.closed_trades())}
+        """Liveness. Names its counts, because one of them read as a claim.
+
+        It used to return `{"ok": true, "trades": 0}` with a 21-share short
+        open at the broker. Zero was literally correct — the figure counts
+        CLOSED trades — and read as "this bot has never traded", which is the
+        plausible-wrong-figure failure this repository avoids everywhere else,
+        arriving through a monitoring key. Both counts are now named for what
+        they count, and the open one is there so that "nothing has closed" can
+        never again be the whole answer.
+        """
+        return {
+            "ok": True,
+            "closed_trades": len(resolved_journal.closed_trades()),
+            "open_trades": len(resolved_journal.open_trades()),
+        }
+
+    @app.exception_handler(404)
+    async def not_found(request: Request, exc: Any) -> Response:
+        """A mistyped URL, in the deck rather than as a JSON object.
+
+        The same split the auth middleware makes, and for the same reason: a
+        browser gets the themed shell with the nav on it, and an API client
+        keeps the JSON body it can act on. Answering markup to a caller that
+        asked for JSON turns a clear 404 into something it has to parse to
+        understand.
+
+        `POST /chat` raises a 404 of its own when chat is not configured. That
+        call comes from `fetch`, whose default `Accept` is `*/*`, so it lands
+        on the JSON side — which is what its caller already handles.
+        """
+        if "text/html" not in request.headers.get("accept", ""):
+            detail = getattr(exc, "detail", "Not Found")
+            return JSONResponse({"detail": detail}, status_code=404)
+        return HTMLResponse(
+            # No active nav item: none of them is where you are.
+            _page("Not found", "", render.not_found_page(request.url.path)),
+            status_code=404,
+        )
 
     return app
 

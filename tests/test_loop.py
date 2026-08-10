@@ -356,6 +356,28 @@ def test_an_adopted_dream_reaches_the_heartbeat(monkeypatch, tmp_path):
 
     beat = _heartbeat(logs)
     assert beat["granted_symbols"] == ["TSLA"]
+    assert beat["grant_state"] == "granted"
+    assert beat["grants_degraded"] is False
+
+
+def test_the_heartbeat_says_WHY_the_granted_list_is_empty(monkeypatch, tmp_path):
+    """Five causes, one blank list, and the `calendar_degraded` lesson again.
+
+    A switched-off feature, nothing adopted, a store that would not open, an
+    unreadable row and a set over the cap all render `granted_symbols=[]`. Only
+    two of those are ordinary, and a reader scanning the log to find out what
+    the bot could see reaches for the wrong one every time.
+    """
+    logs = _run_one_cycle(
+        monkeypatch,
+        tmp_path,
+        ClaudeDecision(market_assessment="Quiet, and nothing adopted.", proposals=[]),
+    )
+
+    beat = _heartbeat(logs)
+    assert beat["granted_symbols"] == []
+    assert beat["grants_degraded"] is False
+    assert beat["grant_state"] == "none_live"
 
 
 def test_a_broken_dream_store_costs_the_grants_and_not_the_cycle(monkeypatch, tmp_path):
@@ -400,6 +422,9 @@ def test_a_broken_dream_store_costs_the_grants_and_not_the_cycle(monkeypatch, tm
 
     beat = _heartbeat(logs)
     assert beat["granted_symbols"] == []
+    # And the heartbeat says the list is empty because nothing could be read,
+    # rather than leaving it to look like a quiet day with nothing adopted.
+    assert beat["grants_degraded"] is True
     assert [e for e in logs if e["event"] == "dream_store_unavailable"]
 
 

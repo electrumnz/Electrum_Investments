@@ -462,6 +462,23 @@ class WorkingOrder(BaseModel):
     order_type: str = ""
 
     status: OrderStatus = OrderStatus.NEW
+
+    # What the BROKER called it, lowercased and untranslated. Empty means the
+    # broker did not say.
+    #
+    # `status` above answers "which of our seven buckets is this", and OTHER is
+    # an honest answer to that question and a useless one to an operator: the
+    # live stop leg protecting a short renders as OTHER, and so does a status
+    # this build has simply never seen. Alpaca's own word for the first is
+    # `held` — a bracket child waiting on its parent — which is actionable, and
+    # for the second it is whatever it is, which is at least reportable.
+    #
+    # Same rule and same reason as `order_type` immediately above: a raw string
+    # rather than a wider enum, so a status this code has never heard of
+    # travels through and is displayed instead of being coerced into the
+    # nearest known member.
+    broker_status: str = ""
+
     submitted_at: datetime | None = None
     filled_qty: float = 0.0
 

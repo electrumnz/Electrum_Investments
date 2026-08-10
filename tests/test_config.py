@@ -423,14 +423,26 @@ def test_the_shipped_config_turns_symbol_grants_on():
 def test_the_configured_vault_numbers_match_the_value_objects():
     """The numbers live in the file and the dataclasses keep their own defaults
     for callers that pass nothing. This is what stops the two drifting into two
-    different answers to the same question."""
+    different answers to the same question.
+
+    **It loads the FILE**, which is the point and was the bug. It used to
+    compare `DreamingRules()` with `VaultCaps()` — two sets of code defaults,
+    which agree with each other by construction and say nothing whatever about
+    `config/rules.yaml`. A file setting `caps.adopted: 5` kept this green while
+    the enforced number stayed 3, so the anti-drift test could not see the
+    drift it exists for.
+    """
     from bot.config import DreamingRules
     from bot.dreaming import VaultCaps, VaultTTLs
 
-    defaults = DreamingRules()
+    shipped = Rules.load(REPO_ROOT / "config" / "rules.yaml").dreaming
 
-    assert defaults.vault_caps() == VaultCaps()
-    assert defaults.vault_ttls() == VaultTTLs()
+    assert shipped.vault_caps() == VaultCaps()
+    assert shipped.vault_ttls() == VaultTTLs()
+    # And the code defaults still agree, so a caller that passes nothing gets
+    # the same answer as one that read the file.
+    assert DreamingRules().vault_caps() == VaultCaps()
+    assert DreamingRules().vault_ttls() == VaultTTLs()
 
 
 def test_the_shipped_vault_caps_match_the_position_cap():
@@ -444,3 +456,76 @@ def test_the_shipped_vault_caps_match_the_position_cap():
     # dream when the archive is full is deleting it.
     assert rules.dreaming.caps.archive is None
     assert rules.dreaming.ttl_days.archive is None
+
+
+# ------------------------------------------------- which class a symbol is in
+
+
+def test_true_class_key_reads_a_disabled_blocks_symbol_list_too():
+    """`for_symbol` scans ENABLED classes only, which made "is this symbol from
+    a class the operator switched off?" unanswerable — at exactly the moment an
+    adopted dream claimed one under a different class's key."""
+    rules = Rules.load(REPO_ROOT / "config" / "rules.yaml")
+    rules.instruments["crypto"].allowed_symbols = ["ETH/USD"]
+    assert rules.instruments["crypto"].enabled is False
+
+    assert rules.for_symbol("ETH/USD") is None
+    assert rules.true_class_key("ETH/USD") == "crypto"
+
+
+def test_true_class_key_agrees_with_the_rule_the_broker_routes_on():
+    """`AlpacaBroker.place_order` branches on `"/" in symbol`, so a slashed
+    symbol is a crypto order — unbracketed, no broker-side stop — whatever any
+    config says about it."""
+    rules = Rules.load(REPO_ROOT / "config" / "rules.yaml")
+
+    assert rules.true_class_key("BTC/USD") == "crypto"
+    assert rules.true_class_key("MP") == "us_equity"
+    assert rules.true_class_key("SPY") == "us_equity"
+
+
+def test_true_class_key_is_empty_when_two_blocks_claim_one_symbol():
+    """Where the file disagrees with itself there is no single answer, and the
+    callers read `""` as "drop this" rather than as a default."""
+    rules = Rules.load(REPO_ROOT / "config" / "rules.yaml")
+    rules.instruments["crypto"].allowed_symbols = ["WIDGET"]
+    rules.instruments["shelved"] = rules.instruments["crypto"].model_copy(
+        update={"allowed_symbols": ["WIDGET"], "enabled": False}
+    )
+
+    assert rules.true_class_key("WIDGET") == ""
+
+
+def test_true_class_key_is_empty_when_the_listing_contradicts_the_routing():
+    """A config that filed `BTC/USD` under the equity book would be a class the
+    gate applied and a class the broker used, and they would not be the same
+    one. Neither answer is safe, so there is no answer."""
+    rules = Rules.load(REPO_ROOT / "config" / "rules.yaml")
+    rules.instruments["us_equity"].allowed_symbols = [
+        *rules.instruments["us_equity"].allowed_symbols,
+        "BTC/USD",
+    ]
+
+    assert rules.true_class_key("BTC/USD") == ""
+
+
+def test_true_class_key_is_empty_for_a_symbol_that_is_not_one():
+    rules = Rules.load(REPO_ROOT / "config" / "rules.yaml")
+
+    assert rules.true_class_key("   ") == ""
+
+
+def test_a_bare_ticker_filed_under_crypto_has_no_establishable_class():
+    """The disagreement runs both ways, and the consequence is the same.
+
+    A symbol with no slash placed in the crypto block would be gated as crypto
+    and ROUTED as an equity — bracketed, with a broker-side stop, under crypto's
+    caps. Neither reading is the truth, so there is no answer and the grant is
+    dropped. Worth knowing for the day a second broker arrives: a `futures:`
+    block listing `ES` lands here too, and the routing rule is what has to learn
+    about it rather than this method.
+    """
+    rules = Rules.load(REPO_ROOT / "config" / "rules.yaml")
+    rules.instruments["crypto"].allowed_symbols = ["ES"]
+
+    assert rules.true_class_key("ES") == ""

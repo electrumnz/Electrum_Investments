@@ -1599,15 +1599,27 @@ a stray value cannot silently close a chain that is still running, and a source
 on an unchecked hop is dropped rather than kept, because that pair is a
 contradiction and the unchecked flag is the honest half of it.
 
-**`data/dreams.db` is its own file, not the journal.** Losing every dream costs
-some speculative notes; `backup-journal.sh` covers the one irreplaceable file
-and deliberately does not cover this. Keeping them apart also means no query can
-read a hypothesis as a position.
+**`data/dreams.db` is its own file, not the journal.** Keeping them apart means
+no query can read a hypothesis as a position, and a bug in the speculative half
+cannot corrupt the trading record.
+
+**What losing it costs is no longer "some speculative notes".** That was true
+when a dream reached nobody. The `adoptions` table is a live trading permission
+now, and `Trade.dream_id` points here. It is still deliberately outside
+`backup-journal.sh`: losing it withdraws every grant, which is the safe
+direction, and restoring a stale copy over a current one would resurrect
+permissions somebody handed back. The journal stays the only irreplaceable file
+on the box.
 
 **Tests must not write to `data/` or `audit/`, and a fixture now enforces it.**
 A session-scoped autouse guard in `tests/conftest.py` fails the suite if either
-directory gains a file. `DreamStore` landing is exactly how that regressed: a
-new store, a new `build_app` default, and one call site nobody updated.
+directory gains a file — **or if one that was already there CHANGES.** It
+compared a listing first, which went blind the moment `data/dreams.db` existed:
+a test writing rows into it appeared on both sides of the diff and was reported
+as nothing at all, so the guard was strongest on a clean machine and useless on
+a developer's. It fingerprints size and mtime now. `DreamStore` landing is how
+that regressed in the first place: a new store, a new `build_app` default, and
+one call site nobody updated.
 
 ### A dream can widen what may be traded, and every property below is load-bearing
 
@@ -1671,10 +1683,24 @@ cap. The grant would have bought entry to the allowlist *and* a silent
 exemption from three limits, including the crypto 0.5% total. Do not "simplify"
 `_class_symbols` back to `instrument.allowed_symbols`.
 
-Consequence worth knowing rather than guarding against: a position still held
-under a **lapsed** grant drops back out of those counts. It was never in them
-before adoption either, and expiry must never force-close a position — closing
-sits outside the gated path deliberately.
+**And an OPEN POSITION keeps its class after the grant ends.** This paragraph
+used to say the opposite — that a position held under a lapsed grant "drops back
+out of those counts", which was "not new, it was never in them". That was wrong,
+and a second audit measured it: before adoption existed a position in an
+unlisted symbol could not exist at all, and `return_to_vault` is one of the two
+things the trading agent is allowed to do, so the agent chose the moment. Handing
+a dream back moved $1,200 of live class risk out of a $1,500 class cap and
+flipped a rejection into an approval with nothing closed. `_class_symbols` now
+matches a held symbol with `Rules.true_class_key` — the same derivation the
+fence and the broker's routing use — so membership follows what a position IS,
+not what is granted this instant.
+
+It is read off the account snapshot rather than off the journal's
+`Trade.asset_class`, which is copied from the model's own proposal and would let
+a mislabelled proposal choose which caps it faced.
+
+Expiry still never force-closes a position. Closing sits outside the gated path
+deliberately; what expiry withdraws is the right to OPEN.
 
 **`Dream` still carries no order fields**, and the guarantee is narrower than
 it used to be, so state it precisely: no qty, no entry, no stop, no side, and
@@ -2045,7 +2071,9 @@ souls/                  Character files for the two agents, in the SOUL.md shape
   grants.py             Turns a live dream adoption into the symbol permission the
                         risk gate is handed. Applies the enabled-class hard block
                         and answers {} on ANY failure, so the caller fails closed.
-data/dreams.db          Speculative notes. NOT the journal, NOT backed up.
+data/dreams.db          Speculative notes AND the live symbol grants an adopted
+                        dream carries. NOT the journal, NOT backed up — losing
+                        it withdraws every grant, which is the safe direction.
                         Gitignored.
 deploy/                 VPS provisioning: bootstrap.sh + systemd units. The unit
                         runs the loop WITHOUT --execute; enabling it is a

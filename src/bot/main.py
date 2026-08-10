@@ -35,8 +35,16 @@ from .data.marketaux import MarketauxNews
 from .data.news import EmptyNews, NewsFeed
 from .data.xfeed import XFeed
 from .dreaming import Dream, DreamStore, Vault
-from .grants import NONE_LIVE as grants_none_live
-from .grants import resolve_grant_dream_ids, resolve_granted_symbols, resolve_grants
+from .grants import (
+    DEGRADED_STATES as GRANTS_DEGRADED_STATES,
+)
+from .grants import SWITCHED_OFF as grants_switched_off
+from .grants import UNAVAILABLE as grants_unavailable
+from .grants import (
+    resolve_grant_dream_ids,
+    resolve_granted_symbols,
+    resolve_grants,
+)
 from .indicators import snapshot as snapshot_indicators
 from .indicators import summarise as summarise_indicators
 from .intraday import summarise as summarise_intraday
@@ -204,6 +212,13 @@ def cmd_loop(
     # unanticipated exception here would end the decision loop, which is the
     # worst available outcome once `--execute` is on.
     dreams: DreamStore | None = None
+    # Which of the five states the empty grant list will be reported as when
+    # there is no store to ask. Set here rather than defaulted at the cycle,
+    # because "switched off" and "would not open" are the two answers a reader
+    # of the heartbeat most needs told apart, and only this block knows which.
+    no_store_state = (
+        grants_unavailable if rules.dreaming.allow_symbol_grants else grants_switched_off
+    )
     if rules.dreaming.allow_symbol_grants:
         try:
             dreams = DreamStore()
@@ -395,11 +410,10 @@ def cmd_loop(
             # as crypto being fully configured while disabled.
             granted_symbols: dict[str, str] = {}
             granted_dream_ids: dict[str, int] = {}
-            # `none_live` rather than a blank when there is no store at all:
-            # every state this can be in gets a word, so the heartbeat never
+            # Every state this can be in gets a word, so the heartbeat never
             # carries an empty list whose cause a reader has to guess.
-            grant_state = grants_none_live
-            grants_degraded = False
+            grant_state = no_store_state
+            grants_degraded = grant_state in GRANTS_DEGRADED_STATES
             if dreams is not None:
                 resolution = resolve_grants(dreams, rules, now=now)
                 granted_symbols = resolution.symbols

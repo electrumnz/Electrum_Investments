@@ -1658,3 +1658,237 @@ def test_the_gate_reads_nothing_but_its_arguments(rules, account):
     )
 
     assert first == second
+
+
+# ------------------------------- the class block, checked here as the guarantee
+
+
+def test_a_grant_whose_class_disagrees_with_the_symbol_is_refused(rules, account):
+    """`grants.py` is the useful message; this is the promise.
+
+    The gate is handed a mapping and must not assume it was filtered. A grant of
+    `BTC/USD` under `us_equity` names an ENABLED class, so every check that
+    existed said yes — and the equity book's limits then applied to an order
+    `AlpacaBroker` routes to Alpaca as crypto: unbracketed, no broker-side stop.
+    Same arrangement as `mode=ro` plus the statement guard in `insight.py`.
+    """
+    verdict = _gate(rules).evaluate(
+        _btc(0.01, "A crypto symbol wearing the equity book's class key."),
+        account=account,
+        tick=_btc_tick(INSIDE_SESSION),
+        granted_symbols={"BTC/USD": "us_equity"},
+    )
+
+    assert not verdict.approved
+    assert verdict.granted_by_dream_class is None
+    assert _reasons_mention(verdict, "belongs to 'crypto'")
+
+
+def test_the_refusal_names_the_class_the_symbol_really_belongs_to(rules, account):
+    """"Not in the allowed list" on a symbol a dream visibly granted sends an
+    operator to the wrong problem, and so does "that class is switched off" when
+    the class named is enabled."""
+    verdict = _gate(rules).evaluate(
+        _btc(0.01, "The message has to distinguish the two ways this fails."),
+        account=account,
+        tick=_btc_tick(INSIDE_SESSION),
+        granted_symbols={"BTC/USD": "us_equity"},
+    )
+
+    assert not _reasons_mention(verdict, "not an enabled instrument class")
+    assert _reasons_mention(verdict, "routes on the symbol")
+
+
+def test_a_grant_for_a_symbol_whose_class_cannot_be_established_is_refused(
+    rules, account, spy_tick
+):
+    """Two blocks claiming one symbol leaves no single answer, and an unknown is
+    never treated as a permission."""
+    muddled = rules.model_copy(deep=True)
+    muddled.instruments["crypto"].allowed_symbols = ["WIDGET"]
+    muddled.instruments["shelved"] = muddled.instruments["crypto"].model_copy(
+        update={"allowed_symbols": ["WIDGET"], "enabled": False}
+    )
+
+    verdict = _gate(muddled).evaluate(
+        OrderProposal(
+            symbol="WIDGET",
+            direction=Direction.BUY,
+            qty=3,
+            limit_price=580.00,
+            stop_loss_price=575.00,
+            take_profit_price=590.00,
+            rationale="Two instrument blocks both list this symbol.",
+        ),
+        account=account,
+        tick=Tick(symbol="WIDGET", bid=579.98, ask=580.02, timestamp=INSIDE_SESSION),
+        granted_symbols={"WIDGET": "us_equity"},
+    )
+
+    assert not verdict.approved
+    assert _reasons_mention(verdict, "cannot be established")
+
+
+# --------------------------- an open position keeps the class it was opened in
+
+
+def test_a_position_still_open_counts_against_its_class_after_the_grant_ends(rules):
+    """Handing the dream back must not move live risk out of a class cap.
+
+    `_class_symbols` computed membership from the grants in force NOW, so a
+    position opened under a grant left its class's counts the instant the grant
+    did — and `return_to_vault` is one of the two things the trading agent is
+    allowed to do, so the agent chose the moment. Measured: a class total-risk
+    rejection flipped to an approval with the position still open and still at
+    risk, and nothing about the account had changed.
+    """
+    enabled = _crypto_class_total(rules)
+    held = Position(
+        symbol="DOGE/USD",
+        asset_class=AssetClass.CRYPTO,
+        direction=Direction.BUY,
+        qty=1000,
+        entry_price=0.4,
+        opened_at=INSIDE_SESSION,
+        current_price=0.4,
+    )
+    account = _account_with_class_risk(
+        positions=[held], open_risk_by_symbol={"DOGE/USD": 400.0}
+    )
+    proposal = _btc(0.2, "The lapsed grant's position is still $400 at risk.")
+
+    # The grant is gone: handed back, or expired. The position is not.
+    verdict = _gate(enabled).evaluate(
+        proposal,
+        account=account,
+        tick=_btc_tick(INSIDE_SESSION),
+        granted_symbols={},
+    )
+
+    assert not verdict.approved
+    assert _reasons_mention(verdict, "open risk would reach")
+    assert _reasons_mention(verdict, "800.00")
+
+
+def test_a_lapsed_grants_position_still_fills_its_class_concurrency_slot(rules):
+    tightened = rules.model_copy(deep=True)
+    tightened.instruments["us_equity"].max_concurrent_positions = 1
+    held = Position(
+        symbol="TSLA",
+        direction=Direction.BUY,
+        qty=3,
+        entry_price=420.0,
+        opened_at=INSIDE_SESSION,
+        current_price=420.0,
+    )
+    account = AccountSnapshot(
+        equity_usd=PAPER_EQUITY,
+        cash_usd=PAPER_EQUITY,
+        buying_power_usd=PAPER_EQUITY,
+        open_positions=[held],
+        open_risk_by_symbol={"TSLA": 15.0},
+        open_risk_usd=15.0,
+    )
+
+    verdict = _gate(tightened).evaluate(
+        OrderProposal(
+            symbol="SPY",
+            direction=Direction.BUY,
+            qty=3,
+            limit_price=580.00,
+            stop_loss_price=575.00,
+            take_profit_price=590.00,
+            rationale="The class's one slot is held by a position under a dead grant.",
+        ),
+        account=account,
+        tick=Tick(symbol="SPY", bid=579.98, ask=580.02, timestamp=INSIDE_SESSION),
+        granted_symbols={},
+    )
+
+    assert not verdict.approved
+    assert _reasons_mention(verdict, "for this instrument class")
+
+
+def test_a_lapsed_grants_position_still_counts_toward_the_class_capital_cap(rules):
+    enabled = _with_crypto(rules, cap=15.0)
+    enabled.instruments["crypto"].max_concurrent_positions = 5
+    held = Position(
+        symbol="DOGE/USD",
+        asset_class=AssetClass.CRYPTO,
+        direction=Direction.BUY,
+        qty=30_000,
+        entry_price=0.4,
+        opened_at=INSIDE_SESSION,
+        current_price=0.4,
+    )
+    account = _account_with_class_risk(
+        positions=[held], open_risk_by_symbol={"DOGE/USD": 100.0}
+    )
+
+    verdict = _gate(enabled).evaluate(
+        _btc(0.05, "12% of equity is already held in this class under a dead grant."),
+        account=account,
+        tick=_btc_tick(INSIDE_SESSION),
+        granted_symbols={},
+    )
+
+    assert not verdict.approved
+    assert _reasons_mention(verdict, "allocation would reach")
+
+
+def test_a_lapsed_grants_untracked_position_still_fails_the_class_closed(rules):
+    """The fail-closed branch has to survive the grant ending too, or handing a
+    dream back is a way to make an unknowable position stop being counted."""
+    enabled = _crypto_class_total(rules)
+    held = Position(
+        symbol="DOGE/USD",
+        asset_class=AssetClass.CRYPTO,
+        direction=Direction.BUY,
+        qty=1000,
+        entry_price=0.4,
+        opened_at=INSIDE_SESSION,
+        current_price=0.4,
+    )
+    account = _account_with_class_risk(
+        positions=[held], symbols_with_unknown_risk=["DOGE/USD"]
+    )
+
+    verdict = _gate(enabled).evaluate(
+        _btc(0.01, "An unknowable position does not become knowable by expiring."),
+        account=account,
+        tick=_btc_tick(INSIDE_SESSION),
+        granted_symbols={},
+    )
+
+    assert not verdict.approved
+    assert _reasons_mention(verdict, "cannot be established")
+
+
+def test_a_held_symbol_counts_in_its_own_class_and_not_another(rules):
+    """The membership is derived, so it has to put the position in ONE class.
+
+    An equity held under a lapsed grant must not start counting against
+    crypto's budget, which would be the mirror failure: a cap binding on
+    something that has nothing to do with it.
+    """
+    enabled = _crypto_class_total(rules)
+    held = Position(
+        symbol="MP",
+        direction=Direction.BUY,
+        qty=200,
+        entry_price=100.0,
+        opened_at=INSIDE_SESSION,
+        current_price=100.0,
+    )
+    account = _account_with_class_risk(
+        positions=[held], open_risk_by_symbol={"MP": 400.0}
+    )
+
+    verdict = _gate(enabled).evaluate(
+        _btc(0.2, "An equity position says nothing about the crypto class."),
+        account=account,
+        tick=_btc_tick(INSIDE_SESSION),
+        granted_symbols={},
+    )
+
+    assert verdict.approved, verdict.reasons

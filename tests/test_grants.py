@@ -18,7 +18,16 @@ import pytest
 
 from bot.config import Rules
 from bot.dreaming import DREAMER, Adoption, Dream, DreamStore, Vault
-from bot.grants import resolve_grant_dream_ids, resolve_granted_symbols
+from bot.grants import (
+    GRANTED,
+    NONE_LIVE,
+    OVER_CAP,
+    SWITCHED_OFF,
+    UNAVAILABLE,
+    resolve_grant_dream_ids,
+    resolve_granted_symbols,
+    resolve_grants,
+)
 
 from .conftest import RULES_PATH
 
@@ -326,3 +335,150 @@ def test_no_grants_means_no_query():
 
     assert resolve_grant_dream_ids(store, {}, now=NOW) == {}
     assert store.reads == 0
+
+
+# ---------------------------------------- the hard block, checked on the SYMBOL
+
+
+def test_a_grant_claiming_the_wrong_class_for_its_symbol_grants_nothing(rules):
+    """The hole an adversarial audit walked through, and the reason it mattered.
+
+    The block used to ask only whether the class key an adoption row NAMED was
+    an enabled one. `BTC/USD` under `us_equity` answered yes, so crypto — the
+    class the operator switched off — was tradeable under the equity book's
+    limits: 1% per-trade risk instead of 0.5%, 50% concentration instead of 15%,
+    three positions instead of one.
+
+    And the limits are the smaller half. `AlpacaBroker.place_order` routes on
+    `"/" in symbol`, so the order that reached Alpaca was a CRYPTO order —
+    unbracketed, because Alpaca accepts no bracket there — which means no
+    broker-side stop rested behind it at all. That is the operator's third rule,
+    gone, through a permission that named the wrong word.
+    """
+    store = _Store({"BTC/USD": "us_equity"})
+
+    assert resolve_granted_symbols(store, rules, now=NOW) == {}
+
+
+def test_the_same_symbol_under_its_own_class_is_refused_by_the_class_block(rules):
+    """Both halves refuse it, and they refuse it for different reasons.
+
+    Naming crypto is caught by the enabled check; naming us_equity is caught by
+    the symbol check. A test that only tried the first would pass over the
+    second, which is exactly what happened.
+    """
+    assert rules.instruments["crypto"].enabled is False
+
+    assert resolve_granted_symbols(_Store({"BTC/USD": "crypto"}), rules, now=NOW) == {}
+    assert resolve_granted_symbols(_Store({"BTC/USD": "us_equity"}), rules, now=NOW) == {}
+
+
+def test_a_symbol_a_disabled_class_LISTS_cannot_be_granted_under_another(rules):
+    """`Rules.for_symbol` scans enabled classes only, so a disabled class's
+    `allowed_symbols` was invisible to every check. It is the operator's own
+    statement of which class a symbol belongs to and it has to be read."""
+    rules.instruments["crypto"].allowed_symbols = ["WIDGET"]
+    assert rules.instruments["crypto"].enabled is False
+
+    assert resolve_granted_symbols(_Store({"WIDGET": "us_equity"}), rules, now=NOW) == {}
+
+
+def test_a_symbol_two_blocks_both_claim_grants_nothing(rules):
+    """Where the file and the file disagree there is no single answer, and an
+    unknown is never treated as a permission.
+
+    Both claimants are disabled on purpose, so the symbol is in no enabled
+    `allowed_symbols` list and the "already permitted" rule cannot be what
+    refuses it. What refuses it is that its class cannot be established.
+    """
+    rules.instruments["crypto"].allowed_symbols = ["WIDGET"]
+    rules.instruments["shelved"] = rules.instruments["crypto"].model_copy(
+        update={"allowed_symbols": ["WIDGET"], "enabled": False}
+    )
+
+    assert resolve_granted_symbols(_Store({"WIDGET": "us_equity"}), rules, now=NOW) == {}
+
+
+def test_an_ordinary_ticker_still_resolves_under_the_equity_class(rules):
+    """The check must not refuse the case the whole feature exists for: a symbol
+    nobody has listed anywhere, which is what a dreamer is allowed to reach
+    for."""
+    assert resolve_granted_symbols(_Store({"MP": "us_equity"}), rules, now=NOW) == {
+        "MP": "us_equity"
+    }
+
+
+def test_the_wrong_class_costs_that_grant_and_no_other(rules):
+    store = _Store({"BTC/USD": "us_equity", "MP": "us_equity"})
+
+    assert resolve_granted_symbols(store, rules, now=NOW) == {"MP": "us_equity"}
+
+
+# --------------------------------------------- why the mapping is empty is said
+
+
+def test_an_empty_mapping_says_which_of_its_five_causes_it_was(rules):
+    """`calendar_degraded` again: a zero has to be a stated fact rather than the
+    absence of a warning. Switched off, nothing adopted, a broken store and a
+    set over the cap all render as `[]` on the cycle line."""
+    off = Rules.load(RULES_PATH)
+    off.dreaming.allow_symbol_grants = False
+
+    assert resolve_grants(_Store({}), off, now=NOW).state == SWITCHED_OFF
+    assert resolve_grants(_Store({}), rules, now=NOW).state == NONE_LIVE
+    assert resolve_grants(_Store({"MP": "us_equity"}), rules, now=NOW).state == GRANTED
+    assert (
+        resolve_grants(_Store(error=RuntimeError("locked")), rules, now=NOW).state
+        == UNAVAILABLE
+    )
+    over = {f"SYM{i}": "us_equity" for i in range(rules.dreaming.max_granted_symbols + 1)}
+    assert resolve_grants(_Store(over), rules, now=NOW).state == OVER_CAP
+
+
+def test_only_the_states_that_withhold_an_answer_read_as_degraded(rules):
+    """A feature nobody turned on is a configuration, not a failure. Flagging it
+    would make every deployment that does not use dreams look broken, and a
+    warning that is always on is a warning nobody reads."""
+    off = Rules.load(RULES_PATH)
+    off.dreaming.allow_symbol_grants = False
+
+    assert resolve_grants(_Store({}), off, now=NOW).degraded is False
+    assert resolve_grants(_Store({}), rules, now=NOW).degraded is False
+    assert resolve_grants(_Store({"MP": "us_equity"}), rules, now=NOW).degraded is False
+    assert resolve_grants(_Store(error=RuntimeError("x")), rules, now=NOW).degraded is True
+    over = {f"SYM{i}": "us_equity" for i in range(rules.dreaming.max_granted_symbols + 1)}
+    assert resolve_grants(_Store(over), rules, now=NOW).degraded is True
+
+
+# ------------------------------------------- an exception must not reach a loop
+
+
+def test_a_naive_now_costs_the_provenance_and_never_the_cycle():
+    """The guard used to wrap the QUERY and not the arithmetic after it.
+
+    `Adoption.is_live` compares datetimes, so a naive `now` raised `TypeError`
+    straight out of `resolve_grant_dream_ids` and into the decision cycle — the
+    shape `claude.propose` was wrapped for after a `ValidationError` killed a
+    live loop and systemd restarted it into the same failure.
+    """
+    store = _Store(adoptions=[_adoption(7, ["TSLA"])])
+
+    ids = resolve_grant_dream_ids(
+        store, {"TSLA": "us_equity"}, now=NOW.replace(tzinfo=None)
+    )
+
+    assert ids == {"TSLA": 7}
+
+
+def test_an_adoption_row_that_will_not_iterate_costs_the_provenance_only():
+    """Anything unexpected from the store, not merely a raise from the query."""
+    broken = Adoption(
+        dream_id=7,
+        adopted_at=NOW,
+        symbols_granted=None,  # type: ignore[arg-type]
+        asset_class="us_equity",
+        expires_at=NOW + timedelta(days=30),
+    )
+    store = _Store(adoptions=[broken])
+
+    assert resolve_grant_dream_ids(store, {"TSLA": "us_equity"}, now=NOW) == {}

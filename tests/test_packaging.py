@@ -120,3 +120,42 @@ def test_every_first_party_import_resolves_to_a_committed_module():
                 )
 
     assert not problems, "\n  ".join(["Unshippable imports:", *problems])
+
+
+# ------------------------------------------- the guard that guards the runtime
+
+
+def test_the_runtime_directory_guard_notices_a_file_that_only_GREW(tmp_path):
+    """It compared a file LISTING, so it went blind after the first offence.
+
+    Once `data/dreams.db` existed, a test writing rows into it appeared in the
+    before-set and the after-set and was reported as nothing at all — the guard
+    was strongest on a clean machine and useless on a developer's, which is the
+    inverse of what a guard should be. `tests/test_loop.py` already carried a
+    note saying so.
+    """
+    from .conftest import runtime_fingerprint
+
+    watched = tmp_path / "data"
+    watched.mkdir()
+    journal = watched / "journal.db"
+    journal.write_text("one row")
+
+    before = runtime_fingerprint([watched])
+    journal.write_text("one row, and a second one nobody asked for")
+    after = runtime_fingerprint([watched])
+
+    assert set(after) == set(before), "the listing alone cannot see this"
+    assert after != before
+
+
+def test_the_runtime_directory_guard_still_notices_a_new_file(tmp_path):
+    from .conftest import runtime_fingerprint
+
+    watched = tmp_path / "audit"
+    watched.mkdir()
+
+    before = runtime_fingerprint([watched])
+    (watched / "2026-06-01.jsonl").write_text("{}\n")
+
+    assert set(runtime_fingerprint([watched])) - set(before) == {"audit/2026-06-01.jsonl"}
