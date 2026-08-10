@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import html
 import json
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -37,12 +37,18 @@ from ..data.xfeed import DEFAULT_CACHE_TTL_SECONDS as XFEED_CACHE_TTL_SECONDS
 from ..data.xfeed import FeedState
 from ..dreamer import estimated_cost_usd, read_schedule
 from ..dreaming import (
+    FUSION,
     THIN_LEDGER_THRESHOLD,
+    Adoption,
     Dream,
+    DreamCondition,
     DreamLedger,
+    DreamMessage,
     DreamSummary,
     DreamVerdict,
     Hop,
+    Vault,
+    promotion_for,
 )
 from ..market_clock import (
     NY,
@@ -58,6 +64,7 @@ from ..metrics import JournalReport, render_excursions, render_summary
 from ..models import (
     AccountSnapshot,
     Direction,
+    Position,
     StandDownState,
     Trade,
     WorkingOrder,
@@ -80,10 +87,13 @@ from ..tailnet import TailnetStatus
 # `app.py` does not apply to a plain string constant. Two constants, kept in
 # their own file because the confirmation window is a self-contained thing with
 # its own reasoning, and this module is long enough.
+from .dream_fx import CSS as DREAM_FX_CSS
+from .dream_fx import SCRIPT as DREAM_FX_SCRIPT
+from .dream_fx import reveal_attrs
 from .forge_window import CSS as FORGE_WINDOW_CSS
 from .forge_window import SCRIPT as FORGE_WINDOW_SCRIPT
 from .live import SessionDayView, TickerQuote
-from .seen import SinceLastVisit
+from .seen import Marker, SinceLastVisit
 
 #: The two banners the live stream is allowed to take away, by id.
 #:
@@ -1167,6 +1177,189 @@ nav a:hover::after,nav a[aria-current=page]::after{transform:scaleX(1)}
   background:rgba(22,27,34,.5)}
 .worked h3{margin-bottom:.5rem}
 
+/* ==================================================== the shelves a dream sits on
+   Five vaults, and the page is built around them rather than around one flat
+   list, because WHERE a dream is held is the fact that decides what it can do:
+   only the dream vault is visible to the trading agent, and only an adopted
+   dream carries a live symbol permission.
+
+   Every shelf identity is a `data-vault` ATTRIBUTE rather than a class, and
+   that is the two-class lesson taken seriously rather than survived. `vault`,
+   `archive` and `adopted` are all words that name a state, and a `.shelf.vault`
+   rule would put three more of them into the modifier vocabulary — where the
+   next bare `.vault{padding:...}` written for something else silently restyles
+   them. An attribute selector cannot collide with a class at all. */
+.shelfrail{display:grid;gap:.6rem;margin-top:1.5rem;
+  grid-template-columns:repeat(auto-fit,minmax(180px,1fr))}
+.shelf{display:block;text-decoration:none;border:1px solid var(--slate);
+  border-radius:2px;padding:.8rem .9rem;background:var(--graphite);
+  border-top-width:2px;border-top-color:var(--slate)}
+.shelf:hover{background:rgba(41,49,60,.55)}
+.shelf .n{display:block;font-family:var(--mono);font-size:.625rem;
+  letter-spacing:.14em;text-transform:uppercase;color:var(--pewter)}
+.shelf .c{display:block;font-family:var(--mono);font-size:1.375rem;
+  font-variant-numeric:tabular-nums;color:var(--bone);margin-top:.3rem}
+.shelf .s{display:block;font-size:.75rem;color:var(--pewter);margin-top:.2rem}
+.shelf[data-vault=prophecy]{border-top-color:var(--holo)}
+.shelf[data-vault=vault]{border-top-color:var(--patina)}
+.shelf[data-vault=adopted]{border-top-color:var(--amber)}
+.shelf[data-vault=prophecy] .c{color:var(--holo)}
+.shelf[data-vault=vault] .c{color:var(--patina)}
+.shelf[data-vault=adopted] .c{color:var(--amber)}
+/* An empty shelf is a stated zero, never a skipped row. `DreamSummary.by_vault`
+   keys every vault for this reason: a missing row reads as "no data" and a nought
+   reads as a fact, and on the adopted shelf those are very different claims. */
+.shelf[data-empty] .c{color:var(--pewter)}
+
+.shelf-head{display:flex;gap:1rem;align-items:center;flex-wrap:wrap;
+  margin-bottom:.875rem}
+.shelf-head .lede{margin:.2rem 0 0;max-width:60ch;font-size:.8125rem;
+  color:var(--pewter)}
+.shelf-head h2{margin:0}
+
+/* Grogu with the crystal ball, for the prophecy shelf. Drawn in primitives for
+   the reason the avatar is: it inherits the palette, it costs no request, and
+   `aria-hidden` because it is a mood and everything it says is said in text. */
+.oracle{width:104px;height:104px;display:block;overflow:visible;flex:none}
+.oracle .orb{fill:rgba(111,211,232,.12);stroke:var(--holo);stroke-width:1.5;
+  animation:fx-orb 4.4s ease-in-out infinite;transform-origin:60px 82px;
+  transform-box:view-box}
+.oracle .glint{fill:var(--holo);opacity:.85}
+.oracle .head,.oracle .ear{fill:rgba(111,211,232,.10);stroke:var(--holo);
+  stroke-width:1.5}
+.oracle .robe{fill:rgba(78,140,125,.16);stroke:var(--patina);stroke-width:1.5}
+.oracle .eye{fill:var(--bone)}
+.oracle .stand,.oracle .arm{fill:none;stroke:var(--patina);stroke-width:1.5;
+  stroke-linecap:round}
+.oracle .hand{fill:rgba(78,140,125,.35);stroke:var(--patina);stroke-width:1.2}
+@keyframes fx-orb{0%,100%{opacity:.55}50%{opacity:1}}
+
+/* The dream vault itself: the one shelf the trading agent can see, so it is the
+   one that gets a door drawn round it. */
+.vaultdoor{border:1px solid var(--patina);border-radius:2px;padding:1.125rem;
+  background:radial-gradient(120% 90% at 50% 0,rgba(78,140,125,.09),
+    rgba(22,27,34,.55) 62%)}
+
+/* What a prophecy pre-registered, and how much of it the world has settled.
+   Counted, never summarised: "2 of 3" is arithmetic and "close" is an opinion. */
+.conds{margin:.875rem 0 0;padding:0;list-style:none}
+.conds li{position:relative;padding:.3rem 0 .3rem 1.4rem;font-size:.8125rem;
+  color:var(--bone)}
+.conds li::before{content:"·";position:absolute;left:.3rem;top:.28rem;
+  font-family:var(--mono);color:var(--pewter)}
+.conds li[data-met]::before{content:"✓";color:var(--patina);font-size:.75rem}
+.conds .thr{font-family:var(--mono);font-size:.6875rem;color:var(--pewter);
+  display:block}
+.condhead{margin:.875rem 0 0;font-family:var(--mono);font-size:.625rem;
+  letter-spacing:.14em;text-transform:uppercase;color:var(--pewter)}
+
+/* Symbiosis. The card is drawn fused by `dream_fx.CSS`; these are the parts
+   that carry the ARGUMENT rather than the treatment.
+   `article.fused` rather than `.dream.fused` on purpose: element-plus-class is
+   deliberately more specific than `.dream`, where a second class would be a tie
+   decided by which file was concatenated last — the mistake this repository has
+   made three times. */
+article.fused{border-color:var(--patina)}
+/* A parent crest is a LINK to a dream that is still there. It reads as one,
+   which is the point: `fuse` consumes nothing, and a crest greyed out or struck
+   through would describe a store that does not work that way. Specificity is
+   deliberate again — `.fused .crest` is two classes, so an element-qualified
+   three is what wins rather than an ordering. */
+.fused a.crest{color:var(--bone);text-decoration:none}
+.fused a.crest:hover{border-color:var(--patina);background:rgba(78,140,125,.1)}
+.symbiosis{margin:0 0 .875rem;padding:.7rem .85rem;border-radius:2px;
+  border:1px solid rgba(78,140,125,.4);border-left-width:3px;
+  background:rgba(78,140,125,.07)}
+.symbiosis b{display:block;font-family:var(--mono);font-size:.625rem;
+  letter-spacing:.14em;text-transform:uppercase;color:var(--patina);
+  margin-bottom:.25rem}
+.symbiosis p{margin:0;font-size:.8125rem;color:var(--bone)}
+.symbiosis p + p{margin-top:.35rem}
+/* The same claim, marked where it sits in the chain. Attributes rather than
+   classes, and a real element rather than `::after` content, because ONE HOP
+   CAN BE BOTH — a shared claim can also be the weakest link — and a
+   pseudo-element carries one label. Generated content is also announced
+   inconsistently by screen readers, which is a limit this stylesheet already
+   states about `td[data-l]::before`. */
+.hops li[data-shared]{background:rgba(78,140,125,.07)}
+.hops li[data-weakest]{background:rgba(192,138,62,.07)}
+.hops li[data-weakest]::before{border-color:var(--amber);color:var(--amber);
+  box-shadow:0 0 0 3px rgba(192,138,62,.16)}
+.hops .hoptags{display:block;margin-top:.3rem}
+.hops .hoptags i{font-family:var(--mono);font-size:.5625rem;letter-spacing:.12em;
+  text-transform:uppercase;font-style:normal;margin-right:.6rem}
+.hops .hoptags i[data-tag=shared]{color:var(--patina)}
+.hops .hoptags i[data-tag=weakest]{color:var(--amber)}
+/* The named weakest link, ringed in the diagram as well as in the list. Same
+   attribute, same reason: `.node.weak` would put `weak` into the modifier
+   vocabulary, where the padded amber `.weak` panel would style an SVG circle. */
+.chainviz .node[data-weakest]{stroke-width:3}
+.lineage{margin:.75rem 0 0;font-family:var(--mono);font-size:.6875rem;
+  letter-spacing:.06em;color:var(--patina)}
+
+/* Why a finished keep is still on the workbench. Deliberately NOT `.weak`,
+   which is amber and means "this is the link that could kill the chain". This
+   is the promotion rule explaining itself, which is an instruction rather than
+   a danger, and spending the alert colour on it would leave the two reading as
+   the same kind of fact on the same card. */
+.notyet{margin:.875rem 0 0;padding:.6rem .75rem;font-size:.8125rem;
+  border:1px solid var(--slate);border-left-width:3px;border-radius:2px;
+  background:rgba(22,27,34,.6);color:var(--bone)}
+.notyet b{font-family:var(--mono);font-size:.625rem;letter-spacing:.14em;
+  text-transform:uppercase;color:var(--pewter);display:block;margin-bottom:.2rem}
+
+/* The wisp an adopted dream leaves the dreamer, and what the adoption granted.
+   Two different facts side by side: one is what Grogu kept, the other is what
+   the account may trade because of it. */
+.wisptrace{margin:.875rem 0 0;padding:.7rem .85rem;border-radius:2px;
+  border:1px dashed var(--slate);background:rgba(22,27,34,.5);
+  font-family:var(--serif);font-size:.875rem;color:var(--bone)}
+.wisptrace b{display:block;font-family:var(--mono);font-size:.625rem;
+  letter-spacing:.14em;text-transform:uppercase;color:var(--pewter);
+  margin-bottom:.25rem}
+.grantline{margin:.6rem 0 0;font-size:.8125rem;color:var(--bone)}
+.grantline .sym{font-family:var(--mono);color:var(--amber)}
+.grantline .lbl{font-family:var(--mono);font-size:.625rem;letter-spacing:.14em;
+  text-transform:uppercase;color:var(--pewter);margin-right:.4rem}
+
+/* The two agents talking, rendered so a person can read it. Stored either way,
+   including the exchanges that ended in nothing, because a dream the trader
+   kept declining is a fact about the dreamer worth having. */
+.talk{margin-top:1rem;border-top:1px solid var(--slate);padding-top:.75rem}
+.talk summary{cursor:pointer;list-style:none;font-family:var(--mono);
+  font-size:.625rem;letter-spacing:.14em;text-transform:uppercase;
+  color:var(--pewter)}
+.talk summary::-webkit-details-marker{display:none}
+.talk summary::before{content:"▸ ";color:var(--pewter)}
+.talk[open] summary::before{content:"▾ "}
+.talk summary:hover{color:var(--bone)}
+.talk ol{list-style:none;margin:.75rem 0 0;padding:0}
+.talk .said{padding:.5rem 0 .5rem .9rem;border-left:2px solid var(--slate);
+  margin-bottom:.5rem}
+.talk .said:last-child{margin-bottom:0}
+.talk .said .hdr{display:flex;gap:.5rem;align-items:baseline;flex-wrap:wrap;
+  font-family:var(--mono);font-size:.625rem;letter-spacing:.12em;
+  text-transform:uppercase;color:var(--pewter);margin-bottom:.2rem}
+.talk .said .hdr .name{color:var(--bone)}
+.talk .said .hdr .at{margin-left:auto}
+.talk .said p{margin:0;font-size:.875rem;color:var(--bone)}
+.talk .said[data-who=dreamer]{border-left-color:var(--holo)}
+.talk .said[data-who=dreamer] .hdr .name{color:var(--holo)}
+.talk .said[data-who=trader]{border-left-color:var(--patina)}
+.talk .said[data-who=trader] .hdr .name{color:var(--patina)}
+.talk .said[data-who=operator]{border-left-color:var(--bone)}
+.talk .said[data-who=fusion]{border-left-color:var(--amber);
+  border-left-style:dashed}
+.talk .said[data-who=fusion] .hdr .name{color:var(--amber)}
+
+/* A trade that came from a dream. `.wisped` and `.from-dream` are styled in
+   `dream_fx.CSS`; this is the one thing that file cannot know — that the mote
+   layer needs a block box to inset itself against, and a table cell's content
+   is wrapped in a span for the 760px card layout. */
+td .wisped{display:block}
+td .wisped .from-dream{display:block;margin-top:.15rem;text-decoration:none}
+td .wisped .from-dream:hover{text-decoration:underline}
+
 /* ================================================== motion that MEANS things ==
    Everything above this line is decoration: a starfield, a jump, panels that
    materialise. It sets a mood and carries no information, which is why it is
@@ -1456,6 +1649,14 @@ nav a:hover::after,nav a[aria-current=page]::after{transform:scaleX(1)}
 
 @media (max-width:760px){
   nav{margin-left:0;width:100%;order:3}
+  /* MEASURED, not guessed: at a 390px viewport the eight nav links render 32px
+     tall, against the 44px minimum a finger needs. They are the only way around
+     the deck on a phone and they are the smallest targets on it.
+     The fix is a minimum HEIGHT plus centring rather than more vertical padding,
+     because padding on a wrapping flex row grows the header on every line the
+     nav wraps to — and it is inside the 760px block, so the desktop bar keeps
+     the compact 32px links it lays out in one row beside the wordmark. */
+  nav a{min-height:44px;display:inline-flex;align-items:center}
   .live{margin-left:auto;padding-left:0;border-left:0}
   .scroll{border:0}
   /* A STATED LIMIT, because it is a real one and pretending otherwise is worse.
@@ -1517,6 +1718,13 @@ STYLES += _kind_css()
 # no-backslash rule as everything above — `tests/test_web.py` fails the build if
 # a control character reaches `STYLES`, and that check has to see this too.
 STYLES += FORGE_WINDOW_CSS
+
+# The wisps and the fusion reveal, for the same reason and under the same rule.
+# It is concatenated LAST of the three deliberately: `.fused` there sets the
+# patina border on a fused card, and `article.fused` above wins that on
+# specificity rather than on order — so this position is a convenience and not a
+# thing any rule depends on.
+STYLES += DREAM_FX_CSS
 
 SCRIPT = """
 /* The projection layer for the command centre: starfield, hyperspace jump,
@@ -3700,7 +3908,17 @@ def board(
         + fixed
         + _positions(account, open_trades, equity, unexplained)
         + "</section>"
-        + _working_orders(orders or [], prices or {}, fixed_reading=fixed)
+        + _working_orders(
+            orders or [],
+            prices or {},
+            fixed_reading=fixed,
+            # What is HELD, so a resting order can be told apart from an entry
+            # that has not filled. Without it every protective leg reads as a
+            # pending order, which is how the operator's own stop came to be
+            # reported as clutter twice.
+            positions=account.open_positions,
+            unexplained=unexplained,
+        )
     )
 
 
@@ -3793,30 +4011,197 @@ def _order_gap(o: WorkingOrder, price: float) -> float | None:
     return o.distance_to_fill(price)
 
 
+def _protects(order: WorkingOrder, held: Mapping[str, Direction]) -> bool:
+    """Whether this resting order is the other half of an open position.
+
+    A protective leg is one that would REDUCE a position that exists: a stop or
+    a take-profit on the opposite side to what is held. An order on the same
+    side as the position is adding to it, and an order on a symbol nothing is
+    held in is an entry — both are pending in the way the word usually means.
+
+    Read off the direction rather than off `is_stop`, because a bracket's
+    take-profit is a plain limit order and is every bit as much a consequence of
+    the position as the stop leg is. `is_stop` is what decides how the LEVEL is
+    read; this decides which list the row belongs in.
+
+    A stop resting on a symbol with nothing held is False here, and that is the
+    honest answer rather than an oversight: this reading shows no position for
+    it to protect. `_working_orders` says so on the row instead of quietly
+    filing it under protection it cannot demonstrate.
+    """
+    side = held.get(order.symbol)
+    if side is None:
+        return False
+    return order.direction is not side
+
+
 def _working_orders(
     orders: list[WorkingOrder],
     prices: dict[str, float],
     *,
     fixed_reading: str = "",
+    positions: Sequence[Position] = (),
+    unexplained: UnexplainedMoveReport | None = None,
 ) -> str:
-    """Orders resting at the broker, and how far the market is from them.
+    """Orders resting at the broker, split by what they are actually doing.
 
-    Two kinds rest here and they are not the same thing. An entry is a limit
-    order that waits for its price and simply never fills if the price does not
-    come. A **stop leg** is the other half of the bracket every entry now goes
-    out as, and it is what the operator's third rule — a hard stop on every
-    trade — actually amounts to at the broker. Without this section the Board
-    shows no position and no explanation for the first kind, and no visible
-    proof of the second.
+    **Two entirely different things rest here and one flat list conflated
+    them.** An entry is a limit order waiting for its price, which never fills
+    if the price does not come — genuinely pending. A **protective leg** is the
+    other half of the bracket every entry goes out as: it exists *because* a
+    position exists, it is doing its job by sitting there, and it is what the
+    operator's third rule amounts to at the broker.
+
+    **The word "Pending" was the defect, not the row under it.** *"I understand
+    what the pending order is but for the ui it's not a pending order it's a
+    stop loss isn't it? Pending infers the trading agent is going to put another
+    trade down."* Exactly so: a heading is a claim, and "Pending orders" claims
+    something is about to happen. A resting stop is the guarantee that something
+    will NOT happen — it is the opposite claim — so that heading told the
+    operator the agent was mid-way into a new position every time they looked.
+    The word is reserved for entries now, where it is true.
+
+    That is the second time this same leg has been read as debris. The first was
+    `str()` on an alpaca-py enum rendering it as status `other`; this one was a
+    heading. *A badly rendered safety mechanism gets mistaken for junk and asked
+    to be removed*, and the general form is worth carrying: **a wrong heading is
+    not fixed by the row underneath being correct.**
+
+    So the two are separated and named rather than filtered, and **nothing here
+    offers a way to cancel one** — there is no `cancel_order` on the `Broker`
+    protocol, and a button that took a stop off a dashboard would be the
+    shortest route in this repository to an unprotected live position.
+
+    **The absence of a protective leg becomes legible for the first time here.**
+    In one list it was invisible; grouped, an open position with nothing resting
+    behind it is a gap in the row of protection, and `unexplained` is what can
+    state it — including saying it could not be established, because
+    `can_check` is False when the order book itself could not be read and an
+    outage must never render as a clean all-clear.
     """
+    held = {p.symbol: p.direction for p in positions}
+    protective = [o for o in orders if _protects(o, held)]
+    pending = [o for o in orders if not _protects(o, held)]
+    unreadable = unexplained is not None and not unexplained.can_check
+
+    return (
+        '<section class="block"><h2>Stop losses and targets in force</h2>'
+        + fixed_reading
+        # No separate lede: the caption below is visible AND is what names the
+        # scroll region through `aria-labelledby`, so a sentence above it would
+        # be the same claim twice with two places to let it drift.
+        + _protection_gap(positions, protective, unexplained)
+        + _order_table(
+            protective,
+            prices,
+            kind="protective",
+            empty=(
+                # A failed read must not render as an empty book. The banner
+                # above says so and this sentence must not contradict it, for
+                # the reason `_board_waiting` exists: an unknown is not a nought.
+                "The order book could not be read, so this is not a list of "
+                "nothing resting — it is a list of nothing returned."
+                if unreadable
+                else "Nothing is resting behind the open positions."
+                if positions
+                else "No positions open, so there is nothing to protect."
+            ),
+        )
+        + "</section>"
+        + '<section class="block"><h2>Pending entries</h2>'
+        # Both tables are server-rendered from the same reading and NEITHER
+        # repaints, so both say so. One note across two sections would leave the
+        # second looking live.
+        + fixed_reading
+        + _order_table(
+            pending,
+            prices,
+            kind="pending",
+            empty=(
+                "The order book could not be read, so nothing here says an "
+                "entry is or is not waiting."
+                if unreadable
+                else "No entries pending. The agent is not part-way into a new "
+                "position."
+            ),
+        )
+        + "</section>"
+    )
+
+
+def _protection_gap(
+    positions: Sequence[Position],
+    protective: Sequence[WorkingOrder],
+    unexplained: UnexplainedMoveReport | None,
+) -> str:
+    """An open position with nothing resting behind it, said loudly.
+
+    Three states, never two. `unexplained` is the authority when it is present,
+    because it already excludes crypto — Alpaca accepts no bracket there, so a
+    crypto position with no resting stop is expected rather than alarming — and
+    because `can_check` is False when the order book could not be read at all.
+    An outage must not render as an all-clear, which is the
+    `FinnhubCalendar.is_degraded` rule arriving at the order book.
+
+    With no report at all, this falls back to naming the positions with no
+    protective row on this reading and says plainly that nothing compared it
+    against the journal. That is weaker than the report and is still a fact
+    about what is on screen.
+    """
+    if not positions:
+        return ""
+
+    if unexplained is not None and not unexplained.can_check:
+        return (
+            '<p class="note"><span class="alert">The resting orders could not '
+            "be read, so this list is not a list of what is protecting the "
+            "account — it is what one failed reading returned. Nothing here "
+            "says a position is unprotected, and nothing here says one is "
+            "protected.</span></p>"
+        )
+
+    if unexplained is not None:
+        naked = unexplained.positions_without_a_resting_stop
+        if not naked:
+            return ""
+        return (
+            '<p class="note"><span class="alert">'
+            f"{_e(', '.join(naked))} {_word(len(naked), 'is', 'are')} open with "
+            "no stop order resting at the broker. The journal's stop is a figure "
+            "rather than an order, so rule 3 is being met by stop_watch "
+            "reporting a breach on the loop's pulse and by nothing at the "
+            "broker. Crypto is excluded from this — Alpaca accepts no bracket on "
+            "it — so these are equities whose bracket is gone.</span></p>"
+        )
+
+    covered = {o.symbol for o in protective}
+    naked = sorted(p.symbol for p in positions if p.symbol not in covered)
+    if not naked:
+        return ""
+    return (
+        '<p class="note"><span class="alert">'
+        f"{_e(', '.join(naked))} {_word(len(naked), 'has', 'have')} no order "
+        "resting on this reading. Nothing compared that against the journal, so "
+        "this is what the broker returned and not a verdict.</span></p>"
+    )
+
+
+def _order_table(
+    orders: Sequence[WorkingOrder],
+    prices: dict[str, float],
+    *,
+    kind: str,
+    empty: str,
+) -> str:
+    """One of the two tables. `kind` chooses the caption and nothing else."""
+    label = (
+        "Stop losses and targets in force" if kind == "protective"
+        else "Pending entries"
+    )
     if not orders:
         return (
-            '<section class="block"><h2>Pending orders</h2>'
-            + fixed_reading
-            + '<div class="scroll" role="region" tabindex="0" '
-            'aria-label="Pending orders"><p class="empty">Nothing resting at '
-            "the broker. Every order either filled or was never sent.</p>"
-            "</div></section>"
+            '<div class="scroll" role="region" tabindex="0" '
+            f'aria-label="{_e(label)}"><p class="empty">{_e(empty)}</p></div>'
         )
 
     rows = ""
@@ -3872,8 +4257,19 @@ def _working_orders(
         # and land at opposite ends of the card with the label between them —
         # one figure rendered as two fields. Wrapped, the row has exactly two
         # children and reads "QTY   6 (2 filled)".
+        # A stop with nothing held against it. Not filed under protection it
+        # cannot demonstrate, and not passed off as an ordinary entry either —
+        # the bot submits no stop entries, so this is a leg whose position has
+        # gone: closed by hand, or filled and not yet read back.
+        orphan = (
+            '<br><span class="alert">a stop with no position on this reading'
+            "</span>"
+            if kind == "pending" and o.is_stop
+            else ""
+        )
         rows += (
-            f'<tr class="data"><td data-l="Symbol"><b>{_e(o.symbol)}</b></td>'
+            f'<tr class="data"><td data-l="Symbol"><span><b>{_e(o.symbol)}</b>'
+            f"{orphan}</span></td>"
             f'<td data-l="Side">{_e(o.direction.value)}</td>'
             f'<td data-l="Status"><span class="pill hold">{_e(status)}</span></td>'
             f'<td data-l="Qty" class="r num"><span>{o.qty:g}{filled_note}</span></td>'
@@ -3884,26 +4280,36 @@ def _working_orders(
             f'<td data-l="Submitted">{_e(submitted)}</td></tr>'
         )
 
+    caption = (
+        "Each of these exists BECAUSE a position does — a stop or a target on "
+        "the other side of something held — so nothing here is waiting to "
+        "become a trade. One resting here is the hard stop doing its job: the "
+        "guarantee that a loss will not run. "
+        '&ldquo;Needs&rdquo; is how far the market still has to move to the '
+        "trigger; a trigger reading &ldquo;unknown&rdquo; means the broker did "
+        "not report the level, so nobody can say where the stop is and it "
+        "cannot be checked against the journal. There is no way to cancel one "
+        "from here, deliberately."
+        if kind == "protective"
+        else "Entries that have not filled and would become positions. "
+        "&ldquo;Needs&rdquo; is how far the market still has to move to the "
+        "limit; an order placed out of hours rests until the next regular open "
+        "rather than trading now."
+    )
+    cap_id = f"ord-cap-{kind}"
     return (
-        '<section class="block"><h2>Pending orders</h2>'
-        + fixed_reading
         # The caption is already the sentence that describes this table, so it
         # is what names the scroll region — `aria-labelledby` rather than an
         # `aria-label` repeating it, which would be two names to keep in step.
-        + '<div class="scroll" role="region" tabindex="0" '
-        'aria-labelledby="ord-cap"><table>'
-        '<caption id="ord-cap">"Needs" is how far the market still '
-        "has to move — to the limit for a resting entry, to the trigger for a "
-        "stop leg. A stop leg is the other half of the bracket every entry goes "
-        "out as, so one resting here is the hard stop doing its job; a trigger "
-        "reading &ldquo;unknown&rdquo; means the broker did not report the level "
-        "and it cannot be checked against the journal.</caption>"
+        '<div class="scroll" role="region" tabindex="0" '
+        f'aria-labelledby="{cap_id}"><table>'
+        f'<caption id="{cap_id}">{caption}</caption>'
         "<thead><tr><th scope=col>Symbol</th><th scope=col>Side</th>"
         "<th scope=col>Status</th><th scope=col class=r>Qty</th>"
         "<th scope=col class=r>Trigger / limit</th><th scope=col class=r>Market</th>"
         "<th scope=col class=r>Needs</th>"
         "<th scope=col>Submitted</th></tr></thead>"
-        f"<tbody>{rows}</tbody></table></div></section>"
+        f"<tbody>{rows}</tbody></table></div>"
     )
 
 
@@ -4051,6 +4457,34 @@ def _position_tags(
     return " ".join(pills), notes
 
 
+def _from_dream(trade: Trade | None) -> tuple[str, str]:
+    """The motes on a position that came from an adopted dream, and its trace.
+
+    *"Trades that are 'dreams' show differently — a wisp animation or something
+    like orbs floating around it."* A tag would say the same thing in the same
+    voice as every other tag on the deck; the point of this one is that the
+    provenance is felt before it is read.
+
+    **The line naming the dream is not optional decoration.** The motes say THAT
+    a trade came from one; only the link says which, and a treatment that cannot
+    be traced back to a record is decoration pretending to be provenance. It
+    survives `prefers-reduced-motion` for exactly that reason, where the motes
+    do not.
+
+    Returns the attribute for the cell wrapper and the markup to put inside it,
+    because they go in different places and the caller owns the wrapper.
+    """
+    if trade is None or trade.dream_id is None:
+        return "", ""
+    return (
+        ' class="wisped"',
+        '<span class="wisps" aria-hidden="true"><b></b><b></b><b></b><b></b>'
+        "</span>"
+        f'<a class="from-dream" href="/dreaming#dream-{trade.dream_id}">'
+        f"from dream #{trade.dream_id}</a>",
+    )
+
+
 def _positions(
     account: AccountSnapshot,
     open_trades: list[Trade],
@@ -4094,6 +4528,7 @@ def _positions(
         )
         current = p.current_price or p.entry_price
         tags, notes = _position_tags(p.symbol, trade, unexplained)
+        wisp_attr, wisps = _from_dream(trade)
         # `.alert` on an INNER span, never beside `.note` on the `<p>`. Both are
         # single-class rules and `.note` is declared after `.alert`, so
         # `class="note alert"` resolves to pewter and the warning quietly loses
@@ -4110,8 +4545,10 @@ def _positions(
             # content, so a bare `<b>SPY</b>` beside two bare pills is four flex
             # items flung across the card as though they were four fields. Same
             # trap as the "at risk" cell below and as `_working_orders`.
-            f'<tr class="data"><td data-l="Symbol"><span><b>{_e(p.symbol)}</b>'
+            f'<tr class="data"><td data-l="Symbol"><span{wisp_attr}>'
+            f"<b>{_e(p.symbol)}</b>"
             + (f" {tags}" if tags else "")
+            + wisps
             + "</span></td>"
             f'<td data-l="Side">{_e(p.direction.value)}</td>'
             f'<td data-l="Qty" class="r num">{p.qty:g}</td>'
@@ -4872,6 +5309,7 @@ def trades_page(recent: list[Trade], report: JournalReport) -> str:
             if t.rationale
             else ""
         )
+        wisp_attr, wisps = _from_dream(t)
         rows.append(
             # One wrapper per cell, for the reason given in `_working_orders`:
             # under 760px a `td` is a `space-between` flex row, a `<br>` does
@@ -4879,8 +5317,9 @@ def trades_page(recent: list[Trade], report: JournalReport) -> str:
             # flung to opposite ends of the card as though they were separate
             # fields. Wrapped, each cell is one flex item and the `<br>` goes
             # back to doing what it does on the desktop table.
-            f'<tr class="data"><td data-l="Symbol"><span><b>{_e(t.symbol)}</b><br>'
-            f'<span class="note">{_e(t.strategy)}</span></span></td>'
+            f'<tr class="data"><td data-l="Symbol"><span{wisp_attr}>'
+            f"<b>{_e(t.symbol)}</b><br>"
+            f'<span class="note">{_e(t.strategy)}</span>{wisps}</span></td>'
             f'<td data-l="Held"><span>{_e(t.entry_time.date().isoformat())}<br>'
             f'<span class="note">to {_e(exit_date)}</span></span></td>'
             f'<td data-l="Qty" class="r num">{t.qty:g}</td>'
@@ -6340,14 +6779,38 @@ def chat_panel(
 # ----------------------------------------------------------------- dreaming
 
 
-def _hop(hop: Hop) -> str:
+def _hop(hop: Hop, *, shared: bool = False, weakest: bool = False) -> str:
+    """One link, whether anybody checked it, and what it is to this chain.
+
+    `shared` marks a claim two fused parents had in common; `weakest` marks the
+    hop the dreamer named as the one that could kill it. **Both can be true of
+    one hop**, which is why they are ATTRIBUTES rather than second classes:
+    `checked` and `open` already occupy that slot, and stacking more words there
+    is the collision this stylesheet has lost three times.
+
+    The labels are real elements rather than `::after` content, for two reasons
+    that point the same way. Generated content is announced inconsistently by
+    screen readers and by some not at all — the limit this stylesheet already
+    states about `td[data-l]::before` — and one pseudo-element cannot carry two
+    labels, so a hop that was both would silently show one.
+    """
     state = "checked" if hop.checked else "open"
     source = (
         f'<span class="src">{_e(hop.source)}</span>'
         if hop.checked and hop.source
         else '<span class="src">Not checked. Nobody has verified this hop.</span>'
     )
-    return f'<li class="{state}">{_e(hop.claim)}{source}</li>'
+    marks = (' data-shared=""' if shared else "") + (
+        ' data-weakest=""' if weakest else ""
+    )
+    tags = ""
+    if shared:
+        tags += '<i data-tag="shared">shared with both parents</i>'
+    if weakest:
+        tags += '<i data-tag="weakest">the weakest link</i>'
+    if tags:
+        tags = f'<span class="hoptags">{tags}</span>'
+    return f'<li class="{state}"{marks}>{_e(hop.claim)}{source}{tags}</li>'
 
 
 def _chain_diagram(dream: Dream) -> str:
@@ -6371,6 +6834,11 @@ def _chain_diagram(dream: Dream) -> str:
     hops = dream.chain
     if not hops:
         return ""
+
+    # READ, never recomputed. Same rule as the verification badge: a page that
+    # worked out its own answer would disagree with `promotion_for`, and the
+    # rule is the one that decides which shelf this sits on.
+    weakest = dream.resolved_weakest_hop
 
     # Geometry in a fixed viewBox, scaled by CSS. Nodes are evenly spaced and
     # the whole thing is one row: a chain that wrapped would stop reading as a
@@ -6407,14 +6875,25 @@ def _chain_diagram(dream: Dream) -> str:
                     f'<text class="gapmark" x="{mid:.0f}" y="30">?</text>'
                 )
         state = "checked" if hop.checked else "open"
+        # The named weakest link, ringed. An ATTRIBUTE rather than a `weak`
+        # class, because `.weak` is already a bare layout rule for the box
+        # underneath — `.node.weak` would put that word into the modifier
+        # vocabulary and the padded amber panel would style an SVG circle.
+        weak = ' data-weakest=""' if weakest == i + 1 else ""
         parts.append(
-            f'<circle class="node {state}" cx="{x:.0f}" cy="26" r="{node_r:.0f}"/>'
+            f'<circle class="node {state}"{weak} cx="{x:.0f}" cy="26" '
+            f'r="{node_r:.0f}"/>'
             f'<text class="idx" x="{x:.0f}" y="31">{i + 1}</text>'
         )
 
     checked = sum(1 for h in hops if h.checked)
+    named = (
+        f" Hop {weakest} is named as the weakest link."
+        if weakest is not None
+        else ""
+    )
     label = (
-        f"A chain of {len(hops)} hops, of which {checked} are checked. "
+        f"A chain of {len(hops)} hops, of which {checked} are checked.{named} "
         "A broken connector marks a hop nobody has verified."
     )
     return (
@@ -6424,22 +6903,306 @@ def _chain_diagram(dream: Dream) -> str:
     )
 
 
-def _dream(dream: Dream) -> str:
+def _crest(dream_id: int, titles: Mapping[int, str]) -> str:
+    """One parent of a fusion, LINKED and rendered alive.
+
+    Nothing was consumed to make the child — `DreamStore.fuse` says so in its
+    first line and the parents keep everything they had. So a crest is a link to
+    a dream still sitting on its own shelf, never a strikethrough and never
+    greyed: a visual that implied the parents were eaten would be describing a
+    store that does not work that way.
+
+    A title this page has not loaded degrades to the id alone. The id is the
+    fact; the title is the convenience.
+    """
+    title = titles.get(dream_id, "")
+    label = f"#{dream_id} {title}" if title else f"#{dream_id}"
+    return f'<a class="crest" href="#dream-{dream_id}">{_e(label)}</a>'
+
+
+def _symbiosis(dream: Dream, titles: Mapping[int, str]) -> str:
+    """The crests, and the claim the parents had in common.
+
+    The shared hop leads, because it is the reason the fusion exists at all. A
+    fused card that buried it under the chain would be asking a reader to spot
+    the overlap by holding two arguments side by side, which is the work the
+    fusion was supposed to have already done.
+    """
+    if not dream.is_fusion:
+        return ""
+
+    crests = '<span class="join">+</span>'.join(
+        _crest(pid, titles) for pid in dream.parents
+    )
+    out = (
+        '<div class="crests"><span class="sigil"><i></i>fused</span>'
+        + crests
+        + "</div>"
+    )
+
+    shared = "".join(f"<p>{_e(claim)}</p>" for claim in dream.shared_hops)
+    if shared:
+        out += (
+            '<div class="symbiosis"><b>The hop they both stand on</b>'
+            + shared
+            + "<p><small>Both parents are unchanged and still on their own "
+            "shelves. This is a third chain that carries the pair.</small></p>"
+            "</div>"
+        )
+    else:
+        # `plan_fusion` can produce a child with no overlap recorded. Saying so
+        # is better than a heading with nothing under it: the shared hop is the
+        # argument, and its absence is worth reading.
+        out += (
+            '<div class="symbiosis"><b>The hop they both stand on</b>'
+            "<p>None recorded. These two were tied together without a claim in "
+            "common on file, so the reason lives in the working below rather "
+            "than in a shared link.</p></div>"
+        )
+    return out
+
+
+def _verification_note(dream: Dream) -> str:
+    """Why the badge reads the way it does, when a fusion is what capped it.
+
+    The badge itself is `dream.verification` and is never recomputed here. A
+    card that counted `checked` flags for itself would show a better badge than
+    the dream claims — the union of two chains can hold checked hops from one
+    parent and unchecked ones from the other, which counts PARTIAL even when a
+    parent was UNVERIFIED. Two unverified chains must not make a sourced one.
+    """
+    ceiling = dream.verification_ceiling
+    if ceiling is None:
+        return ""
+    return (
+        '<p class="note" style="margin-top:.75rem">Capped at the weakest parent: '
+        f"no better than <b>{_e(str(ceiling))}</b>. Combining two arguments is "
+        "not evidence for either of them.</p>"
+    )
+
+
+def _conditions(dream: Dream) -> str:
+    """What was pre-registered, how much the world has settled, and what it pins.
+
+    `conditions_met` of `len(conditions)` — a count, never a summary. A fusion
+    inherits every condition both parents carried, so it is HARDER to promote
+    than either of them, and the sentence says that rather than letting a long
+    unmet list read as a failing.
+
+    **Which hop a condition settles is rendered, and "none yet" is rendered
+    too.** That is the actionable state: the prophecy shelf is for a dream
+    parked awaiting the link that could kill it, so a threshold on a link
+    nobody doubted grades cleanly and settles nothing. An operator looking at a
+    finished `keep` stuck on the workbench has to be able to see which of its
+    conditions bears on the weakest hop and that none of them does.
+
+    Nothing here is graded on this page: `grade_conditions` settles them against
+    the figures the decision loop recorded, and this renders what it wrote.
+    """
+    if not dream.has_conditions:
+        return ""
+
+    weakest = dream.resolved_weakest_hop
+
+    def row(cond: DreamCondition) -> str:
+        met = ' data-met=""' if cond.fulfilled else ""
+        threshold = (
+            f'<span class="thr">{_e(cond.symbol)} {_e(cond.field)} '
+            f"{_e(cond.op)} {cond.value:g}</span>"
+            if cond.is_checkable
+            else '<span class="thr">No number in this one, so nothing can '
+            "settle it.</span>"
+        )
+        if not cond.settles_hops:
+            pin = '<span class="thr">Settles no hop yet.</span>'
+        else:
+            named = ", ".join(str(h) for h in cond.settles_hops)
+            kills = (
+                " — the weakest link"
+                if weakest is not None and cond.settles(weakest)
+                else ""
+            )
+            pin = (
+                f'<span class="thr">Pinned to '
+                f"{_word(len(cond.settles_hops), 'hop')} {_e(named)}"
+                f"{kills}.</span>"
+            )
+        return f"<li{met}>{_e(cond.text)}{threshold}{pin}</li>"
+
+    met = dream.conditions_met
+    total = len(dream.conditions)
+    head = (
+        f'<p class="condhead">{met} of {total} '
+        f"{_word(total, 'condition')} met</p>"
+    )
+    if dream.is_fusion:
+        head += (
+            '<p class="note">A fusion carries every condition both parents '
+            "wrote, so it has more to clear than either of them did.</p>"
+        )
+    return head + '<ul class="conds">' + "".join(row(c) for c in dream.conditions) + "</ul>"
+
+
+def _stuck(dream: Dream) -> str:
+    """Why a finished `keep` is still on the workbench, in the rule's own words.
+
+    A dream that has been attacked, kept, and will not promote reads as broken
+    rather than incomplete unless the page says which clause is holding it. The
+    sentence is `promotion_for(dream).reason` verbatim — it names the hop,
+    quotes the claim and says what to change — and paraphrasing it here would
+    put a second, shorter account of the rule beside the rule, which is how the
+    two drift apart.
+
+    Rendered only for a KEEP on the workbench that is not moving. Every other
+    "stays put" is an ordinary state the stage pill already reports: a dream
+    still being worked has no verdict, and a fusion is refused on the verdict
+    clause before the weakest-hop one is ever reached — showing it here would
+    read as a defect in something whose whole state is "nobody has attacked
+    this yet".
+    """
+    if dream.vault is not Vault.WORKBENCH or dream.verdict is not DreamVerdict.KEEP:
+        return ""
+    promotion = promotion_for(dream)
+    if promotion.moves:
+        return ""
+    return (
+        '<p class="notyet"><b>Not a prophecy yet</b>'
+        f"{_e(promotion.reason)}</p>"
+    )
+
+
+def _wisp_and_grant(dream: Dream, adoptions: Sequence[Adoption], now: datetime) -> str:
+    """What the dreamer kept, and what the account may trade because of it.
+
+    Two different facts, and only one of them is a permission. The wisp is a
+    trace — the chain, the conditions and the thoughts are all still on the row,
+    nothing was destroyed to produce it — and it is what stops an adopted dream
+    occupying a slot in Grogu's head. The grant is the live thing.
+
+    The motes are `dream_fx`'s, on the wisp and nowhere else on this card: this
+    is the one paragraph on the page describing something that has been let go
+    of, and it should look like it.
+    """
+    out = ""
+    if dream.wisp:
+        out += (
+            '<div class="wisptrace wisped"><span class="wisps"><b></b><b></b>'
+            "<b></b><b></b></span><b>What Grogu kept</b>"
+            f"{_e(dream.wisp)}</div>"
+        )
+
+    for adoption in adoptions:
+        live = adoption.is_live(now)
+        symbols = ", ".join(adoption.symbols_granted) or "nothing"
+        when = (
+            f"expires {_when(adoption.expires_at)}"
+            if adoption.expires_at
+            else "no expiry recorded, which grants nothing"
+        )
+        if adoption.returned_at is not None:
+            state = f"handed back {_when(adoption.returned_at)}"
+        elif live:
+            state = when
+        else:
+            state = f"lapsed — {when}"
+        out += (
+            '<p class="grantline"><span class="lbl">Granted</span>'
+            f'<span class="sym">{_e(symbols)}</span> under '
+            f"{_e(adoption.asset_class or 'no class, so nothing is permitted')}"
+            f' <span class="muted">({_e(state)})</span></p>'
+        )
+        if adoption.return_reason:
+            out += (
+                '<p class="note">Handed back because: '
+                f"{_e(adoption.return_reason)}</p>"
+            )
+    return out
+
+
+SPEAKER_NAMES = {
+    "dreamer": "Grogu",
+    "trader": "The trading agent",
+    "operator": "You",
+    FUSION: "The store",
+}
+
+
+def _transcript(messages: Sequence[DreamMessage]) -> str:
+    """The two agents talking about one dream, in the order they said it.
+
+    Oldest first, because a negotiation read newest-first is a negotiation read
+    backwards. Exchanges that ended in nothing are here too: a dream the trader
+    kept declining is a fact about the dreamer worth having, and a transcript
+    that kept only the successes would be a sales record.
+
+    `speaker` and `kind` are open strings by design, so an unfamiliar one costs
+    a badge rather than a turn — the name falls back to the raw word.
+    """
+    if not messages:
+        return ""
+
+    rows = ""
+    for m in messages:
+        who = m.speaker.lower()
+        name = SPEAKER_NAMES.get(who, m.speaker or "unattributed")
+        rows += (
+            f'<li class="said" data-who="{_e(who)}"><div class="hdr">'
+            f'<span class="name">{_e(name)}</span>'
+            f'<span class="kind">{_e(m.kind)}</span>'
+            f'<span class="at">{_e(_when(m.at))}</span></div>'
+            f"<p>{_e(m.text)}</p></li>"
+        )
+    return (
+        '<details class="talk"><summary>What was said about it, '
+        f"{_count(len(messages), 'turn')}</summary><ol>{rows}</ol></details>"
+    )
+
+
+def _dream(
+    dream: Dream,
+    *,
+    titles: Mapping[int, str] | None = None,
+    fused_into: Sequence[int] = (),
+    transcript: Sequence[DreamMessage] = (),
+    adoptions: Sequence[Adoption] = (),
+    is_new_fusion: bool = False,
+    now: datetime | None = None,
+) -> str:
     """One mini-project, read top to bottom as an argument.
 
     The spark, the chain, the hop most likely to break it, then what was
     decided. Ordering it that way is deliberate: a reader who stops after two
     sections has read the idea and the reason to doubt it, which is the right
     pair to have if you only read two.
+
+    **A fusion is drawn already fused.** The `fused` class is in the markup the
+    server sends; `is_new_fusion` only decides whether the client plays the
+    joining once. Script off, script threw, reduced motion — all render both
+    parent titles and the shared hop as ordinary text, because the alternative
+    (two cards merged by JavaScript) fails to two cards and a lie.
+
+    **It is not an endorsement either.** No "stronger idea" styling, no verdict
+    it has not earned, and no weakest hop inherited from a parent: nobody has
+    attacked the combined chain yet, and that is where it has got to rather than
+    a gap in it.
     """
+    names = titles or {}
+    moment = now or datetime.now(UTC)
     verdict = (
         f'<span class="pill {dream.verdict}">{_e(str(dream.verdict))}</span>'
         if dream.verdict
         else ""
     )
     verification = dream.verification
+    fused = " fused" if dream.is_fusion else ""
+    anchor = f' id="dream-{dream.id}"' if dream.id is not None else ""
+    reveal = (
+        reveal_attrs(is_new=is_new_fusion, fusion_id=dream.id)
+        if dream.is_fusion
+        else ""
+    )
     out = (
-        '<article class="dream"><div class="top">'
+        f'<article class="dream{fused}"{anchor}{reveal}><div class="top">'
         f"<h3>{_e(dream.title)}</h3>"
         f'<span class="pill {dream.stage}">{_e(str(dream.stage))}</span>'
         f"{verdict}"
@@ -6448,16 +7211,34 @@ def _dream(dream: Dream) -> str:
         "</div>"
         f'<div class="spark">{_e(dream.seed)}'
         + (
+            # A fusion's origin is its parents, and `fuse` writes it as prose
+            # naming both titles — which the crests below say better, linked and
+            # by id. Rendering both puts the same sentence on the card three
+            # times, since `_fusion_title` is the pair as well.
             f'<span class="from">Sparked by {_e(dream.origin)}</span>'
-            if dream.origin
+            if dream.origin and not dream.is_fusion
             else ""
         )
         + '</div><div class="body">'
+        + _symbiosis(dream, names)
     )
 
     if dream.chain:
+        shared = set(dream.shared_hops)
+        # Read off the dream, never worked out here. `resolved_weakest_hop`
+        # honours the number the dreamer wrote when it lands inside the chain
+        # and otherwise looks for an exact claim match, and it deliberately does
+        # not clamp: a model answering 9 on a three-hop chain has named no hop.
+        weakest = dream.resolved_weakest_hop
         out += _chain_diagram(dream)
-        out += '<ol class="hops">' + "".join(_hop(h) for h in dream.chain) + "</ol>"
+        out += (
+            '<ol class="hops">'
+            + "".join(
+                _hop(h, shared=h.claim in shared, weakest=(i == weakest))
+                for i, h in enumerate(dream.chain, 1)
+            )
+            + "</ol>"
+        )
     else:
         out += '<p class="note">No chain recorded yet. Still a spark.</p>'
 
@@ -6465,14 +7246,41 @@ def _dream(dream: Dream) -> str:
     # minimum across its links rather than the average, and a reader given one
     # sentence should be given the one that could kill it.
     if dream.weakest_hop:
+        # Which hop the sentence NAMES, when it names one. `None` on a chain
+        # that has hops is "could not establish which", not "there is no weak
+        # link" — the missing-versus-absent rule, and it is exactly the state
+        # that blocks promotion, so it is said in words rather than left as a
+        # hop with no ring round it.
+        unplaced = (
+            ""
+            if dream.resolved_weakest_hop is not None or not dream.chain
+            else " <span class=\"muted\">Which hop this is has not been "
+            "established: the sentence matches no claim in the chain and no "
+            "usable hop number was given, so nothing can be pinned to it.</span>"
+        )
         out += (
-            f'<p class="weak"><b>Weakest hop</b>{_e(dream.weakest_hop)}</p>'
+            f'<p class="weak"><b>Weakest hop</b>{_e(dream.weakest_hop)}{unplaced}</p>'
+        )
+    elif dream.is_fusion:
+        # Deliberately a different sentence from the one below. A fusion is
+        # BORN without a weakest hop and without a verdict — `fuse` refuses to
+        # inherit either, because claiming the combined chain had been examined
+        # would be back-dating an attack nobody has made. That is a state, not a
+        # shortfall, and the copy has to read as one.
+        out += (
+            '<p class="weak"><b>Weakest hop</b>Nobody has attacked this yet. A '
+            "fusion starts with no weakest hop and no verdict on purpose — "
+            "neither parent's is inherited, because the combined chain has not "
+            "been examined and a chain without a stated weakest link has not "
+            "been attacked yet.</p>"
         )
     elif dream.chain:
         out += (
             '<p class="weak"><b>Weakest hop</b>Not named. A chain without a '
             "stated weakest link has not been attacked yet.</p>"
         )
+
+    out += _verification_note(dream)
 
     if dream.trigger:
         out += f'<p class="trigger"><b>Watching for:</b> {_e(dream.trigger)}</p>'
@@ -6485,11 +7293,35 @@ def _dream(dream: Dream) -> str:
             "named. A kept idea with no trigger is a note, not a watch.</span></p>"
         )
 
+    out += _conditions(dream)
+    out += _stuck(dream)
+
     if dream.instruments:
         out += (
             '<p class="trigger"><b>About:</b> '
             + _e(", ".join(dream.instruments))
             + ' <span class="muted">(subject matter, not an instruction)</span></p>'
+        )
+
+    if dream.symbols and dream.vault is not Vault.ADOPTED:
+        # What it CLAIMS, which is not yet what anything permits. Only an
+        # adoption row grants, and only while it is live.
+        out += (
+            '<p class="trigger"><b>Claims:</b> '
+            + _e(", ".join(dream.symbols))
+            + ' <span class="muted">(what an adoption would permit, not a '
+            "permission)</span></p>"
+        )
+
+    out += _wisp_and_grant(dream, adoptions, moment)
+
+    if fused_into:
+        named = ", ".join(
+            f'<a href="#dream-{i}">#{i}</a>' for i in sorted(set(fused_into))
+        )
+        out += (
+            f'<p class="lineage">Fused into {named} — unchanged and still '
+            "here.</p>"
         )
 
     if dream.thoughts:
@@ -6502,6 +7334,8 @@ def _dream(dream: Dream) -> str:
             f'<details class="stream"><summary>The working, '
             f"{_count(len(dream.thoughts), 'step')}</summary><ol>{rows}</ol></details>"
         )
+
+    out += _transcript(transcript)
 
     return out + "</div></article>"
 
@@ -6548,11 +7382,11 @@ def _ledger(ledger: DreamLedger) -> str:
     return (
         '<section class="block"><h2>What it has learned about its own thinking</h2>'
         '<p class="note" style="max-width:68ch;margin-bottom:1rem">Counted over the '
-        "chains below. Deliberately nothing about what any idea would have "
-        "earned: the dreamer does not learn from profit and loss, because forty "
-        "trades is noise and a model shown three losses will confidently change "
-        "approach. These are facts about the reasoning, true regardless of how a "
-        "trade went, and they reach you rather than it.</p>"
+        "chains below, and deliberately nothing about what any of them would "
+        "have earned. The dreamer never sees profit and loss: forty trades is "
+        "noise, and a model shown three losses will confidently change "
+        "approach. These are facts about the reasoning — true however a trade "
+        "went — and they reach you rather than it.</p>"
         '<div class="grid g4">'
         + stat("Hops sourced", rate(ledger.sourcing_rate), "of every hop recorded")
         + stat(
@@ -6614,6 +7448,108 @@ WORKED_EXAMPLE = """
 """
 
 
+# Grogu at the crystal ball, for the shelf where a chain stops being rearranged
+# and becomes a claim the world can settle. Primitives rather than an image, for
+# the reason `DREAMER` is: it inherits the palette, animates in CSS and costs no
+# request. `aria-hidden`, because it is a mood — everything it says is said in
+# words beside it.
+ORACLE = """
+<svg class="oracle" viewBox="0 0 120 120" aria-hidden="true">
+  <ellipse class="ear" cx="24" cy="30" rx="14" ry="6.5"/>
+  <ellipse class="ear" cx="96" cy="30" rx="14" ry="6.5"/>
+  <path class="robe" d="M42 44c10 6 26 6 36 0l5 24H37Z"/>
+  <path class="head" d="M60 6c13 0 21 9 21 21s-9 21-21 21-21-9-21-21 8-21 21-21Z"/>
+  <ellipse class="eye" cx="52" cy="29" rx="4" ry="5"/>
+  <ellipse class="eye" cx="68" cy="29" rx="4" ry="5"/>
+  <path class="stand" d="M46 110h28M52 110l8-5M68 110l-8-5"/>
+  <circle class="orb" cx="60" cy="88" r="18"/>
+  <path class="arm" d="M43 56c-8 8-10 18-1 26M77 56c8 8 10 18 1 26"/>
+  <circle class="hand" cx="43" cy="83" r="3.4"/>
+  <circle class="hand" cx="77" cy="83" r="3.4"/>
+  <circle class="glint" cx="52" cy="81" r="2.8"/>
+</svg>
+"""
+
+
+#: The five shelves, in the order a dream travels them, with the sentence that
+#: says what being on one MEANS.
+#:
+#: Every shelf appears whether or not anything is on it. `DreamSummary.by_vault`
+#: keys all five for the same reason: a missing row reads as "no data" and a
+#: nought reads as a stated fact, and on the adopted shelf — where a row is a
+#: live symbol permission — those are very different claims.
+SHELVES: tuple[tuple[Vault, str, str, str, str], ...] = (
+    (
+        Vault.WORKBENCH,
+        "Workbench",
+        "still being turned over",
+        "Grogu's table. Unfinished by definition, and the one place to follow "
+        "something silly and find out that it was silly.",
+        "Nothing on the table.",
+    ),
+    (
+        Vault.PROPHECY,
+        "Prophecy vault",
+        "waiting on the world",
+        "A chain he has stopped rearranging. It has become a claim the world "
+        "can settle without him, so it carries a condition with a number in "
+        "it — a threshold that names another figure tests a level nobody ever "
+        "saw.",
+        "Empty. Nothing has become a claim the world can settle yet.",
+    ),
+    (
+        Vault.VAULT,
+        "Dream vault",
+        "the trading agent can see these",
+        "The only shelf the trading agent can see, so putting something here "
+        "is an act rather than a filing decision. What it buys is small: "
+        "permission to consider some symbols for a while. Not a position, not "
+        "a size, not a direction.",
+        "Empty, and that is a complete answer rather than a missing one — the "
+        "trading agent has nothing on offer.",
+    ),
+    (
+        Vault.ADOPTED,
+        "Adopted",
+        "carrying a live permission",
+        "Where he lets go. Nothing is destroyed — the chain, the conditions "
+        "and the working all stay on the record — it simply stops taking up a "
+        "slot in his head. His again only if the trading agent hands it back "
+        "and says why.",
+        "Nothing adopted. No dream is permitting a symbol right now.",
+    ),
+    (
+        Vault.ARCHIVE,
+        "Archive",
+        "finished with",
+        "Done with. A chain that fell apart on the second hop is a good "
+        "outcome; what is kept is which hop broke, so the same idea does not "
+        "arrive next month wearing a different headline.",
+        "Nothing archived yet.",
+    ),
+)
+
+
+def _shelf_rail(summary: DreamSummary) -> str:
+    """Where everything is, before any of it is read.
+
+    The spine of the page, because WHERE a dream is held is what decides what it
+    can do: only the dream vault is visible to the trading agent, and only an
+    adopted dream carries a permission. A flat list of cards cannot say that.
+    """
+    tiles = ""
+    for vault, name, short, _lede, _empty in SHELVES:
+        count = summary.by_vault.get(vault, 0)
+        empty = ' data-empty=""' if not count else ""
+        tiles += (
+            f'<a class="shelf" href="#shelf-{vault}" data-vault="{vault}"{empty}>'
+            f'<span class="n">{_e(name)}</span>'
+            f'<span class="c">{count}</span>'
+            f'<span class="s">{_e(short)}</span></a>'
+        )
+    return f'<div class="shelfrail">{tiles}</div>'
+
+
 def dreaming_page(
     dreams: list[Dream],
     summary: DreamSummary,
@@ -6623,22 +7559,49 @@ def dreaming_page(
     hermes_available: bool,
     soul_found: bool,
     isolated: bool = False,
+    titles: Mapping[int, str] | None = None,
+    fused_into: Mapping[int, Sequence[int]] | None = None,
+    transcripts: Mapping[int, Sequence[DreamMessage]] | None = None,
+    adoptions: Mapping[int, Sequence[Adoption]] | None = None,
+    marker: Marker | None = None,
+    now: datetime | None = None,
 ) -> str:
-    """The dreamer's deck: what it is thinking about, and a way to talk to it.
+    """The dreamer's deck: where every idea is being held, and a way to talk to it.
 
     The warning at the top is not decoration and is not dismissible. Everything
     on this page is speculation, produced by a model that is good at sounding
     certain, on a surface that otherwise reports measured facts about real
     money. A reader arriving mid-page has to be told which of the two they are
     looking at, in the same way the public site labels its invented figures.
+
+    **The page is organised by SHELF rather than by recency**, because the shelf
+    is the consequential fact: the dream vault is the only one the trading agent
+    can see and the adopted shelf is the only one carrying a live symbol
+    permission. A flat list sorted by date cannot say either of those.
+
+    `marker` is `seen.py`'s answer to "when was the operator last provably shown
+    the state of the world", and the ONLY thing it decides here is whether a
+    fusion plays its joining animation. **A caller with no marker gets no
+    animation**: `Marker.is_new` answers `None` on a first visit rather than
+    True, and a vault of dreams all animating at once on a first ever load is a
+    fireworks display rather than a notification.
     """
+    names = dict(titles or {})
+    for dream in dreams:
+        if dream.id is not None:
+            names.setdefault(dream.id, dream.title)
+    children = fused_into or {}
+    talk = transcripts or {}
+    grants = adoptions or {}
+    moment = now or datetime.now(UTC)
+
     body = (
         '<div class="dream-head">'
         + DREAMER
         + '<div class="who"><p class="eyebrow">Grogu</p><h1>Dreaming</h1>'
-        "<p class=note>Second-order ideas, thought about in public. It reaches "
-        "for connections nobody asked for, records the chain link by link, "
-        "attacks it, and reaches a verdict.</p></div></div>"
+        "<p class=note>Two hops away from whatever anyone is watching. Every "
+        "link is a physical claim that can be checked on its own, and any one "
+        "of them can break the whole thing.</p></div></div>"
     )
 
     # Ahead of everything, including the counts. The single most important fact
@@ -6656,8 +7619,8 @@ def dreaming_page(
         "no stop and no side, so nothing recorded here can describe an order at "
         "all: the decision loop proposes and <code>src/bot/risk.py</code> vets "
         "what it proposes, and none of this is in either path. An idea worth "
-        "acting on is read by a person and acted on through the ordinary "
-        "machinery, in their own time.</div>"
+        "acting on is read by a person and goes through the ordinary machinery, "
+        "in their own time.</div>"
     )
 
     if enabled and hermes_available:
@@ -6687,52 +7650,127 @@ def dreaming_page(
             "like nothing in particular.</div>"
         )
 
+    body += _shelf_rail(summary)
+
+    # The verdicts, kept as a line rather than four tiles. They describe how the
+    # THINKING ended; the shelves above describe where the dream is being held,
+    # and a chain can be at any stage in any vault. The rail is the spine, so
+    # this sits under it as a sentence.
     body += (
-        '<div class="grid g4" style="margin-top:1.5rem">'
-        + stat("Open", str(summary.open_dreams), "still being thought about")
-        + stat("Kept", str(summary.kept), "chain held, worth watching")
-        + stat("Parked", str(summary.parked), "interesting, not now")
-        + stat("Dropped", str(summary.dropped), "broke on inspection")
-        + "</div>"
+        f'<p class="note" style="margin-top:.75rem">{summary.open_dreams} still '
+        f"open, {summary.kept} kept, {summary.parked} parked, {summary.dropped} "
+        "dropped. "
+        + (
+            f"{_count(summary.fusions, 'is a fusion', 'are fusions')} — chains "
+            "that turned out to rest on the same claim."
+            if summary.fusions
+            else "Nothing has been fused yet."
+        )
+        + "</p>"
     )
 
     body += _ledger(DreamLedger.of(dreams))
 
-    body += '<section class="block"><h2>Thoughts</h2>'
-    if dreams:
-        if summary.unverified:
-            body += (
-                f'<p class="note" style="margin-bottom:1rem">{summary.unverified} of '
-                f"{summary.total} rest entirely on hops nobody has checked. They are "
-                "marked <span class=\"pill unverified\">unverified</span> and that "
-                "is a statement about evidence, not about how likely they are.</p>"
-            )
-        body += "".join(_dream(d) for d in dreams)
-    else:
+    if not dreams:
         body += (
-            '<p class="note" style="margin-bottom:1rem">Nothing recorded yet. The '
-            "dreamer writes here as it works; until then, here is the shape one "
-            "takes.</p>" + WORKED_EXAMPLE
+            '<section class="block"><h2>Nothing on any shelf yet</h2>'
+            '<p class="note" style="margin-bottom:1rem">The dreamer writes here '
+            "as it works. Here is the shape one takes.</p>" + WORKED_EXAMPLE
+            + "</section>"
         )
-    body += "</section>"
+        return body + _dreaming_talk(
+            enabled=enabled,
+            token=token,
+            hermes_available=hermes_available,
+            isolated=isolated,
+        )
 
-    body += '<section class="block"><h2>Talk to it</h2>'
+    if summary.unverified:
+        body += (
+            f'<p class="note" style="margin-top:1rem">{summary.unverified} of '
+            f"{summary.total} rest entirely on hops nobody has checked. They are "
+            "marked <span class=\"pill unverified\">unverified</span>, which is a "
+            "statement about evidence rather than about how likely they are.</p>"
+        )
+
+    by_vault: dict[Vault, list[Dream]] = {v: [] for v, *_ in SHELVES}
+    for dream in dreams:
+        by_vault.setdefault(dream.vault, []).append(dream)
+
+    for vault, name, _short, lede, empty in SHELVES:
+        held = by_vault.get(vault, [])
+        heading = (
+            f'<section class="block" id="shelf-{vault}"><div class="shelf-head">'
+            + (ORACLE if vault is Vault.PROPHECY else "")
+            + f"<div><h2>{_e(name)}</h2>"
+            f'<p class="lede">{_e(lede)}</p></div></div>'
+        )
+        if not held:
+            # A stated nought, never a skipped shelf.
+            body += heading + f'<p class="note">{_e(empty)}</p></section>'
+            continue
+
+        cards = "".join(
+            _dream(
+                dream,
+                titles=names,
+                fused_into=children.get(dream.id or 0, ()),
+                transcript=talk.get(dream.id or 0, ()),
+                adoptions=grants.get(dream.id or 0, ()),
+                is_new_fusion=bool(
+                    marker.is_new(dream.created_at) if marker else False
+                ),
+                now=moment,
+            )
+            for dream in held
+        )
+        # The dream vault gets a door drawn round it, because it is the one
+        # shelf whose contents are visible to something that can trade.
+        if vault is Vault.VAULT:
+            cards = f'<div class="vaultdoor">{cards}</div>'
+        body += heading + cards + "</section>"
+
+    return body + _dreaming_talk(
+        enabled=enabled,
+        token=token,
+        hermes_available=hermes_available,
+        isolated=isolated,
+    )
+
+
+def _dreaming_talk(
+    *, enabled: bool, token: str, hermes_available: bool, isolated: bool
+) -> str:
+    """The panel at the foot of the page, and the two ways it can be off.
+
+    Its own function because the page returns early on an empty store, and the
+    conversation is worth having whether or not anything has been recorded —
+    the first dream has to start somewhere.
+
+    **`DREAM_FX_SCRIPT` is emitted here, at the end of the document.** It plays
+    the joining on a fusion the server marked new and does nothing else; every
+    fused card is already fused in the markup above it, so a browser that never
+    runs this shows the same page without the animation.
+    """
+    out = '<section class="block"><h2>Talk to it</h2>'
     if not enabled:
-        return body + (
+        return out + (
             '<div class="banner warn"><b>Chat is off</b>'
             "Set <code>DASHBOARD_CHAT_TOKEN</code> in the environment to enable "
-            "it. The thoughts above are rendered from "
+            "it. The shelves above are rendered from "
             "<code>data/dreams.db</code> and do not need it.</div></section>"
+            + DREAM_FX_SCRIPT
         )
     if not hermes_available:
-        return body + (
+        return out + (
             '<div class="banner crit"><b>Hermes not found</b>'
             "The token is set, but the Hermes binary is not installed where this "
             "process expects it. See <code>docs/HERMES_SETUP.md</code>.</div></section>"
+            + DREAM_FX_SCRIPT
         )
 
     return (
-        body
+        out
         + chat_panel(
             token=token,
             soul="grogu",
@@ -6760,6 +7798,7 @@ def dreaming_page(
             avatar=True,
         )
         + "</section>"
+        + DREAM_FX_SCRIPT
     )
 
 

@@ -47,7 +47,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Resp
 from .. import news_history
 from ..audit import AuditLog
 from ..config import DEFAULT_RULES_PATH, Env, Rules, load_rules
-from ..dreaming import DreamStore, DreamSummary
+from ..dreaming import Adoption, DreamMessage, DreamStore, DreamSummary
 from ..journal import Journal
 from ..market_clock import market_state
 from ..metrics import build_report
@@ -578,7 +578,7 @@ def build_app(
         return _page("Analytics", "/analytics", render.analytics_page(report))
 
     @app.get("/dreaming", response_class=HTMLResponse)
-    def dreaming() -> str:
+    def dreaming(request: Request) -> str:
         """The dreamer's deck.
 
         Read-only, like every other GET here, and its store is a different file
@@ -588,11 +588,63 @@ def build_app(
         rather than a 500 — this is the surface an operator opens to browse,
         and a broken speculative-notes table is not a reason to show them an
         error page.
+
+        **The seen cookie is READ here and never re-stamped.** The marker's
+        whole property is that it advances only to a moment the operator was
+        provably shown the state of the world, and what they were shown here is
+        a shelf of hypotheses — advancing it would mark the Board's decisions
+        and closes as seen on the strength of a visit to a different page. So
+        this takes the marker, uses it to decide whether a fusion is new enough
+        to animate, and leaves it exactly where it was.
+
+        Everything the page needs beyond the dreams themselves is gathered here
+        rather than in the renderer, for the reason `news_windows` is resolved
+        outside the risk gate: a render that opened a database is a render that
+        can fail, and this one already degrades to an empty deck.
         """
         try:
-            recent = resolved_dreams.recent(limit=25)
+            recent = resolved_dreams.recent(limit=40)
         except sqlite3.Error:
             recent = []
+
+        titles: dict[int, str] = {}
+        # Which fusions each dream on this page is a parent OF.
+        #
+        # Inverted from the children's own `parents` in one pass over what is
+        # already loaded, rather than by calling `DreamStore.children_of` per
+        # card: that answers for one id and SCANS the table to do it, so a card
+        # per row would be one full scan per dream on the page.
+        #
+        # The window is what it costs. A parent whose fusion has scrolled out of
+        # `recent` shows no back-link here — but `fuse` writes a note into every
+        # parent's transcript naming the child, and that transcript is rendered,
+        # so the relationship is never lost, only the shortcut to it.
+        children: dict[int, list[int]] = {}
+        transcripts: dict[int, list[DreamMessage]] = {}
+        grants: dict[int, list[Adoption]] = {}
+        try:
+            for dream in recent:
+                if dream.id is None:
+                    continue
+                titles[dream.id] = dream.title
+                transcripts[dream.id] = resolved_dreams.messages(dream.id)
+                for parent in dream.parents:
+                    children.setdefault(parent, []).append(dream.id)
+            # A parent that is not itself on this page still needs its title, or
+            # a fusion's crest reads as a bare id.
+            for wanted in {p for d in recent for p in d.parents} - set(titles):
+                parent_dream = resolved_dreams.get(wanted)
+                if parent_dream is not None:
+                    titles[wanted] = parent_dream.title
+            # One query for every adoption ever made, grouped here. Per-dream
+            # would be one query per card for a table with a handful of rows.
+            for adoption in resolved_dreams.adoptions():
+                grants.setdefault(adoption.dream_id, []).append(adoption)
+        except sqlite3.Error:
+            # Same failure direction as the read above: the page loses the
+            # trimmings and keeps the dreams, rather than becoming a 500.
+            pass
+
         return _page(
             "Dreaming",
             "/dreaming",
@@ -607,6 +659,11 @@ def build_app(
                 hermes_available=dreamer.available or bridge.available,
                 isolated=dreamer.available,
                 soul_found=load_soul(GROGU).found,
+                titles=titles,
+                fused_into=children,
+                transcripts=transcripts,
+                adoptions=grants,
+                marker=seen.from_cookies(request.cookies).marker,
             ),
         )
 

@@ -29,6 +29,7 @@ from bot.models import (
     MarketInputs,
     OrderProposal,
     OrderResult,
+    Position,
     PositionAction,
     PositionPlan,
     RiskVerdict,
@@ -838,14 +839,27 @@ def test_a_resting_order_is_shown_with_the_distance_to_its_limit(journal, dreams
     finally:
         main_mod.build_broker = original
 
-    assert "Pending orders" in body
+    # An entry on a symbol nothing is held in. "Pending" is a true claim about
+    # exactly this row — it will become a position — and about nothing else on
+    # the Board, which is why the word is reserved for this group.
+    assert "Pending entries" in body
     assert "641.2000" in body          # the limit
     assert "648.0200" in body          # the market
     assert "% away" in body            # and how far it has to travel
 
 
 def test_no_resting_orders_says_so(client):
-    assert "Nothing resting at the broker" in client.get("/").text
+    """Both groups state their own nought, and they say different things.
+
+    "Nothing is protecting anything" and "no entry is waiting" are different
+    facts, and one sentence covering both was what let a live stop leg read as
+    an order stuck in a queue.
+    """
+    body = client.get("/").text
+
+    assert "No entries pending" in body
+    assert "not part-way into a new position" in body
+    assert "nothing to protect" in body
 
 
 def test_the_stylesheet_carries_no_control_characters():
@@ -2437,7 +2451,34 @@ def _order(
     )
 
 
+def _position(
+    *, direction: Direction = Direction.SELL, symbol: str = "SPY"
+) -> Position:
+    """One held position, so a resting order can be classified against it.
+
+    A protective leg is one that would REDUCE something held — the buy stop
+    over a short, the sell target under a long. Without a position on file the
+    same order is an entry, which is exactly the distinction the two groups on
+    the Board exist to make.
+    """
+    return Position(
+        symbol=symbol,
+        direction=direction,
+        qty=21,
+        entry_price=773.32,
+        opened_at=ENTRY,
+        current_price=773.10,
+    )
+
+
 def _rows(body: str) -> str:
+    """The first table body on the page.
+
+    With the orders split into two groups this is the PROTECTIVE table whenever
+    it has rows, and the pending one when it does not — an empty group renders a
+    sentence rather than a `<tbody>`. Every caller below passes exactly one
+    order, so there is only ever one table with rows in it.
+    """
     return body.split("<tbody>")[1]
 
 
@@ -2467,10 +2508,15 @@ def test_a_readable_stop_and_an_unreadable_one_do_not_render_identically():
     the leg rule 3 depends on and nobody can read its level". Both used to print
     the same word."""
     prices = {"SPY": 773.10}
+    # Held short, so both legs are PROTECTIVE and the difference under test is
+    # the trigger price rather than which group they land in.
+    held = [_position(direction=Direction.SELL)]
     known = render._working_orders(
-        [_order(stop_price=820.0, order_type="stop")], prices
+        [_order(stop_price=820.0, order_type="stop")], prices, positions=held
     )
-    unknown = render._working_orders([_order(order_type="stop")], prices)
+    unknown = render._working_orders(
+        [_order(order_type="stop")], prices, positions=held
+    )
 
     assert known != unknown
     # Loud, not muted: this is a value that should exist and does not.
@@ -2523,15 +2569,22 @@ def test_the_distance_to_a_stop_is_the_mirror_of_the_distance_to_a_limit():
     assert "alert" in _rows(through)
 
 
-def test_the_pending_orders_caption_no_longer_claims_limit_orders_only():
+def test_the_protective_caption_says_the_leg_is_doing_its_job():
     """It was true when nothing sent a stop to the broker. Every entry is a
-    bracket now, so a stop leg always rests there."""
-    body = render._working_orders([_order(limit_price=641.20)], {"SPY": 648.02})
+    bracket now, so a stop leg always rests there — and the operator has twice
+    read that leg as clutter. The caption over the group it sits in has to say
+    what it is FOR, not merely what it is."""
+    body = render._working_orders(
+        [_order(stop_price=820.0, order_type="stop")],
+        {"SPY": 773.10},
+        positions=[_position(direction=Direction.SELL)],
+    )
     # `<caption` rather than `<caption>`: it carries an id now, because it is
     # what names the scroll region around it via `aria-labelledby`.
     caption = body[body.index("<caption") : body.index("</caption>")]
 
-    assert "stop leg" in caption
+    assert "hard stop doing its job" in caption
+    assert "BECAUSE a position does" in caption
     assert "limit orders only" not in (render._working_orders.__doc__ or "")
 
 
@@ -3139,7 +3192,10 @@ def test_a_section_the_stream_cannot_repaint_carries_its_own_reading(
     """
     body = client.get("/").text
 
-    assert body.count("This section does not repaint") == 2
+    # Three now: the positions table and BOTH order groups. Neither order
+    # table repaints, so one note across the pair would leave the second
+    # looking live.
+    assert body.count("This section does not repaint") == 3
     assert "Reload for a newer one." in body
     # Fixed on purpose: the whole claim is that this one does NOT change, so it
     # must not be marked for the stream.
@@ -3147,8 +3203,9 @@ def test_a_section_the_stream_cannot_repaint_carries_its_own_reading(
         assert not chunk.endswith("data-live-read")
 
     positions = body.index("<h2>Open positions</h2>")
-    orders = body.index("<h2>Pending orders</h2>")
-    for start in (positions, orders):
+    protective = body.index("<h2>Stop losses and targets in force</h2>")
+    pending = body.index("<h2>Pending entries</h2>")
+    for start in (positions, protective, pending):
         assert "does not repaint" in body[start : start + 700]
 
 
@@ -3789,3 +3846,651 @@ def test_a_recorded_tighten_is_not_dressed_as_a_warning():
     # And never both classes on one element: `.note` is declared after `.alert`,
     # so the two together resolve to pewter and the warning loses its colour.
     assert 'class="note alert"' not in body
+
+
+# ============================================================== resting orders
+#
+# The operator has now twice read the same live stop leg as debris. The first
+# time an SDK enum rendered it as status `other`; the second time the HEADING
+# over it said "Pending orders", which claims the agent is part-way into a new
+# trade. A heading is a claim, and a wrong one is not fixed by the row
+# underneath being correct.
+
+
+def test_a_protective_leg_is_never_filed_under_pending():
+    """"Pending" infers the agent is about to put another trade down.
+
+    A resting stop is the opposite claim — it is the guarantee that a loss will
+    not run. Filing it under a heading that says something is about to happen is
+    what made a live stop leg read as clutter.
+    """
+    body = render._working_orders(
+        [_order(stop_price=820.0, order_type="stop")],
+        {"SPY": 773.10},
+        positions=[_position(direction=Direction.SELL)],
+    )
+
+    protective = body.index("<h2>Stop losses and targets in force</h2>")
+    pending = body.index("<h2>Pending entries</h2>")
+    assert protective < pending
+    # The stop row is above the pending heading, so it is in the other group.
+    assert body.index("820.0000") < pending
+    assert "No entries pending" in body[pending:]
+    assert "Pending orders" not in body
+
+
+def test_a_take_profit_leg_is_protective_even_though_it_is_a_limit_order():
+    """The bracket's other child is a plain limit order and is every bit as
+    much a consequence of the position as the stop is. Classifying on `is_stop`
+    would leave it in the pending list, where "waiting to become a position" is
+    exactly the wrong reading of an order that closes one."""
+    body = render._working_orders(
+        [_order(limit_price=740.0, order_type="limit")],
+        {"SPY": 773.10},
+        positions=[_position(direction=Direction.SELL)],
+    )
+
+    assert body.index("740.0000") < body.index("<h2>Pending entries</h2>")
+
+
+def test_an_entry_on_a_symbol_nothing_is_held_in_stays_pending():
+    """The other half of the rule. Without a position there is nothing for an
+    order to be the other side of, so it is an entry and "pending" is true."""
+    body = render._working_orders(
+        [_order(limit_price=641.20, order_type="limit")], {"SPY": 648.02}
+    )
+
+    assert body.index("641.2000") > body.index("<h2>Pending entries</h2>")
+
+
+def test_an_order_adding_to_a_position_is_not_called_protective():
+    """A buy resting under a long adds to it. Only an order that would REDUCE
+    what is held is protection, which is why the classification reads the
+    direction rather than assuming any order on a held symbol is a leg."""
+    body = render._working_orders(
+        [_order(direction=Direction.BUY, limit_price=500.0, order_type="limit")],
+        {"SPY": 773.10},
+        positions=[_position(direction=Direction.BUY)],
+    )
+
+    assert body.index("500.0000") > body.index("<h2>Pending entries</h2>")
+
+
+def test_a_protective_leg_states_the_level_it_triggers_at():
+    """`WorkingOrder.stop_price` and `order_type` exist for exactly this. A leg
+    whose trigger cannot be read is most of the way to no stop at all."""
+    body = render._working_orders(
+        [_order(stop_price=820.0, order_type="stop")],
+        {"SPY": 773.10},
+        positions=[_position(direction=Direction.SELL)],
+    )
+
+    assert "820.0000" in body
+    assert "% away" in body
+
+
+def test_an_unreadable_trigger_in_the_protective_group_is_its_own_state():
+    """On a plain limit order a missing stop price is correct and dull. On the
+    leg holding rule 3 up it means nobody can say where the stop is, and the two
+    must not print the same blank."""
+    body = render._working_orders(
+        [_order(order_type="stop")],
+        {"SPY": 773.10},
+        positions=[_position(direction=Direction.SELL)],
+    )
+
+    assert '<span class="alert">unknown</span>' in body
+    assert "nobody can say where the stop is" in body
+
+
+def test_a_position_with_no_protective_leg_is_loud():
+    """Grouped, the absence is legible for the first time. In one list an open
+    position with nothing resting behind it was invisible."""
+    from bot.position_actions import UnexplainedMoveReport
+
+    body = render._working_orders(
+        [],
+        {"SPY": 773.10},
+        positions=[_position(direction=Direction.SELL)],
+        unexplained=UnexplainedMoveReport(positions_without_a_resting_stop=["SPY"]),
+    )
+
+    assert '<span class="alert">SPY is open with no stop order' in body
+
+
+def test_an_unreadable_order_book_is_not_an_empty_one():
+    """`AlpacaBroker.get_open_orders` catches its own errors and returns `[]`,
+    so an outage arrives here indistinguishable from a clean book. Reporting
+    "nothing resting" would be an all-clear nobody established — the
+    `FinnhubCalendar.is_degraded` rule at the order book."""
+    from bot.position_actions import UnexplainedMoveReport
+
+    body = render._working_orders(
+        [],
+        {"SPY": 773.10},
+        positions=[_position(direction=Direction.SELL)],
+        unexplained=UnexplainedMoveReport(can_check=False),
+    )
+
+    assert "could not be read" in body
+    assert "Nothing is resting behind the open positions." not in body
+    assert "No entries pending." not in body
+
+
+def test_a_stop_with_no_position_behind_it_is_named_rather_than_assumed():
+    """The bot submits no stop entries, so a stop with nothing held is a leg
+    whose position has gone — closed by hand, or filled and not read back. It is
+    filed under neither heading silently."""
+    body = render._working_orders(
+        [_order(direction=Direction.SELL, stop_price=201.0, order_type="stop")],
+        {"SPY": 205.0},
+    )
+
+    assert "a stop with no position on this reading" in body
+
+
+def test_the_board_offers_no_way_to_cancel_a_resting_stop():
+    """There is no `cancel_order` on the `Broker` protocol, and a button that
+    took a stop off a dashboard would be the shortest route in this repository
+    to an unprotected live position."""
+    body = render._working_orders(
+        [_order(stop_price=820.0, order_type="stop")],
+        {"SPY": 773.10},
+        positions=[_position(direction=Direction.SELL)],
+    ).lower()
+
+    for control in ("<form", "<button", "cancel_order", 'href="/cancel'):
+        assert control not in body
+
+
+# =================================================================== symbiosis
+#
+# A fusion is a STATE the store reached in the background, and the animation is
+# a notification about it. The card is rendered already fused; the client may
+# only ever add the transient `joining` class.
+
+
+def _fusion_pair(store: DreamStore) -> tuple[int, list[int]]:
+    """Two dreams sharing a claim, fused. Returns (child_id, parent_ids)."""
+    from bot.dreaming import DREAMER, Dream, Hop, VaultCaps
+
+    shared = "Transits are rationed by draught, and draught is rainfall."
+    a = store.save(
+        Dream(
+            title="Rainfall and the landed cost of everything",
+            seed="Nobody reads a lake.",
+            chain=[
+                Hop(shared, checked=True, source="ACP advisories"),
+                Hop("Marginal cargo moves to the long route."),
+            ],
+        )
+    )
+    b = store.save(
+        Dream(
+            title="Separation capacity is the bottleneck",
+            seed="Everyone counts deposits.",
+            chain=[
+                Hop(shared, checked=True, source="ACP advisories"),
+                Hop("Capacity outside one country is a short list."),
+            ],
+        )
+    )
+    result = store.fuse(
+        [a, b], by=DREAMER, caps=VaultCaps(workbench=50, prophecy=50, vault=50)
+    )
+    assert result.ok, result.detail
+    assert result.dream_id is not None
+    return result.dream_id, [a, b]
+
+
+def test_a_fusion_card_is_fused_in_the_markup_the_server_sends(client, dreams):
+    """The fail-to-visible rule where it is easiest to get wrong.
+
+    It is very natural to draw two cards and have JavaScript merge them, and
+    that fails to two cards and a lie. Script off, script threw, reduced motion:
+    all show a fused card with both parent titles and the shared hop as text.
+    """
+    child, parents = _fusion_pair(dreams)
+    body = client.get("/dreaming").text
+
+    assert f'<article class="dream fused" id="dream-{child}"' in body
+    assert "The hop they both stand on" in body
+    assert "Transits are rationed by draught" in body
+    for parent in parents:
+        assert f'href="#dream-{parent}"' in body
+
+
+def test_a_parent_renders_alive_and_linked(client, dreams):
+    """`fuse` consumes nothing and the parents keep everything they had. A crest
+    greyed out or struck through would describe a store that does not work that
+    way."""
+    _child, parents = _fusion_pair(dreams)
+    body = client.get("/dreaming").text
+
+    crest = body[body.index('<a class="crest"') :][:400]
+    assert "text-decoration:line-through" not in render.STYLES
+    assert "Both parents are unchanged and still on their own shelves" in body
+    assert f"#{parents[0]}" in crest
+
+
+def test_a_fusion_badge_is_read_and_never_recomputed(dreams):
+    """A card that counted `checked` flags for itself would show a better badge
+    than the dream claims. The union of two chains can read PARTIAL when a
+    parent was UNVERIFIED, and combining two arguments is not evidence for
+    either."""
+    from bot.dreaming import Verification
+
+    child, _ = _fusion_pair(dreams)
+    dream = dreams.get(child)
+    dream.verification_ceiling = Verification.UNVERIFIED
+
+    body = render._dream(dream)
+
+    assert '<span class="pill unverified">' in body
+    assert "Capped at the weakest parent" in body
+    # The chain itself has a checked hop, so a card doing its own arithmetic
+    # would have printed `partial` here.
+    assert dream._counted_verification() is Verification.PARTIAL
+
+
+def test_a_fusion_is_not_dressed_as_an_endorsement(dreams):
+    """It has no weakest hop and no verdict BY DESIGN — `fuse` refuses to
+    inherit either, because claiming the combined chain had been examined would
+    back-date an attack nobody made. That is a state, not a defect, and it is
+    refused promotion on the verdict clause long before the weak-link one."""
+    child, _ = _fusion_pair(dreams)
+    body = render._dream(dreams.get(child))
+
+    assert "Nobody has attacked this yet" in body
+    # Not the stuck-keep explanation: a fusion is not a failing keep.
+    assert "Not a prophecy yet" not in body
+    assert "stronger" not in body.lower()
+
+
+def test_a_fusion_inherits_every_condition_and_the_page_says_so(dreams):
+    """A fusion carries both parents' conditions, so it is HARDER to promote
+    than either of them. A long unmet list must not read as a failing."""
+    from bot.dreaming import DreamCondition
+    from bot.models import TriggerField, TriggerOp
+
+    child, _ = _fusion_pair(dreams)
+    dream = dreams.get(child)
+    dream.conditions = [
+        DreamCondition(
+            text="one",
+            symbol="SPY",
+            field=TriggerField.CLOSE,
+            op=TriggerOp.ABOVE,
+            value=1.0,
+        ),
+        DreamCondition(
+            text="two",
+            symbol="SPY",
+            field=TriggerField.CLOSE,
+            op=TriggerOp.ABOVE,
+            value=2.0,
+            fulfilled=True,
+        ),
+    ]
+
+    body = render._dream(dream)
+
+    assert "1 of 2 conditions met" in body
+    assert "every condition both parents wrote" in body
+
+
+def test_a_first_visit_does_not_animate_the_vault(client, dreams):
+    """`Marker.is_new` answers `None` with no marker rather than True. A vault
+    of dreams all animating at once on a first load is a fireworks display, not
+    a notification."""
+    _fusion_pair(dreams)
+    body = client.get("/dreaming").text
+
+    # The attribute the client looks for is absent from the markup entirely.
+    # `data-fuse-new` appears inside the inlined script as a selector, so the
+    # assertion is on the rendered attribute rather than on the bare word.
+    assert 'data-fuse-new="1"' not in body
+
+
+def test_a_fusion_newer_than_the_marker_is_marked_for_the_reveal(dreams):
+    """The other half. The server decides; the client plays it once."""
+    from bot.web.seen import Marker, MarkerState
+
+    child, _ = _fusion_pair(dreams)
+    dream = dreams.get(child)
+    marker = Marker(MarkerState.MARKED, dream.created_at - timedelta(hours=2))
+
+    body = render.dreaming_page(
+        [dream],
+        DreamSummary.of([dream]),
+        enabled=False,
+        token="",
+        hermes_available=False,
+        soul_found=True,
+        marker=marker,
+    )
+
+    assert 'data-fuse-new="1"' in body
+    assert f'data-fuse-id="{child}"' in body
+
+
+def test_the_fusion_client_is_emitted_and_its_styling_is_in_the_sheet():
+    """`dream_fx` is wired up rather than sitting unreferenced. Its CSS has to
+    reach `STYLES` so the no-control-character guard sees it too."""
+    from bot.web import dream_fx
+
+    page = render.dreaming_page(
+        [], DreamSummary.of([]), enabled=False, token="",
+        hermes_available=False, soul_found=True,
+    )
+
+    assert dream_fx.SCRIPT in page
+    assert ".wisped .wisps b" in render.STYLES
+    assert "fuse-flare" in render.STYLES
+
+
+# ===================================================================== the vaults
+
+
+def test_every_shelf_gets_a_section_even_when_it_is_empty(client, dreams):
+    """`DreamSummary.by_vault` keys every vault for this reason: a missing row
+    reads as "no data" and a nought reads as a stated fact. On the adopted
+    shelf, where a row is a live symbol permission, those are very different
+    claims."""
+    from bot.dreaming import Dream, Vault
+
+    dreams.save(Dream(title="On the bench", seed="s"))
+    body = client.get("/dreaming").text
+
+    for vault in Vault:
+        assert f'id="shelf-{vault}"' in body
+    assert "No positions open" not in body  # not this page's sentence
+    assert "Nothing adopted. No dream is permitting a symbol right now." in body
+
+
+def test_the_dream_vault_says_what_being_on_it_buys(client, dreams):
+    """It is the only shelf the trading agent can see, so putting something
+    there is an act rather than a filing decision — and what it buys is small."""
+    from bot.dreaming import Dream
+
+    # An empty store returns the worked example rather than the shelves, so a
+    # dream has to exist for there to be shelves at all.
+    dreams.save(Dream(title="On the bench", seed="s"))
+    body = client.get("/dreaming").text
+
+    assert "the only shelf the trading agent can see" in body.lower()
+    assert "Not a position, not a size, not a direction." in body
+
+
+def test_an_adopted_dream_shows_the_wisp_and_the_grant(client, dreams):
+    """Two different facts side by side: what Grogu kept, and what the account
+    may trade because of it. Only the second is a permission."""
+    from bot.dreaming import DREAMER, Dream, DreamCondition, Vault, VaultCaps
+    from bot.models import TriggerField, TriggerOp
+
+    caps = VaultCaps(workbench=50, prophecy=50, vault=50)
+    dream_id = dreams.save(
+        Dream(
+            title="Rail-car backlog",
+            seed="A hopper out of service is a bushel that cannot move.",
+            symbols=["SPY"],
+            asset_class_key="us_equity",
+            conditions=[
+                DreamCondition(
+                    text="c",
+                    symbol="SPY",
+                    field=TriggerField.CLOSE,
+                    op=TriggerOp.ABOVE,
+                    value=1.0,
+                )
+            ],
+        )
+    )
+    dreams.move(dream_id, Vault.PROPHECY, by=DREAMER, caps=caps)
+    dreams.move(dream_id, Vault.VAULT, by=DREAMER, caps=caps)
+    assert dreams.adopt(dream_id, ttl_days=30, caps=caps).ok
+
+    body = client.get("/dreaming").text
+
+    assert "What Grogu kept" in body
+    assert '<span class="lbl">Granted</span>' in body
+    assert "SPY" in body
+    assert "us_equity" in body
+    # The motes go on the wisp, which is the one thing on the card describing
+    # something that has been let go of.
+    assert '<div class="wisptrace wisped">' in body
+
+
+def test_the_transcript_is_rendered_so_a_person_can_read_it(client, dreams):
+    """Stored either way, including exchanges that ended in nothing: a dream the
+    trader kept declining is a fact about the dreamer worth having."""
+    from bot.dreaming import DREAMER, OPERATOR, TRADER, Dream
+
+    dream_id = dreams.save(Dream(title="Offered", seed="s"))
+    dreams.add_message(dream_id, speaker=DREAMER, kind="offer", text="Here is one.")
+    dreams.add_message(dream_id, speaker=TRADER, kind="question", text="What kills it?")
+    dreams.add_message(dream_id, speaker=OPERATOR, kind="note", text="Leave it a week.")
+
+    body = client.get("/dreaming").text
+
+    assert "What was said about it, 3 turns" in body
+    assert '<li class="said" data-who="dreamer">' in body
+    assert "The trading agent" in body
+    assert "What kills it?" in body
+
+
+def test_the_fusion_note_in_a_parent_transcript_gets_a_name(dreams):
+    """`speaker` is an open string and `fusion` is a new value the renderer
+    meets. An unfamiliar one costs a badge rather than a turn."""
+    _, parents = _fusion_pair(dreams)
+    messages = dreams.messages(parents[0])
+
+    body = render._transcript(messages)
+
+    assert 'data-who="fusion"' in body
+    assert "The store" in body
+    assert "Fused into dream" in body
+
+
+def test_a_trade_from_a_dream_carries_its_provenance(journal, dreams):
+    """The motes say THAT it came from one; only the line says which, and a
+    treatment that cannot be traced back to a record is decoration pretending to
+    be provenance."""
+    trade = Trade(
+        symbol="QQQ",
+        direction=Direction.BUY,
+        qty=10,
+        entry_price=500.0,
+        planned_stop=490.0,
+        entry_time=ENTRY,
+        exit_price=510.0,
+        exit_time=ENTRY + timedelta(days=1),
+        strategy="trend_break",
+        dream_id=7,
+    )
+    from bot.metrics import build_report
+
+    body = render.trades_page([trade], build_report([trade]))
+
+    assert '<span class="wisped">' in body
+    assert 'href="/dreaming#dream-7"' in body
+    assert "from dream #7" in body
+
+
+def test_a_trade_with_no_dream_carries_no_motes(journal):
+    from bot.metrics import build_report
+
+    trade = Trade(
+        symbol="SPY",
+        direction=Direction.BUY,
+        qty=10,
+        entry_price=500.0,
+        planned_stop=490.0,
+        entry_time=ENTRY,
+        exit_price=510.0,
+        exit_time=ENTRY + timedelta(days=1),
+        strategy="trend_break",
+    )
+    body = render.trades_page([trade], build_report([trade]))
+
+    assert "wisped" not in body
+    assert "from-dream" not in body
+
+
+# ============================================================ the weakest link
+
+
+def test_the_weakest_hop_is_marked_in_the_chain_and_never_recomputed(dreams):
+    """Read the field. A page that worked out its own answer would disagree
+    with `promotion_for`, and the rule is the one that decides which shelf a
+    dream sits on."""
+    from bot.dreaming import Dream, Hop
+
+    dream = Dream(
+        title="Pinned",
+        seed="s",
+        chain=[Hop("first", checked=True, source="x"), Hop("second")],
+        weakest_hop="second",
+        weakest_hop_index=2,
+    )
+
+    body = render._dream(dream)
+
+    assert 'data-weakest=""' in body
+    assert "the weakest link" in body
+    assert '<circle class="node open" data-weakest=""' in body
+
+
+def test_a_weakest_hop_naming_no_hop_says_it_was_not_established(dreams):
+    """`resolved_weakest_hop` is deliberately not clamped: a model answering 9
+    on a three-hop chain has named no hop. That is "which one was not
+    established", never "there is no weak link"."""
+    from bot.dreaming import Dream, Hop
+
+    dream = Dream(
+        title="Unplaced",
+        seed="s",
+        chain=[Hop("first", checked=True, source="x"), Hop("second")],
+        weakest_hop="something that matches nothing in the chain",
+        weakest_hop_index=9,
+    )
+
+    assert dream.resolved_weakest_hop is None
+    body = render._dream(dream)
+
+    assert "has not been established" in body
+    assert 'data-weakest=""' not in body
+
+
+def test_a_condition_says_which_hop_it_settles_or_that_it_settles_none(dreams):
+    """"Pinned to hop 3" and "settles no hop yet" are different states, and the
+    second is the actionable one."""
+    from bot.dreaming import Dream, DreamCondition, Hop
+    from bot.models import TriggerField, TriggerOp
+
+    dream = Dream(
+        title="Two conditions",
+        seed="s",
+        chain=[Hop("first", checked=True, source="x"), Hop("second")],
+        weakest_hop="second",
+        weakest_hop_index=2,
+        conditions=[
+            DreamCondition(
+                text="pinned",
+                symbol="SPY",
+                field=TriggerField.CLOSE,
+                op=TriggerOp.ABOVE,
+                value=1.0,
+                settles_hops=(2,),
+            ),
+            DreamCondition(
+                text="floating",
+                symbol="SPY",
+                field=TriggerField.CLOSE,
+                op=TriggerOp.ABOVE,
+                value=2.0,
+            ),
+        ],
+    )
+
+    body = render._dream(dream)
+
+    assert "Pinned to hop 2 — the weakest link." in body
+    assert "Settles no hop yet." in body
+
+
+def test_a_stuck_keep_explains_itself_in_the_rules_own_words(dreams):
+    """A dream that has been attacked, kept, and will not promote reads as
+    broken rather than incomplete unless the page says which clause holds it.
+    The sentence is `promotion_for`'s, not a shorter paraphrase beside it."""
+    from bot.dreaming import (
+        Dream,
+        DreamCondition,
+        DreamStage,
+        DreamVerdict,
+        Hop,
+        promotion_for,
+    )
+    from bot.models import TriggerField, TriggerOp
+
+    dream = Dream(
+        title="Stuck",
+        seed="s",
+        stage=DreamStage.VERDICT,
+        verdict=DreamVerdict.KEEP,
+        chain=[Hop("first", checked=True, source="x"), Hop("second")],
+        weakest_hop="second",
+        weakest_hop_index=2,
+        conditions=[
+            DreamCondition(
+                text="on a link nobody doubted",
+                symbol="SPY",
+                field=TriggerField.CLOSE,
+                op=TriggerOp.ABOVE,
+                value=1.0,
+            )
+        ],
+    )
+    promotion = promotion_for(dream)
+    assert not promotion.moves
+
+    body = render._dream(dream)
+
+    assert "Not a prophecy yet" in body
+    assert render._e(promotion.reason) in body
+
+
+def test_a_dream_still_being_worked_is_not_told_off(dreams):
+    """Only a KEEP that will not move gets the explanation. "Stays on the
+    workbench: the verdict is no verdict yet" is what a dream in progress is,
+    and the stage pill already says it."""
+    from bot.dreaming import Dream, Hop
+
+    body = render._dream(
+        Dream(title="In progress", seed="s", chain=[Hop("a claim")])
+    )
+
+    assert "Not a prophecy yet" not in body
+
+
+# ================================================================ touch targets
+
+
+def test_the_nav_links_clear_the_touch_target_minimum_on_a_phone():
+    """MEASURED at a 390px viewport: eight links rendering 32px tall against a
+    44px minimum, and they are the only route around the deck on a phone.
+
+    Inside the 760px block on purpose, so the desktop bar keeps the compact
+    links it lays out in one row beside the wordmark.
+    """
+    import re
+
+    css = re.sub(r"/\*.*?\*/", "", render.STYLES, flags=re.S)
+    start = css.index("@media (max-width:760px)")
+    rest = css[start + 24 :]
+    block = rest[: rest.index("@media")] if "@media" in rest else rest
+
+    assert "nav a{min-height:44px" in block
+    # And NOT outside it: the desktop bar lays the links out in one row beside
+    # the wordmark and a 44px link there would grow the header for nothing.
+    assert "nav a{min-height:44px" not in css[:start]
