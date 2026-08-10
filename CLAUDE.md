@@ -896,6 +896,43 @@ Three properties are load-bearing, and all three are the same principle:
 warning that outlives the fix by six hours teaches an operator to ignore the
 next one.
 
+### A feed writes into the model's document, so `.strip()` is not enough
+
+`context.py` renders each headline as `f"- {h}"` into a **markdown document**
+the model reads. `marketaux._parse` cleaned titles with `.strip()`, which
+removes leading and trailing whitespace and **leaves an embedded newline
+intact**. So a headline carrying a newline could close its bullet and open its
+own `##` section — and the section most worth forging is *"Gate verdicts
+(previous cycle)"*, which the prompt tells the model is deterministic and not to
+be argued with.
+
+**This is not a gate bypass and must not be described as one.** `RiskGate`
+reads no prompt, and no headline widens a cap. What it reaches is the half the
+gate deliberately does not second-guess: direction, symbol, entry, and where
+the stop goes. That half belongs to the agent by design, which is precisely why
+an outside party writing into it matters — the guardrail below it is intact and
+the *choice* above it is being steered.
+
+The fix is `" ".join(text.split())`, which collapses every kind of whitespace
+including newlines, rather than trimming the ends.
+
+Three things worth carrying:
+
+- **`xfeed` was already safe, and only by ACCIDENT.** It normalised whitespace
+  for formatting reasons, with nothing saying that was load-bearing and no test
+  holding it there. A later tidy-up to `.strip()` "for consistency with the news
+  adapter" would have opened the same channel silently. Posts render **ahead of**
+  headlines, so that one sits closer to the top of the document. Both are pinned
+  now.
+- **It was found by MEASURING both parsers against a newline-bearing string**,
+  not by reading them. Reading would have shown two plausible one-line
+  expressions; only running them showed one emitting two lines. The accidental
+  half was invisible any other way.
+- **The general rule: anything rendered into a prompt is a document, not a
+  string.** A value that can carry the document's own structural characters can
+  restructure it. That applies to every feed added later, and to any surface
+  that renders operator or agent text into a model's context.
+
 ### The three data feeds are not equally important
 
 `src/bot/data/` holds three adapters and they fail in different ways.
