@@ -72,6 +72,59 @@ and that the prompt says what it is supposed to say. That is assertion about
 shape rather than observation of behaviour, and the difference must be stated
 whenever these are reported.
 
+### What the live box DID confirm, over HTTP, on 10 Aug
+
+The Funnel is reachable with `curl` from a cloud session even though a browser
+is not (see below), and that is enough for a real cross-check.
+
+**The auth gate is correct in production.** Every page — Board, Decisions,
+Trades, Analytics, Chat, Dreaming, Settings — **and `/live`** answer `303` to
+the login page when unauthenticated. Only `/healthz` and `/login` are open,
+which is exactly `OPEN_PATHS`. `/live` being refused is the one worth naming:
+it serves equity, cash, buying power, every open position and every resting
+order, and it was missing from `tests/test_auth.py` entirely once because it
+is not a *page*.
+
+**The figures cross-check to the cent**, which is what the operator asked for.
+`/live` and the rendered Board agree with each other and with the journal
+figures recorded at the top of this file:
+
+| | Live box |
+|---|---|
+| equity | 100,010.38 |
+| open risk | 980.19 |
+| position | SPY sell 21 @ 773.324285 |
+| position count | 1 |
+
+**The stale-reading banner works and is honest.** The first SSE event carried
+`stale: true` with *"The last successful read was 3 minutes ago, which is older
+than this page expects. Nothing failed, so the poller may have stopped."* That
+is the idle stop doing its job and saying so, rather than serving an overnight
+reading stamped with the current time.
+
+**The deployed code is well behind HEAD.** Probed by marker: `data-live-read`
+is present, and `fw-scrim`, `MUDHORN_FORGE`, `unexplained-move`, `wisped`,
+`raise_consideration` and the weakest-hop rendering are all absent. So the box
+is running code from partway through this session. **Deploying needs a shell**
+— see below.
+
+### Playwright cannot reach the Funnel from a cloud session
+
+Worth recording so the next session does not spend the time. `curl` to
+`https://mudhorn.tailc04415.ts.net` works; Chromium gets
+`net::ERR_CONNECTION_RESET`, with the proxy logging **no** rejection for that
+host — so it is not an egress policy denial, it is the browser's TLS handshake
+being reset at the gateway. Tried with `HTTPS_PROXY` as a Playwright `proxy`
+option, with explicit `--proxy-server` plus `--proxy-bypass-list=<-loopback>`,
+and with the component updater disabled. All reset.
+
+**So browser-driven UX testing happens against a LOCAL instance of the same
+code**, which is the better test anyway while the droplet is behind: run
+`electrum-bot-web --mock` from a scratch directory — never the repo root, or
+the `data/`-and-`audit/` conftest guard will fail every other agent's suite —
+and point Playwright at loopback with
+`executable_path="/opt/pw-browsers/chromium-1194/chrome-linux/chrome"`.
+
 Anything in this file phrased as "verify on the box" means exactly that: it
 needs a session with the credentials, or the operator at a shell on the droplet.
 Do not report these as done from a container that cannot see them.
