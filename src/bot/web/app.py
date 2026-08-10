@@ -51,7 +51,7 @@ from ..models import AccountSnapshot, WorkingOrder
 from ..options import alerts_for_positions
 from ..souls import GROGU, YODA, load_soul
 from ..tailnet import read as read_tailnet_status
-from . import live, render
+from . import live, render, seen
 from .auth import COOKIE_NAME, SESSION_TTL_SECONDS, SessionStore
 from .chat import DREAMER_BINARY, HermesBridge
 
@@ -209,7 +209,20 @@ def build_app(
         return response
 
     @app.get("/", response_class=HTMLResponse)
-    def board() -> str:
+    def board(request: Request, response: Response) -> str:
+        # The marker is read and re-stamped on HTML page routes ONLY.
+        #
+        # Not on `/live`: an EventSource reconnects on its own and every
+        # reconnect carries the cookie, so stamping there would hold a sitting
+        # open for as long as the tab lived. Not on `/login` either — that would
+        # advance the marker to a moment the operator was shown a password form
+        # rather than the state of the world. And not on `/healthz`, where a
+        # monitoring probe every thirty seconds would do the same thing.
+        visit = seen.from_cookies(request.cookies)
+        response.set_cookie(
+            **seen.cookie_for(visit, secure=request.url.scheme == "https")
+        )
+
         account, orders, prices = _account_orders_prices()
         open_trades = resolved_journal.open_trades()
 
@@ -222,7 +235,14 @@ def build_app(
             return _page(
                 "Board",
                 "/",
-                render.board(
+                render.since_last_visit(
+                    seen.summarise(
+                        visit.marker,
+                        decisions=audit.read(limit=60).decisions,
+                        closed_trades=resolved_journal.closed_trades(),
+                    )
+                )
+                + render.board(
                     None, resolved_rules, [], open_trades,
                     resolved_journal.get_stand_down(), 0, env=resolved_env,
                 ),
@@ -240,7 +260,13 @@ def build_app(
             buying_power_usd=account.buying_power_usd,
         )
 
-        body = render.banners(
+        body = render.since_last_visit(
+            seen.summarise(
+                visit.marker,
+                decisions=audit.read(limit=60).decisions,
+                closed_trades=resolved_journal.closed_trades(),
+            )
+        ) + render.banners(
             resolved_journal.get_stand_down(),
             alerts,
             untracked,

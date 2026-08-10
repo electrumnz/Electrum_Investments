@@ -1206,3 +1206,47 @@ def test_enter_sends_and_ctrl_enter_makes_a_new_line():
     collapsed = re.sub(r"\s+", " ", body)
     assert "<b>Enter</b> sends." in collapsed
     assert "<b>Ctrl+Enter</b> or <b>Shift+Enter</b> for a new line." in collapsed
+
+
+# ------------------------------------------------------ since you were here
+
+
+def test_the_board_stamps_the_visit_marker(client):
+    """The cookie is what makes "since you were last here" possible at all."""
+    from bot.web.seen import COOKIE_NAME as SEEN_COOKIE
+
+    r = client.get("/")
+
+    assert SEEN_COOKIE in r.cookies
+
+
+def test_a_first_visit_is_not_told_that_nothing_happened(client):
+    """A strip saying "we have no record of you" is noise on the one visit
+    where there is genuinely nothing to report."""
+    body = client.get("/").text
+
+    assert "Since you were last here" not in body
+
+
+def test_a_returning_visit_is_told_what_changed(client, audited=None):
+    """The second visit, after a gap, reports the window between them."""
+    from datetime import timedelta
+
+    from bot.web import seen as seen_mod
+
+    first = seen_mod.observe(None, now=ENTRY)
+    later = seen_mod.observe(first.cookie_value, now=ENTRY + timedelta(hours=4))
+
+    client.cookies.set(seen_mod.COOKIE_NAME, later.cookie_value)
+    body = client.get("/").text
+
+    assert "Since you were last here" in body
+
+
+def test_the_marker_is_not_stamped_by_the_stream_or_the_health_probe(client):
+    """An EventSource reconnects by itself and a monitor probes every thirty
+    seconds. Either stamping the cookie would hold a sitting open forever,
+    which is the bug the six-hour ceiling exists to bound."""
+    from bot.web.seen import COOKIE_NAME as SEEN_COOKIE
+
+    assert SEEN_COOKIE not in client.get("/healthz").cookies

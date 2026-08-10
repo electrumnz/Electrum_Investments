@@ -43,6 +43,7 @@ from ..metrics import JournalReport, render_excursions, render_summary
 from ..models import AccountSnapshot, StandDownState, Trade, WorkingOrder
 from ..options import ExpiryAlert
 from ..tailnet import TailnetStatus
+from .seen import SinceLastVisit
 
 STYLES = """
 :root {
@@ -1618,6 +1619,43 @@ def banners(
 
 
 # -------------------------------------------------------------------- board
+
+
+def since_last_visit(summary: SinceLastVisit) -> str:
+    """The strip answering "what changed while I was away".
+
+    The module supplies its own words — `headline()` and `caveats()` — the same
+    way `tailnet.headline()` and `news_history` do, so a renderer cannot get the
+    three states wrong by paraphrasing them. All this decides is emphasis.
+
+    It renders nothing at all on a first visit. A strip saying "we have no
+    record of you" is noise on the one visit where there is genuinely nothing to
+    report, and the empty case is the common one.
+    """
+    if not summary.is_reportable:
+        return ""
+
+    tone = "warn" if summary.needs_attention else ""
+    counts = ""
+    if summary.anything_new:
+        bits = []
+        if summary.new_decisions:
+            bits.append(f"{summary.new_decisions} cycle(s)")
+        if summary.new_trades_closed:
+            bits.append(f"{summary.new_trades_closed} trade(s) closed")
+        if summary.new_rejections:
+            bits.append(f"{summary.new_rejections} rejected")
+        if bits:
+            counts = (
+                '<span class="fresh-tag">' + _e(" &middot; ".join(bits)) + "</span>"
+            )
+
+    caveats = "".join(f'<p class="note">{_e(c)}</p>' for c in summary.caveats())
+    return (
+        f'<div class="banner {tone} fresh" style="margin-bottom:1rem">'
+        f"<b>Since you were last here</b>{_e(summary.headline())}{counts}"
+        f"{caveats}</div>"
+    )
 
 
 def _board_waiting(env: Env | None) -> str:
