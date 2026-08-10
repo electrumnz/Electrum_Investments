@@ -126,6 +126,64 @@ def test_allowed_symbols_is_derived_from_enabled_classes():
     assert enabled.strategy_for("BTC/USD") == "momentum"
 
 
+def test_a_per_class_total_risk_cap_is_optional_and_bounded():
+    """`None` is "no opinion", not zero — absent means the portfolio total alone.
+
+    The bounds are the same shape as the other per-class limits: a percentage
+    that has to be a real one. Zero would be a class that could never trade,
+    written as though it were a setting.
+    """
+    assert InstrumentRules().max_class_total_risk_pct is None
+
+    with pytest.raises(ValueError):
+        InstrumentRules(max_class_total_risk_pct=0)
+    with pytest.raises(ValueError):
+        InstrumentRules(max_class_total_risk_pct=-1.0)
+    with pytest.raises(ValueError):
+        InstrumentRules(max_class_total_risk_pct=11.0)
+
+    assert InstrumentRules(max_class_total_risk_pct=0.5).max_class_total_risk_pct == 0.5
+
+
+def test_a_looser_class_total_is_accepted_rather_than_refused_at_load():
+    """Same doctrine as `max_risk_per_trade_pct`: it overrides in EITHER direction.
+
+    A validator that refused a class total above the portfolio's 2% would be a
+    denial at the least useful moment — boot, with no explanation and no way for
+    the operator to say "yes, I mean it". That friction belongs in the settings
+    agent. What matters here is that the file and the gate agree, so the value
+    is kept exactly as written and is never floored back with a `min`.
+
+    It buys nothing on its own, because `max_total_risk_pct` stays
+    portfolio-wide and refuses the trade that would breach it first — but that
+    is an interaction to know about, not a reason to reject the config.
+    """
+    loose = InstrumentRules(max_class_total_risk_pct=5.0)
+
+    assert loose.max_class_total_risk_pct == 5.0
+
+
+def test_the_shipped_crypto_class_caps_its_total_risk():
+    """Guards the operator's rule in the file, not only in the gate."""
+    from .conftest import RULES_PATH
+
+    crypto = Rules.load(RULES_PATH).instruments["crypto"]
+
+    assert crypto.max_class_total_risk_pct == 0.5
+    # The same figure as the per-trade cap, which is what makes crypto one
+    # full-size position at a time. Deliberate rather than a coincidence: it
+    # agrees with max_concurrent_positions: 1 instead of overriding it.
+    assert crypto.max_risk_per_trade_pct == 0.5
+    assert crypto.max_concurrent_positions == 1
+
+
+def test_the_equity_class_declares_no_total_risk_cap():
+    """Absence is the setting. Equities are bounded by the portfolio total."""
+    from .conftest import RULES_PATH
+
+    assert Rules.load(RULES_PATH).instruments["us_equity"].max_class_total_risk_pct is None
+
+
 def test_enabled_instrument_must_have_symbols_and_sessions():
     """An enabled class with no session window could never trade."""
     from bot.config import InstrumentRules
