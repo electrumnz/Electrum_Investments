@@ -1250,3 +1250,34 @@ def test_the_marker_is_not_stamped_by_the_stream_or_the_health_probe(client):
     from bot.web.seen import COOKIE_NAME as SEEN_COOKIE
 
     assert SEEN_COOKIE not in client.get("/healthz").cookies
+
+
+def test_only_a_page_with_live_figures_opens_the_stream():
+    """The sign-in page inherits SCRIPT, and used to open `/live` from it.
+
+    `/live` sits behind the same password as the pages that render an account,
+    so an unauthenticated page opening it got a 401 and a console error on every
+    view of the login form. Confirmed in a browser before this guard, and gone
+    after it.
+
+    It also keeps Decisions, Trades, Settings and Chat off the stream: they have
+    no `data-live` targets to paint. Since the poller starts on the first
+    subscription and idle-stops after the last, a session that never opens the
+    Board never talks to the broker at all.
+    """
+    from bot.web.render import SCRIPT
+
+    assert "if (!document.querySelector('[data-live]')) return;" in SCRIPT
+
+
+def test_the_sign_in_page_carries_no_live_targets(client):
+    """The other half of the guard: if the gate ever grew a `data-live`
+    attribute it would start opening an authenticated stream unauthenticated."""
+    from bot.config import Env
+    from bot.web.render import login_page
+
+    env = Env(_env_file=None)  # type: ignore[call-arg]
+    # The ATTRIBUTE, not the bare word: SCRIPT is inlined into this page and
+    # contains the `[data-live]` selector it guards on, so a looser check
+    # passes for the wrong reason.
+    assert 'data-live="' not in login_page(env=env)

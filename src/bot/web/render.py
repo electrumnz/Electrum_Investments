@@ -1300,6 +1300,20 @@ SCRIPT = """
   }
 
   function connect() {
+    /* Only open the stream on a page that consumes it.
+     *
+     * Without this the SIGN-IN page opened it too — inheriting this script —
+     * and got a 401, because `/live` is behind the same password as the pages
+     * that render an account. Confirmed in a browser: one request, one 401,
+     * one console error on every view of the login form.
+     *
+     * It also stops Decisions, Trades, Settings and Chat opening a stream they
+     * have no figures for. Today only the Board carries `data-live` targets, so
+     * today only the Board subscribes — and since the poller starts on the
+     * first subscription and idle-stops after the last, a session that never
+     * opens the Board never talks to the broker at all.
+     */
+    if (!document.querySelector('[data-live]')) return;
     if (!window.EventSource) { setLink('down', 'no stream'); return; }
     var es;
     try {
