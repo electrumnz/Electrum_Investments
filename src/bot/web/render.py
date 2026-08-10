@@ -52,12 +52,38 @@ from ..market_clock import (
     venue_state,
 )
 from ..metrics import JournalReport, render_excursions, render_summary
-from ..models import AccountSnapshot, StandDownState, Trade, WorkingOrder
+from ..models import (
+    AccountSnapshot,
+    Direction,
+    StandDownState,
+    Trade,
+    WorkingOrder,
+)
 from ..options import ExpiryAlert
 from ..session_calendar import SessionCalendar
 from ..tailnet import TailnetStatus
 from .live import SessionDayView, TickerQuote
 from .seen import SinceLastVisit
+
+#: The two banners the live stream is allowed to take away, by id.
+#:
+#: Both are statements about a broker reading the SERVER had when it built the
+#: page, and the stream exists to replace that reading — so both stop being true
+#: the moment a fresh one arrives, and neither could clear itself. A server-
+#: rendered warning that outlives its cause is the same failure as a timestamp
+#: that outlives its reading, and it teaches an operator to read past the next
+#: one.
+#:
+#: They are named here and repeated as literals in `SCRIPT`, because `SCRIPT` is
+#: a plain string and interpolating into it is how the `{field: "close"}` trap
+#: got into `SYSTEM_PROMPT_TEMPLATE`. `tests/test_web.py` fails the build if the
+#: two copies drift apart.
+#:
+#: Nothing else may be removed this way. The client may UPDATE a figure the
+#: server already rendered and may retract a claim the server made about its own
+#: freshness; it must never be what reveals a figure.
+STALE_BANNER_ID = "reading-stale"
+COLD_START_BANNER_ID = "cold-start"
 
 #: A hue per kind, applied to the SYMBOL LABEL ONLY.
 #:
@@ -125,6 +151,11 @@ a:hover{text-decoration-color:var(--patina)}
 .wrap{width:min(100% - 2rem,1240px);margin-inline:auto}
 .num{font-family:var(--mono);font-variant-numeric:tabular-nums}
 .pos,.gain{color:var(--gain)} .neg,.loss{color:var(--loss)} .muted{color:var(--pewter)}
+/* A figure that could not be read, as opposed to one that is absent. `.muted`
+   is for "there is nothing here and that is fine"; this is for "this should
+   have a value and does not", which is a different claim and must not be
+   whispered. Not the loss colour — unreadable is not losing. */
+.alert{color:var(--amber)}
 .note{font-size:.8125rem;color:var(--pewter)}
 h1,h2,h3{font-family:var(--serif);font-weight:400;letter-spacing:-.01em;margin:0}
 h1{font-size:1.75rem} h2{font-size:1.375rem;margin-bottom:.25rem} h3{font-size:1rem}
@@ -453,12 +484,31 @@ section.block>h2{margin-bottom:.75rem}
 .pips i.lit{background:var(--loss);border-color:var(--loss)}
 
 table{width:100%;border-collapse:collapse;font-size:.8125rem}
+/* `overflow-x:auto` stays — a table wider than the deck genuinely needs it.
+   What it also does, and what cost the operator four scrollbars a page, is
+   make the computed `overflow-y` `auto` as well: a box cannot scroll on one
+   axis and paint outside itself on the other. So this is a scroll container in
+   BOTH directions, and anything overflowing its end edges by even a pixel is
+   scrollable overflow rather than a decoration hanging over the border. The
+   bracket corner at `bottom:-1px;right:-1px` was exactly that pixel — see
+   `.scroll::after` below. */
 .scroll{overflow-x:auto;border:1px solid var(--slate);border-radius:2px}
 caption{text-align:left;padding:0 0 .6rem;color:var(--pewter);font-size:.8125rem}
+/* No `position:sticky` here, and its absence is deliberate rather than an
+   oversight. Sticky resolves against the nearest SCROLLPORT, which is `.scroll`
+   and not the viewport — and `.scroll` is sized by its content, so it has no
+   vertical scroll range for a header to stick within. The rule was present for
+   a long time and could never once have fired: measured in Chromium, the
+   header's offset from the wrapper stayed at exactly 1px through a full page
+   scroll.
+   Making it work would mean giving `.scroll` a `max-height`, which puts an
+   inner scroll region back on every table — the thing the fix above just took
+   away. A property that cannot work reads like a feature to the next person,
+   so it goes rather than staying as decoration. */
 th{text-align:left;font-family:var(--mono);font-size:.625rem;letter-spacing:.12em;
   text-transform:uppercase;color:var(--pewter);font-weight:400;
   padding:.7rem .875rem;border-bottom:1px solid var(--slate);white-space:nowrap;
-  background:var(--graphite);position:sticky;top:0}
+  background:var(--graphite)}
 td{padding:.7rem .875rem;border-bottom:1px solid var(--slate);vertical-align:top}
 td.r,th.r{text-align:right}
 tr.data td.r{white-space:nowrap}
@@ -688,10 +738,31 @@ header.bar{background:rgba(11,14,18,.82)}
 .banner::after,.chat .log::after{
   content:"";position:absolute;width:9px;height:9px;pointer-events:none;
   border:1px solid var(--holo);opacity:.45;transition:opacity .25s var(--ease)}
-.card::before,.curve::before,.cycle::before,.scroll::before,.readout::before,
-.banner::before,.chat .log::before{top:-1px;left:-1px;border-right:0;border-bottom:0}
-.card::after,.curve::after,.cycle::after,.scroll::after,.readout::after,
-.banner::after,.chat .log::after{bottom:-1px;right:-1px;border-left:0;border-top:0}
+.card::before,.curve::before,.cycle::before,.readout::before,
+.banner::before{top:-1px;left:-1px;border-right:0;border-bottom:0}
+.card::after,.curve::after,.cycle::after,.readout::after,
+.banner::after{bottom:-1px;right:-1px;border-left:0;border-top:0}
+/* The two scroll containers get the SAME brackets at zero rather than at -1px,
+   and this is the operator's "weird scrolling stuff" in one declaration.
+   `.scroll` is `overflow-x:auto` and `.chat .log` is `overflow-y:auto`, and in
+   CSS either one makes the OTHER axis `auto` too — so both boxes are scroll
+   containers on both axes. End-direction overflow from an absolutely positioned
+   descendant is scrollable overflow, not clipped decoration, so a bracket
+   hanging 1px past the bottom-right corner gave every table on the deck exactly
+   1px of scroll range on each axis. Measured: `scrollWidth 1239 / clientWidth
+   1238`, two full-length 15px scrollbars per table, six on Analytics, the first
+   notch of any wheel gesture over a table eaten moving it one pixel, and a junk
+   keyboard tab stop with no `tabindex` — Chrome makes a scroll container
+   focusable when nothing inside it is.
+   The start-direction pair is moved with it. `top:-1px` does not add scrollable
+   overflow (start overflow is clipped) but it IS clipped, so leaving it would
+   draw the top-left bracket a pixel short of the bottom-right one on the same
+   box. Both corners now sit against the padding box, which is where the border
+   is.
+   Do not "restore" these to -1px, and do not answer the scrollbars by removing
+   `overflow-x` — a table wider than the deck needs it. */
+.scroll::before,.chat .log::before{top:0;left:0;border-right:0;border-bottom:0}
+.scroll::after,.chat .log::after{bottom:0;right:0;border-left:0;border-top:0}
 .card:hover::before,.card:hover::after,.cycle:hover::before,.cycle:hover::after{opacity:.9}
 
 .card,.curve,.cycle,.readout,.chat .log{
@@ -2501,8 +2572,18 @@ def banners(
     now = datetime.now(UTC)
 
     if reading_stale:
+        # The id is the stream's handle on it. This banner is a claim about the
+        # reading the SERVER built the page from, and the stream's whole job is
+        # to replace that reading — so once a fresh one lands the claim is
+        # false, and it used to stand for as long as the tab was open. Measured:
+        # forty-five seconds and eleven stream messages later the page still
+        # said its figures were not current while the tiles repainted every five
+        # seconds above the sentence. A warning that outlives its cause teaches
+        # an operator to ignore the next one, which is the same reasoning that
+        # put `RECHECK_COMMAND` on the tailnet banner.
         out.append(
-            '<div class="banner warn"><b>These figures are not current</b>'
+            f'<div class="banner warn" id="{STALE_BANNER_ID}">'
+            "<b>These figures are not current</b>"
             "The last successful broker read is older than this page expects, so "
             "everything below — the positions, the expiries, the risk against the "
             "caps — describes that reading rather than the account as it stands "
@@ -2973,13 +3054,33 @@ def _board_waiting(env: Env | None) -> str:
         )
     )
     return (
-        head(greeting(env) if env else "Account", "Board", "not read yet")
-        + '<div class="banner" style="border-left-color:var(--holo)">'
+        # `asof_live=True` is the whole reason this stamp is not a lie a few
+        # seconds later. Without it the stamp carries no `data-live-read`,
+        # `paintStamp` returns on its first line, and the page keeps saying
+        # "not read yet" while the four tiles beneath it repaint every five
+        # seconds with real equity and real open risk. One screen said three
+        # separate times that it had no figures, directly above four of them.
+        head(
+            greeting(env) if env else "Account",
+            "Board",
+            "not read yet",
+            asof_live=True,
+        )
+        # The id lets the stream retract this the moment the first reading
+        # lands — and the reload beside it is what fills in everything this
+        # page does not have. A cold-start Board renders four tiles and NO
+        # sections: no positions, no resting orders, no risk meters. The stream
+        # can only repaint figures the server already rendered, so those
+        # sections can never arrive by themselves and the operator had no route
+        # to them short of noticing and reloading by hand.
+        + f'<div class="banner" id="{COLD_START_BANNER_ID}" '
+        'style="border-left-color:var(--holo)">'
         "<b>Reading the account</b>No broker reading has come back yet, so "
         "there are no figures to show. This is a cold start rather than an "
         "empty account: nothing here is zero, it is unknown. The live stream "
-        "fills these in as soon as the first read lands, and the connection "
-        "indicator beside the mode badge says whether it is getting through."
+        "fills these in as soon as the first read lands, and the page reloads "
+        "itself once to bring in the positions, the resting orders and the risk "
+        "meters, which cannot be streamed into a page that never rendered them."
         "</div>"
         + f'<div class="grid g4">{tiles}</div>'
     )
@@ -3127,13 +3228,71 @@ def board(
     )
 
 
-def _working_orders(orders: list[WorkingOrder], prices: dict[str, float]) -> str:
-    """Orders resting at the broker, and how far the market is from filling them.
+def _order_level(o: WorkingOrder) -> str:
+    """The price this order is waiting on, named for what kind of price it is.
 
-    The bot submits limit orders only, deliberately, so one that does not reach
-    its price simply waits. Without this the Board shows no position and no
-    explanation, when the truth is that an order is sitting there needing a move
-    that may never come.
+    This cell used to be `limit_price or "market"`, which made two separate
+    false statements about the one order that matters most. Every entry is a
+    GTC bracket or an OTO now, so a stop leg is resting at the broker for as
+    long as the position is open — and a stop leg has no `limit_price`, so it
+    rendered as **market**. It is not a market order: it becomes one only if it
+    triggers, and the level it triggers at appeared nowhere on the deck.
+
+    Worse, a stop at a known 820 and a stop whose trigger the broker did not
+    report rendered identically. `models.WorkingOrder` carries `order_type` next
+    to `stop_price` precisely so those two can be told apart — "this is a limit
+    order and correctly has no stop" against "this is the leg the operator's
+    third rule depends on and nobody can read its level". The second is the one
+    worth saying loudly, so it says `unknown` in the alert colour rather than
+    disappearing into a muted blank.
+    """
+    if o.trigger_price_unknown:
+        return '<span class="alert">unknown</span> <span class="muted">stop</span>'
+    if o.is_stop and o.stop_price is not None:
+        return f'{o.stop_price:,.4f} <span class="muted">stop</span>'
+    if o.limit_price is not None:
+        return f"{o.limit_price:,.4f}"
+    if "market" in o.order_type.lower():
+        return "market"
+    # No level, and the broker did not say what kind of order this is. That is
+    # not a market order either; it is a gap in what was read back.
+    return '<span class="muted">unknown</span>'
+
+
+def _order_gap(o: WorkingOrder, price: float) -> float | None:
+    """How far the market still has to travel before this order does something.
+
+    Positive means it has not got there yet, for either kind of order — but the
+    arithmetic is the MIRROR of a limit's, because a stop sits on the other side
+    of the market. A buy limit rests below the price and a buy stop triggers
+    above it, so reusing `distance_to_fill` for a stop leg would report the
+    right magnitude with the wrong sign, and a stop 6% away from firing would
+    read as one that should already have gone.
+
+    `distance_to_fill` is left alone rather than taught about stops: it is named
+    for filling, and a stop does not fill at its trigger.
+    """
+    if price <= 0:
+        return None
+    if o.is_stop:
+        if o.stop_price is None:
+            return None
+        if o.direction == Direction.BUY:
+            return (o.stop_price - price) / price * 100
+        return (price - o.stop_price) / price * 100
+    return o.distance_to_fill(price)
+
+
+def _working_orders(orders: list[WorkingOrder], prices: dict[str, float]) -> str:
+    """Orders resting at the broker, and how far the market is from them.
+
+    Two kinds rest here and they are not the same thing. An entry is a limit
+    order that waits for its price and simply never fills if the price does not
+    come. A **stop leg** is the other half of the bracket every entry now goes
+    out as, and it is what the operator's third rule — a hard stop on every
+    trade — actually amounts to at the broker. Without this section the Board
+    shows no position and no explanation for the first kind, and no visible
+    proof of the second.
     """
     if not orders:
         return (
@@ -3145,22 +3304,35 @@ def _working_orders(orders: list[WorkingOrder], prices: dict[str, float]) -> str
     rows = ""
     for o in orders:
         price = prices.get(o.symbol)
-        gap = o.distance_to_fill(price) if price else None
-        gap_text = (
-            "n/a"
-            if gap is None
-            else (f"{gap:+.2f}% away" if abs(gap) > 0.005 else "at the limit")
-        )
+        gap = _order_gap(o, price) if price else None
+        level_word = "trigger" if o.is_stop else "limit"
+        if gap is None:
+            gap_text = "n/a"
+        elif abs(gap) <= 0.005:
+            gap_text = f"at the {level_word}"
+        elif gap < 0 and o.is_stop:
+            # The market is already through a stop that has not fired. Out of
+            # hours that is expected — a stop becomes a market order and
+            # extended-hours venues take limits only — and it is exactly what
+            # `stop_watch` reports on the loop's pulse. Never muted.
+            gap_text = f"{gap:+.2f}% — through the trigger"
+        else:
+            gap_text = f"{gap:+.2f}% away"
         # A positive gap means the price still has to travel; that is the
         # difference between waiting and never filling.
-        gap_cls = "muted" if gap is None or gap <= 0 else ""
+        if gap is None:
+            gap_cls = "muted"
+        elif gap < 0 and o.is_stop:
+            gap_cls = "alert"
+        elif gap <= 0:
+            gap_cls = "muted"
+        else:
+            gap_cls = ""
 
         # Each cell is built before the row, never with a trailing conditional
         # on a multi-part f-string: the ternary binds to the whole expression,
         # not the last fragment, and silently eats the rest of the row.
-        limit_cell = (
-            f"{o.limit_price:,.4f}" if o.limit_price is not None else "market"
-        )
+        level_cell = _order_level(o)
         market_cell = f"{price:,.4f}" if price else "unknown"
         filled_note = (
             f' <span class="muted">({o.filled_qty:g} filled)</span>'
@@ -3170,12 +3342,19 @@ def _working_orders(orders: list[WorkingOrder], prices: dict[str, float]) -> str
         submitted = _when(o.submitted_at) if o.submitted_at else "unknown"
         status = o.status.value.replace("_", " ")
 
+        # A value and its qualifier travel inside ONE element. Under 760px each
+        # `td` becomes a `space-between` flex row with the label injected as
+        # `::before`, so a bare "6" plus a bare "(2 filled)" are two flex items
+        # and land at opposite ends of the card with the label between them —
+        # one figure rendered as two fields. Wrapped, the row has exactly two
+        # children and reads "QTY   6 (2 filled)".
         rows += (
             f'<tr class="data"><td data-l="Symbol"><b>{_e(o.symbol)}</b></td>'
             f'<td data-l="Side">{_e(o.direction.value)}</td>'
             f'<td data-l="Status"><span class="pill hold">{_e(status)}</span></td>'
-            f'<td data-l="Qty" class="r num">{o.qty:g}{filled_note}</td>'
-            f'<td data-l="Limit" class="r num">{limit_cell}</td>'
+            f'<td data-l="Qty" class="r num"><span>{o.qty:g}{filled_note}</span></td>'
+            f'<td data-l="Trigger / limit" class="r num">'
+            f"<span>{level_cell}</span></td>"
             f'<td data-l="Market" class="r num">{market_cell}</td>'
             f'<td data-l="Needs" class="r num {gap_cls}">{gap_text}</td>'
             f'<td data-l="Submitted">{_e(submitted)}</td></tr>'
@@ -3184,10 +3363,14 @@ def _working_orders(orders: list[WorkingOrder], prices: dict[str, float]) -> str
     return (
         '<section class="block"><h2>Pending orders</h2>'
         '<div class="scroll"><table><caption>"Needs" is how far the market still '
-        "has to move for the limit to fill. A large positive number is an order "
-        "that is not going to fill today.</caption>"
+        "has to move — to the limit for a resting entry, to the trigger for a "
+        "stop leg. A stop leg is the other half of the bracket every entry goes "
+        "out as, so one resting here is the hard stop doing its job; a trigger "
+        "reading &ldquo;unknown&rdquo; means the broker did not report the level "
+        "and it cannot be checked against the journal.</caption>"
         "<thead><tr><th>Symbol</th><th>Side</th><th>Status</th><th class=r>Qty</th>"
-        "<th class=r>Limit</th><th class=r>Market</th><th class=r>Needs</th>"
+        "<th class=r>Trigger / limit</th><th class=r>Market</th>"
+        "<th class=r>Needs</th>"
         f"<th>Submitted</th></tr></thead><tbody>{rows}</tbody></table></div></section>"
     )
 
@@ -3274,8 +3457,12 @@ def _positions(
             f'<td data-l="Entry" class="r num">{p.entry_price:,.4f}</td>'
             f'<td data-l="Now" class="r num">{current:,.4f}</td>'
             f'<td data-l="Stop" class="r num">{stop}</td>'
-            f'<td data-l="At risk" class="r num">{risk} '
-            f'<span class="muted">({risk_pct})</span></td>'
+            # Value and qualifier inside one element — see `_working_orders`.
+            # Under 760px a bare "$980.19" and a bare "(0.98%)" are two flex
+            # items in a `space-between` row and end up at opposite ends of the
+            # card, reading as two separate fields rather than one figure.
+            f'<td data-l="At risk" class="r num"><span>{risk} '
+            f'<span class="muted">({risk_pct})</span></span></td>'
             f'<td data-l="Unrealised" class="r num {_cls(p.unrealised_pnl_usd)}">'
             f"{_money(p.unrealised_pnl_usd, sign=True)}</td></tr>"
             + (
@@ -3646,10 +3833,16 @@ def trades_page(recent: list[Trade], report: JournalReport) -> str:
             else ""
         )
         rows.append(
-            f'<tr class="data"><td data-l="Symbol"><b>{_e(t.symbol)}</b><br>'
-            f'<span class="note">{_e(t.strategy)}</span></td>'
-            f'<td data-l="Held">{_e(t.entry_time.date().isoformat())}<br>'
-            f'<span class="note">to {_e(exit_date)}</span></td>'
+            # One wrapper per cell, for the reason given in `_working_orders`:
+            # under 760px a `td` is a `space-between` flex row, a `<br>` does
+            # not break a line inside one, and the two stacked lines would be
+            # flung to opposite ends of the card as though they were separate
+            # fields. Wrapped, each cell is one flex item and the `<br>` goes
+            # back to doing what it does on the desktop table.
+            f'<tr class="data"><td data-l="Symbol"><span><b>{_e(t.symbol)}</b><br>'
+            f'<span class="note">{_e(t.strategy)}</span></span></td>'
+            f'<td data-l="Held"><span>{_e(t.entry_time.date().isoformat())}<br>'
+            f'<span class="note">to {_e(exit_date)}</span></span></td>'
             f'<td data-l="Qty" class="r num">{t.qty:g}</td>'
             f'<td data-l="Entry" class="r num">{t.entry_price:,.4f}</td>'
             f'<td data-l="Stop" class="r num">{t.planned_stop:,.4f}</td>'
@@ -3657,8 +3850,8 @@ def trades_page(recent: list[Trade], report: JournalReport) -> str:
             f'<td data-l="At risk" class="r num">{_money(t.planned_risk_usd)}</td>'
             f'<td data-l="Fees" class="r num muted">{_money(t.fees_usd)}</td>'
             f'<td data-l="Result" class="r num {_cls(t.net_pnl_usd)}">'
-            f"{_money(t.net_pnl_usd, sign=True)}<br>"
-            f'<span class="note">{r_text}</span></td></tr>' + rationale
+            f"<span>{_money(t.net_pnl_usd, sign=True)}<br>"
+            f'<span class="note">{r_text}</span></span></td></tr>' + rationale
         )
 
     body += (

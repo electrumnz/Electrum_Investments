@@ -782,6 +782,31 @@ this is a deliberate change to that rule rather than an addition beside it.
 
 ---
 
+## Working with several agents in one tree
+
+Learned the hard way, twice in one session, and it costs real work each time.
+
+**Never `git stash` while another agent is writing to the tree.** `git stash
+push --keep-index` reverts every unstaged change, which is exactly the
+in-flight work of anything running beside you. Observed: an agent's
+`render.py` went from 5,057 lines back to 4,925 mid-edit, and a second agent
+lost two untracked files it had to recover from `stash@{0}^3`. The agent
+carries on editing a file that has silently moved under it.
+
+The safe pattern is to **stage and commit by explicit path**, never `git add
+-A`, and to verify the committed slice by checking out a clean copy elsewhere
+rather than by emptying the working tree.
+
+**And do not trust a green suite run against a tree that holds another agent's
+half-finished work.** A commit assembled from a subset of it has never been
+tested as a unit — that is how `grants.py` reached the repository while the
+`config.py` it depends on did not, and CI caught it with `"Rules" has no
+attribute "dreaming"` on a suite that had just passed locally. That is the
+"green local suite says nothing about the repository" rule arriving through
+concurrency rather than through `.gitignore`.
+
+---
+
 ## Rules that apply to everything above
 
 - `src/bot/risk.py` decides what may be traded. Never route around

@@ -22,6 +22,7 @@ from mcp.server.mcpserver import MCPServer
 from .audit import AuditLog
 from .broker import Broker
 from .config import Env, Rules, load_rules
+from .dreaming import DEFAULT_DREAMS_PATH, DreamStore
 from .insight import DEFAULT_DB_PATH as INSIGHT_DB_PATH
 from .insight import InsightIndex, run_query
 from .journal import Journal
@@ -54,7 +55,16 @@ server = MCPServer(
         "query_history runs read-only SQL over every decision, assessment, "
         "rejection reason and news item ever recorded, and describe_history "
         "returns the schema and the days covered. Prefer those over saying the "
-        "history is unavailable — it is on disk and indexed."
+        "history is unavailable — it is on disk and indexed.\n\n"
+        "The dream vaults are here too. list_dreams, get_dream and "
+        "dream_vault_status read them; adopt_dream and return_dream are the "
+        "only two verbs the trading agent has, and post_dream_message records a "
+        "turn of the conversation. None of them reaches the broker: adopting a "
+        "dream grants a SYMBOL PERMISSION with an expiry on it, and every gate "
+        "in config/rules.yaml still runs on anything traded under one. Quote "
+        "the ages these tools report — a dream offered three months ago and one "
+        "offered this morning are different facts — and never read an empty "
+        "list as 'nothing is happening' without checking store_readable first."
     ),
 )
 
@@ -71,6 +81,8 @@ class _Session:
         self._audit = AuditLog()
         self._insight: InsightIndex | None = None
         self._insight_path = INSIGHT_DB_PATH
+        self._dreams: DreamStore | None = None
+        self._dreams_path = DEFAULT_DREAMS_PATH
 
     @property
     def env(self) -> Env:
@@ -134,6 +146,26 @@ class _Session:
                 self._insight_path, audit_dir=self._audit.base_dir
             )
         return self._insight
+
+    @property
+    def dreams(self) -> DreamStore:
+        """The dream store, built on first use. May raise; callers use `_store`.
+
+        Lazy for the reason the index is: most sessions never ask about dreams,
+        and opening a SQLite file to answer a question about the account would
+        be work nobody asked for. It is also the reason it can fail — a missing
+        directory, a file somebody moved — and a store that will not open must
+        reach the agent as a stated fact rather than as a traceback, which is
+        what `_store` is for.
+
+        `DreamStore` is resolved off the module rather than captured at import,
+        so a test can patch it. `_dreams_path` follows the same pattern as
+        `_insight_path`: every store here takes its path from the session so the
+        suite never writes to the real `data/`.
+        """
+        if self._dreams is None:
+            self._dreams = DreamStore(self._dreams_path)
+        return self._dreams
 
     def account(self) -> AccountSnapshot:
         """Broker state with open risk filled in from the journal.
