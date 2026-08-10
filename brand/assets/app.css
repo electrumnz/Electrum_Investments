@@ -161,13 +161,6 @@ nav.primary a {
 nav.primary a:hover { color: var(--bone); border-color: var(--slate); }
 nav.primary a[aria-current="page"] { color: var(--bone); border-color: var(--patina); }
 
-.whoami {
-  font-family: var(--mono); font-size: 0.6875rem; letter-spacing: 0.1em;
-  color: var(--pewter); text-transform: uppercase;
-  padding-left: 1rem; border-left: 1px solid var(--slate);
-}
-.whoami a { color: var(--pewter); }
-
 /* ------------------------------------------------------------------ layout */
 main { padding: clamp(2rem, 5vw, 3.5rem) 0 4rem; }
 
@@ -372,24 +365,28 @@ select:hover, input:hover { border-color: var(--pewter); }
 .yaml .c { color: var(--pewter); }   /* comment */
 .yaml .k { color: var(--patina); }   /* key */
 
-/* ------------------------------------------------------------------ signin */
-.signin-page { min-height: 100svh; display: flex; flex-direction: column; }
-.signin-main { flex: 1; display: grid; place-items: center; padding: 3rem 0; }
-.signin-card { width: min(100% - 2rem, 420px); }
-.signin-card .mark { display: block; margin: 0 auto 1.5rem; }
-.signin-card .mark path { fill: var(--bone); }
-.signin-card h1 {
+/* ------------------------------------------------------------------ launch */
+/* The landing page. NOT a sign-in: there is no form, no session and nothing to
+   authenticate against, because every figure on this site comes from a
+   committed fixture. It is the launch pad into the demonstration, and fx.js
+   turns its one link into a jump to lightspeed. */
+.launch-page { min-height: 100svh; display: flex; flex-direction: column; }
+.launch-main { flex: 1; display: grid; place-items: center; padding: 3rem 0; }
+.launch-card { width: min(100% - 2rem, 420px); }
+.launch-card .mark { display: block; margin: 0 auto 1.5rem; }
+.launch-card .mark path { fill: var(--bone); }
+.launch-card h1 {
   font-size: 1.5rem; text-align: center; letter-spacing: 0.06em; margin: 0 0 0.5rem;
 }
-.signin-card h1 span { color: var(--pewter); }
-.signin-card .tagline {
+.launch-card h1 span { color: var(--pewter); }
+.launch-card .tagline {
   font-family: var(--mono); font-size: 0.6875rem; letter-spacing: 0.2em;
   text-transform: uppercase; color: var(--pewter); text-align: center;
   margin: 0 0 2rem;
 }
-.signin-card form { display: flex; flex-direction: column; gap: 1rem; }
-.signin-card .field input { width: 100%; }
-.signin-card .btn { width: 100%; }
+.launch-card form { display: flex; flex-direction: column; gap: 1rem; }
+.launch-card .field input { width: 100%; }
+.launch-card .btn { width: 100%; }
 
 /* ------------------------------------------------------------------ footer */
 footer.site {
@@ -410,7 +407,6 @@ footer.site a { color: var(--pewter); }
   nav.primary { margin-left: 0; width: 100%; order: 3; }
   nav.primary ul { gap: 0.125rem; }
   nav.primary a { padding: 0.375rem 0.5rem; font-size: 0.8125rem; }
-  .whoami { margin-left: auto; padding-left: 0; border-left: 0; }
 
   .table-wrap { border: 0; overflow-x: visible; }
   table, thead, tbody, tr, td { display: block; width: 100%; }
@@ -444,7 +440,205 @@ footer.site a { color: var(--pewter); }
   td.r, th.r { text-align: right; }
 }
 
+/* ========================================================= 2200 flight deck ==
+   The projection layer, matching the live command centre in src/bot/web/ so
+   the two surfaces read as one system: a perspective starfield, a hyperspace
+   jump between pages, HUD bracket corners, and panels that materialise rather
+   than simply being there.
+
+   It is decoration, and it is scoped so it cannot become anything else.
+
+   - **Nothing starts hidden unless assets/fx.js said so.** The entry animations
+     key off `html.fx-ready`, a class the script adds. JavaScript off, a script
+     that threw, or a file that 404s all render the plain site with every figure
+     visible. The obvious arrangement — hide in CSS, reveal in JS — fails to a
+     blank page.
+   - **The demo banner is never touched by any of this.** It is plain HTML in
+     all six files precisely so that the label saying these figures are invented
+     cannot depend on a script having run, and it must not acquire an entry
+     animation for the same reason.
+   - **Reduced motion switches the layer off rather than down**, in the block at
+     the end of this file and again in the script.
+   ========================================================================== */
+
+:root {
+  /* Projection layer only. The identity has one accent by design and patina
+     keeps it: chrome, links and focus rings are still patina, and gain and loss
+     are still the only two colours allowed on a figure. This is the medium the
+     interface is drawn in rather than a third meaning. */
+  --holo: #6FD3E8;
+  --holo-faint: rgba(111, 211, 232, 0.14);
+  --ease-jump: cubic-bezier(0.7, 0, 0.84, 0);
+}
+
+.fx { position: fixed; inset: 0; pointer-events: none; contain: layout paint; }
+#fx-stars { z-index: 0; }
+#fx-stars canvas { display: block; width: 100%; height: 100%; }
+
+.fx-grid {
+  z-index: 1; opacity: 0.5;
+  background-image:
+    linear-gradient(to right, var(--holo-faint) 1px, transparent 1px),
+    linear-gradient(to bottom, var(--holo-faint) 1px, transparent 1px);
+  background-size: 72px 72px;
+  -webkit-mask-image: radial-gradient(ellipse 110% 80% at 50% 0%, #000 5%, transparent 72%);
+  mask-image: radial-gradient(ellipse 110% 80% at 50% 0%, #000 5%, transparent 72%);
+}
+.fx-vig {
+  z-index: 2;
+  background: radial-gradient(ellipse 78% 62% at 50% 42%, transparent 45%, rgba(4, 6, 9, 0.62) 100%);
+}
+.fx-scan {
+  z-index: 3; opacity: 0.5;
+  background: repeating-linear-gradient(to bottom, transparent 0 3px, rgba(3, 6, 10, 0.16) 3px 4px);
+}
+
+.demo-banner, .masthead, main, footer.site { position: relative; z-index: 5; }
+.demo-banner { background: rgba(22, 27, 34, 0.92); }
+.masthead { background: rgba(11, 14, 18, 0.72); }
+
+/* ------------------------------------------------------------------- jump */
+.fx-flash {
+  z-index: 60; opacity: 0;
+  background: radial-gradient(circle at 50% 50%, #F2FBFF 0%, #A9E2F2 30%, rgba(11, 14, 18, 0) 70%);
+}
+.fx-flash.out { animation: fx-out 520ms var(--ease-jump) forwards; }
+.fx-flash.in { animation: fx-in 720ms var(--ease) forwards; }
+@keyframes fx-out { from { opacity: 0; } to { opacity: 1; } }
+@keyframes fx-in { from { opacity: 0.92; } to { opacity: 0; } }
+
+.fx-sweep {
+  z-index: 59; opacity: 0;
+  background: linear-gradient(to bottom, transparent 0%, rgba(111, 211, 232, 0.3) 46%,
+    rgba(210, 245, 255, 0.55) 50%, rgba(111, 211, 232, 0.3) 54%, transparent 100%);
+  background-size: 100% 220px;
+  background-repeat: no-repeat;
+}
+.fx-sweep.run { animation: fx-sweep 900ms var(--ease) forwards; }
+@keyframes fx-sweep {
+  0% { opacity: 0; background-position: 0 -240px; }
+  12% { opacity: 0.85; }
+  85% { opacity: 0.25; }
+  100% { opacity: 0; background-position: 0 110vh; }
+}
+
+/* --------------------------------------------------- panel materialisation */
+.fx-ready .fx-panel { opacity: 0; }
+.fx-ready .fx-panel.fx-in { animation: fx-rise 560ms var(--ease) var(--fx-d, 0ms) both; }
+/* Cleared on animationend rather than left applied: `both` retains the final
+   frame, and a retained clip-path makes the element a containing block, which
+   would quietly break every sticky table header on the site. */
+.fx-ready .fx-panel.fx-done { opacity: 1; animation: none; clip-path: none; transform: none; }
+@keyframes fx-rise {
+  0% { opacity: 0; transform: translate3d(0, 20px, 0); clip-path: inset(0 0 100% 0); }
+  55% { opacity: 1; }
+  100% { opacity: 1; transform: none; clip-path: inset(0 0 -2px 0); }
+}
+
+/* --------------------------------------------------------------- HUD chrome */
+.card, .chart-frame, .callout, .table-wrap, .yaml, .launch-card { position: relative; }
+.card::before, .chart-frame::before, .callout::before, .table-wrap::before,
+.yaml::before, .launch-card::before,
+.card::after, .chart-frame::after, .callout::after, .table-wrap::after,
+.yaml::after, .launch-card::after {
+  content: ""; position: absolute; width: 9px; height: 9px; pointer-events: none;
+  border: 1px solid var(--holo); opacity: 0.45;
+  transition: opacity 0.25s var(--ease);
+}
+.card::before, .chart-frame::before, .callout::before, .table-wrap::before,
+.yaml::before, .launch-card::before {
+  top: -1px; left: -1px; border-right: 0; border-bottom: 0;
+}
+.card::after, .chart-frame::after, .callout::after, .table-wrap::after,
+.yaml::after, .launch-card::after {
+  bottom: -1px; right: -1px; border-left: 0; border-top: 0;
+}
+.card:hover::before, .card:hover::after { opacity: 0.9; }
+
+.card, .chart-frame, .callout, .yaml {
+  background: linear-gradient(180deg, rgba(22, 27, 34, 0.88), rgba(17, 21, 27, 0.92));
+  backdrop-filter: blur(3px);
+  box-shadow: inset 0 1px 0 rgba(111, 211, 232, 0.07), 0 12px 30px -18px rgba(0, 0, 0, 0.9);
+}
+
+nav.primary a { position: relative; overflow: hidden; }
+nav.primary a::after {
+  content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 1px;
+  background: var(--holo); transform: scaleX(0); transform-origin: left;
+  transition: transform 0.28s var(--ease); opacity: 0.85;
+}
+nav.primary a:hover::after, nav.primary a[aria-current="page"]::after { transform: scaleX(1); }
+
+/* -------------------------------------------------------------- boot readout */
+/* Built by the script, never present in the markup, so a page without
+   JavaScript cannot end up behind an overlay it has no way to dismiss.
+
+   Every line names a piece of this interface. None of them reports a figure,
+   because every figure on this site is invented and a boot screen implying
+   otherwise would undercut the banner three lines above it. */
+.fx-boot {
+  position: fixed; inset: 0; z-index: 60; background: var(--ink);
+  display: flex; align-items: center; justify-content: center;
+  font-family: var(--mono); font-size: 0.8125rem; letter-spacing: 0.06em;
+}
+.fx-boot.done { animation: fx-boot-out 420ms var(--ease) forwards; pointer-events: none; }
+@keyframes fx-boot-out { to { opacity: 0; } }
+.fx-boot .panel { width: min(100% - 3rem, 26rem); }
+.fx-boot .sig {
+  font-family: var(--serif); font-size: 1.125rem; letter-spacing: 0.16em;
+  color: var(--bone); margin-bottom: 1.25rem; text-align: center;
+}
+.fx-boot .sig span { color: var(--pewter); }
+.fx-boot ul { list-style: none; margin: 0; padding: 0; }
+.fx-boot li {
+  display: flex; gap: 0.75rem; align-items: baseline; color: var(--pewter);
+  padding: 0.2rem 0; opacity: 0;
+}
+.fx-boot li.on { animation: fx-line 260ms var(--ease) forwards; }
+@keyframes fx-line {
+  from { opacity: 0; transform: translate3d(-6px, 0, 0); }
+  to { opacity: 1; transform: none; }
+}
+.fx-boot li b {
+  margin-left: auto; font-weight: 400; color: var(--holo);
+  font-size: 0.6875rem; letter-spacing: 0.14em;
+}
+.fx-boot .rule { height: 1px; background: var(--slate); margin: 1rem 0; }
+.fx-boot .rule i {
+  display: block; height: 1px; width: 0; background: var(--holo);
+  animation: fx-fill 1150ms var(--ease) forwards;
+}
+@keyframes fx-fill { to { width: 100%; } }
+
+/* The landing page is the launch pad, so its one control reads as one. */
+.launch-card .btn.primary { letter-spacing: 0.2em; }
+.launch-card .standby {
+  margin: 1.5rem 0 0; text-align: center; font-family: var(--mono);
+  font-size: 0.625rem; letter-spacing: 0.16em; text-transform: uppercase;
+  color: var(--pewter);
+}
+.launch-card .standby i {
+  display: inline-block; width: 5px; height: 5px; border-radius: 50%;
+  background: var(--holo); margin-right: 0.5rem; vertical-align: middle;
+  animation: fx-pulse 2.8s ease-in-out infinite;
+}
+@keyframes fx-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(111, 211, 232, 0.5); opacity: 0.75; }
+  50% { box-shadow: 0 0 0 4px rgba(111, 211, 232, 0); opacity: 1; }
+}
+
 /* --------------------------------------------------- reduced motion honoured */
+/* Off, not slowed down. Someone who asked their operating system for less
+   motion has not asked for a gentler hyperspace jump, and a full-screen radial
+   starfield accelerating to lightspeed is close to a worked example of a
+   vestibular trigger. fx.js reads the same query and never starts the canvas,
+   so the work is not done rather than done invisibly; this block catches the
+   case where the preference is switched on after the page has loaded. */
 @media (prefers-reduced-motion: reduce) {
   * { animation: none !important; transition: none !important; }
+  #fx-stars, .fx-grid, .fx-scan, .fx-sweep, .fx-flash, .fx-boot { display: none !important; }
+  .fx-vig { opacity: 0.5; }
+  .fx-ready .fx-panel {
+    opacity: 1 !important; clip-path: none !important; transform: none !important;
+  }
 }

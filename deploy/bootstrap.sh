@@ -94,12 +94,19 @@ install -m 644 "$APP_DIR/deploy/systemd/mudhorn-backup.service" /etc/systemd/sys
 install -m 644 "$APP_DIR/deploy/systemd/mudhorn-backup.timer" /etc/systemd/system/
 install -m 644 "$APP_DIR/deploy/systemd/mudhorn-tailnet.service" /etc/systemd/system/
 install -m 644 "$APP_DIR/deploy/systemd/mudhorn-tailnet.timer" /etc/systemd/system/
-# run-mcp.sh and run-chat.sh are named in sudoers rules, so they must be
-# executable and — from the chown above — root-owned and not writable by the
-# account the rule grants FROM. A wrapper writable by that account turns its
+install -m 644 "$APP_DIR/deploy/systemd/mudhorn-dream.service" /etc/systemd/system/
+install -m 644 "$APP_DIR/deploy/systemd/mudhorn-dream.timer" /etc/systemd/system/
+# run-mcp.sh, run-chat.sh and run-dream.sh are named in sudoers rules, so they
+# must be executable and — from the chown above — root-owned and not writable by
+# the account the rule grants FROM. A wrapper writable by that account turns its
 # sudoers rule into arbitrary code execution as the target user.
+#
+# run-dream.sh is made executable here whether or not the second Hermes instance
+# exists. It is inert without one: nothing invokes it unless a sudoers rule names
+# it, and the dashboard falls back to the account agent and says so on the page.
 chmod 755 "$APP_DIR/deploy/backup-journal.sh" "$APP_DIR/deploy/check-tailscale.sh" \
-          "$APP_DIR/deploy/run-mcp.sh" "$APP_DIR/deploy/run-chat.sh"
+          "$APP_DIR/deploy/run-mcp.sh" "$APP_DIR/deploy/run-chat.sh" \
+          "$APP_DIR/deploy/run-dream.sh"
 systemctl daemon-reload
 systemctl enable --quiet mudhorn-bot.service mudhorn-web.service
 echo "    enabled at boot, not started"
@@ -110,6 +117,17 @@ echo "    enabled at boot, not started"
 # that turns out not to have been running.
 systemctl enable --now --quiet mudhorn-backup.timer
 echo "    mudhorn-backup.timer started (hourly)"
+
+# The dream timer is installed but NOT started, and that asymmetry is the point.
+# The backup timer costs nothing and the failure it prevents is unrecoverable,
+# so it starts itself. This one spends money on an API call every time it fires
+# and needs ANTHROPIC_API_KEY to do anything at all — without one it exits 1 and
+# would post a failed unit every morning, which teaches an operator to ignore
+# systemctl --failed. Same reasoning as --execute and the chat token: anything
+# that spends or acts is switched on by a person who decided to.
+echo "    mudhorn-dream.timer installed, NOT started"
+echo "      enable with: systemctl enable --now mudhorn-dream.timer"
+echo "      needs ANTHROPIC_API_KEY in .env. Costs roughly a few pounds a year."
 
 # Started for the same reason. Before Tailscale is installed this reports "not
 # logged in", which is correct rather than noisy: on a box whose dashboard is

@@ -11,7 +11,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from bot.config import Rules
+from bot.config import Rules, load_rules
 from bot.models import (
     AccountSnapshot,
     AssetClass,
@@ -90,6 +90,177 @@ def test_rejects_outside_session(rules, account, spy_tick, buy_proposal):
     verdict = _gate(rules, now=night).evaluate(buy_proposal, account=account, tick=spy_tick)
     assert not verdict.approved
     assert _reasons_mention(verdict, "outside the trading sessions")
+
+
+def test_a_class_limit_may_tighten_the_portfolio_limit(
+    rules, account, spy_tick, buy_proposal
+):
+    """Each instrument class carries its own limits, and the gate takes the
+    tighter of the two."""
+    # The proposal risks $15 against $100k of equity, so the class limit has to
+    # be below 0.015% to bite. That it takes a figure this small is the point:
+    # the portfolio limit of 1% is nowhere near binding here, so a rejection can
+    # only have come from the class.
+    rules.instruments["us_equity"].max_risk_per_trade_pct = 0.01
+
+    verdict = _gate(rules).evaluate(buy_proposal, account=account, tick=spy_tick)
+
+    assert not verdict.approved
+    assert _reasons_mention(verdict, "per-trade cap")
+    # The message quotes the limit actually applied, not the portfolio one, or
+    # an operator would go looking in the wrong block for the number.
+    assert _reasons_mention(verdict, "0.01%")
+    assert not _reasons_mention(verdict, "1.00%")
+
+
+def test_a_class_limit_overrides_the_portfolio_limit_in_either_direction():
+    """`account:` is the default, not a ceiling.
+
+    An earlier version refused a class limit looser than the portfolio one at
+    config load. That was the wrong mechanism: pushing back on a limit getting
+    looser belongs to the settings agent, which argues the case and slows the
+    operator down without denying the change. A validator that refuses to start
+    is a denial, and it denies at the least useful moment — boot, with no
+    explanation of the trade-off and no way to say "yes, I mean it".
+
+    What matters instead is that the file and the gate agree. A config saying
+    3% while the gate quietly applied 1% would be a limit nobody could read off
+    the config, which is worse than either number on its own.
+    """
+    rules = load_rules()
+    rules.instruments["us_equity"].max_risk_per_trade_pct = 3.0
+
+    account = AccountSnapshot(
+        equity_usd=100_000.0, cash_usd=100_000.0, buying_power_usd=100_000.0
+    )
+    tick = Tick(symbol="SPY", bid=579.98, ask=580.02, timestamp=INSIDE_SESSION)
+    # Risks $2,500 — over the portfolio's 1% but inside the class's 3%.
+    proposal = OrderProposal(
+        symbol="SPY",
+        direction=Direction.BUY,
+        qty=100,
+        limit_price=580.00,
+        stop_loss_price=555.00,
+        take_profit_price=620.00,
+        rationale="Sized to the class limit rather than the portfolio default.",
+    )
+
+    verdict = _gate(rules).evaluate(proposal, account=account, tick=tick)
+
+    # The per-trade gate does not object: the class said 3% and meant it.
+    assert not _reasons_mention(verdict, "per-trade cap")
+
+
+def test_a_looser_class_limit_still_meets_the_portfolio_total_risk_cap():
+    """Worth knowing rather than guarded against.
+
+    `max_total_risk_pct` is portfolio-wide and stays that way, so a per-trade
+    override above it can never actually fill — the total-risk gate refuses the
+    trade that would breach it. Raising a class limit past the total therefore
+    does nothing on its own, which is a fact about the interaction rather than
+    a rule stopping anybody.
+    """
+    rules = load_rules()
+    rules.instruments["us_equity"].max_risk_per_trade_pct = 3.0
+
+    account = AccountSnapshot(
+        equity_usd=100_000.0, cash_usd=100_000.0, buying_power_usd=100_000.0
+    )
+    tick = Tick(symbol="SPY", bid=579.98, ask=580.02, timestamp=INSIDE_SESSION)
+    proposal = OrderProposal(
+        symbol="SPY",
+        direction=Direction.BUY,
+        qty=100,
+        limit_price=580.00,
+        stop_loss_price=555.00,
+        take_profit_price=620.00,
+        rationale="Risks 2.5%, inside the class limit and past the 2% total.",
+    )
+
+    verdict = _gate(rules).evaluate(proposal, account=account, tick=tick)
+
+    assert not verdict.approved
+    assert _reasons_mention(verdict, "total risk")
+
+
+def test_a_class_position_cap_counts_only_that_class(rules, account, spy_tick, buy_proposal):
+    """Both caps apply, and they measure different things. A class that gets
+    loud must not be able to fill every slot the portfolio has."""
+    rules.instruments["us_equity"].max_concurrent_positions = 1
+    account.open_positions = [
+        Position(
+            symbol="SPY",
+            direction=Direction.BUY,
+            qty=1,
+            entry_price=580.0,
+            opened_at=INSIDE_SESSION,
+            current_price=580.0,
+        )
+    ]
+
+    verdict = _gate(rules).evaluate(buy_proposal, account=account, tick=spy_tick)
+
+    assert not verdict.approved
+    assert _reasons_mention(verdict, "for this instrument class")
+    # The portfolio cap is 3 and only one position is held, so this rejection
+    # can only have come from the class cap.
+    assert not _reasons_mention(verdict, "already holding 1 positions")
+
+
+def test_rejects_the_pre_market_the_utc_window_would_have_let_through(
+    rules, account, spy_tick, buy_proposal
+):
+    """The operator's rule: no pre-market. After hours is fine.
+
+    This is the case `sessions_utc` structurally cannot catch. It is fixed UTC
+    hours; the US session is defined in New York time and moves an hour twice a
+    year. `[[14, 21]]` is the winter window applied all year, so in JANUARY
+    14:00 UTC is 09:00 New York — half an hour of pre-market, inside the
+    configured window, every day, with nothing in the window able to notice.
+
+    It used to cost nothing: an out-of-hours equity order was queued to the
+    next open rather than filled. It costs something now, because Alpaca runs a
+    pre-market session from 04:00 ET, so an order placed into it trades in a
+    thinner book than anybody chose.
+    """
+    winter_premarket = datetime(2026, 1, 12, 14, 15, tzinfo=UTC)  # 09:15 EST
+    gate = _gate(rules, now=winter_premarket)
+
+    # The UTC window is satisfied — this is the trap.
+    assert rules.instruments["us_equity"].is_in_session(winter_premarket)
+
+    verdict = gate.evaluate(buy_proposal, account=account, tick=spy_tick)
+
+    assert not verdict.approved
+    assert _reasons_mention(verdict, "pre-market")
+    assert not _reasons_mention(verdict, "outside the trading sessions")
+
+
+@pytest.mark.parametrize(
+    ("label", "moment"),
+    [
+        # 10:00 New York, EST. The regular session.
+        ("regular session", datetime(2026, 1, 12, 15, 0, tzinfo=UTC)),
+        # 16:30 New York, EDT. After hours, which the operator allows.
+        ("after hours", datetime(2026, 8, 10, 20, 30, tzinfo=UTC)),
+    ],
+)
+def test_the_premarket_rule_refuses_nothing_else(
+    rules, account, spy_tick, buy_proposal, label, moment
+):
+    """Only 04:00-09:30 New York. The rule must not quietly become
+    regular-session-only — after hours was explicitly kept."""
+    verdict = _gate(rules, now=moment).evaluate(
+        buy_proposal, account=account, tick=spy_tick
+    )
+
+    assert not _reasons_mention(verdict, "pre-market"), f"{label} was refused"
+
+
+def test_crypto_never_gets_a_premarket_rule(rules):
+    """A 24/7 market has no pre-market, and the phases this reads are the US
+    equity ones. Switched on for crypto it would refuse every hour of the day."""
+    assert rules.instruments["crypto"].refuse_premarket is False
 
 
 @pytest.mark.parametrize(

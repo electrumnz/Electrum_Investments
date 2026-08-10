@@ -41,7 +41,7 @@ It holds limits rather than secrets and is already public in this repository.
 
 | File | What it is |
 | --- | --- |
-| `index.html` | Sign-in shell. Prefilled, accepts anything, gates nothing. |
+| `index.html` | Launch pad. No form, no session, no gate: one link into the demonstration, which fx.js turns into a jump to lightspeed. |
 | `overview.html` | Equity curve, open positions, P&L, risk against the caps, stand-down state. |
 | `trades.html` | Filterable journal. Every trade carries the reasoning recorded against it. |
 | `analytics.html` | Win rate, profit factor, expectancy, R distribution, drawdown, excursion capture. |
@@ -49,8 +49,32 @@ It holds limits rather than secrets and is already public in this repository.
 | `about.html` | The identity reference, plus what this site is. |
 
 `assets/app.css` is the design system, `assets/app.js` holds formatting, metrics
-and the SVG charts, `assets/demo-data.js` is the fixture, `assets/mark.svg` is
-the favicon.
+and the SVG charts, `assets/fx.js` is the projection layer, `assets/demo-data.js`
+is the fixture, `assets/mark.svg` is the favicon.
+
+## The projection layer
+
+`assets/fx.js` adds a perspective starfield, a hyperspace jump between pages, HUD
+bracket corners and panels that materialise on arrival. It is the same engine as
+the live command centre in `src/bot/web/`, so the two surfaces move the same way.
+
+It is decoration and it is built so it cannot become anything else.
+
+- **Nothing starts hidden unless the script said so.** The entry animations need
+  both `html.fx-ready` and a per-element `fx-panel` class, added together in one
+  synchronous block, with a timer that force-finishes every panel whatever
+  happened in between. Script blocked, script threw, JavaScript off: the plain
+  site renders with every figure visible. Hiding in CSS and revealing in JS fails
+  to a blank page, which is why it is done the other way round.
+- **The demo banner is not in the panel list.** It is plain HTML in all six files
+  so the label saying these figures are invented cannot depend on a script having
+  run, and an entry animation would undo exactly that.
+- **The landing page link is an ordinary link first.** `fx.js` turns it into a
+  jump to lightspeed and `overview.html` completes it on arrival, but with the
+  script absent it still just goes there. An entrance that can fail closed is not
+  an entrance.
+- **The boot readout names parts of the interface, never a figure.** Its last
+  line reads `Data source: FIXTURE`, which is the same thing the banner says.
 
 ## Regenerating the fixture
 
@@ -87,9 +111,13 @@ Carried over from the identity reference, which is now `about.html`.
 
 ## Accessibility
 
-`prefers-reduced-motion` is honoured: animations and transitions are switched
-off, the identity reveal shows its final state immediately, and the replay
-control is hidden. Focus is visible throughout. Charts carry `role="img"` and a
+`prefers-reduced-motion` is honoured, and switched **off** rather than slowed
+down: animations and transitions are disabled, the identity reveal shows its
+final state immediately, the replay control is hidden, and `fx.js` returns before
+it starts the canvas, so the starfield and the hyperspace jump are never built at
+all. A full-screen radial starfield accelerating to lightspeed is close to a
+worked example of a vestibular trigger, and a gentler one is not what was asked
+for. Focus is visible throughout. Charts carry `role="img"` and a
 spoken summary, and every chart is also described in words beneath it.
 
 Tables become stacked records below 760px rather than scrolling sideways,

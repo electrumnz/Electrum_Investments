@@ -29,6 +29,7 @@ privileges and should not be granted by one secret.
 from __future__ import annotations
 
 import argparse
+import sqlite3
 from datetime import UTC, datetime
 from typing import Any
 
@@ -43,14 +44,17 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Resp
 
 from ..audit import AuditLog
 from ..config import Env, Rules, load_rules
+from ..dreaming import DreamStore, DreamSummary
 from ..journal import Journal
+from ..market_clock import market_state
 from ..metrics import build_report
 from ..models import AccountSnapshot, WorkingOrder
 from ..options import alerts_for_positions
+from ..souls import GROGU, YODA, load_soul
 from ..tailnet import read as read_tailnet_status
-from . import render
+from . import live, render, seen
 from .auth import COOKIE_NAME, SESSION_TTL_SECONDS, SessionStore
-from .chat import HermesBridge
+from .chat import DREAMER_BINARY, HermesBridge
 
 
 def build_app(
@@ -59,12 +63,19 @@ def build_app(
     rules: Rules | None = None,
     env: Env | None = None,
     audit_log: AuditLog | None = None,
+    dreams: DreamStore | None = None,
+    poller: live.LivePoller | None = None,
     force_mock: bool = False,
 ) -> Any:
     """Construct the FastAPI app. Dependencies are injectable so tests never
     touch a real journal or broker."""
     app = FastAPI(title="Mudhorn Capital", docs_url=None, redoc_url=None)
     bridge = HermesBridge()
+    # The dreamer's own instance when one is installed, so a speculative agent
+    # has no broker tool at all rather than one it was asked not to use. See
+    # DREAMER_BINARY. Absent, `/dreaming` falls back to `bridge` and the page
+    # says which it is rather than claiming the stronger arrangement.
+    dreamer = HermesBridge(binary=DREAMER_BINARY)
 
     resolved_env = env or Env()
     resolved_env.assert_paper_only()
@@ -92,44 +103,114 @@ def build_app(
     resolved_rules = rules or load_rules()
     resolved_journal = journal or Journal()
     audit = audit_log or AuditLog()
+    resolved_dreams = dreams or DreamStore()
 
-    def _account_orders_prices() -> tuple[AccountSnapshot, list[WorkingOrder], dict[str, float]]:
-        """One broker session for everything the Board needs.
+    # One poller for the whole application. Polling per connected browser would
+    # multiply broker load for nothing, and every page render would still be
+    # paying a round trip.
+    # Injectable like the journal and the dream store, so a test can prime it
+    # with one synchronous `poll_once()` and assert on a rendered Board without
+    # standing up an event loop.
+    resolved_poller = poller or live.build_poller(
+        journal=resolved_journal, env=resolved_env, force_mock=force_mock,
+        rules=resolved_rules,
+    )
+    live.install(app, resolved_poller)
 
-        Open risk is filled in from the journal, as on every other path that
-        hands out a snapshot: the broker holds stop-losses as separate orders
-        and cannot report it, so a snapshot that skipped this would understate
-        it silently.
+    def _account_orders_prices() -> (
+        tuple[
+            AccountSnapshot | None,
+            list[WorkingOrder],
+            dict[str, float],
+            datetime | None,
+            bool,
+        ]
+    ):
+        """What the Board renders, taken from the poller and NEVER blocking.
 
-        Opening a second connection per widget would triple the round trips on
-        a page refreshed by hand. Orders and quotes degrade to empty rather than
-        failing the page: a broker hiccup should cost the pending list, not the
-        equity figure next to it.
+        This used to open a broker session inline, which meant a slow Alpaca
+        held the whole page with nothing on screen — and after a hyperspace
+        jump that promised speed, which made the wait read as a broken deck
+        rather than a slow one.
+
+        The poller owns the broker conversation now. This reads whatever it has
+        and returns immediately, so a page render costs no network at all.
+
+        **`None` on a cold start is the point, not a gap.** The first request
+        after a restart has no reading yet, and the honest answer is that it is
+        unknown. Rendering zeros would be a lie the page has no way to walk
+        back, and the stream fills the figures in a moment later.
+
+        Open risk still comes from the journal rather than the broker, inside
+        the poller: stop-losses are separate orders and Alpaca cannot report
+        the aggregate, so any path handing out an `AccountSnapshot` has to do
+        this or the total-risk cap silently counts nothing.
+
+        **When the reading was taken comes back with it, and so does whether
+        it is too old to present as current.** The poller idle-stops once
+        nobody is watching and keeps its last reading, so the first load of a
+        morning is served an overnight snapshot. Handing back the figures
+        without their age let the page stamp them `as at <now>` and assert
+        expiries and untracked positions off them, all in the present tense.
+        A reading is only as good as the moment it was taken, so the moment
+        travels with it.
         """
-        from ..main import build_broker
+        # NOT `ensure_running()`. That schedules an asyncio task and this runs
+        # in FastAPI's threadpool, where there is no loop to schedule onto. The
+        # stream starts the poller when a browser connects, which is also the
+        # behaviour worth having: a box nobody is watching does not talk to the
+        # broker every five seconds all night.
+        snapshot = resolved_poller.latest()
+        if snapshot is None:
+            return None, [], {}, None, False
+        return (
+            snapshot.account,
+            snapshot.orders,
+            snapshot.prices,
+            snapshot.taken_at,
+            resolved_poller.reading_is_stale(),
+        )
 
-        broker = build_broker(resolved_env, force_mock=force_mock)
-        broker.connect()
-        try:
-            snapshot = broker.get_account()
-            snapshot.open_risk_usd = resolved_journal.open_risk_usd()
-            try:
-                orders = broker.get_open_orders()
-            except Exception:
-                orders = []
-            prices: dict[str, float] = {}
-            for symbol in {o.symbol for o in orders}:
-                try:
-                    prices[symbol] = broker.get_tick(symbol).mid
-                except Exception:
-                    continue
-            return snapshot, orders, prices
-        finally:
-            broker.disconnect()
+    def _tape() -> str:
+        """The ticker strip, on EVERY page rather than only the Board.
+
+        That is a deliberate change to a property this module used to have: a
+        session that never opened the Board never talked to Alpaca at all,
+        because only the Board carried `data-live` targets and only a page with
+        those opens the stream. The tape carries them too, so any page now
+        keeps the poller warm.
+
+        The trade is small and the reasoning is that the old property was about
+        an UNATTENDED box, not an attended one. Somebody reading the Settings
+        page is watching; the poller's idle stop is what protects the overnight
+        case, and it still does. What has not changed is that a render costs no
+        network — this reads the poller's last snapshot and returns.
+        """
+        watchlist = resolved_rules.watchlist
+        if not watchlist.enabled or not watchlist.symbols:
+            return ""
+        equities = resolved_rules.instruments.get("us_equity")
+        snapshot = resolved_poller.latest()
+        return render.ticker_tape(
+            market_state(
+                datetime.now(UTC),
+                windows_by_day=equities.windows_by_day if equities else None,
+            ),
+            # No reading yet renders the symbols with no quote rather than an
+            # empty strip: a cold start should look like a tape waiting for
+            # prices, not like a watchlist nobody configured.
+            snapshot.ticker if snapshot else [
+                live.TickerQuote(
+                    symbol=sym, tradeable=sym in resolved_rules.allowed_symbols
+                )
+                for sym in watchlist.symbols
+            ],
+        )
 
     def _page(title: str, active: str, body: str) -> str:
         return render.shell(
-            title, active, body, env=resolved_env, exposed=sessions.required
+            title, active, body, env=resolved_env, exposed=sessions.required,
+            tape=_tape(),
         )
 
     @app.get("/login", response_class=HTMLResponse)
@@ -188,9 +269,44 @@ def build_app(
         return response
 
     @app.get("/", response_class=HTMLResponse)
-    def board() -> str:
-        account, orders, prices = _account_orders_prices()
+    def board(request: Request, response: Response) -> str:
+        # The marker is read and re-stamped on HTML page routes ONLY.
+        #
+        # Not on `/live`: an EventSource reconnects on its own and every
+        # reconnect carries the cookie, so stamping there would hold a sitting
+        # open for as long as the tab lived. Not on `/login` either — that would
+        # advance the marker to a moment the operator was shown a password form
+        # rather than the state of the world. And not on `/healthz`, where a
+        # monitoring probe every thirty seconds would do the same thing.
+        visit = seen.from_cookies(request.cookies)
+        response.set_cookie(
+            **seen.cookie_for(visit, secure=request.url.scheme == "https")
+        )
+
+        account, orders, prices, read_at, reading_stale = _account_orders_prices()
         open_trades = resolved_journal.open_trades()
+
+        if account is None:
+            # Cold start: no reading yet, so there is nothing to reconcile the
+            # journal against and no position list to check for expiries. The
+            # banners are all statements about a broker reading, so rendering
+            # them here would be asserting things about an account nobody has
+            # read. The waiting Board says exactly that instead.
+            return _page(
+                "Board",
+                "/",
+                render.since_last_visit(
+                    seen.summarise(
+                        visit.marker,
+                        decisions=audit.read(limit=60).decisions,
+                        closed_trades=resolved_journal.closed_trades(),
+                    )
+                )
+                + render.board(
+                    None, resolved_rules, [], open_trades,
+                    resolved_journal.get_stand_down(), 0, env=resolved_env,
+                ),
+            )
 
         journalled = {t.symbol for t in open_trades}
         held = {p.symbol for p in account.open_positions}
@@ -204,7 +320,13 @@ def build_app(
             buying_power_usd=account.buying_power_usd,
         )
 
-        body = render.banners(
+        body = render.since_last_visit(
+            seen.summarise(
+                visit.marker,
+                decisions=audit.read(limit=60).decisions,
+                closed_trades=resolved_journal.closed_trades(),
+            )
+        ) + render.banners(
             resolved_journal.get_stand_down(),
             alerts,
             untracked,
@@ -213,6 +335,7 @@ def build_app(
             # than a false all-clear. A box without the timer installed should
             # not be told its link is healthy.
             tailnet=read_tailnet_status(),
+            reading_stale=reading_stale,
         ) + render.board(
             account,
             resolved_rules,
@@ -224,6 +347,9 @@ def build_app(
             ),
             orders,
             prices,
+            env=resolved_env,
+            read_at=read_at,
+            stale=reading_stale,
         )
         return _page("Board", "/", body)
 
@@ -242,6 +368,39 @@ def build_app(
     def analytics() -> str:
         report = build_report(resolved_journal.closed_trades())
         return _page("Analytics", "/analytics", render.analytics_page(report))
+
+    @app.get("/dreaming", response_class=HTMLResponse)
+    def dreaming() -> str:
+        """The dreamer's deck.
+
+        Read-only, like every other GET here, and its store is a different file
+        from the journal on purpose: a hypothesis and a position must never be
+        reachable by the same query. A store that cannot be opened costs the
+        page its contents and nothing else, so it degrades to an empty deck
+        rather than a 500 — this is the surface an operator opens to browse,
+        and a broken speculative-notes table is not a reason to show them an
+        error page.
+        """
+        try:
+            recent = resolved_dreams.recent(limit=25)
+        except sqlite3.Error:
+            recent = []
+        return _page(
+            "Dreaming",
+            "/dreaming",
+            render.dreaming_page(
+                recent,
+                DreamSummary.of(recent),
+                enabled=bool(resolved_env.dashboard_chat_token),
+                token=resolved_env.dashboard_chat_token,
+                # Either instance can serve the panel, so it is available
+                # if either is. Which one, and what that means for its reach, is
+                # rendered explicitly rather than left to be assumed.
+                hermes_available=dreamer.available or bridge.available,
+                isolated=dreamer.available,
+                soul_found=load_soul(GROGU).found,
+            ),
+        )
 
     @app.get("/settings", response_class=HTMLResponse)
     def settings() -> str:
@@ -311,7 +470,33 @@ def build_app(
             (str(t.get("user", "")), str(t.get("agent", "")))
             for t in payload.get("history") or []
         ]
-        reply = bridge.ask(str(payload.get("message", "")), history)
+
+        # Which character answers. Validated against a fixed set rather than
+        # used as a filename: `load_soul` builds a path from this string, and an
+        # unvalidated value from a request body reaching a path join is a
+        # traversal waiting to happen. An unknown name falls back to the
+        # account agent rather than erroring, because the worst case of getting
+        # this wrong is the wrong voice, and refusing the question would be a
+        # larger failure than answering it plainly.
+        requested = str(payload.get("soul", YODA)).lower()
+        soul = load_soul(requested if requested in {YODA, GROGU} else YODA)
+
+        # The dreamer gets its own instance when there is one. Falling back
+        # to the shared bridge keeps the panel working on a box that has not had
+        # the second Hermes installed; the page it is embedded in states that
+        # this is what is happening, so the fallback is disclosed rather than
+        # silent.
+        answering = dreamer if (soul.name == GROGU and dreamer.available) else bridge
+
+        # The operator's name reaches the agent only from here, which is
+        # behind both the dashboard password and the chat token. The sign-in
+        # page never carries it. See `Env.operator_name`.
+        reply = answering.ask(
+            str(payload.get("message", "")),
+            history,
+            soul=soul,
+            operator=resolved_env.greeting_name,
+        )
         return {"ok": reply.ok, "text": reply.text, "error": reply.error}
 
     @app.get("/healthz")

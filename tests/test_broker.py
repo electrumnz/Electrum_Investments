@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
 from bot.broker import Broker, MockBroker, is_crypto_symbol
@@ -11,6 +13,9 @@ def _proposal(
     direction: Direction = Direction.BUY,
     qty: float = 10,
     rationale: str = "Mock order used to exercise the broker interface.",
+    limit_price: float = 580.00,
+    stop_loss_price: float | None = None,
+    take_profit_price: float | None = None,
 ) -> OrderProposal:
     if direction == Direction.BUY:
         sl, tp = 575.00, 590.00
@@ -20,9 +25,9 @@ def _proposal(
         symbol=symbol,
         direction=direction,
         qty=qty,
-        limit_price=580.00,
-        stop_loss_price=sl,
-        take_profit_price=tp,
+        limit_price=limit_price,
+        stop_loss_price=stop_loss_price if stop_loss_price is not None else sl,
+        take_profit_price=take_profit_price if take_profit_price is not None else tp,
         rationale=rationale,
     )
 
@@ -121,3 +126,101 @@ def test_activity_tracks_fills():
     assert activity.trades_today == 1
     assert activity.trades_this_week == 1
     assert "SPY" in activity.last_trade_at_by_symbol
+
+
+# --------------------------------------------------- the stop reaches Alpaca
+
+
+class _CapturingTrading:
+    """Stands in for the Alpaca SDK's TradingClient, recording what it was sent.
+
+    Hand-rolled rather than mocked so the assertions are about the REQUEST
+    OBJECT the SDK would receive — which is the thing that was wrong before,
+    and which a mock returning a canned response would not have shown.
+    """
+
+    def __init__(self) -> None:
+        # `Any`, because the assertions read fields off the SDK's request
+        # models and typing them as `object` would hide exactly what is being
+        # checked behind an ignore on every line.
+        self.requests: list[Any] = []
+
+    def submit_order(self, request: Any) -> Any:
+        self.requests.append(request)
+
+        class _Order:
+            id = "order-1"
+            filled_avg_price = None
+            filled_qty = None
+
+        return _Order()
+
+
+def _alpaca_with(trading: _CapturingTrading) -> Any:
+    """An AlpacaBroker with its SDK clients replaced. Built without __init__ so
+    no credentials are needed and nothing reaches the network."""
+    from bot.broker import AlpacaBroker
+
+    broker: Any = AlpacaBroker.__new__(AlpacaBroker)
+    broker._trading = trading
+    broker._connected = True
+    broker._orders_degraded = False
+    return broker
+
+
+def test_an_equity_order_sends_the_stop_to_the_broker():
+    """The gap this closes: `stop_loss_price` was validated by the gate, used to
+    size the position, written to the journal — and never sent to Alpaca.
+
+    The operator's third rule is "hard stops on every trade". It was true at
+    sizing time and false at the broker: nothing was resting there that would
+    have closed a losing position, ever.
+    """
+    from alpaca.trading.enums import OrderClass, TimeInForce
+
+    trading = _CapturingTrading()
+    result = _alpaca_with(trading).place_order(
+        _proposal(symbol="SPY", stop_loss_price=575.0, take_profit_price=590.0)
+    )
+
+    assert result.accepted
+    request = trading.requests[0]
+    assert request.order_class == OrderClass.BRACKET
+    assert request.stop_loss.stop_price == 575.0
+    assert request.take_profit.limit_price == 590.0
+
+    # GTC, not DAY, and that is the whole point: a DAY bracket's legs expire
+    # with the session, so a position held overnight would sit unprotected from
+    # 16:00 until somebody noticed.
+    assert request.time_in_force == TimeInForce.GTC
+
+
+def test_a_crypto_order_stays_a_plain_limit():
+    """Alpaca does not accept bracket orders on crypto, so sending one would be
+    rejected outright and the entry would not happen at all. The loop's stop
+    monitor is what covers a crypto position instead."""
+    from alpaca.trading.enums import OrderClass, TimeInForce
+
+    trading = _CapturingTrading()
+    _alpaca_with(trading).place_order(
+        _proposal(symbol="BTC/USD", limit_price=60_000.0,
+                  stop_loss_price=57_000.0, take_profit_price=66_000.0)
+    )
+
+    request = trading.requests[0]
+    assert request.order_class in (None, OrderClass.SIMPLE)
+    assert request.stop_loss is None
+    assert request.time_in_force == TimeInForce.GTC
+
+
+def test_a_failed_submit_is_a_rejection_not_an_exception():
+    """Same on both paths. A broker refusal must reach the caller as a result
+    rather than propagate and end whatever was running."""
+    class _Failing(_CapturingTrading):
+        def submit_order(self, request: Any) -> Any:
+            raise RuntimeError("422 unprocessable")
+
+    result = _alpaca_with(_Failing()).place_order(_proposal(symbol="SPY"))
+
+    assert not result.accepted
+    assert "422" in (result.error or "")

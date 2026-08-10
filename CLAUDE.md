@@ -117,8 +117,85 @@ it. That is the point.
 ### Each instrument class carries its own rules
 
 `config/rules.yaml` has an `instruments:` block keyed by asset class. Session
-windows, symbol lists and strategy live there; the portfolio limits (1% per
-trade, 2% total risk, stand-down, daily loss, margin) stay global.
+windows, symbol lists, strategy and **that class's own risk limits** live there;
+the account-wide rules (2% total risk, stand-down, daily loss, margin) stay
+global.
+
+**A per-class limit OVERRIDES the portfolio one, in either direction.**
+`account:` is the default, not a ceiling. Set a class to 3% and that class gets
+3%, and nothing refuses it.
+
+There was briefly a validator that rejected a looser class limit at config
+load. **Do not reintroduce it.** Refusing to start is a denial, and it denies at
+the least useful moment — boot, with no explanation of the trade-off and no way
+for the operator to say "yes, I mean it". The friction belongs in the *settings
+agent* (see Deferred), which argues the case, makes the operator think about the
+consequence, and then does what they say. Pushing back is not the same as
+refusing, and only one of the two is this codebase's job.
+
+What still matters is that the file and the gate agree. An override is
+deliberately **not floored back with a `min`**: a config saying 3% while the
+gate quietly applied 1% would be a limit nobody could read off the file, which
+is worse than either number on its own. The Settings page names which figure is
+in force per class, and says out loud when one is looser than the default —
+information for the operator, not a warning at them.
+
+Worth knowing rather than guarded against: `max_total_risk_pct` is still
+portfolio-wide, so a per-trade override above it can never fill — the total-risk
+gate refuses the trade that would breach it. Raising a class limit past the
+total does nothing until the total moves too.
+
+`max_concurrent_positions` on a class counts **within** that class, so both caps
+apply and they measure different things: a class that gets loud cannot fill
+every slot the portfolio has. Membership is by the class's own
+`allowed_symbols`, not the position's asset-class enum, so one source answers
+the question.
+
+**Crypto is configured while disabled, on purpose.** The moment to enable it is
+a moment when nothing else is open, which is the worst possible moment to be
+deciding what a crypto position should be allowed to risk. Its limits are set
+(half the per-trade risk, a third of the concentration, one position) with the
+market shut and nothing riding on the decision, so enabling is a one-word edit.
+
+### No pre-market. After hours is fine
+
+The operator's rule, and it needs its own gate check because `sessions_utc`
+**structurally cannot express it**.
+
+Those are fixed UTC hours; the US session is defined in New York time and moves
+an hour twice a year. So `[[14, 21]]` is the *winter* window applied all year:
+
+- **summer (EDT)** — session 13:30–20:00 UTC, window runs to 21:00, so an hour
+  of after-hours is permitted every day
+- **winter (EST)** — session 14:30–21:00 UTC, window opens at 14:00, so half an
+  hour of **pre-market** is permitted every day
+
+Wrong at one end in each half of the year, silently. That gap used to cost
+nothing, because an out-of-hours equity order was queued to the next open rather
+than filled. **It costs something now: Alpaca runs a pre-market session from
+04:00 ET**, plus an overnight venue, so an order placed into one *trades*, in a
+thinner book than anybody chose.
+
+`RiskGate._premarket` reads the phase from `market_clock`, which computes in New
+York time, so it follows daylight saving with no diary entry and stays
+deterministic and offline. It can only ever add a reason to refuse.
+
+Scoped to 04:00–09:30 New York and nothing else — after hours was explicitly
+kept, and a test pins that the rule does not quietly grow into
+regular-session-only. Off for crypto: a 24/7 market has no pre-market, and the
+phases it reads are the US equity ones, so switched on there it would refuse
+every hour of every day.
+
+**`market_clock.py` states the venue's phase and the gate's window separately
+and never merges them into one green light.** "The market is open" and "this bot
+will trade" are different claims, and confusing them is what produced the
+question this module was written after: *the market should be open right now*,
+at 04:49 New York on a Monday. Alpaca was open — pre-market — four and a half
+hours before the session this bot trades. `is_tradeable_by_bot` requires both,
+which is what makes the discrepancy visible rather than hidden.
+
+Holidays are not covered here either. Thanksgiving reads as an ordinary Thursday
+to both checks.
 
 This exists because a single global `sessions_utc` is wrong the moment there is
 more than one class. Equities trade a fixed window, crypto trades continuously,
@@ -185,6 +262,51 @@ inside a gate that has to stay deterministic and must not fail open. The guard
 is weekday-shaped, not market-open-shaped, and should not be described as more
 than that.
 
+### The stop is a real order now, and it still cannot fire out of hours
+
+`place_order` used to submit the entry limit order and nothing else.
+`stop_loss_price` was validated by the gate, used to size the position, written
+to the journal — and **never sent to Alpaca**. The operator's third rule is
+"hard stops on every trade", and it was true at sizing time and false at the
+broker: nothing was resting there that would have closed a losing position.
+
+It is a **GTC bracket** now, and GTC rather than DAY is the whole point: a DAY
+bracket's legs expire with the session, so a position held overnight would sit
+unprotected from 16:00 until somebody noticed. GTC legs stay active across days,
+surviving the close, the overnight session, the pre-market and the weekend.
+
+**What no order type from any broker buys is an out-of-hours exit.** A stop is a
+trigger that becomes a MARKET order, and extended-hours venues accept limit
+orders only, so the leg rests through the night and is eligible again when the
+regular session reopens. A gap through the stop fills at the open rather than at
+the stop price. That is how every retail stop behaves; it is not an Alpaca
+limitation and it cannot be configured away.
+
+Three things the bracket structurally cannot cover, which is why
+`stop_watch.py` runs on the loop's fifteen-minute pulse:
+
+- out-of-hours, for the reason above
+- **crypto, which Alpaca does not accept brackets on at all**
+- a position adopted from the broker, or one whose bracket was cancelled by
+  hand: a journalled stop with no order behind it
+
+**`stop_watch` reports and never closes.** Closing out of hours needs a
+marketable limit order, which is a new execution path, and one that fires
+unattended at 3am is a different proposition from one an operator watches.
+Making the breach loud — the log line, an audit event, the cycle summary — is
+the honest intermediate, and automating it is its own decision.
+
+A symbol with no quote is **skipped rather than assumed safe** and named in
+`stops_unchecked`. `fetch_market_ticks` drops a symbol whose fetch failed, so an
+absent tick means "not checked", never "fine" — the `calendar_degraded` lesson
+again. The breach count is on the `cycle_complete` line so that a zero is a
+stated fact each cycle rather than the absence of a warning, which is also what
+an outage looks like.
+
+Compared against the **mid**, not the touch: a wide out-of-hours spread would
+otherwise trip a long on the bid and a short on the ask, reporting a breach the
+traded price never reached.
+
 ### The journal must be wired in or the caps count nothing
 
 `AccountSnapshot.open_risk_usd` is what the total-risk cap counts against, and it
@@ -203,8 +325,8 @@ risk is reported as **missing** rather than guessed at.
 
 Two surfaces, and confusing them is the mistake to avoid.
 
-`src/bot/web/` renders **live** journal, broker and audit state, on six pages:
-Board, Decisions, Trades, Analytics, Settings, Chat. It has no login *because*
+`src/bot/web/` renders **live** journal, broker and audit state, on seven pages:
+Board, Decisions, Trades, Analytics, Dreaming, Settings, Chat. It has no login *because*
 it binds to `127.0.0.1` and is reached over Tailscale. That is where operator
 features belong, and building one there needs no auth because nothing is
 published.
@@ -820,6 +942,363 @@ A session is grouped by **UTC date**, which is exactly right for US equities
 be wrong for a market whose session spans midnight UTC, which is CME Globex if a
 second broker ever arrives.
 
+### The deck is live, and one poller owns the broker conversation
+
+`src/bot/web/live.py` streams the account to the browser over Server-Sent
+Events. No new dependency: `StreamingResponse` with `text/event-stream` on this
+side, the browser's native `EventSource` on the other, and it is plain HTTP so
+a Funnel or a reverse proxy passes it through untouched. It also reconnects by
+itself, which matters on a phone that has been in a pocket.
+
+**The Board no longer talks to the broker during a render.** It used to open a
+session inline, so a slow Alpaca held the page with nothing on screen — and
+after a hyperspace jump that promised speed, which made the wait read as a
+broken deck rather than a slow one. `_account_orders_prices` now reads whatever
+the poller has and returns immediately.
+
+**A cold start renders unknown, never zero.** `latest()` is `None` until the
+first read comes back, and `render.board` answers that with its own shape: four
+tiles at the width the figures will occupy, a banner saying this is a cold start
+rather than an empty account, and the shimmer carrying the wait. `0.00` equity
+would be a plausible wrong figure, which is the thing this repository exists to
+refuse. The route returns before the banners in that case, because every one of
+them is a statement about a broker reading.
+
+**Do not call `ensure_running()` from a render path.** It schedules an asyncio
+task and FastAPI runs `def` routes in a threadpool, where there is no loop to
+schedule onto. The stream starts the poller when a browser subscribes.
+
+**Only a page with `data-live` targets opens the stream.** Without that guard
+the sign-in page opened it too — it inlines `SCRIPT` like every other page — and
+took a 401, because `/live` sits behind the same password as the pages that
+render an account. One pointless request and one console error per view of the
+login form. It has a second effect worth keeping: Decisions, Trades, Settings
+and Chat have no live figures either, so a session that never opens the Board
+never talks to Alpaca at all.
+
+**The client may only UPDATE a figure the server already rendered**, never be
+what reveals one. Same rule as the projection layer. Every value is in the
+markup before the script runs, so a blocked script shows the reading it was
+served — one page-load old and honest about it — rather than an empty box.
+
+**That bug was invisible to the test suite.** 731 tests, `ruff` and `mypy
+--strict` were all green while the login page 401ed on every view. It took
+driving the thing in a browser. Same shape as the `.gitignore` finding below: a
+green local suite says nothing about what actually happens.
+
+### A visit is a sitting, and the marker never advances to now
+
+`src/bot/web/seen.py` answers "what changed since I last looked?", which is the
+question an operator opening this two or three times a day actually arrives
+with. A cookie carries three stamps: the marker, the previous request, and when
+the sitting began.
+
+**The marker advances to the PREVIOUS request's time, never to `now`.**
+Stamping `now` marks as seen anything recorded between the render and the next
+click — which was never on screen. `last` is the latest moment the operator
+provably *was* shown the state of the world.
+
+**A sitting ends two ways and both are needed.** A thirty-minute gap ends one
+that stopped; a six-hour ceiling ends one that never stops. Without the second,
+anything requesting more often than the gap holds a sitting open forever: a
+refresh timer, a phone on the Board, or an `EventSource` reconnecting on a flaky
+link. On a first sitting that is worse than a frozen marker, because none is
+ever established and the delta stays empty for the life of the tab.
+
+**The cookie is stamped on HTML page routes only.** Not `/live`, for the
+reconnect reason above. Not `/login`, which would advance the marker to a moment
+the operator was shown a password form. Not `/healthz`, where a probe every
+thirty seconds does the same thing as a reconnect.
+
+**First visit is a third state, not "nothing happened"**, and every count is
+`int | None` rather than `0` when there is no marker — so a renderer that
+ignores the state prints something visibly broken rather than plausibly wrong.
+Same rule as `has_cycles` in `news_history` and `can_grade_anything` in
+`triggers`. That rule was missing once already: the caveat "the loop may have
+stopped" fired for a caller that simply never opened the audit log, and the
+module's own test pinned the wrong behaviour.
+
+**`reaches_past_marker` covers the audit reader and NOT
+`Journal.closed_trades(limit=...)`.** That query sorts `exit_time` ascending
+before its LIMIT, so a limited call drops the NEWEST closes while leaving the
+earlier bucket full — trades that closed since the marker would be reported as
+nothing, with no caveat. No caller passes a limit; do not add one without
+sorting descending first.
+
+### The projection layer must fail to VISIBLE, and it is built that way
+
+Both surfaces carry a starfield, a hyperspace jump on navigation, HUD bracket
+corners and panels that materialise: `render.STYLES` plus `render.SCRIPT` on the
+dashboard, `brand/assets/app.css` plus `brand/assets/fx.js` on the public site.
+Same engine twice, the same split those two design systems already live with.
+
+It is decoration, and the whole design is about making sure it stays that way.
+
+**Nothing is hidden unless the script said so.** Hiding a panel takes BOTH
+`html.fx-ready` and a per-element `fx-panel` class, and they are added together
+in one synchronous block. JavaScript off, a script that threw, a blocked file:
+all render the plain page with every figure visible. The obvious arrangement —
+hide in CSS, reveal in JS — fails to a **blank page**, on the one surface whose
+job is making problems visible. Never invert this.
+
+**The settle timer is armed before anything can throw, and re-armed rather than
+cancelled.** Two durations doing different jobs: 2.6s catches a throw between
+hiding and playing, and 20s is the last resort for panels the IntersectionObserver
+owns. Settling those at 2.6s would force everything below the fold visible before
+anyone scrolled to it, so the reveal could never happen at all. `settleAll`
+queries the DOM rather than a list built earlier, because it must not depend on
+any of the code between it and the failure it is catching.
+
+**`prefers-reduced-motion` switches the layer off, not down.** Both the
+stylesheet and the script check it; the script never starts the canvas, never
+adds the class and never builds the boot overlay, so the work is not done rather
+than done invisibly. A full-screen radial starfield accelerating to lightspeed
+is close to a worked example of a vestibular trigger.
+
+**The boot readout names parts of the INTERFACE, never the account.** "Risk gate
+armed" would be stating a fact it has not read, on a dashboard whose whole
+argument is that figures are measured rather than plausible. The execution mode
+is the one live value on it and the server renders it into a data attribute.
+
+**On the public site the demo banner is not in the panel list.** It is plain
+HTML in all six files so the label saying every figure is invented cannot depend
+on a script having run, and giving it an entry animation would undo that.
+
+**A `.pill` modifier must not double as a layout class.** The stage badges are
+named after the states they show, so `.dream .seed { padding: ... }` written for
+the spark paragraph also matched `<span class="pill seed">` and rendered the
+badge as a full-width block. Valid CSS, silently styling the wrong element, and
+invisible unless somebody looks. `tests/test_web.py` now fails the build on the
+shape rather than the instance.
+
+**The Cmd+K console is NOT part of this layer, and lives in its own closure.**
+`render.SCRIPT` answers `prefers-reduced-motion` by returning on line one, which
+is right for a starfield and wrong for the only keyboard route to every page:
+somebody asking for less motion is asking for fewer moving pixels, not for a way
+around the site to be withdrawn. So the palette sits after the projection
+closure, outside the bail-out, animating through the stylesheet — which has a
+reduced-motion block of its own, so the preference is honoured where it applies.
+It reaches hyperspace through `window.MUDHORN_FX` if that layer built one and
+falls back to an ordinary navigation if it did not, so a throw up there costs the
+starfield rather than the way around the deck. Same principle as the settle
+timer: the recovery path must not depend on the code it is recovering from.
+
+Focus returning from the palette is **checked, never assumed**. The shortcut is
+global, so it is usually pressed with nothing focused and `activeElement` is the
+body — and `body.focus()` silently does nothing, raising no error while a
+keyboard user is stranded at the top of the document anyway.
+
+Both were found in a browser and neither was visible from the suite, which is
+the general lesson: a closure boundary and a silent no-op are not things a unit
+test sees. `tests/test_web.py` pins the shapes; the Playwright pass in the
+scratchpad checks the behaviour.
+
+### A timestamp on a page describes the READING, never the render
+
+The Board printed `as at <now>` above figures that came from whatever the poller
+last read. Those are different moments, and the gap between them is not small:
+`LivePoller` idle-stops once nobody is watching and **keeps its snapshot**, so
+the first load of a morning served an overnight reading stamped with the current
+time. Every figure a present-tense claim about an account nobody had read since
+the night before, and the one element a reader checks to find out saying it was
+current.
+
+That is the confident-partial-answer failure this repository exists to prevent,
+arriving through the furniture rather than through the model. The whole suite was
+green throughout.
+
+Three properties now, and they are the same rule three times:
+
+- **The stamp names `taken_at`**, and a caller that cannot say when the figures
+  were read gets "read time unknown" rather than a default of now.
+- **A stale reading is announced ahead of everything it qualifies.** The expiry
+  and untracked-position banners are each a claim about a broker reading; an
+  eight-hour-old one still deserves showing — erring towards warning is the safe
+  direction — but a reader has to be told which account state they describe.
+- **The stamp carries `data-live-read` so the stream owns it.** A
+  server-rendered timestamp is right for exactly one instant, and the figures
+  under it repaint every few seconds. Left alone it becomes a time attached to a
+  reading it no longer describes, and stays wrong for as long as the tab is open.
+
+**`Broker.orders_degraded` is the `FinnhubCalendar.is_degraded` lesson in a
+third place.** `AlpacaBroker.get_open_orders` catches its own SDK errors and
+returns `[]` — it has to, because it feeds a display beside positions and risk —
+so the poller's `except` around it was dead for the only broker that can
+actually fail, and an outage rendered as an account with nothing resting. The
+existing test passed because the stub raises where the real one does not, which
+is the trap worth remembering: a test double that fails differently from the
+thing it doubles pins a path production never takes.
+
+**Four live states must not collapse into two.** `slow` fell through to the
+`else` in `paint()` and painted the link green, which said "live" while a read
+was outstanding and the figures on screen were the previous ones.
+
+**A poller that has been stopped stays stopped.** Cancelling
+`asyncio.to_thread` abandons the future while the worker thread runs on, so an
+abandoned poll could reach `_connected_broker`, authenticate a *new* session and
+store it after `stop()` had cleared the old one — a connected broker with nobody
+left to close it. The closed flag is set before the cancel, the release runs
+either side of the await, and `ensure_running` refuses to restart. The idle stop
+releases the session too; stopping the reads and holding the session is half an
+idle stop.
+
+**An injectable clock must be honoured everywhere or not offered.** `LiveState`
+falls back to the wall clock because it is a value object with no clock of its
+own, so a poller with an injected one stamped readings with it and measured
+their ages against the real one. Figures that look like measurements and are not
+are the exact thing this repository refuses.
+
+**`/live` was missing from `tests/test_auth.py` entirely**, and that is the
+shape of the miss worth naming: it is not a *page*, so it never came up when
+somebody wrote "every page is refused". It serves equity, cash, buying power,
+every open position and every resting order. Moving it into `OPEN_PATHS` would
+have published all of that with the suite green. The fix is not one more line in
+a hand-maintained list — that list failed exactly the way per-route dependencies
+were rejected for failing. **The routes are enumerated from the application
+now**, and a new one must be classified as refused or as deliberately open
+before the suite passes.
+
+### Two agents, two souls, and Hermes only holds one
+
+`souls/yoda.md` answers about the account on `/chat`; `souls/grogu.md` dreams on
+`/dreaming`. Both follow the `SOUL.md` convention down to the headings
+(`## Personality`, `## Style`, `## What to avoid`).
+
+**Hermes loads exactly one soul, from `$HERMES_HOME/SOUL.md`.** Not the working
+directory, no CLI flag, no environment variable to point at another file, and
+`/personality` is a session overlay rather than a second soul. One instance, one
+character. This repository needs two on one instance chosen per request, so
+`HermesBridge.ask` prepends the selected soul to the prompt **on stdin**, which
+is the only mechanism that can vary per call — and is where it has to go anyway,
+because the sudoers rule permits `run-chat.sh` with no arguments so nothing a
+signed-in user types can be read as a flag.
+
+**Do not install either file as `~/.hermes/SOUL.md`.** It would apply to both
+agents at once, alongside whichever soul the request injected, and the model
+would receive two characters and pick.
+
+**One instance is enough for the souls, and not enough for the tools.** The
+account agent's Hermes registers this repo's MCP server, which exposes
+`place_order`. Sharing it means the only thing keeping a *speculative* agent
+away from the broker is the sentence in `souls/grogu.md` telling it not to —
+prose, where this repository uses a structure everywhere else. `RiskGate.evaluate`
+still runs on every order path, so the operator's four rules hold either way,
+but "it has no broker tool" and "it has one and was asked nicely" are different
+claims and only one is worth making.
+
+So `deploy/run-dream.sh` runs a second Hermes from its own `HERMES_HOME`, whose
+registry must not contain the bot's MCP server. When it is absent the dreamer
+falls back to the shared instance and **the Dreaming page says so in a banner** —
+it does not quietly claim an isolation it does not have. Same rule as
+`calendar_degraded` and the tailnet status: report the weaker fact rather than
+imply the stronger one.
+
+This was a real overclaim, caught after shipping. The banner originally read
+"no route to the broker", which is true of the dream *records* and was false of
+the chat panel on the same page. `tests/test_web.py` now pins both wordings.
+
+The soul name arrives in the request body and `load_soul` builds a path from it,
+so the route validates it against a fixed set first. An unknown name falls back
+to the account agent rather than erroring: the worst case of getting it wrong is
+the wrong voice, and refusing the question would be the larger failure.
+
+**A soul shapes the framing and never touches a figure.** Both files carry that
+first and `souls.py` restates it in the prefix that actually reaches the model,
+because these are read from disk at call time and could be edited on the box. A
+missing soul degrades to a voiceless prompt rather than raising — same failure
+direction as `HermesBridge.available`.
+
+### The dreamer has no order path, and that is structural
+
+`src/bot/dreaming.py` produces second-order hypotheses: the cicada brood that
+damages two of the three largest sesame producers, making the third, which has
+no cicadas, the marginal supplier into a shortage it did not experience.
+
+**`Dream` carries no quantity, no entry price, no stop, no side and no symbol.**
+`OrderProposal` requires all of them and validates `stop_loss_price`, so nothing
+turns one into the other without somebody adding fields and validation by hand.
+`tests/test_dreaming.py` asserts that overlap stays empty. This is the whole
+safety argument and it is deliberately not a matter of discipline: a
+speculative-idea generator wired to an execution path is the Alpha Arena failure
+with extra steps, and confidence is what this module produces most of.
+
+`instruments` names what a dream is *about* and is free text on purpose, so it
+cannot be read as a ticker the bot trades.
+
+**Verification is counted, never claimed.** A model asked to rate its own
+sourcing rates it generously, so the badge is arithmetic over the `checked`
+flags on each hop. An empty chain reads as `unverified` rather than `sourced`:
+the good outcome must not be what an absence of evidence looks like, which is
+the same rule as the tailnet status reporting `unknown`.
+
+**This is NOT Anthropic's "Dreaming", and the difference is the dangerous part.**
+That one, a research preview from May 2026, consolidates an agent's memory from
+its own past session transcripts so it learns from its mistakes. Applied to a
+trading account, "learn from what happened last time" means learning from profit
+and loss, which this repository forbids: forty trades is noise and a model shown
+three losses will confidently change approach.
+
+So `DreamLedger` is the shape consolidation is allowed to take here. It counts
+how often the dreamer sources a hop, drops a chain, names a trigger — facts
+about the **reasoning**, true regardless of how any trade went, with no outcome
+sample to overfit to. It reaches the operator on the Dreaming page and stops
+there, exactly as `metrics.py` reaches Analytics and stops there.
+
+**The dream timer is in New Zealand time, by NAME rather than by conversion.**
+`OnCalendar=*-*-* 07:00:00 Pacific/Auckland`. New Zealand observes daylight
+saving, so a hardcoded UTC hour drifts by one twice a year and drifts silently;
+naming the zone makes systemd redo the arithmetic on every elapse. The suffix
+needs systemd 252 or newer and Ubuntu 24.04 ships 255, verified with
+`systemd-analyze calendar`. On anything older the unit fails to parse and the
+timer simply never fires.
+
+**Do not set the box timezone to Pacific/Auckland instead.** Everything else
+here reasons in UTC deliberately — `sessions_utc`, every journal timestamp,
+every figure the dashboard renders — and moving the system clock would silently
+reinterpret all of it. The suffix changes one timer and nothing else.
+
+The Settings page reads `OnCalendar=` out of the unit rather than quoting a
+constant, so an edit on the box shows up there. It also distinguishes three
+states a file check can actually establish — installed, in the repo only, absent
+— and says plainly that **whether the timer is ENABLED is not visible from that
+process**, naming `systemctl list-timers` instead of guessing. A card announcing
+a daily dream because a file exists would be the confident-partial-answer
+failure in a new place.
+
+**The dreamer runs on its own command, not on the loop.** `electrum-bot dream`
+is one Claude call producing one step: a new chain, or the next step on one it
+already started. Separate from `cmd_loop` for two reasons, and the second is the
+one that matters. The loop wakes every fifteen minutes because a price moves
+that fast and a second-order supply-chain idea does not, so a lateral thought
+per cycle would buy ninety-six shallow ones a day. And the loop proposes orders
+while this cannot, so keeping them in different processes means no later
+refactor quietly connects a dream to the code that places one.
+
+**The dreamer is never shown profit and loss, and that is where the rule is
+actually enforced.** `souls/grogu.md` asks it not to learn from the track
+record; `build_prompt` is what makes that true, because the figures never enter
+the prompt. What closed is given as an EVENT ("SPY closed 04 May, opened on
+mean_reversion"), never as an outcome ("SPY made $340"). `tests/test_dreamer.py`
+asserts no P&L figure reaches the text. A dreamer that starts chasing what
+recently worked is a momentum strategy with a personality.
+
+**An `advance_id` is looked up in what was actually offered, never trusted.** A
+model returning an id for a row it was never shown starts a new dream instead of
+writing over an unrelated one. A verdict is honoured only on a verdict step, so
+a stray value cannot silently close a chain that is still running, and a source
+on an unchecked hop is dropped rather than kept, because that pair is a
+contradiction and the unchecked flag is the honest half of it.
+
+**`data/dreams.db` is its own file, not the journal.** Losing every dream costs
+some speculative notes; `backup-journal.sh` covers the one irreplaceable file
+and deliberately does not cover this. Keeping them apart also means no query can
+read a hypothesis as a position.
+
+**Tests must not write to `data/` or `audit/`, and a fixture now enforces it.**
+A session-scoped autouse guard in `tests/conftest.py` fails the suite if either
+directory gains a file. `DreamStore` landing is exactly how that regressed: a
+new store, a new `build_app` default, and one call site nobody updated.
+
 ### Hermes ships a large surface, and both ways of trimming it fail quietly
 
 `deploy/hermes-config.yaml` disables 25 toolsets and all 77 bundled skills.
@@ -996,6 +1475,9 @@ trades to appear useful.
 
 ```
 config/rules.yaml       Trading limits. Enforced in code. The only place to change behaviour.
+                        `instruments:` carries each class's own limits, which may only
+                        ever tighten the global ones. `watchlist:` is DISPLAY ONLY and
+                        is deliberately not `allowed_symbols`.
 src/bot/
   risk.py               The risk gate. The load-bearing file in this repo.
   reconcile.py          Squares journal against broker each cycle. Populates open risk.
@@ -1004,10 +1486,20 @@ src/bot/
   options.py            OCC parsing and expiry safety. Protective only.
   broker.py             Broker Protocol + AlpacaBroker + MockBroker. Daily bars and
                         resting orders live here.
+  market_clock.py       What time it is where the market is, and what the market
+                        is doing. Alpaca's five session phases computed in New
+                        York time, so daylight saving needs no diary entry. States
+                        the venue's phase and the gate's window SEPARATELY and
+                        never merges them into one green light. Pure; no network.
+                        Feeds RiskGate._premarket and the ticker tape.
   indicators.py         Averages, ATR, volume ratio, swing levels. Pure functions over
                         daily bars. Computed in Python so the model never derives them.
                         `snapshot()` records them as NUMBERS alongside the rendered
                         line, which is what a stored trigger is graded against.
+  stop_watch.py         Is an open position already through the stop it was
+                        sized against? The backstop for what a broker-side
+                        bracket cannot cover: out of hours, crypto, and adopted
+                        positions. Reports; never closes. Pure functions.
   triggers.py           Grades the watch list: did the named condition fire, and
                         did anything follow. Plan-following, never counterfactual
                         P&L. Operator surface only — it must not reach the prompt.
@@ -1042,12 +1534,32 @@ src/bot/
   tailnet.py            Is the Tailscale link still going to be there next week.
                         Warns at ten days, and says "unknown" rather than "fine"
                         when the check itself has stopped.
+  souls.py              Loads the character files in souls/. Degrades to a
+                        voiceless prompt rather than taking a page down.
+  dreaming.py           Second-order hypotheses: Dream, Hop, the stage machine
+                        and the store. Carries NO order fields, which is the
+                        whole reason it may sit beside an order path.
+  dreamer.py            The thing that fills it. One Claude call per run,
+                        driven by `electrum-bot dream`, never by the loop.
+                        Shown headlines, posts and what CLOSED; never shown
+                        profit and loss.
   web/                  Operator command centre: Board, Decisions, Trades,
-                        Analytics, Settings, Chat. Binds 127.0.0.1. Read-only
-                        apart from POST /chat, which is off unless
+                        Analytics, Dreaming, Chat, Settings. Binds 127.0.0.1.
+                        live.py streams the account over SSE from ONE poller,
+                        so a render costs no network and a cold start says
+                        unknown rather than zero. seen.py answers "what changed
+                        since I last looked", with the marker advancing to the
+                        previous request rather than to now.
+                        Read-only apart from POST /chat, which is off unless
                         DASHBOARD_CHAT_TOKEN is set. auth.py is the shared
                         password gate; chat.py runs one Hermes process per
                         message and keeps no state of its own.
+                        render.STYLES and render.SCRIPT carry the projection
+                        layer: starfield, hyperspace jump, panel materialisation.
+souls/                  Character files for the two agents, in the SOUL.md shape.
+                        yoda.md answers about the account; grogu.md dreams.
+data/dreams.db          Speculative notes. NOT the journal, NOT backed up.
+                        Gitignored.
   main.py               CLI: `electrum-bot smoketest`, `electrum-bot loop`.
 deploy/                 VPS provisioning: bootstrap.sh + systemd units. The unit
                         runs the loop WITHOUT --execute; enabling it is a
@@ -1085,9 +1597,10 @@ reference/              Third-party projects we borrow from. See reference/STATU
 ## Running it
 
 ```sh
-.venv/bin/python -m pytest              # full suite (569 tests)
+.venv/bin/python -m pytest              # full suite (733 tests)
 electrum-bot smoketest --mock           # no credentials needed
 electrum-bot smoketest                  # needs Alpaca paper keys
+electrum-bot dream                      # one lateral-thinking step; places nothing
 electrum-bot loop                       # proposes and vets; places nothing
 electrum-bot loop --execute             # places approved orders on PAPER
 electrum-bot reindex                    # rebuild the searchable history from audit/
@@ -1097,6 +1610,42 @@ electrum-bot-web                        # command centre on http://127.0.0.1:878
 
 `--execute` is off by default. Leave it off until you have watched the proposals
 for a while and agree with them.
+
+## Deferred, and noted so the shape is not lost
+
+- **A settings agent.** "Open settings agent": a deliberately conservative,
+  strict, stubborn character, the only route to changing `config/rules.yaml`
+  from the interface. Asymmetric on purpose — it makes the operator argue for a
+  limit getting looser and encourages one getting tighter.
+  **It pushes back; it does not deny.** The job is to slow the operator down and
+  make the consequence explicit, then do what they decide. That distinction is
+  why the per-class limit validator was removed — a hard refusal at config load
+  is the same intent implemented as a wall, at the moment it helps least.
+  It does NOT have to run on Hermes. It needs read access to the settings and a written file
+  covering each limit: what it is, why it sits there, and the goal it serves.
+  Settings has no edit control today and `tests/test_web.py` enforces that, so
+  this is a deliberate change to that rule rather than an addition beside it.
+- **An exit review, grading the PLAN and never the profit.** Nothing currently
+  records *why* a position closed: `record_exit` takes a price, a time and a
+  realised figure, and stop-hit, target-hit, closed-by-hand and expiry are
+  indistinguishable afterwards. Classifying it would answer the one question
+  worth asking on a close — "did this end the way it was designed to?" — and
+  the interesting bucket is **closed by hand before either level**, because
+  that is the plan being abandoned, which is discipline rather than luck.
+  It belongs beside `triggers.py` and `DreamLedger` rather than beside
+  `metrics.py`: those grade plan-following and reasoning quality, which are
+  true regardless of how a trade went and have no outcome sample to overfit to.
+  **The P&L half stays out.** "Review the trade so it can learn" is the
+  reasonable-sounding request that this repository exists to refuse — forty
+  trades is noise, a model shown three losses will confidently change approach,
+  and that is the Alpha Arena failure arriving as a feature request. The
+  operator learns from the track record; the model learns from nothing.
+- **Multi-agent dreaming.** Several dreamers working a topic independently and
+  then debating it out before a verdict. `Thought.by` already carries the
+  attribution that needs.
+- **Vercel AI Gateway.** `https://ai-gateway.vercel.sh` speaks the Anthropic
+  Messages API, so it is a base-URL swap rather than a rewrite. The Vercel AI
+  SDK itself is TypeScript only and does not apply to this Python codebase.
 
 ## What is deliberately not here
 

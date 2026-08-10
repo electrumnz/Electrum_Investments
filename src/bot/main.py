@@ -15,6 +15,7 @@ from pathlib import Path
 
 import structlog
 
+from . import stop_watch
 from .audit import AuditLog
 from .broker import AlpacaBroker, Broker, MockBroker
 from .claude_client import ClaudeClient, build_system_prompt
@@ -278,6 +279,40 @@ def cmd_loop(
                         detail=alert.message,
                     )
 
+            # Is anything already through the stop it was sized against?
+            #
+            # The bracket at the broker is the primary protection and covers the
+            # regular session completely. This covers what it structurally
+            # cannot: a stop leg cannot fire outside regular hours, because a
+            # stop becomes a MARKET order and extended-hours venues take limit
+            # orders only; Alpaca does not accept brackets on crypto at all; and
+            # a position adopted from the broker has a journalled stop with no
+            # order behind it.
+            #
+            # Reported, never acted on. Closing out of hours needs a marketable
+            # limit order, which is a new execution path, and one that fires
+            # unattended at 3am is a different proposition from one somebody
+            # watches. Making the breach loud is the honest intermediate.
+            breaches = stop_watch.check(journal.open_trades(), ticks)
+            for breach in breaches:
+                log.warning(
+                    "stop_breached",
+                    symbol=breach.trade.symbol,
+                    direction=breach.trade.direction.value,
+                    price=round(breach.price, 4),
+                    planned_stop=round(breach.trade.planned_stop, 4),
+                    through_by=round(breach.distance_usd, 4),
+                    loss_if_closed_now=round(breach.loss_if_closed_now_usd, 2),
+                    detail=breach.describe(),
+                )
+                audit.record_event("stop_breached", {"detail": breach.describe()})
+            # Named separately, never folded into "no breaches". A symbol whose
+            # quote failed is one this cycle could not check, which is not the
+            # same as one it checked and found fine.
+            unchecked_stops = stop_watch.unchecked(journal.open_trades(), ticks)
+            if unchecked_stops:
+                log.warning("stops_unchecked", symbols=unchecked_stops)
+
             # Nothing enabled is open, so a proposal cannot be approved whatever
             # it says. Skipping the model call here is a cost control, not a
             # risk one: everything above this line has already run, so the
@@ -501,6 +536,12 @@ def cmd_loop(
                 if stand_down_state.is_active(datetime.now(UTC))
                 else 0,
                 risk_understated=recon.risk_is_understated,
+                # On the cycle line rather than only in a warning, so a reader
+                # scanning the log sees it without grepping — and so "0" is a
+                # stated fact each cycle rather than the absence of a warning,
+                # which is what an outage also looks like.
+                stops_breached=len(breaches),
+                stops_unchecked=unchecked_stops,
                 news_windows=len(news_windows),
                 calendar_degraded=getattr(calendar, "is_degraded", False),
                 # Same reasoning as calendar_degraded: an empty post list from a
@@ -526,6 +567,77 @@ def cmd_loop(
     finally:
         audit.record_event("loop_end", {})
         broker.disconnect()
+
+
+def cmd_dream(env: Env, rules: Rules) -> int:
+    """One dream step.
+
+    Its own command rather than a step inside `cmd_loop`, and deliberately so.
+    The loop wakes every fifteen minutes because a price moves that fast; a
+    second-order supply-chain idea does not, and a lateral thought every quarter
+    hour would buy ninety-six shallow ones a day. Drive this from a timer at
+    whatever cadence suits, or by hand.
+
+    It also keeps the two apart structurally: the loop proposes orders and this
+    cannot, because a `Dream` has no field an order needs.
+
+    Returns 0 on a dream and 1 on a failed call. A non-zero exit is what a timer
+    unit surfaces through `systemctl --failed`, and a model call that failed is
+    worth noticing rather than logging into the void.
+    """
+    from .dreamer import Dreamer
+    from .dreaming import DreamStore
+
+    if not env.anthropic_api_key:
+        log.error("dream_no_api_key", detail="ANTHROPIC_API_KEY is not set")
+        return 1
+
+    # The same feeds the decision loop reads, and for the opposite purpose: the
+    # loop wants to know what happened to its six symbols, and this wants
+    # something to pull on. A headline about crop insurance is useless to the
+    # loop and is exactly the kind of spark this is for.
+    #
+    # Both degrade to empty rather than failing, as everywhere else: a dreamer
+    # with no headlines has less to work with, which is a quieter run and not a
+    # broken one. `recent_headlines` and `recent_posts` already catch their own
+    # network failures.
+    news = build_news_feed(env)
+    social = build_social_feed(env, rules)
+
+    headlines = news.recent_headlines(rules.allowed_symbols)
+    posts = [p.render() for p in social.recent_posts()] if social else []
+
+    journal = Journal()
+    dreamer = Dreamer(env, rules, DreamStore(), journal)
+    result = dreamer.run_once(headlines=headlines, posts=posts)
+
+    if result is None:
+        # Already logged with its reason inside run_once. Nothing was written:
+        # a dream that could not be had is not recorded as one that decided
+        # nothing.
+        return 1
+
+    dream = result.dream
+    log.info(
+        "dream_complete",
+        dream_id=dream.id,
+        title=dream.title,
+        stage=str(dream.stage),
+        verdict=str(dream.verdict) if dream.verdict else None,
+        advanced=result.advanced,
+        hops=len(dream.chain),
+        unchecked_hops=len(dream.unverified_hops),
+        verification=str(dream.verification),
+        # Named for the same reason the loop reports `calendar_degraded` and
+        # `symbols_without_history`: a run with no headlines is a different run
+        # from one where nothing was in the news, and only the log can tell them
+        # apart afterwards.
+        headlines_seen=len(headlines),
+        posts_seen=len(posts),
+        social_degraded=bool(social and social.is_degraded),
+        cost_usd=round(result.usage.estimated_cost_usd, 4) if result.usage else None,
+    )
+    return 0
 
 
 def cmd_reindex() -> int:
@@ -572,10 +684,12 @@ def main() -> int:
     parser = argparse.ArgumentParser(prog="electrum-bot")
     parser.add_argument(
         "command",
-        choices=["smoketest", "loop", "reindex"],
+        choices=["smoketest", "loop", "dream", "reindex"],
         help=(
             "smoketest: one-shot connectivity check. loop: run the decision "
-            "loop. reindex: rebuild the searchable history from audit/."
+            "loop. dream: one lateral-thinking step, written to data/dreams.db "
+            "and shown on the Dreaming page, which places nothing ever. "
+            "reindex: rebuild the searchable history from audit/."
         ),
     )
     parser.add_argument(
@@ -612,6 +726,8 @@ def main() -> int:
 
     if args.command == "smoketest":
         return cmd_smoketest(env, rules, force_mock=args.mock)
+    if args.command == "dream":
+        return cmd_dream(env, rules)
     return cmd_loop(env, rules, execute=args.execute, force_mock=args.mock)
 
 

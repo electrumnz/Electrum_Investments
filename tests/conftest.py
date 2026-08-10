@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -24,6 +25,40 @@ PAPER_EQUITY = 100_000.0
 
 # A Monday, 15:00 UTC — inside the [14, 21) session window in rules.yaml.
 INSIDE_SESSION = datetime(2026, 5, 4, 15, 0, tzinfo=UTC)
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _runtime_dirs_stay_clean() -> Iterator[None]:
+    """No test may leave a file in `data/` or `audit/`.
+
+    Both hold runtime artefacts that are gitignored and shared between runs, so
+    a test writing there does two things: it leaves state on the developer's
+    machine that the *next* run then reads, and on a real box it puts test rows
+    next to the journal that is the only irreplaceable file there.
+
+    Every store in this repository takes its path as a constructor argument for
+    exactly this reason, and every fixture passes a `tmp_path`. This catches the
+    case that keeps recurring: a new store is added, `build_app` gains a new
+    default, and one call site that nobody updated quietly starts writing to the
+    real directory. It happened when `DreamStore` landed.
+
+    Session-scoped because it is a guard on the suite rather than on any one
+    test, and because the interesting question is "did anything appear", not
+    "which test did it" — the answer to the second is almost always the test
+    that constructed something without a path.
+    """
+    watched = [REPO_ROOT / "data", REPO_ROOT / "audit"]
+
+    def snapshot() -> set[Path]:
+        return {p for d in watched if d.exists() for p in d.iterdir()}
+
+    before = snapshot()
+    yield
+    new = sorted(str(p.relative_to(REPO_ROOT)) for p in snapshot() - before)
+    assert not new, (
+        f"tests wrote to a runtime directory: {new}. Pass a tmp_path to the "
+        "store instead of letting it use its production default."
+    )
 
 
 @pytest.fixture

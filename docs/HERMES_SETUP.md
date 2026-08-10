@@ -189,6 +189,14 @@ without `DASHBOARD_CHAT_TOKEN` the panel is hidden and `POST /chat` returns 404.
 ```sh
 sudo tee /etc/sudoers.d/mudhorn-chat >/dev/null <<'EOF'
 mudhorn ALL=(hermes) NOPASSWD: /opt/mudhorn/deploy/run-chat.sh
+
+# Optional, and recommended once the Dreaming page is in use. A SECOND Hermes
+# instance for the dreamer, from its own HERMES_HOME, whose MCP registry must
+# NOT contain this repo's server. Without it the dreamer shares the account
+# agent's tools — including the order tools — and the Dreaming page shows a
+# banner saying exactly that. See the header of deploy/run-dream.sh for the
+# setup steps.
+mudhorn ALL=(hermes) NOPASSWD: /opt/mudhorn/deploy/run-dream.sh
 EOF
 sudo chmod 440 /etc/sudoers.d/mudhorn-chat
 sudo visudo -c

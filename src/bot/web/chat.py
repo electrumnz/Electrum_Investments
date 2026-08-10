@@ -36,6 +36,8 @@ from pathlib import Path
 
 import structlog
 
+from ..souls import Soul
+
 log = structlog.get_logger(__name__)
 
 # The root-owned wrapper, NOT the Hermes binary itself. The flags are fixed in
@@ -50,6 +52,27 @@ log = structlog.get_logger(__name__)
 # inside this service's namespace, still needs /home/hermes visible. The unit
 # file explains it where someone tightening it would look.
 DEFAULT_BINARY = Path("/opt/mudhorn/deploy/run-chat.sh")
+
+# The dreamer's own instance, when one is installed. A SECOND Hermes rather than
+# a flag on the first, and the reason is not the character file:
+#
+# The account agent's Hermes registers this repo's MCP server, which exposes
+# `place_order`. Sharing that instance means the only thing keeping a
+# speculative agent away from the broker is the sentence in `souls/grogu.md`
+# telling it not to — prose, where this repository uses a structure everywhere
+# else. `RiskGate.evaluate` still runs on every order path either way, so the
+# operator's four rules hold; but "it has no broker tool" and "it has one and
+# was asked nicely" are different claims and only one is worth making.
+#
+# A second `HERMES_HOME` also gives the dreamer its own memory and its own
+# native SOUL.md, since Hermes holds exactly one soul per instance.
+#
+# Absent, the dreamer falls back to the shared instance and the Dreaming page
+# SAYS SO. It does not quietly claim an isolation it does not have — the same
+# rule as `calendar_degraded` and the tailnet status: report the weaker fact
+# rather than imply the stronger one.
+DREAMER_BINARY = Path("/opt/mudhorn/deploy/run-dream.sh")
+
 DEFAULT_USER = "hermes"
 
 # Generous: a question that fans out across MCP tools takes a while, and the
@@ -111,7 +134,24 @@ class HermesBridge:
         except OSError:
             return True
 
-    def ask(self, message: str, history: list[tuple[str, str]] | None = None) -> ChatReply:
+    def ask(
+        self,
+        message: str,
+        history: list[tuple[str, str]] | None = None,
+        soul: Soul | None = None,
+        operator: str = "",
+    ) -> ChatReply:
+        """One Hermes turn, optionally in character.
+
+        The soul is prepended to the prompt rather than passed as a flag,
+        because the wrapper takes no arguments on purpose: the sudoers rule
+        names `run-chat.sh` with nothing after it, so everything this process
+        wants to say goes down stdin where it cannot be read as an option.
+
+        A missing soul is not an error. `load_soul` returns an absent one, whose
+        prefix is empty, and the agent answers plainly. See `souls.py` for why
+        that is the right failure direction.
+        """
         if not message.strip():
             return ChatReply.failed("empty message")
         if not self.available:
@@ -121,6 +161,8 @@ class HermesBridge:
             )
 
         prompt = _with_history(message, history or [])
+        if soul is not None and soul.found:
+            prompt = f"{soul.prompt_prefix(operator)}\n{prompt}"
 
         # argv list, never a shell string: the message is untrusted input and
         # this process holds the broker credentials. No shell means no quoting

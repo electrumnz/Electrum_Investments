@@ -19,6 +19,7 @@ from datetime import UTC, datetime, timedelta
 from typing import NamedTuple
 
 from .config import InstrumentRules, Rules
+from .market_clock import MarketPhase, market_state
 from .models import (
     AccountSnapshot,
     Direction,
@@ -105,13 +106,14 @@ class RiskGate:
             self._equity_floor(account),
             self._symbol_allowed(proposal),
             self._within_session(instrument),
+            self._premarket(instrument),
             self._news_blackout(proposal.symbol, news_windows or []),
-            self._concurrent_positions(account),
+            self._concurrent_positions(account, instrument),
             self._daily_loss(account),
             self._limit_price_sane(proposal, tick),
             self._stops_on_correct_side(proposal),
-            self._per_trade_risk(proposal, account),
-            self._position_size(proposal, account),
+            self._per_trade_risk(proposal, account, instrument),
+            self._position_size(proposal, account, instrument),
             self._total_risk(proposal, account),
             self._buying_power(proposal, account),
             self._gross_notional(proposal, account),
@@ -212,6 +214,38 @@ class RiskGate:
             f"{now.hour:02d}:00 UTC is outside the trading sessions for {label}"
         )
 
+    def _premarket(self, instrument: InstrumentRules | None) -> str | None:
+        """The operator's rule: no pre-market. After hours is fine.
+
+        Separate from `_within_session` because it answers a question a UTC
+        window structurally cannot. `sessions_utc` is fixed hours; the US
+        session is defined in New York time and moves an hour twice a year, so
+        the configured `[[14, 21]]` opens at 09:00 New York through the winter
+        — half an hour of pre-market, every day, with nothing in the window
+        able to notice.
+
+        That gap used to cost nothing, because an out-of-hours equity order was
+        queued to the next open rather than filled. It costs something now:
+        Alpaca runs a pre-market session from 04:00 ET, so an order placed into
+        it **trades**, in a thinner book than anybody chose.
+
+        `market_clock` is a pure function over the clock — no network, no
+        calendar fetch — so this stays deterministic and cannot fail open, and
+        it only ever adds a reason to refuse.
+
+        **Holidays are still not covered**, exactly as in `_within_session`.
+        Thanksgiving reads as an ordinary Thursday to both.
+        """
+        if instrument is None or not instrument.refuse_premarket:
+            return None
+        phase = market_state(self._now()).phase
+        if phase is not MarketPhase.PRE:
+            return None
+        return (
+            "pre-market session (04:00-09:30 New York); this account does not "
+            "trade pre-market, and Alpaca would fill this rather than queue it"
+        )
+
     def _news_blackout(self, symbol: str, windows: list[NewsWindow]) -> str | None:
         before = timedelta(minutes=self._rules.news_blackout_minutes_before)
         after = timedelta(minutes=self._rules.news_blackout_minutes_after)
@@ -221,10 +255,36 @@ class RiskGate:
                 return f"inside news blackout window around {w.timestamp.isoformat()}"
         return None
 
-    def _concurrent_positions(self, account: AccountSnapshot) -> str | None:
+    def _concurrent_positions(
+        self, account: AccountSnapshot, instrument: InstrumentRules | None = None
+    ) -> str | None:
+        """The portfolio cap always, and this class's own cap if it has one.
+
+        Both, not either. The portfolio limit bounds the account and a class
+        limit bounds the class, so a class that gets loud cannot fill every
+        slot the portfolio has — which is the failure a single global count
+        cannot express.
+        """
         cap = self._rules.account.max_concurrent_positions
         if len(account.open_positions) >= cap:
             return f"already holding {len(account.open_positions)} positions (max {cap})"
+
+        if instrument is None or instrument.max_concurrent_positions is None:
+            return None
+        # Counted WITHIN the class, so the two caps measure different things.
+        # By SYMBOL membership rather than by the position's `asset_class`: the
+        # instrument block's own `allowed_symbols` is what defines the class
+        # here, and reading the enum instead would ask two different sources
+        # the same question and eventually get two answers.
+        symbols = set(instrument.allowed_symbols)
+        held = sum(1 for p in account.open_positions if p.symbol in symbols)
+        class_cap = instrument.max_concurrent_positions
+        if held >= class_cap:
+            label = proposal_class_label(instrument)
+            return (
+                f"already holding {held} {label} position(s) "
+                f"(max {class_cap} for this instrument class)"
+            )
         return None
 
     def _daily_loss(self, account: AccountSnapshot) -> str | None:
@@ -270,26 +330,53 @@ class RiskGate:
                 return f"sell take-profit {proposal.take_profit_price} is not below entry {entry}"
         return None
 
-    def _per_trade_risk(self, proposal: OrderProposal, account: AccountSnapshot) -> str | None:
-        """Loss if the stop fills must stay within max_risk_per_trade_pct of equity.
+    def _per_trade_risk(
+        self,
+        proposal: OrderProposal,
+        account: AccountSnapshot,
+        instrument: InstrumentRules | None = None,
+    ) -> str | None:
+        """Loss if the stop fills must stay within the per-trade cap.
 
         Shares and coin units are 1:1 with price, so this is exact — unlike the
         FX version this replaces, which had to approximate contract sizes.
+
+        A class limit OVERRIDES the portfolio one, in either direction —
+        `account:` is the default rather than a ceiling. It is deliberately not
+        floored back with a `min`: a file saying 3% while the gate quietly
+        applied 1% would be a limit nobody could read off the config, which is
+        worse than either number on its own.
+
+        Pushing back on a limit getting looser is a job for the settings agent
+        (see docs), which argues and slows the operator down without denying
+        the change. It is not a job for a validator that refuses to start.
         """
+        pct = self._rules.account.max_risk_per_trade_pct
+        if instrument is not None and instrument.max_risk_per_trade_pct is not None:
+            pct = instrument.max_risk_per_trade_pct
+
         risk_usd = abs(proposal.limit_price - proposal.stop_loss_price) * proposal.qty
-        cap_usd = account.equity_usd * self._rules.account.max_risk_per_trade_pct / 100
+        cap_usd = account.equity_usd * pct / 100
         if risk_usd > cap_usd:
             return (
                 f"risk {risk_usd:,.2f} exceeds the per-trade cap {cap_usd:,.2f} "
-                f"({self._rules.account.max_risk_per_trade_pct:.2f}% of equity)"
+                f"({pct:.2f}% of equity)"
             )
         return None
 
-    def _position_size(self, proposal: OrderProposal, account: AccountSnapshot) -> str | None:
+    def _position_size(
+        self,
+        proposal: OrderProposal,
+        account: AccountSnapshot,
+        instrument: InstrumentRules | None = None,
+    ) -> str | None:
         if account.equity_usd <= 0:
             return "account equity is zero or negative"
         pct = proposal.notional_usd / account.equity_usd * 100
         cap = self._rules.account.max_position_pct
+        if instrument is not None and instrument.max_position_pct is not None:
+            # Overrides rather than floors. See `_per_trade_risk`.
+            cap = instrument.max_position_pct
         if pct > cap:
             return (
                 f"position {proposal.notional_usd:,.2f} is {pct:.1f}% of equity "

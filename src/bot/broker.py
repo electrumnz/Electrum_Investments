@@ -58,6 +58,22 @@ DEFAULT_INTRADAY_LOOKBACK = 160
 
 @runtime_checkable
 class Broker(Protocol):
+    @property
+    def orders_degraded(self) -> bool:
+        """True when the last `get_open_orders` failed and returned nothing.
+
+        Same rule as `FinnhubCalendar.is_degraded`, and it exists for the same
+        reason: an empty order list from a refused API call is indistinguishable
+        from an account with nothing resting. `get_open_orders` catches its own
+        failures — it must, because it feeds a display beside positions and risk
+        and an SDK error should not take those down with it — and that catch was
+        silently making "we could not ask" look like "there is nothing there".
+
+        A caller that ignores this is asserting there are no working orders,
+        which is not what a failed fetch established.
+        """
+        ...
+
     def connect(self) -> None: ...
     def disconnect(self) -> None: ...
     def get_account(self) -> AccountSnapshot: ...
@@ -91,6 +107,16 @@ class MockBroker:
         self._bars: dict[str, list[Bar]] = {}
         self._intraday: dict[str, list[Bar]] = {}
         self._open_orders: list[WorkingOrder] = []
+        self._orders_degraded = False
+
+    @property
+    def orders_degraded(self) -> bool:
+        return self._orders_degraded
+
+    def set_orders_degraded(self, degraded: bool) -> None:
+        """Test hook. Nothing in memory can fail, so the flag has to be set by
+        hand for a caller's degraded path to be exercisable at all."""
+        self._orders_degraded = degraded
 
     def connect(self) -> None:
         self._connected = True
@@ -259,6 +285,11 @@ class AlpacaBroker:
             api_key=env.alpaca_api_key, secret_key=env.alpaca_secret_key
         )
         self._connected = False
+        self._orders_degraded = False
+
+    @property
+    def orders_degraded(self) -> bool:
+        return self._orders_degraded
 
     def connect(self) -> None:
         # Alpaca is stateless HTTP; "connecting" means proving the keys work.
@@ -458,9 +489,17 @@ class AlpacaBroker:
             # Same reasoning as the feed fetches: this feeds a display, and an
             # SDK error here must not take down a caller that also renders
             # positions and risk.
+            #
+            # But an empty list is what an account with nothing resting looks
+            # like too, so swallowing the failure quietly turned "we could not
+            # ask" into "there is nothing there". The flag is the difference,
+            # and it is the `FinnhubCalendar.is_degraded` lesson in a third
+            # place: report the weaker fact rather than imply the stronger one.
+            self._orders_degraded = True
             log.warning("open_orders_fetch_failed", error=f"{type(exc).__name__}: {exc}")
             return []
 
+        self._orders_degraded = False
         orders: list[WorkingOrder] = []
         for o in raw:
             qty = float(getattr(o, "qty", 0) or 0)
@@ -527,18 +566,72 @@ class AlpacaBroker:
         if not self._connected:
             return OrderResult(accepted=False, error="not connected")
 
-        from alpaca.trading.enums import OrderSide, TimeInForce
-        from alpaca.trading.requests import LimitOrderRequest
+        from alpaca.trading.enums import OrderClass, OrderSide, TimeInForce
+        from alpaca.trading.requests import (
+            LimitOrderRequest,
+            StopLossRequest,
+            TakeProfitRequest,
+        )
 
         crypto = is_crypto_symbol(proposal.symbol)
-        request = LimitOrderRequest(
-            symbol=proposal.symbol,
-            qty=proposal.qty,
-            side=OrderSide.BUY if proposal.direction == Direction.BUY else OrderSide.SELL,
-            # Crypto trades around the clock and rejects DAY.
-            time_in_force=TimeInForce.GTC if crypto else TimeInForce.DAY,
-            limit_price=proposal.limit_price,
+        side = OrderSide.BUY if proposal.direction == Direction.BUY else OrderSide.SELL
+
+        if crypto:
+            # Crypto trades around the clock and rejects DAY. Alpaca does not
+            # accept bracket orders on crypto either, so the stop stays a
+            # journal figure here and the loop's monitor is what watches it.
+            return self._submit(
+                LimitOrderRequest(
+                    symbol=proposal.symbol,
+                    qty=proposal.qty,
+                    side=side,
+                    time_in_force=TimeInForce.GTC,
+                    limit_price=proposal.limit_price,
+                )
+            )
+
+        # A BRACKET, so the stop actually rests at the broker.
+        #
+        # Before this, `stop_loss_price` was validated by the gate, used to size
+        # the position, written to the journal — and never sent to Alpaca. The
+        # operator's third rule is "hard stops on every trade", and it was true
+        # at sizing time and false at the broker: nothing would have closed a
+        # losing position, ever, because nothing was resting there to do it.
+        #
+        # **GTC rather than DAY, and that is the whole point.** A DAY bracket's
+        # legs expire with the session, so a position held overnight would sit
+        # unprotected from 16:00 until somebody noticed. GTC legs stay active in
+        # the system across days, so the stop survives the close, the overnight
+        # session, the pre-market and the weekend.
+        #
+        # What GTC does NOT buy is an out-of-hours exit, and no order type from
+        # any broker does. A stop is a trigger that becomes a MARKET order, and
+        # extended-hours venues accept limit orders only — so the leg rests
+        # through the night and becomes eligible again when the regular session
+        # reopens. A gap through the stop therefore fills at the open rather
+        # than at the stop price. That is how every retail stop behaves and it
+        # is worth knowing rather than being surprised by.
+        #
+        # The cost of GTC is at the other end: an unfilled ENTRY also rests
+        # rather than expiring with the day. That is deliberately visible — an
+        # order resting at the broker shows in `get_open_orders` and on the
+        # Board's pending panel — rather than silently cancelled.
+        return self._submit(
+            LimitOrderRequest(
+                symbol=proposal.symbol,
+                qty=proposal.qty,
+                side=side,
+                time_in_force=TimeInForce.GTC,
+                limit_price=proposal.limit_price,
+                order_class=OrderClass.BRACKET,
+                stop_loss=StopLossRequest(stop_price=proposal.stop_loss_price),
+                take_profit=TakeProfitRequest(limit_price=proposal.take_profit_price),
+            )
         )
+
+    def _submit(self, request: Any) -> OrderResult:
+        """One place that talks to `submit_order`, so entry and bracket paths
+        cannot drift in how they report a failure."""
 
         try:
             order: Any = self._trading.submit_order(request)

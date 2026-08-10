@@ -18,6 +18,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from bot.config import Env, load_rules
+from bot.dreaming import DreamStore, DreamSummary
 from bot.journal import Journal
 from bot.models import (
     Decision,
@@ -33,6 +34,8 @@ from bot.models import (
     SymbolAssessment,
     Trade,
 )
+from bot.souls import Soul
+from bot.web import live, render
 from bot.web.app import build_app
 
 pytest.importorskip("fastapi")
@@ -51,8 +54,33 @@ def journal(tmp_path):
 
 
 @pytest.fixture
-def client(journal):
-    app = build_app(journal=journal, rules=load_rules(), env=_env(), force_mock=True)
+def dreams(tmp_path):
+    """Never the real store. Same rule as the journal: a test that wrote to
+    data/ would leave a file on the developer's machine that the next run
+    then reads."""
+    return DreamStore(tmp_path / "dreams.db")
+
+
+@pytest.fixture
+def poller(journal):
+    """A poller primed with one synchronous read.
+
+    The Board no longer talks to the broker during a render — the poller owns
+    that conversation — so a test that wants figures on the page has to give it
+    a reading first. `poll_once()` is synchronous precisely so this needs no
+    event loop.
+    """
+    p = live.build_poller(journal=journal, env=_env(), force_mock=True)
+    p.poll_once()
+    return p
+
+
+@pytest.fixture
+def client(journal, dreams, poller):
+    app = build_app(
+        journal=journal, rules=load_rules(), env=_env(),
+        dreams=dreams, poller=poller, force_mock=True
+    )
     return TestClient(app)
 
 
@@ -86,7 +114,7 @@ def _closed_trade(journal: Journal, pnl: float, *, minutes: int = 0,
 # ------------------------------------------------------------------- renders
 
 
-PAGES = ["/", "/decisions", "/trades", "/analytics", "/settings", "/chat"]
+PAGES = ["/", "/decisions", "/trades", "/analytics", "/dreaming", "/settings", "/chat"]
 
 
 @pytest.mark.parametrize("path", PAGES)
@@ -163,7 +191,7 @@ def test_stand_down_is_surfaced(client, journal):
     assert "Paper trading continues" in body
 
 
-def test_untracked_position_warning(client, journal, tmp_path):
+def test_untracked_position_warning(client, journal, tmp_path, dreams):
     """A held position the journal never saw makes open risk understated."""
     from bot.broker import MockBroker
     from bot.models import OrderProposal
@@ -189,10 +217,22 @@ def test_untracked_position_warning(client, journal, tmp_path):
     def _fixed_broker(env, force_mock=False):
         return broker
 
-    app = build_app(journal=journal, rules=load_rules(), env=_env(), force_mock=True)
+    app = build_app(
+        journal=journal, rules=load_rules(), env=_env(),
+        dreams=dreams, force_mock=True
+    )
     original = main_mod.build_broker
     main_mod.build_broker = _fixed_broker
     try:
+        # Built and polled INSIDE the swap: the poller reaches the broker
+        # through the same `build_broker`, so a poller created outside it would
+        # read the wrong account.
+        primed = live.build_poller(journal=journal, env=_env(), force_mock=True)
+        primed.poll_once()
+        app = build_app(
+            journal=journal, rules=load_rules(), env=_env(),
+            dreams=dreams, poller=primed, force_mock=True
+        )
         body = TestClient(app).get("/").text
     finally:
         main_mod.build_broker = original
@@ -234,12 +274,15 @@ def test_chat_is_off_unless_a_token_is_set(client):
     assert client.post("/chat", json={"message": "hello"}).status_code == 404
 
 
-def test_chat_rejects_a_wrong_token(tmp_path, journal):
+def test_chat_rejects_a_wrong_token(tmp_path, journal, dreams):
     from bot.web.app import build_app
 
     env = Env(_env_file=None)  # type: ignore[call-arg]
     env.dashboard_chat_token = "correct-horse"
-    app = build_app(journal=journal, rules=load_rules(), env=env, force_mock=True)
+    app = build_app(
+        journal=journal, rules=load_rules(), env=env,
+        dreams=dreams, force_mock=True
+    )
 
     r = TestClient(app).post("/chat", json={"token": "wrong", "message": "hi"})
     assert r.status_code == 403
@@ -355,12 +398,15 @@ def test_settings_shows_trading_days_beside_the_session_hours(client):
     assert "Mon, Tue, Wed, Thu, Fri" in body
 
 
-def test_settings_never_renders_a_credential(tmp_path, journal):
+def test_settings_never_renders_a_credential(tmp_path, journal, dreams):
     """Loopback-bound is not the same as private. A screenshot travels."""
     env = Env(_env_file=None)  # type: ignore[call-arg]
     env.alpaca_api_key = "PK-SUPER-SECRET-KEY"
     env.finnhub_api_key = "fh-secret"
-    app = build_app(journal=journal, rules=load_rules(), env=env, force_mock=True)
+    app = build_app(
+        journal=journal, rules=load_rules(), env=env,
+        dreams=dreams, force_mock=True
+    )
 
     body = TestClient(app).get("/settings").text
 
@@ -376,12 +422,13 @@ def test_settings_never_renders_a_credential(tmp_path, journal):
 
 
 @pytest.fixture
-def audited(tmp_path, journal):
+def audited(tmp_path, journal, dreams):
     from bot.audit import AuditLog
 
     log = AuditLog(tmp_path / "audit")
     app = build_app(
-        journal=journal, rules=load_rules(), env=_env(), audit_log=log, force_mock=True
+        journal=journal, rules=load_rules(), env=_env(), audit_log=log,
+        dreams=dreams, force_mock=True
     )
     return log, TestClient(app)
 
@@ -655,7 +702,7 @@ def test_a_degraded_calendar_is_not_shown_as_no_announcements(audited):
 # ------------------------------------------------------------ pending orders
 
 
-def test_a_resting_order_is_shown_with_the_distance_to_its_limit(journal):
+def test_a_resting_order_is_shown_with_the_distance_to_its_limit(journal, dreams):
     """A limit order that has not filled leaves no position and no explanation.
 
     The gap is what separates "waiting patiently" from "never going to fill".
@@ -682,13 +729,21 @@ def test_a_resting_order_is_shown_with_the_distance_to_its_limit(journal):
 
     import bot.main as main_mod
 
-    app = build_app(journal=journal, rules=load_rules(), env=_env(), force_mock=True)
     def _fixed(env: object, force_mock: bool = False) -> MockBroker:
         return broker
 
     original = main_mod.build_broker
     main_mod.build_broker = _fixed
     try:
+        # Built and polled INSIDE the swap: the poller reaches the broker
+        # through the same `build_broker`, so one created outside it would read
+        # a different account and find no resting orders.
+        primed = live.build_poller(journal=journal, env=_env(), force_mock=True)
+        primed.poll_once()
+        app = build_app(
+            journal=journal, rules=load_rules(), env=_env(),
+            dreams=dreams, poller=primed, force_mock=True
+        )
         body = TestClient(app).get("/").text
     finally:
         main_mod.build_broker = original
@@ -750,6 +805,380 @@ def test_a_degraded_social_feed_is_not_shown_as_a_quiet_morning(audited):
     assert "not that nothing was posted" in body
 
 
+# ------------------------------------------------------------------ dreaming
+
+
+def test_the_dreaming_page_leads_with_what_it_is_not(client):
+    """The most important fact about the page, ahead of any of its contents.
+
+    Everything on it is speculation produced by a model that is good at
+    sounding certain, on a dashboard that otherwise reports measured facts about
+    real money. A reader landing mid-page has to be told which of the two they
+    are looking at, in the same way the public site labels its invented figures.
+    """
+    body = client.get("/dreaming").text
+
+    assert "Nothing here is a proposal" in body
+    assert "no quantity, no entry, no stop and no side" in body
+    assert "risk.py" in body
+
+
+def test_the_page_does_not_claim_an_isolation_it_does_not_have():
+    """The banner used to say the dreamer had "no route to the broker".
+
+    True of the dream RECORDS, which carry no order fields. Not true of the chat
+    panel on the same page: without a separate instance it talks to the same
+    Hermes as Chat and can reach the same order tools. The risk gate still runs
+    on every one of them, so the operator's limits hold — but "it has no broker
+    tool" and "it has one and was asked nicely" are different claims, and the
+    page must make the one that is actually true today.
+    """
+    from bot.web.render import dreaming_page
+
+    shared = dreaming_page(
+        [], DreamSummary.of([]), enabled=True, token="t",
+        hermes_available=True, soul_found=True, isolated=False,
+    )
+    assert "Sharing the account agent" in shared
+    assert "including the order tools" in shared
+    assert "souls/grogu.md" in shared
+    assert "runs on its own agent" not in shared
+
+    isolated = dreaming_page(
+        [], DreamSummary.of([]), enabled=True, token="t",
+        hermes_available=True, soul_found=True, isolated=True,
+    )
+    assert "runs on its own agent" in isolated
+    assert "no broker tool to reach for" in isolated
+    assert "Sharing the account agent" not in isolated
+
+
+def test_the_dreamer_uses_its_own_instance_when_one_is_installed(journal, dreams, monkeypatch):
+    """A speculative agent should have no broker tool, not one it was told not
+    to use. When the second Hermes is absent the panel still works, and the page
+    above it says so rather than implying the stronger arrangement."""
+    from bot.web import chat as chat_mod
+
+    env = Env(_env_file=None)  # type: ignore[call-arg]
+    env.dashboard_chat_token = "tok"
+
+    asked: list[str] = []
+
+    def _ask(self, message, history=None, soul=None, operator=""):
+        asked.append(str(self.binary))
+        return chat_mod.ChatReply(text="ok")
+
+    monkeypatch.setattr(chat_mod.HermesBridge, "ask", _ask)
+    # Both instances present: the dreamer gets its own.
+    monkeypatch.setattr(chat_mod.HermesBridge, "available", property(lambda self: True))
+
+    app = build_app(
+        journal=journal, rules=load_rules(), env=env,
+        dreams=dreams, force_mock=True
+    )
+    client = TestClient(app)
+    client.post("/chat", json={"token": "tok", "message": "hi", "soul": "grogu"})
+    client.post("/chat", json={"token": "tok", "message": "hi", "soul": "yoda"})
+
+    assert asked[0].endswith("run-dream.sh")
+    assert asked[1].endswith("run-chat.sh")
+
+
+def test_the_dreamer_falls_back_rather_than_refusing(journal, dreams, monkeypatch):
+    """A box without the second instance still gets a working panel."""
+    from bot.web import chat as chat_mod
+
+    env = Env(_env_file=None)  # type: ignore[call-arg]
+    env.dashboard_chat_token = "tok"
+
+    asked: list[str] = []
+
+    def _ask(self, message, history=None, soul=None, operator=""):
+        asked.append(str(self.binary))
+        return chat_mod.ChatReply(text="ok")
+
+    monkeypatch.setattr(chat_mod.HermesBridge, "ask", _ask)
+    # Only the account instance exists.
+    monkeypatch.setattr(
+        chat_mod.HermesBridge,
+        "available",
+        property(lambda self: self.binary == chat_mod.DEFAULT_BINARY),
+    )
+
+    app = build_app(
+        journal=journal, rules=load_rules(), env=env,
+        dreams=dreams, force_mock=True
+    )
+    TestClient(app).post("/chat", json={"token": "tok", "message": "hi", "soul": "grogu"})
+
+    assert asked == [str(chat_mod.DEFAULT_BINARY)]
+
+
+def test_an_empty_deck_shows_a_worked_example_marked_as_one(client):
+    """A fresh box has no dreams, and a blank page teaches nothing.
+
+    The illustration must not be mistakeable for something the agent produced,
+    which is the same rule the public site follows about invented figures.
+    """
+    body = client.get("/dreaming").text
+
+    assert "An illustration, not a recorded dream" in body
+    assert "sesame" in body.lower()
+
+
+def test_a_dream_renders_its_unchecked_hops_as_unchecked(client, dreams):
+    """Missing stays missing. A chain is only as good as its weakest link and a
+    hop nobody verified must not read like one somebody did."""
+    from bot.dreaming import Dream, Hop
+
+    dreams.save(
+        Dream(
+            title="Brood overlap",
+            seed="Two of three producers inside overlapping ranges.",
+            chain=[
+                Hop("broods run on fixed cycles", checked=True, source="brood map"),
+                Hop("the overlap lands this season"),
+            ],
+            weakest_hop="whether the overlap and the concentration coincide",
+        )
+    )
+
+    body = client.get("/dreaming").text
+
+    assert "Brood overlap" in body
+    assert "Not checked. Nobody has verified this hop." in body
+    assert "brood map" in body
+    assert "Weakest hop" in body
+    assert "partial" in body
+
+
+def test_a_chain_with_no_stated_weakest_hop_is_called_out(client, dreams):
+    """Same rule the Decisions page applies to a watch with no trigger.
+
+    A chain nobody has attacked is not a strong chain, and rendering it without
+    comment would let the dreamer look like it has a view when it does not.
+    """
+    from bot.dreaming import Dream, Hop
+
+    dreams.save(Dream(title="Unattacked", seed="s", chain=[Hop("a claim")]))
+
+    body = client.get("/dreaming").text
+
+    assert "has not been attacked yet" in body
+
+
+def test_a_kept_dream_with_no_trigger_is_called_out_as_a_note(client, dreams):
+    from bot.dreaming import Dream, DreamStage, DreamVerdict, Hop
+
+    dreams.save(
+        Dream(
+            title="Kept",
+            seed="s",
+            stage=DreamStage.VERDICT,
+            verdict=DreamVerdict.KEEP,
+            chain=[Hop("a claim", checked=True, source="somewhere")],
+        )
+    )
+
+    body = client.get("/dreaming").text
+
+    assert "a note, not a watch" in body
+
+
+def test_the_dreaming_page_survives_a_store_it_cannot_read(journal, dreams, tmp_path):
+    """A broken speculative-notes table is not a reason to show an error page.
+
+    The dreams store is deliberately a different file from the journal, and the
+    whole point of that separation is that losing it costs notes and nothing
+    else. It must cost the page its contents, not the page.
+    """
+    from bot.dreaming import DreamStore
+
+    broken = DreamStore(tmp_path / "broken.db")
+    (tmp_path / "broken.db").write_text("this is not a database")
+
+    app = build_app(
+        journal=journal, rules=load_rules(), env=_env(),
+        dreams=broken, force_mock=True
+    )
+
+    r = TestClient(app).get("/dreaming")
+
+    assert r.status_code == 200
+    assert "Dreaming" in r.text
+
+
+@pytest.mark.parametrize(
+    "requested,expected",
+    [
+        ("yoda", "yoda"),
+        ("grogu", "grogu"),
+        # Anything else is the account agent, including the shapes that would
+        # matter if this string reached a path join.
+        ("../../../../etc/passwd", "yoda"),
+        ("souls/../../.env", "yoda"),
+        ("", "yoda"),
+        ("GROGU", "grogu"),  # case is normalised, not rejected
+    ],
+)
+def test_the_soul_name_from_a_request_body_cannot_name_an_arbitrary_file(
+    journal, dreams, monkeypatch, requested, expected
+):
+    """`load_soul` builds a filesystem path out of this string.
+
+    An unvalidated value from a request body reaching a path join is a traversal
+    waiting to happen, so the route checks it against a fixed set first. An
+    unknown name falls back to the account agent rather than erroring: the worst
+    case of getting it wrong is the wrong voice, and refusing to answer would be
+    a larger failure than answering plainly.
+    """
+    from bot.web import app as app_module
+
+    seen: list[str] = []
+
+    def _spy(name, **kw):
+        seen.append(name)
+        return Soul.absent(name)
+
+    monkeypatch.setattr(app_module, "load_soul", _spy)
+
+    env = Env(_env_file=None)  # type: ignore[call-arg]
+    env.dashboard_chat_token = "tok"
+    app = build_app(
+        journal=journal, rules=load_rules(), env=env,
+        dreams=dreams, force_mock=True
+    )
+
+    TestClient(app).post(
+        "/chat", json={"token": "tok", "message": "hi", "soul": requested}
+    )
+
+    assert seen, "the route did not consult the soul loader at all"
+    assert seen[-1] == expected
+
+
+def test_no_stylesheet_rule_collides_with_a_state_badge():
+    """A modifier class must not double as a layout class.
+
+    Caught twice now, in the same shape both times.
+
+    First: the stage badges are named after the states they show, so
+    `.dream .seed { padding: ... }` written for the spark paragraph ALSO matched
+    `<span class="pill seed">` and rendered the badge as a full-width block.
+
+    Then, with this test written to cover only `.pill` modifiers, it happened
+    again one selector across: the sign-in screen's full-height centring wrapper
+    was `.gate`, and the Decisions page marks its risk-gate verdict row
+    `<div class="rung gate no">`. So every verdict inherited
+    `min-height: calc(100svh - 8rem); place-items: center` and stretched to most
+    of a viewport with the rejection reason floating in the middle of the void.
+    Valid CSS, silently styling the wrong element, and invisible on any page
+    without a decision on it — which every empty-journal render is.
+
+    So the guard now takes EVERY class used as a modifier anywhere, rather than
+    only the badges. That is the general form: a word that names a state is a
+    bad name for a box.
+
+    Colour-only overlaps stay deliberate and harmless: `.loss` means the same
+    red wherever it lands.
+    """
+    import re
+
+    from bot.web.render import STYLES
+
+    # Strip comments first, so prose in them cannot look like a selector.
+    css = re.sub(r"/\*.*?\*/", "", STYLES, flags=re.S)
+
+    # Any class appearing in second position of a compound selector is being
+    # used as a modifier: `.pill.seed`, `.rung.gate`, `.live.link-live`.
+    modifiers = set(re.findall(r"\.[a-z-]+\.([a-z-]+)", css))
+    assert "seed" in modifiers and "gate" in modifiers, (
+        "the two known collisions are no longer detectable as modifiers; "
+        "has the markup changed?"
+    )
+
+    layout = (
+        "display", "padding", "margin", "position", "width", "height",
+        "font-size", "font-family", "border-bottom", "border-left", "grid",
+        "flex",
+    )
+
+    offenders = []
+    for selectors, block in re.findall(r"([^{}]+)\{([^{}]*)\}", css):
+        if not any(f"{prop}:" in block for prop in layout):
+            continue
+        for selector in selectors.split(","):
+            final = selector.strip().split()[-1] if selector.strip() else ""
+            # A bare `.name` — no element, no second class to narrow it.
+            if re.fullmatch(r"\.([a-z-]+)", final) and final[1:] in modifiers:
+                offenders.append((selector.strip(), final))
+
+    assert not offenders, (
+        "these rules restyle a state badge as a side effect: "
+        f"{offenders}. Scope by element role, not by a word that is also a state."
+    )
+
+
+def test_settings_shows_the_dream_schedule_without_claiming_it_is_running(client):
+    """The cadence is read from the timer unit rather than quoted from a
+    constant, and the page is careful about what a file on disk proves.
+
+    A unit existing is not a timer running, and this process cannot tell the
+    difference. Saying "daily at 07:00" on a box where nobody enabled it would
+    be the confident-partial-answer failure in a new place.
+    """
+    body = client.get("/settings").text
+
+    # The section heading, not the bare word: "Dreaming" is in the nav on every
+    # page, so asserting it alone would pass with the card entirely absent.
+    assert "<h2>Dreaming</h2>" in body
+    assert "Pacific/Auckland" in body
+    assert "not visible from this process" in body
+    assert "systemctl list-timers" in body
+    # The tier and the cache decision are both surfaced, since both are
+    # counter-intuitive enough to be worth stating.
+    assert "Prompt cache" in body
+    assert "runs daily, so it would miss every time" in body
+
+
+def test_settings_still_offers_no_way_to_change_anything(client):
+    """The dreaming card is display only, like every other card here."""
+    body = client.get("/settings").text.lower()
+
+    for control in ("<form", "<input", "<select", "contenteditable", "<button"):
+        assert control not in body, f"settings page carries a {control}"
+
+
+def test_the_dreamer_is_not_credited_with_the_account_agent_tools(client):
+    """The two panels share an implementation but not a reach.
+
+    The account agent has the news recording and the searchable history index;
+    the dreamer has neither, and ideally runs on a separate Hermes with no
+    broker tools at all. The shared `chat_panel` therefore takes the notes about
+    those tools as a per-caller argument rather than baking them in — describing
+    them on the Dreaming page would credit the dreamer with tools it cannot
+    reach, which is the same class of overclaim as the "no route to the broker"
+    banner that had to be corrected.
+    """
+    from bot.web.render import chat_page, dreaming_page
+
+    # Rendered directly with chat enabled: the default client fixture has no
+    # DASHBOARD_CHAT_TOKEN, so both routes show their "chat is off" branch and
+    # neither panel exists to compare.
+    chat = chat_page(enabled=True, token="t", hermes_available=True)
+    dreaming = dreaming_page(
+        [], DreamSummary.of([]), enabled=True, token="t",
+        hermes_available=True, soul_found=True, isolated=False,
+    )
+
+    assert "News here is a recording" in chat
+    assert "insight.db" in chat
+    assert 'var SOUL = "yoda"' in chat
+
+    assert "News here is a recording" not in dreaming
+    assert "insight.db" not in dreaming
+    assert 'var SOUL = "grogu"' in dreaming
+
 def test_enter_sends_and_ctrl_enter_makes_a_new_line():
     """The composer's key handling, which is easy to regress into silence.
 
@@ -793,3 +1222,445 @@ def test_enter_sends_and_ctrl_enter_makes_a_new_line():
     collapsed = re.sub(r"\s+", " ", body)
     assert "<b>Enter</b> sends." in collapsed
     assert "<b>Ctrl+Enter</b> or <b>Shift+Enter</b> for a new line." in collapsed
+
+
+# ------------------------------------------------------ since you were here
+
+
+def test_the_board_stamps_the_visit_marker(client):
+    """The cookie is what makes "since you were last here" possible at all."""
+    from bot.web.seen import COOKIE_NAME as SEEN_COOKIE
+
+    r = client.get("/")
+
+    assert SEEN_COOKIE in r.cookies
+
+
+def test_a_first_visit_is_not_told_that_nothing_happened(client):
+    """A strip saying "we have no record of you" is noise on the one visit
+    where there is genuinely nothing to report."""
+    body = client.get("/").text
+
+    assert "Since you were last here" not in body
+
+
+def test_a_returning_visit_is_told_what_changed(client, audited=None):
+    """The second visit, after a gap, reports the window between them."""
+    from datetime import timedelta
+
+    from bot.web import seen as seen_mod
+
+    first = seen_mod.observe(None, now=ENTRY)
+    later = seen_mod.observe(first.cookie_value, now=ENTRY + timedelta(hours=4))
+
+    client.cookies.set(seen_mod.COOKIE_NAME, later.cookie_value)
+    body = client.get("/").text
+
+    assert "Since you were last here" in body
+
+
+def test_the_marker_is_not_stamped_by_the_stream_or_the_health_probe(client):
+    """An EventSource reconnects by itself and a monitor probes every thirty
+    seconds. Either stamping the cookie would hold a sitting open forever,
+    which is the bug the six-hour ceiling exists to bound."""
+    from bot.web.seen import COOKIE_NAME as SEEN_COOKIE
+
+    assert SEEN_COOKIE not in client.get("/healthz").cookies
+
+
+def test_only_a_page_with_live_figures_opens_the_stream():
+    """The sign-in page inherits SCRIPT, and used to open `/live` from it.
+
+    `/live` sits behind the same password as the pages that render an account,
+    so an unauthenticated page opening it got a 401 and a console error on every
+    view of the login form. Confirmed in a browser before this guard, and gone
+    after it.
+
+    It also keeps Decisions, Trades, Settings and Chat off the stream: they have
+    no `data-live` targets to paint. Since the poller starts on the first
+    subscription and idle-stops after the last, a session that never opens the
+    Board never talks to the broker at all.
+    """
+    from bot.web.render import SCRIPT
+
+    assert "if (!document.querySelector('[data-live]')) return;" in SCRIPT
+
+
+def _aged_client(journal, dreams, hours: float):
+    """A Board whose reading is `hours` old, without waiting `hours`.
+
+    The poller's clock is injectable, so the reading is taken at one moment and
+    the page rendered at a later one. Reaching this path by sleeping would mean
+    a test that takes minutes, which is how it went untested in the first place.
+    """
+    moment = [datetime(2026, 8, 10, 0, 0, tzinfo=UTC)]
+    p = live.build_poller(
+        journal=journal, env=_env(), force_mock=True, clock=lambda: moment[0]
+    )
+    p.poll_once()
+    moment[0] += timedelta(hours=hours)
+    app = build_app(
+        journal=journal, rules=load_rules(), env=_env(),
+        dreams=dreams, poller=p, force_mock=True
+    )
+    return TestClient(app)
+
+
+def test_an_old_reading_is_never_stamped_with_the_current_time(journal, dreams):
+    """The Board used to print `as at <now>` over figures read hours earlier.
+
+    The poller idle-stops once nobody is watching and keeps its last reading, so
+    the first load of a morning is served an overnight snapshot. Stamping it
+    with the render clock made every figure on the page a present-tense claim
+    about an account nobody had read since the night before — and the stamp is
+    the one element a reader checks to find out. Confident, plausible, wrong,
+    and delivered by the furniture rather than the model.
+
+    The stamp names the READING now. The whole suite was green while it did not.
+    """
+    client = _aged_client(journal, dreams, hours=8)
+    body = client.get("/").text
+
+    assert '<p class="asof" data-live-read="">last read 10 Aug 2026, 00:00 UTC' in body
+    # The regression itself: the render clock must not appear as a stamp. Named
+    # rather than grepped for "as at", which also matches "canvas at all" in
+    # the inlined script and passes for the wrong reason.
+    assert render._when(datetime.now(UTC)) not in body
+
+
+def test_an_old_reading_says_so_ahead_of_everything_it_qualifies(journal, dreams):
+    """The banner leads because every other banner is a claim about a reading.
+
+    An expiry alert or an untracked-position warning derived from an eight-hour
+    -old snapshot is still worth showing — erring towards warning is the safe
+    direction — but a reader has to be told which account state they describe.
+    """
+    client = _aged_client(journal, dreams, hours=8)
+    body = client.get("/").text
+
+    assert "These figures are not current" in body
+    assert "not refreshed since" in body
+    # Ahead of the page head, so it is read before any figure it qualifies.
+    assert body.index("These figures are not current") < body.index("<h1>Board</h1>")
+
+
+def test_a_fresh_reading_carries_no_staleness_warning(journal, dreams, client):
+    """The other half. A warning that showed on every load would be furniture
+    rather than a signal, and the next real one would be ignored."""
+    body = client.get("/").text
+
+    assert "These figures are not current" not in body
+    assert "read " in body
+
+
+def test_the_stamp_is_marked_for_the_stream_to_correct(journal, dreams, client):
+    """A server-rendered timestamp is right for exactly one instant.
+
+    The figures beneath it are repainted every few seconds, so a stamp left
+    alone becomes a time attached to a reading it no longer describes — and it
+    stays wrong for as long as the tab is open, which is the failure this whole
+    change is about arriving by a slower route.
+    """
+    assert "data-live-read" in client.get("/").text
+    assert "data.status === 'slow'" in render.SCRIPT
+
+
+def test_the_four_live_states_do_not_collapse_into_two():
+    """`slow` used to fall through to the `else` and paint the link green.
+
+    That said "live" while a read was outstanding and the figures on screen were
+    the previous ones — precisely the distinction the state exists to draw. Four
+    states that render as two are two states with extra names.
+    """
+    for state in ("'failing'", "'slow'", "'starting'"):
+        assert f"data.status === {state}" in render.SCRIPT
+
+
+def _quote(
+    symbol: str,
+    last: float | None = None,
+    prev: float | None = None,
+    tradeable: bool = False,
+) -> live.TickerQuote:
+    return live.TickerQuote(
+        symbol=symbol, last=last, previous_close=prev, tradeable=tradeable
+    )
+
+
+def test_a_quote_that_could_not_be_read_never_renders_as_flat():
+    """On a strip of sixteen this is the least conspicuous place in the whole
+    interface to put a plausible wrong figure, which is exactly why it must not
+    happen here. No quote says so; a quote with no prior close says that."""
+    from bot.market_clock import market_state
+
+    state = market_state(datetime(2026, 8, 10, 15, 0, tzinfo=UTC))
+    body = render.ticker_tape(
+        state,
+        [_quote("GLD"), _quote("TLT", last=91.2), _quote("SPY", last=580.0, prev=574.0)],
+    )
+
+    assert "no quote" in body            # nothing came back at all
+    assert "no prior close" in body      # a price, but no yesterday to compare
+    assert "0.00%" not in body           # neither may borrow a flat day
+    assert "▲1.05%" in body
+
+
+def test_the_tape_marks_which_symbols_the_gate_would_actually_allow():
+    """`watchlist.symbols` is a view; `allowed_symbols` is a permission. The
+    tape is the one surface where they sit side by side, so the difference is
+    rendered rather than left to be assumed from a name scrolling past."""
+    from bot.market_clock import market_state
+
+    body = render.ticker_tape(
+        market_state(datetime(2026, 8, 10, 15, 0, tzinfo=UTC)),
+        [_quote("SPY", last=580.0, prev=574.0, tradeable=True), _quote("NVDA", last=9.0)],
+    )
+
+    # SPY: on the watchlist AND in an enabled instrument class.
+    assert 'class="cell can up"' in body
+    # NVDA: on the tape, not tradeable, and not marked as if it were.
+    assert 'data-tick="NVDA"' in body
+    assert 'class="cell can"' not in body.split('data-tick="NVDA"')[0].rsplit(
+        "<span", 1
+    )[-1]
+
+
+def test_a_shut_market_greys_out_but_crypto_never_does():
+    """A Saturday SPY price is last Friday's close, and must not read as live.
+
+    Crypto is the half that matters. It trades continuously, so a Sunday BTC
+    price IS current — dimming it alongside the equities would be the single
+    global session all over again, which is the bug `config/rules.yaml` grew an
+    `instruments:` block to fix, arriving through the interface instead.
+    """
+    from bot.market_clock import market_state
+
+    quotes = [
+        _quote("SPY", last=580.0, prev=574.0, tradeable=True),
+        _quote("BTC/USD", last=61000.0, prev=60000.0),
+    ]
+
+    def greyed(body: str, symbol: str) -> bool:
+        head = body.split(f'data-tick="{symbol}"')[0]
+        return "shut" in head.rsplit("<span class=", 1)[-1]
+
+    weekend = render.ticker_tape(
+        market_state(datetime(2026, 8, 15, 12, 0, tzinfo=UTC)), quotes
+    )
+    assert greyed(weekend, "SPY")
+    assert not greyed(weekend, "BTC/USD")
+    assert "market shut" in weekend
+
+    session = render.ticker_tape(
+        market_state(datetime(2026, 8, 10, 15, 0, tzinfo=UTC)), quotes
+    )
+    assert not greyed(session, "SPY")
+    assert not greyed(session, "BTC/USD")
+
+
+def test_the_grey_override_outranks_what_the_live_painter_puts_back():
+    """The painter re-adds `up`/`down` on every frame and removes only those
+    two, so `shut` survives a repaint — and therefore has to keep winning. At
+    equal specificity that is source order, so the rule must stay below."""
+    styles = render.STYLES
+    assert styles.index(".tape .cell.up .mv") < styles.index(".tape .cell.shut .sym")
+
+
+def test_the_run_is_emitted_twice_so_the_marquee_does_not_snap():
+    """The track scrolls to -50%, where the second copy sits exactly where the
+    first began. One copy would jump back to the start every cycle."""
+    from bot.market_clock import market_state
+
+    body = render.ticker_tape(
+        market_state(datetime(2026, 8, 10, 15, 0, tzinfo=UTC)),
+        [_quote("SPY", last=580.0, prev=574.0)],
+    )
+
+    assert body.count('data-tick="SPY"') == 2
+    assert "translate3d(-50%,0,0)" in render.STYLES
+
+
+def test_the_tape_sits_above_the_projection_planes():
+    """The grid, vignette and scanline are fixed full-screen at z 1-3. A strip
+    left at `auto` renders beneath all three and its cells come out dimmed to
+    near invisibility — while the header beside them, at z 20, looks fine.
+
+    Nothing warns: the elements are present, opaque, and `elementFromPoint`
+    returns them. It took a screenshot to see."""
+    assert "z-index:19}" in render.STYLES
+
+
+def test_settings_shows_a_disabled_class_rather_than_omitting_it(client):
+    """Crypto is off, and the page has to say so.
+
+    The moment to enable it is a moment when nothing else is open — a weekend
+    or the small hours — which is the worst possible moment to be deciding what
+    a crypto position should be allowed to risk. So the limits are configured
+    while it is off, and visible, and enabling is a one-word edit rather than a
+    design exercise under time pressure.
+    """
+    body = client.get("/settings").text
+
+    assert "crypto" in body
+    assert "0.50% (this class)" in body      # its own per-trade limit
+    assert "Disabled." in body
+
+    # A 24/7 market has no pre-market, so "permitted" would answer a question
+    # that does not apply and read as a gap in the rules.
+    assert "not applicable (24/7 market)" in body
+
+
+def test_settings_names_which_limit_is_binding_per_class(client):
+    """A class with no opinion shows the portfolio figure rather than a blank.
+    An empty cell reads as "no limit", which is the opposite of what an absent
+    override means."""
+    body = client.get("/settings").text
+
+    assert "1.00% (this class)" in body      # us_equity states its own
+
+
+def test_settings_says_when_a_class_limit_is_looser_than_the_default():
+    """`account:` is a default, not a ceiling — a class may set a looser limit
+    and nothing refuses it. So a looser value is said out loud rather than
+    rendered identically to a tighter one.
+
+    Information, not a warning. The operator chose it; the settings agent is
+    what argues the case at the moment one is being changed.
+    """
+    assert render._limit_row(3.0, 1.0, "{:.2f}%") == (
+        "3.00% (this class) — looser than the 1.00% default"
+    )
+    assert render._limit_row(0.5, 1.0, "{:.2f}%") == "0.50% (this class)"
+    assert render._limit_row(None, 1.0, "{:.2f}%") == "1.00% (portfolio default)"
+
+
+def test_the_watchlist_is_not_a_trading_permission():
+    """Growing the tape by extending `allowed_symbols` would quietly grant the
+    bot nine new instruments to open positions in — a change to what may be
+    traded, wearing the costume of a display tweak."""
+    from bot.config import load_rules
+
+    rules = load_rules()
+    watch_only = set(rules.watchlist.symbols) - set(rules.allowed_symbols)
+
+    assert watch_only, "the two lists have converged; the distinction is gone"
+    assert "NVDA" in watch_only
+
+    # And the reverse, which is the half that actually matters: the gate's list
+    # is exactly the union of the enabled instrument classes, so nothing can
+    # reach it by being added to the tape.
+    from_instruments = {
+        symbol
+        for instrument in rules.enabled_instruments.values()
+        for symbol in instrument.allowed_symbols
+    }
+    assert set(rules.allowed_symbols) == from_instruments
+
+
+def test_the_command_console_survives_the_reduced_motion_bail_out():
+    """Cmd+K is navigation, and navigation is not decoration.
+
+    SCRIPT answers `prefers-reduced-motion` by returning on line one and doing
+    none of the work — right for a starfield, wrong for the only keyboard route
+    to every page. Somebody asking for less motion is asking for fewer moving
+    pixels, not for a way around the site to be withdrawn.
+
+    So the palette lives in a second closure, after the projection layer's, and
+    this pins that arrangement: the bail-out must be shut before `openConsole`
+    is defined. Found in a browser rather than here — the whole suite was green
+    while reduced motion had no console at all, because a closure boundary is
+    exactly the kind of thing a unit test does not see.
+    """
+    from bot.web.render import SCRIPT
+
+    assert SCRIPT.count("if (reduced && reduced.matches) return;") == 1
+    bail = SCRIPT.index("if (reduced && reduced.matches) return;")
+    close = SCRIPT.index("})();", bail)
+    # Anchored on the projection closure's own last statement rather than on a
+    # count of closures, so adding a fourth does not make this pass or fail for
+    # a reason that has nothing to do with what it guards.
+    assert "api.settle = settleAll;" in SCRIPT[bail:close]
+    assert close < SCRIPT.index("function openConsole")
+
+
+def test_the_clocks_tick_regardless_of_the_motion_preference():
+    """Same rule as the console, one layer out: a clock is information.
+
+    Somebody asking for less motion still needs to know what time it is in New
+    York. The spin-to-blur on a session boundary IS decoration, so it lives in
+    the stylesheet where the reduced-motion block switches it off while the
+    digits carry on."""
+    from bot.web.render import SCRIPT, STYLES
+
+    bail = SCRIPT.index("if (reduced && reduced.matches) return;")
+    assert SCRIPT.index("})();", bail) < SCRIPT.index("var bar = document.querySelector")
+    assert ".tape .clk.turning .t,.tape.turning{animation:none}" in STYLES
+
+
+def test_a_clock_that_is_not_ticking_says_so(client):
+    """A frozen clock is the one plausible wrong figure a clock can be.
+
+    Every other value here is a reading — true of a moment, labelled with that
+    moment. A clock showing 08:51 at 09:30 is not an old reading, it is a wrong
+    one, and it looks exactly like a right one. So the server renders the label
+    and SCRIPT removes it before its first tick: present means stopped.
+    """
+    assert "not ticking" in client.get("/").text
+    assert "if (stale && stale.parentNode) stale.parentNode.removeChild(stale);" in (
+        render.SCRIPT
+    )
+
+
+def test_the_clock_states_the_venue_and_the_gate_separately(client):
+    """"The market is open" and "this bot will trade" are different claims.
+
+    They were confused once already, at 04:49 New York time on a Monday:
+    Alpaca's pre-market genuinely was running, four and a half hours before the
+    window `config/rules.yaml` permits. Merging them into one green light is
+    how that happens again.
+    """
+    from datetime import datetime
+
+    from bot.config import load_rules
+    from bot.market_clock import MarketPhase, market_state
+
+    windows = load_rules().instruments["us_equity"].windows_by_day
+
+    # 20:30 UTC in August: the regular session shut at 20:00, the configured
+    # window runs to 21:00. Both facts are true and the display must not pick.
+    state = market_state(
+        datetime(2026, 8, 10, 20, 30, tzinfo=UTC), windows_by_day=windows
+    )
+    assert state.phase is MarketPhase.POST
+    assert state.bot_window_open is True
+    assert state.is_tradeable_by_bot is False
+
+    body = render.ticker_tape(state, [])
+    assert "gate open, session shut" in body
+
+
+def test_the_console_returns_focus_somewhere_reachable():
+    """A palette that dismisses and leaves focus on the body strands a keyboard
+    user at the top of the document with the whole page to tab back through.
+
+    The shortcut is global, so it is usually pressed with nothing focused and
+    `activeElement` is the body — and `body.focus()` silently does nothing,
+    raising no error while the strand happens anyway. The restore is therefore
+    checked rather than assumed, with the main region as the fallback."""
+    from bot.web.render import SCRIPT
+
+    assert "lastFocus !== document.body" in SCRIPT
+    assert "document.activeElement === lastFocus" in SCRIPT
+
+
+def test_the_sign_in_page_carries_no_live_targets(client):
+    """The other half of the guard: if the gate ever grew a `data-live`
+    attribute it would start opening an authenticated stream unauthenticated."""
+    from bot.config import Env
+    from bot.web.render import login_page
+
+    env = Env(_env_file=None)  # type: ignore[call-arg]
+    # The ATTRIBUTE, not the bare word: SCRIPT is inlined into this page and
+    # contains the `[data-live]` selector it guards on, so a looser check
+    # passes for the wrong reason.
+    assert 'data-live="' not in login_page(env=env)

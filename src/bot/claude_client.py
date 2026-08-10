@@ -59,6 +59,14 @@ class ClaudeDecision(BaseModel):
     )
 
 
+# The dreamer's budget. Generous on purpose: it runs once a day, nothing waits
+# on it, and depth is the entire product. Thinking tokens count against
+# max_tokens, so a proposal-sized budget would truncate the chain that the
+# thinking was spent producing.
+DREAM_MAX_TOKENS = 16000
+DREAM_TIMEOUT_SECONDS = 900.0
+
+
 @dataclass(frozen=True)
 class CallUsage:
     input_tokens: int
@@ -266,24 +274,46 @@ def build_system_prompt(rules: Rules) -> str:
 
 
 class ClaudeClient:
-    def __init__(self, env: Env, system_prompt: str) -> None:
+    def __init__(
+        self,
+        env: Env,
+        system_prompt: str,
+        *,
+        tier: ClaudeTier | None = None,
+        cache_system: bool = True,
+    ) -> None:
+        """
+        `tier` overrides `CLAUDE_TIER` for this client. The decision loop and
+        the dreamer run at wildly different cadences, so the tier that is right
+        for one is not automatically right for the other: see `Env.dream_tier`.
+
+        `cache_system` must be FALSE for anything that runs less often than the
+        cache TTL, and getting this wrong costs money rather than saving it.
+        A 1-hour cache write bills at 2x base input and a read at 0.1x, so a
+        caller that always misses pays DOUBLE the system prompt on every call
+        instead of once. Measured on the dreamer's ~2,400-token system block:
+        $0.0095 a run cached-and-missing against $0.0071 uncached, a third more
+        for a feature sold as an optimisation. The loop wakes every fifteen
+        minutes and gets roughly four reads per write, so it keeps caching on.
+        """
         self._client = anthropic.Anthropic(api_key=env.anthropic_api_key)
-        self._tier = env.claude_tier
+        self._tier = tier or env.claude_tier
         self._model = CLAUDE_MODEL_IDS[self._tier]
         self._system_prompt = system_prompt
+        self._cache_system = cache_system
+
+    def _system_block(self) -> list[dict[str, Any]]:
+        block: dict[str, Any] = {"type": "text", "text": self._system_prompt}
+        if self._cache_system:
+            block["cache_control"] = {"type": "ephemeral", "ttl": "1h"}
+        return [block]
 
     def propose(self, market_context: str) -> tuple[ClaudeDecision, CallUsage]:
         """Send the market context, get back a structured decision plus token accounting."""
         kwargs: dict[str, Any] = {
             "model": self._model,
             "max_tokens": 4096,
-            "system": [
-                {
-                    "type": "text",
-                    "text": self._system_prompt,
-                    "cache_control": {"type": "ephemeral", "ttl": "1h"},
-                }
-            ],
+            "system": self._system_block(),
             "messages": [{"role": "user", "content": market_context}],
             "output_format": ClaudeDecision,
         }
@@ -300,6 +330,56 @@ class ClaudeClient:
                 "and whether the response hit max_tokens."
             )
         return decision, self._usage_from(response)
+
+    def dream(self, prompt: str) -> tuple[Any, CallUsage]:
+        """One dream step. Same transport as `propose`, tuned the opposite way.
+
+        `propose` runs 96 times a day against a market that has already moved,
+        so it is bought cheap and quick. This runs once a day and nothing is
+        waiting on it, so it is bought **deep**: high effort, a large thinking
+        budget and a generous timeout.
+
+        That is not a preference, it is what the output needs. Following a
+        causal chain two hops out and then genuinely attacking it is reasoning
+        work, and reasoning work is what thinking tokens buy. A fast shallow
+        answer here produces "AI is big so buy chips", which is one hop and
+        already priced.
+
+        Note it does NOT need a top-tier model. It needs a thinking one, run
+        patiently. See `Env.dream_tier`.
+
+        Imported inside the method rather than at module scope: `dreamer`
+        imports this module for `ClaudeClient` and `CallUsage`, so a top-level
+        import of `DreamStep` would close the cycle.
+        """
+        from .dreamer import DreamStep
+
+        kwargs: dict[str, Any] = {
+            # Room for a long chain plus the thinking that produced it. Thinking
+            # tokens count against this, so the budget that is fine for a
+            # proposal is not fine here.
+            "max_tokens": DREAM_MAX_TOKENS,
+            "model": self._model,
+            "system": self._system_block(),
+            "messages": [{"role": "user", "content": prompt}],
+            "output_format": DreamStep,
+        }
+        if self._tier in (ClaudeTier.SONNET, ClaudeTier.OPUS):
+            kwargs["thinking"] = {"type": "adaptive"}
+            kwargs["output_config"] = {"effort": "high"}
+
+        # Nothing is waiting on this call. The default timeout is tuned for
+        # interactive use and a long thinking pass can outrun it, which would
+        # surface as a failed dream rather than a slow one.
+        client = self._client.with_options(timeout=DREAM_TIMEOUT_SECONDS)
+        response = client.messages.parse(**kwargs)
+        step = response.parsed_output
+        if step is None:
+            raise RuntimeError(
+                "Claude returned no parsable dream step; check the output schema "
+                "and whether the response hit max_tokens."
+            )
+        return step, self._usage_from(response)
 
     def _usage_from(self, response: anthropic.types.Message) -> CallUsage:
         u = response.usage

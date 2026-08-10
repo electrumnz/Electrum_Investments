@@ -201,6 +201,24 @@ instruments:
     sessions_utc:
       - [14, 21]
 
+    # Operator's rule: no pre-market. After hours is fine.
+    #
+    # This is NOT expressible in sessions_utc above, and the reason is daylight
+    # saving: those are fixed UTC hours, while the US session is defined in New
+    # York time and moves an hour twice a year. [[14, 21]] is the winter window
+    # applied all year, so through the winter it opens at 09:00 New York --
+    # half an hour of pre-market, every day, silently.
+    #
+    # That used to cost nothing, because an out-of-hours equity order was
+    # queued to the next open. It costs something now: Alpaca runs a pre-market
+    # session from 04:00 ET, so an order placed into it TRADES, in a thinner
+    # book than anybody chose.
+    #
+    # RiskGate._premarket reads the phase in New York time, so it follows
+    # daylight saving with no diary entry, and it can only ever narrow what the
+    # window above permits.
+    refuse_premarket: true
+
     # Monday to Friday. Monday is 0, Sunday is 6.
     #
     # Without this the hours alone made Saturday 15:00 UTC a valid session, and
@@ -212,14 +230,61 @@ instruments:
     # passes. See the note in RiskGate._within_session.
     session_days_utc: [0, 1, 2, 3, 4]
 
+    # This class's own limits. Set to the portfolio values rather than left
+    # out, so the equity book states what it is working to instead of leaving
+    # a reader to go and find `account:` and assume nothing overrides it.
+    #
+    # A value here OVERRIDES the portfolio one for this class, in either
+    # direction: `account:` is the default, not a ceiling. Nothing refuses a
+    # looser value. Arguing the case for one is the settings agent's job — it
+    # pushes back and makes the operator think, without denying the change.
+    max_risk_per_trade_pct: 1.0
+    max_position_pct: 50.0
+    max_concurrent_positions: 3
+
   crypto:
-    # Disabled until the equity core is proven on paper.
+    # OFF, and the settings page shows it as off rather than omitting it.
+    #
+    # Kept fully configured while disabled on purpose. The moment to enable
+    # this is a moment when nothing else is open — a weekend, or the small
+    # hours — which is the worst possible moment to be deciding what a crypto
+    # position should be allowed to risk. The numbers below were chosen with
+    # the market shut and nothing riding on them; enabling is then a one-word
+    # edit rather than a design exercise under time pressure.
+    #
+    # `Rules.allowed_symbols` is derived from the ENABLED classes, so while
+    # this is false the gate refuses every symbol here and the tape marks them
+    # watch-only. Flipping it to true is the whole change.
     enabled: false
 
     strategy: momentum
 
     allowed_symbols: []
     # When enabling, set e.g. [BTC/USD, ETH/USD]
+
+    # Crypto's own limits, and they are TIGHTER than the equity book's at
+    # every point. Not caution for its own sake — three specific differences:
+    #
+    #   It trades while nobody is awake. An equity stop that gaps does so at an
+    #   open somebody can watch; a crypto stop can gap at 04:00 local with the
+    #   operator asleep and no session boundary to stop the move.
+    #
+    #   It moves harder. A 2% daily range is a notable equity day and an
+    #   ordinary crypto one, so the same 1% risk budget buys a position that
+    #   swings several times as far before the stop is even approached.
+    #
+    #   There is no circuit breaker. US equities halt on a large move; there is
+    #   nothing equivalent here.
+    #
+    # Half the per-trade risk, a third of the concentration, and one position
+    # at a time.
+    max_risk_per_trade_pct: 0.5
+    max_position_pct: 15.0
+    max_concurrent_positions: 1
+
+    # Deliberately absent: refuse_premarket. A 24/7 market has no pre-market,
+    # and the phases that rule reads are the US equity ones — switched on here
+    # it would refuse every hour of every day.
 
     # 24/7. This is the setting that was wrong under the old global sessions
     # block, and the reason instruments are configured separately at all.
@@ -276,3 +341,58 @@ instruments:
   #     4: [[0, 21]]               # Friday, closes 16:00 CT
   #     6: [[22, 24]]              # Sunday, evening open
   #   capital_cap_pct: 10.0
+
+# ---------------------------------------------------------------------------
+# Ticker tape. DISPLAY ONLY.
+#
+# These are the symbols that scroll across the top of the dashboard. They are
+# deliberately NOT `instruments.*.allowed_symbols`, and that separation is the
+# point rather than an oversight.
+#
+# `allowed_symbols` is a PERMISSION: `RiskGate._symbol_allowed` refuses anything
+# not on it, so every name added there is a new instrument the bot may open a
+# position in. This list is a VIEW. Adding a name here changes what an operator
+# sees and nothing about what may be traded, which is what makes it safe to keep
+# long.
+#
+# A symbol on the tape that is not in an enabled instrument class is marked as
+# watch-only on the page, so the two lists cannot be confused by looking at it.
+watchlist:
+  enabled: true
+
+  # The six tradeable names first, then what moves them. Starting from
+  # `allowed_symbols` is deliberate: the tape should lead with what the bot
+  # can actually act on, and the rest is context. Fifteen is long enough to
+  # be worth scrolling and short enough that one refresh is sixteen quotes
+  # rather than a rate-limit problem.
+  #
+  # SIXTEEN rather than fifteen, and the number is load-bearing: the tape
+  # interleaves one clock per four instruments, so four clocks want a
+  # multiple of four. A remainder would leave one clock trailing a short
+  # group and the repeat would visibly limp.
+  symbols:
+    - SPY      # tradeable
+    - QQQ      # tradeable
+    - AAPL     # tradeable
+    - MSFT     # tradeable
+    - JNJ      # tradeable
+    - KO       # tradeable
+    - NVDA
+    - AMZN
+    - GOOGL
+    - META
+    - TSLA
+    - AMD
+    - IWM
+    - BTC/USD  # crypto is a disabled instrument class, so this is
+               # watch-only — which is exactly the case the tape's
+               # tradeable marker exists to make visible.
+    - TLT
+    - GLD
+
+  # Its own cadence, deliberately slower than the five-second account poll.
+  # Fifteen quotes every five seconds is 180 requests a minute against a
+  # per-minute limit; once a minute is nowhere near it. A tape is orientation,
+  # not a figure anyone trades off, so a minute-old price is fine and a
+  # rate-limit stall on the account read would not be.
+  refresh_seconds: 60.0

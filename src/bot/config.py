@@ -79,6 +79,58 @@ class Env(BaseSettings):
     x_bearer_token: str = Field(default="", alias="X_BEARER_TOKEN")
 
     claude_tier: ClaudeTier = Field(default=ClaudeTier.HAIKU, alias="CLAUDE_TIER")
+
+    # The dreamer's tier, separately settable. Unset, it follows CLAUDE_TIER.
+    #
+    # They are different problems bought at different rates. The decision loop
+    # runs 96 times a day reading precise figures for six symbols, so the tier
+    # is a real running cost and Haiku is the sensible default. The dreamer runs
+    # once a day doing the one thing in this system that genuinely rewards a
+    # bigger model — following a causal chain two hops out and then attacking
+    # it — and at that cadence the whole year costs single-digit dollars on any
+    # tier. Measured: $2.60/yr on Haiku against $13.00/yr on Opus.
+    #
+    # So this exists to let the cheap thing stay cheap without making the
+    # thoughtful thing stupid.
+    #
+    # It deliberately DOES NOT fall back to CLAUDE_TIER. The default there is
+    # Haiku, which has no extended thinking at all, and thinking is the entire
+    # mechanism by which a dream gets past its first hop. A dreamer on Haiku
+    # produces "AI is big so buy chips": one hop, already priced. Sonnet is the
+    # floor rather than the ceiling here — the work wants a model that can think
+    # for a while, not the largest one available.
+    dream_claude_tier: ClaudeTier = Field(
+        default=ClaudeTier.SONNET, alias="DREAM_CLAUDE_TIER"
+    )
+
+    @property
+    def dream_tier(self) -> ClaudeTier:
+        return self.dream_claude_tier
+
+    # Who the operator is, for the interface and the two agents to address.
+    #
+    # In the ENVIRONMENT rather than the repository, and empty by default, for
+    # two reasons. A person's name is theirs and does not belong committed to a
+    # public GitHub repo; and every surface that uses it has to work without it,
+    # because a deployment that has not set it is a supported configuration
+    # rather than a broken one.
+    #
+    # **It is only ever rendered behind the login.** The sign-in page reveals
+    # nothing about the account by design — see `render.login_page` — and a name
+    # on it would tell an unauthenticated visitor whose account this is. That is
+    # a small disclosure for paper money and it is still a change to a property
+    # the page is built around, so it does not happen.
+    # One name, used everywhere. There were briefly two — a plain one and a
+    # formal one — and the split earned nothing: every surface wanted the same
+    # form, so the second field was a choice nobody had to make being offered
+    # anyway.
+    operator_name: str = Field(default="", alias="OPERATOR_NAME")
+
+    @property
+    def greeting_name(self) -> str:
+        """What to call the operator, or empty when nobody said."""
+        return self.operator_name.strip()
+
     decision_interval_seconds: int = Field(default=900, alias="DECISION_INTERVAL_SECONDS")
 
     @property
@@ -301,9 +353,68 @@ class InstrumentRules(BaseModel):
     # allowed only when they match exactly.
     session_days_utc: list[int] = Field(default_factory=list)
 
+    # Operator's rule, stated directly: **this bot does not trade pre-market.**
+    # After hours is fine — the stretch from the close onward — and so is the
+    # regular session. Only 04:00-09:30 New York is refused.
+    #
+    # It needs its own field because `sessions_utc` cannot express it, and the
+    # reason is daylight saving. That window is fixed UTC hours; the US session
+    # is defined in New York time and moves an hour twice a year. So
+    # `[[14, 21]]` is the WINTER window applied all year, and in winter it
+    # opens at 14:00 UTC — which is 09:00 New York, half an hour of pre-market
+    # permitted every day, silently, with nothing in a fixed-UTC window able to
+    # detect it.
+    #
+    # That gap used to be nearly free, because an out-of-hours equity order was
+    # simply queued to the next open. It is not free now: Alpaca runs a
+    # pre-market session from 04:00 ET, so an order placed into it TRADES, in a
+    # thinner book than the operator chose.
+    #
+    # `market_clock` computes the phase in New York time, so this follows
+    # daylight saving without anybody keeping a diary entry, and it is
+    # deterministic and offline as everything the gate reads must be. It can
+    # only ever NARROW what the UTC window allows — an additional reason to
+    # refuse, never a reason to permit.
+    #
+    # Off by default, and it must stay off for crypto: a 24/7 market has no
+    # pre-market, and the phases this reads are the US equity ones.
+    refuse_premarket: bool = False
+
     # Optional ceiling on this class's share of equity, as a fraction of the
     # portfolio. Used to keep a volatile class from quietly dominating.
     capital_cap_pct: float | None = Field(default=None, ge=0, le=100)
+
+    # ------------------------------------------------------ per-class limits
+    #
+    # Each instrument class carries its own risk limits. Crypto moves harder
+    # than the equity book and trades while nobody is awake, so it has no
+    # business borrowing the same per-trade budget as the equity side.
+    #
+    # **A value here OVERRIDES the portfolio limit for this class, in either
+    # direction.** `account:` is the default, not a ceiling. Set a class to 3%
+    # and that class gets 3%.
+    #
+    # An override is not silently floored back to the portfolio value, and that
+    # is the part worth stating: a config saying 3% while the gate quietly used
+    # 1% would be a limit nobody could read off the file, which is worse than
+    # either number on its own. The Settings page shows which value is in force
+    # per class for the same reason.
+    #
+    # `None` means "no opinion, use the portfolio limit". Absent is not zero.
+    #
+    # Worth knowing rather than guarded against: `max_total_risk_pct` is still
+    # portfolio-wide, so a per-trade override above it can never actually fill —
+    # the total-risk gate refuses the trade that would breach it. If a class
+    # limit is raised past the total, raise the total too or the setting does
+    # nothing.
+    max_risk_per_trade_pct: float | None = Field(default=None, gt=0, le=10)
+    max_position_pct: float | None = Field(default=None, gt=0, le=200)
+
+    # Counted WITHIN this class rather than across the account. Two open crypto
+    # positions plus three equity ones is five against the global cap and two
+    # against this one, which is the point: a class that gets loud should not
+    # be able to fill every slot the portfolio has.
+    max_concurrent_positions: int | None = Field(default=None, gt=0)
 
     @model_validator(mode="after")
     def _enabled_classes_must_be_usable(self) -> Self:
@@ -431,6 +542,38 @@ class SocialRules(BaseModel):
         return self
 
 
+class WatchlistRules(BaseModel):
+    """Symbols the ticker tape shows. **Display only, never a permission.**
+
+    Deliberately NOT `instruments.*.allowed_symbols`, and the distinction is
+    the whole reason this block exists. That list is what `RiskGate` will let
+    the bot trade; this one is what an operator wants to see scrolling past.
+    Growing the tape to fifteen names by extending `allowed_symbols` would
+    quietly grant the bot nine new instruments to open positions in, which is
+    a change to what may be traded wearing the costume of a display tweak.
+
+    So: nothing here reaches the gate, and a symbol on the tape is not
+    tradeable unless it is also in an enabled instrument class. The renderer
+    marks the ones that are.
+    """
+
+    enabled: bool = True
+    symbols: list[str] = Field(default_factory=list)
+    # Its own cadence, slower than the account poll. Fifteen quotes every five
+    # seconds is 180 requests a minute against a per-minute limit; once a
+    # minute is nowhere near it, and a tape is not a figure anyone trades off.
+    refresh_seconds: float = Field(default=60.0, gt=0)
+
+    @model_validator(mode="after")
+    def _enabled_needs_symbols(self) -> WatchlistRules:
+        if self.enabled and not self.symbols:
+            raise ValueError(
+                "watchlist.enabled is true but symbols is empty, so the tape "
+                "would render nothing and look broken rather than switched off."
+            )
+        return self
+
+
 class LoopRules(BaseModel):
     """How the decision loop spends its time and money.
 
@@ -461,6 +604,7 @@ class Rules(BaseModel):
 
     social: SocialRules = Field(default_factory=SocialRules)
     loop: LoopRules = Field(default_factory=LoopRules)
+    watchlist: WatchlistRules = Field(default_factory=WatchlistRules)
 
     # Keyed by AssetClass value: "us_equity", "crypto".
     instruments: dict[str, InstrumentRules] = Field(default_factory=dict)
