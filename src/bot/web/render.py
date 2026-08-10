@@ -1204,6 +1204,120 @@ SCRIPT = """
     go();
   }
 
+  /* ------------------------------------------------------- the live stream */
+
+  /* Paints the account stream onto figures the server ALREADY rendered.
+
+     That distinction is the whole safety argument, and it is the same rule the
+     projection layer follows: this may only ever UPDATE a number, never be what
+     reveals one. Every value is in the markup before this runs, so a browser
+     with the script blocked shows the reading it was served — one page-load
+     old, and honest about it — rather than an empty box.
+
+     It is also entirely optional. No EventSource, a refused connection, a proxy
+     that eats the stream: the page keeps the figures it was rendered with and
+     the indicator says the link is down. Nothing here can empty the deck. */
+
+  var link = document.getElementById('link');
+  var lastValues = {};
+
+  function setLink(state, label) {
+    if (!link) return;
+    link.classList.remove('link-live', 'link-retry', 'link-down');
+    link.classList.add('link-' + state);
+    var tag = link.querySelector('.link-label');
+    if (tag) tag.textContent = label || '';
+  }
+
+  function money(v) {
+    /* Matches `render._money` deliberately. Two formatters for the same figure
+       would eventually disagree, and the one that drifted would be the one
+       nobody was looking at. */
+    var sign = v < 0 ? '-' : '';
+    return sign + '$' + Math.abs(v).toLocaleString('en-GB', {
+      minimumFractionDigits: 2, maximumFractionDigits: 2
+    });
+  }
+
+  function paintFigure(el, key, value, signed) {
+    if (value === null || value === undefined) return;
+    var text = signed && value > 0 ? '+' + money(value) : money(value);
+    if (el.textContent === text) return;
+
+    var before = lastValues[key];
+    el.textContent = text;
+    lastValues[key] = value;
+    if (before === undefined || before === value) return;
+
+    /* The direction comes from the SIGN OF THE DELTA, never from the fact that
+       something changed. A green flash on a falling number would be worse than
+       no flash at all. */
+    var dir = value > before ? 'up' : 'down';
+    el.classList.remove('up', 'down');
+    /* Reflow between removing and adding, or the animation does not restart
+       when a figure moves the same way twice. */
+    void el.offsetWidth;
+    el.classList.add('tick', dir);
+  }
+
+  var SIGNED = { unrealised_pnl_usd: true, realised_pnl_today_usd: true };
+
+  function paint(data) {
+    if (!data) return;
+
+    if (data.status === 'failing') {
+      setLink('retry', 'broker');
+    } else if (data.stale) {
+      setLink('retry', 'stale');
+    } else if (data.status === 'starting') {
+      setLink('retry', 'reading');
+    } else {
+      setLink('live', '');
+    }
+
+    var account = data.account;
+    if (!account) return;
+
+    var targets = document.querySelectorAll('[data-live]');
+    for (var i = 0; i < targets.length; i++) {
+      var el = targets[i];
+      var key = el.getAttribute('data-live');
+      if (!(key in account)) continue;
+      /* The first frame replaces the waiting shimmer. After that it is a
+         straight text swap on a figure that was already there. */
+      var shimmer = el.querySelector('.pending');
+      if (shimmer) el.textContent = '';
+      paintFigure(el, key, account[key], !!SIGNED[key]);
+    }
+
+    /* A reading older than the stream thinks is reasonable is marked on the
+       figures themselves, not only on the indicator: a reader looking at a
+       number should be told about THAT number. */
+    for (var j = 0; j < targets.length; j++) {
+      targets[j].classList.toggle('stale', !!data.stale);
+    }
+  }
+
+  function connect() {
+    if (!window.EventSource) { setLink('down', 'no stream'); return; }
+    var es;
+    try {
+      es = new EventSource('/live');
+    } catch (e) {
+      setLink('down', 'no stream');
+      return;
+    }
+    es.onmessage = function (e) {
+      try { paint(JSON.parse(e.data)); } catch (err) { /* a torn frame is not worth a page */ }
+    };
+    /* EventSource reconnects by itself, so this reports rather than retries.
+       Writing our own backoff on top would fight the browser's. */
+    es.onerror = function () { setLink('retry', 'reconnecting'); };
+    es.onopen = function () { setLink('live', ''); };
+  }
+
+  connect();
+
   window.MUDHORN_FX = { jump: jump, warpTo: warpTo, settle: settleAll };
 })();
 """
@@ -1292,10 +1406,21 @@ def _when(stamp: datetime) -> str:
     return stamp.astimezone(UTC).strftime("%d %b %Y, %H:%M UTC")
 
 
-def stat(label: str, value: str, meta: str = "", cls: str = "") -> str:
+def stat(
+    label: str, value: str, meta: str = "", cls: str = "", live: str = ""
+) -> str:
+    """One figure in a card.
+
+    `live` names a field in the stream's payload, and the ONLY thing it does is
+    let the client repaint a figure the server already rendered. It never
+    reveals one: the value is in the markup before any script runs, exactly as
+    the projection layer's rule requires, so a browser with no JavaScript shows
+    the reading it was served rather than an empty box.
+    """
+    attr = f' data-live="{_e(live)}"' if live else ""
     return (
         f'<div class="card stat"><span class="k">{_e(label)}</span>'
-        f'<b class="{cls}">{value}</b>'
+        f'<b class="{cls}"{attr}>{value}</b>'
         + (f"<small>{meta}</small>" if meta else "")
         + "</div>"
     )
@@ -1342,7 +1467,7 @@ def shell(
 <header class="bar"><div class="wrap">
   <a class="brand" href="/">{MARK} MUDHORN <span class="thin">CAPITAL</span></a>
   <nav>{nav}</nav>
-  <span class="live paper"><i></i>{_e(mode)}</span>
+  <span class="live paper" id="link"><i></i>{_e(mode)}<span class="link-label"></span></span>
 </div></header>
 <main><div class="wrap">{body}</div></main>
 <footer class="wrap">Live operator view{
@@ -1505,12 +1630,13 @@ def _board_waiting(env: Env | None) -> str:
     deck is broken.
     """
     tiles = "".join(
-        stat(label, '<span class="pending">000,000.00</span>', meta)
-        for label, meta in (
-            ("Equity", "waiting for the first read"),
-            ("Unrealised", "across an unknown number of positions"),
-            ("Realised today", "closed trades only"),
-            ("Open risk", "loss if every stop filled at once"),
+        stat(label, '<span class="pending">000,000.00</span>', meta, live=key)
+        for label, meta, key in (
+            ("Equity", "waiting for the first read", "equity_usd"),
+            ("Unrealised", "across an unknown number of positions",
+             "unrealised_pnl_usd"),
+            ("Realised today", "closed trades only", "realised_pnl_today_usd"),
+            ("Open risk", "loss if every stop filled at once", "open_risk_usd"),
         )
     )
     return (
@@ -1562,23 +1688,29 @@ def board(
     unrealised = sum(p.unrealised_pnl_usd for p in account.open_positions)
 
     tiles = (
-        stat("Equity", _money(equity), f"{_money(account.cash_usd)} cash")
+        stat(
+            "Equity", _money(equity), f"{_money(account.cash_usd)} cash",
+            live="equity_usd",
+        )
         + stat(
             "Unrealised",
             _money(unrealised, sign=True),
             f"across {len(account.open_positions)} position(s)",
             _cls(unrealised),
+            live="unrealised_pnl_usd",
         )
         + stat(
             "Realised today",
             _money(account.realised_pnl_today_usd, sign=True),
             "closed trades only",
             _cls(account.realised_pnl_today_usd),
+            live="realised_pnl_today_usd",
         )
         + stat(
             "Open risk",
             _money(account.open_risk_usd),
             "loss if every stop filled at once",
+            live="open_risk_usd",
         )
     )
 
