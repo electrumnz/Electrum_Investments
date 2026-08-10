@@ -251,7 +251,20 @@ class OrderProposal(BaseModel):
         "documented source of slippage loss in LLM trading experiments.",
     )
     stop_loss_price: float = Field(gt=0)
-    take_profit_price: float = Field(gt=0)
+
+    # **Optional, and the stop is not.** That asymmetry is the operator's third
+    # rule stated in the type: every trade has a hard stop, and no trade is
+    # obliged to name a target.
+    #
+    # It used to be required, which forced whoever built a proposal to invent a
+    # level to satisfy the validator. That was survivable while the field was
+    # only journalled. It stopped being survivable when entries became GTC
+    # brackets: an invented target is now a live OCO leg resting at the broker,
+    # so a number picked to get past validation is an exit nobody chose.
+    #
+    # `None` means "no target" and the order goes out as an OTO — entry plus a
+    # stop — rather than a bracket. It does NOT mean "decide one for me".
+    take_profit_price: float | None = Field(default=None, gt=0)
     rationale: str = Field(min_length=10, max_length=RATIONALE_MAX_CHARS)
 
     # Truncates rather than rejects, and only because nothing reads this field.
@@ -590,7 +603,10 @@ class Trade(BaseModel):
     entry_time: datetime
     entry_price: float = Field(gt=0)
     planned_stop: float = Field(gt=0)
-    planned_target: float = Field(gt=0)
+    # `None` where the trade was opened with no target. See
+    # `OrderProposal.take_profit_price`: the stop is required, the exit
+    # never was.
+    planned_target: float | None = Field(default=None, gt=0)
 
     exit_time: datetime | None = None
     exit_price: float | None = None

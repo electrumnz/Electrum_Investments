@@ -152,7 +152,7 @@ CREATE TABLE IF NOT EXISTS proposals (
     qty               REAL    NOT NULL,
     limit_price       REAL    NOT NULL,
     stop_loss_price   REAL    NOT NULL,
-    take_profit_price REAL    NOT NULL,
+    take_profit_price REAL,            -- NULL when no target was set
     risk_usd          REAL    NOT NULL DEFAULT 0,
     notional_usd      REAL    NOT NULL DEFAULT 0,
     rationale         TEXT    NOT NULL DEFAULT '',

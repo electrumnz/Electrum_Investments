@@ -625,6 +625,28 @@ class AlpacaBroker:
         # rather than expiring with the day. That is deliberately visible — an
         # order resting at the broker shows in `get_open_orders` and on the
         # Board's pending panel — rather than silently cancelled.
+        # BRACKET when a target was given, OTO when it was not.
+        #
+        # A trade with no take-profit is a normal trade — the operator's rules
+        # require a stop, never an exit — so the order class follows the
+        # proposal rather than the proposal being bent to fit one order class.
+        # OTO is "one triggers other": the entry fills and the stop becomes
+        # active, with no second leg. Both carry the stop, which is the part
+        # that must always be there.
+        #
+        # The alternative, inventing a target to keep the bracket shape, was
+        # what this replaces. It was survivable while the field was only
+        # journalled; with a real bracket it puts a live OCO leg at the broker
+        # at a price nobody chose.
+        if proposal.take_profit_price is None:
+            exits: dict[str, Any] = {"order_class": OrderClass.OTO}
+        else:
+            exits = {
+                "order_class": OrderClass.BRACKET,
+                "take_profit": TakeProfitRequest(
+                    limit_price=proposal.take_profit_price
+                ),
+            }
         return self._submit(
             LimitOrderRequest(
                 symbol=proposal.symbol,
@@ -632,9 +654,8 @@ class AlpacaBroker:
                 side=side,
                 time_in_force=TimeInForce.GTC,
                 limit_price=proposal.limit_price,
-                order_class=OrderClass.BRACKET,
                 stop_loss=StopLossRequest(stop_price=proposal.stop_loss_price),
-                take_profit=TakeProfitRequest(limit_price=proposal.take_profit_price),
+                **exits,
             )
         )
 

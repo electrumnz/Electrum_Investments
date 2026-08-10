@@ -318,16 +318,19 @@ class RiskGate:
     def _stops_on_correct_side(self, proposal: OrderProposal) -> str | None:
         """Stop-loss must sit on the losing side of entry, take-profit on the winning side."""
         entry = proposal.limit_price
+        target = proposal.take_profit_price
         if proposal.direction == Direction.BUY:
             if proposal.stop_loss_price >= entry:
                 return f"buy stop-loss {proposal.stop_loss_price} is not below entry {entry}"
-            if proposal.take_profit_price <= entry:
-                return f"buy take-profit {proposal.take_profit_price} is not above entry {entry}"
+            # Only when one was given. A trade with no target is a normal trade
+            # — the stop is what the operator's rules require, never the exit.
+            if target is not None and target <= entry:
+                return f"buy take-profit {target} is not above entry {entry}"
         else:
             if proposal.stop_loss_price <= entry:
                 return f"sell stop-loss {proposal.stop_loss_price} is not above entry {entry}"
-            if proposal.take_profit_price >= entry:
-                return f"sell take-profit {proposal.take_profit_price} is not below entry {entry}"
+            if target is not None and target >= entry:
+                return f"sell take-profit {target} is not below entry {entry}"
         return None
 
     def _per_trade_risk(

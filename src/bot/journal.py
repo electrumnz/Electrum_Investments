@@ -41,7 +41,7 @@ CREATE TABLE IF NOT EXISTS trades (
     entry_time        TEXT    NOT NULL,
     entry_price       REAL    NOT NULL,
     planned_stop      REAL    NOT NULL,
-    planned_target    REAL    NOT NULL,
+    planned_target    REAL,            -- NULL when opened with no target
     exit_time         TEXT,
     exit_price        REAL,
     realised_pnl_usd  REAL,
