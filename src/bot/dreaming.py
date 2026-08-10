@@ -958,7 +958,21 @@ CREATE TABLE IF NOT EXISTS dreams (
   thoughts     TEXT NOT NULL DEFAULT '[]',
   instruments  TEXT NOT NULL DEFAULT '[]',
   created_at   TEXT NOT NULL,
-  updated_at   TEXT NOT NULL
+  updated_at   TEXT NOT NULL,
+  -- The vault columns. Listed here so a FRESH database gets them directly and
+  -- `SCHEMA` keeps describing the real table, and added to an existing one by
+  -- `_add_vault_columns`. Both halves are needed and neither substitutes for
+  -- the other: without this a new store would be built old-shaped and then
+  -- immediately migrated, which works but means the migration warning fires on
+  -- every first run and this block stops being the answer to "what shape is
+  -- the table". The order matches `_ADDED_DREAM_COLUMNS`, so a migrated
+  -- database and a fresh one end up column-for-column identical.
+  vault           TEXT NOT NULL DEFAULT 'workbench',
+  vault_entered_at TEXT NOT NULL DEFAULT '',
+  conditions      TEXT NOT NULL DEFAULT '[]',
+  symbols         TEXT NOT NULL DEFAULT '[]',
+  asset_class_key TEXT NOT NULL DEFAULT '',
+  wisp            TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS dream_messages (
@@ -990,7 +1004,9 @@ CREATE INDEX IF NOT EXISTS ix_adoptions_live ON adoptions (returned_at, expires_
 
 
 # The columns added to `dreams` after the table already existed on the box, and
-# the SQL to add each one. Order matters only in that `vault_entered_at` is
+# the SQL to add each one. They are ALSO in `SCHEMA`, in this order, so a fresh
+# database is built with them and a migrated one ends up identical to it; keep
+# the two lists in step. Order matters here only in that `vault_entered_at` is
 # backfilled below and must exist first.
 _ADDED_DREAM_COLUMNS: tuple[tuple[str, str], ...] = (
     ("vault", "TEXT NOT NULL DEFAULT 'workbench'"),

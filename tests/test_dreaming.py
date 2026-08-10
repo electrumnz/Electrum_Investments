@@ -486,6 +486,52 @@ def test_the_migrated_vault_clock_is_backfilled_rather_than_left_empty(tmp_path)
     assert dream.vault_entered_at == datetime(2026, 3, 1, 9, 0, tzinfo=UTC)
 
 
+def test_a_migrated_database_ends_up_identical_to_a_fresh_one(tmp_path):
+    """The columns live in two places, and this is what keeps them in step.
+
+    `SCHEMA` has them so a FRESH store is built with them, and
+    `_ADDED_DREAM_COLUMNS` has them so an EXISTING table gains them. Both halves
+    are needed. Leaving them out of `SCHEMA` looks like it works — a new store
+    gets migrated on its first open — but it means the migration warning fires
+    on every first run and `SCHEMA` stops being the answer to "what shape is
+    this table", which is where the next person will look. Found by comparing
+    the two, not by reading either.
+    """
+    old = tmp_path / "old.db"
+    _old_store_with_a_row(old)
+    DreamStore(old)
+    DreamStore(tmp_path / "fresh.db")
+
+    def columns(path: Path, table: str) -> list[str]:
+        conn = sqlite3.connect(path)
+        try:
+            return [str(row[1]) for row in conn.execute(f"PRAGMA table_info({table})")]
+        finally:
+            conn.close()
+
+    for table in ("dreams", "dream_messages", "adoptions"):
+        assert columns(old, table) == columns(tmp_path / "fresh.db", table), table
+
+
+def test_a_fresh_database_is_not_migrated_at_all(tmp_path):
+    """`PRAGMA table_info` is a lookup; a correct database pays one query.
+
+    Nothing is altered and nothing is backfilled, so opening a new store neither
+    logs a migration nor rewrites a clock that `save` has just set.
+    """
+    path = tmp_path / "dreams.db"
+    store = DreamStore(path)
+    entered = datetime(2026, 6, 1, tzinfo=UTC)
+    dream_id = store.save(
+        Dream(title="t", seed="s", vault_entered_at=entered, updated_at=entered)
+    )
+
+    reopened = DreamStore(path).get(dream_id)
+
+    assert reopened is not None
+    assert reopened.vault_entered_at == entered
+
+
 def test_the_migration_is_idempotent_and_leaves_a_current_database_alone(tmp_path):
     """It runs on every open, so re-running it must change nothing.
 

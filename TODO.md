@@ -191,11 +191,59 @@ Messages between dreamer and trader hang off a dream, append-only, with a
 speaker and a kind (question, answer, offer, accept, return, note). Rendered in
 the vault and in the trading agent's adopted area.
 
-**The exchange is explicitly invoked and turn-capped, not an unattended
-negotiation loop.** Two agents talking to each other unwatched, where one of
-them can widen what may be traded, is not a thing to leave running overnight;
-the mechanism is built, the autonomy is not. Making it continuous is its own
-decision, with its own commit.
+**Operator's decision: it runs on the DREAM TIMER, once a day, capped.** Not on
+the loop's fifteen-minute pulse — that would be ninety-six unattended
+negotiations a day on the same process that proposes orders, which is the Alpha
+Arena failure shape with two models instead of one. A day is far slower than a
+price moves, which is the right speed for deciding whether a second-order
+hypothesis is worth acting on.
+
+**Five caps, and the last one is the one that actually stops them talking
+forever.** A turn limit alone does not: it bounds one conversation and says
+nothing about having the same conversation again tomorrow.
+
+- **6 turns per exchange** (3 each). Enough to ask, answer and reach a verdict.
+  Hard stop, no extension.
+- **2 dreams conferred per daily run.** So a run costs at most 12 model calls
+  on top of the dream step itself, and the bill is predictable.
+- **3 exchanges per dream, lifetime.** If they cannot agree in three
+  conferences the dream parks. A fourth would be the same argument again.
+- **`TEXT_MAX_CHARS` per message**, reusing the existing prose cap.
+- **A dream may only be conferred again if SOMETHING CHANGED since the last
+  exchange** — a condition fired, a hop was added or checked, the operator
+  posted a note, the vault moved. Otherwise it is skipped and recorded as
+  nothing new to discuss. Without this rule two agents re-litigate an unchanged
+  dream every single day forever, politely, at cost, and every individual cap
+  above still holds while they do it.
+
+An exchange also ends early on accept, return or park. The transcript is stored
+either way — including the exchanges that ended in nothing, because a dream the
+trader kept declining is a fact about the dreamer worth having.
+
+### What the trading model is told about an adopted dream
+
+**Operator's decision: the FULL CHAIN reaches the prompt.** Every hop, its
+source, and the verification badge, for ADOPTED dreams only — not for
+everything sitting in the vault, which bounds the volume to at most three.
+
+This is deliberately against the grain of the rest of the repo, so the reasons
+it is safe here need to hold rather than be assumed:
+
+- **It is not a track record.** The thing `metrics.py` is kept away from the
+  model for is an OUTCOME sample — win rate, P&L, three losses in a row — which
+  a model will confidently overfit to. A causal chain about cicadas and sesame
+  is not an outcome sample and there is nothing in it to overfit to.
+- **It must arrive LABELLED.** The chain is speculative by construction, so it
+  is rendered with its `Verification` badge and its `weakest_hop` adjacent and
+  never separated from them. An unqualified chain in a prompt reads as
+  established fact, and the whole reason `Hop.checked` exists is that some of
+  those sentences were invented.
+- **It changes no gate.** The chain is context, exactly like headlines and
+  posts. `RiskGate` never sees it and cannot be argued with by it.
+- **It does not make the trade.** The prompt must say so plainly: an adopted
+  dream permits a symbol, it does not propose a position, and the agent still
+  has to justify direction, entry, stop and size on its own evidence. A dream
+  is a reason the symbol is available, never a reason to be in it.
 
 ### Conditions are written to be checkable
 
