@@ -401,3 +401,124 @@ def test_the_clock_comes_back_in_utc():
     assert clock.next_open.utcoffset() == timedelta(0)
     assert clock.next_close.utcoffset() == timedelta(0)
     assert clock.next_open.isoformat(timespec="minutes") == "2026-08-11T13:30+00:00"
+
+
+# --------------------------------------------------------------- resting stops
+#
+# `WorkingOrder` carried `limit_price` and nothing else, so a stop leg resting
+# at the broker rendered as `limit_price=None` and no surface in this repository
+# could state the level it fires at. That was survivable while nothing sent a
+# stop to Alpaca. It stopped being survivable when entries became brackets and
+# OTOs: the stop leg IS what the operator's third rule depends on, and the
+# journal's `planned_stop` and the broker's real trigger are two different
+# facts.
+#
+# The fixture below is the shape of the live position deliberately — a BUY 21
+# SPY stop at 820 protecting a short — so these tests read against the thing
+# that exposed the gap.
+
+
+class _ListingTrading:
+    """Stands in for the SDK's TradingClient for `get_orders` only."""
+
+    def __init__(self, orders: list[Any]) -> None:
+        self._orders = orders
+
+    def get_orders(self, request: Any) -> Any:
+        return self._orders
+
+
+class _RawOrder:
+    """One order as the Alpaca SDK hands it over."""
+
+    def __init__(self, **fields: Any) -> None:
+        self.id = "952237ac-d7ec-426e-bb5f-5c6ce7294260"
+        self.symbol = "SPY"
+        self.side = "buy"
+        self.qty = 21
+        self.limit_price = None
+        self.stop_price = None
+        self.order_type = "limit"
+        self.status = "new"
+        self.submitted_at = None
+        self.filled_qty = 0
+        for key, value in fields.items():
+            setattr(self, key, value)
+
+
+def test_a_resting_stop_reports_the_level_it_will_trigger_at():
+    """The whole point: the leg's trigger is READ BACK, never assumed."""
+    trading = _ListingTrading([_RawOrder(order_type="stop", stop_price="820.00")])
+
+    orders = _alpaca_with(trading).get_open_orders()
+
+    assert len(orders) == 1
+    assert orders[0].stop_price == 820.00
+    assert orders[0].is_stop is True
+    assert orders[0].trigger_price_unknown is False
+
+
+def test_a_limit_order_has_no_stop_and_that_is_not_an_unknown():
+    """`stop_price is None` on a limit order is correct and uninteresting.
+
+    The distinction this pins is the reason `order_type` is carried at all: a
+    renderer checking only `stop_price is None` would print the same blank here
+    as it would for a stop leg whose level could not be read, and only one of
+    those is a problem.
+    """
+    trading = _ListingTrading([_RawOrder(order_type="limit", limit_price="772.84")])
+
+    order = _alpaca_with(trading).get_open_orders()[0]
+
+    assert order.limit_price == 772.84
+    assert order.stop_price is None
+    assert order.is_stop is False
+    assert order.trigger_price_unknown is False
+
+
+def test_a_stop_leg_with_no_reported_trigger_is_UNKNOWN_not_absent():
+    """The state that must be shown loudly rather than rendered as a blank.
+
+    A stop leg protecting a live position whose level the broker did not report
+    is most of the way to having no stop, and it must not be indistinguishable
+    from an ordinary limit order with nothing to report.
+    """
+    trading = _ListingTrading([_RawOrder(order_type="stop", stop_price=None)])
+
+    order = _alpaca_with(trading).get_open_orders()[0]
+
+    assert order.stop_price is None
+    assert order.is_stop is True
+    assert order.trigger_price_unknown is True
+
+
+def test_an_enum_order_type_is_normalised_rather_than_stringified():
+    """`str(OrderType.STOP_LIMIT)` is "OrderType.STOP_LIMIT" on some SDK
+    versions, which would fail every equality check written against it. Take
+    `.value` when there is one."""
+
+    class _OrderType:
+        value = "stop_limit"
+
+    trading = _ListingTrading(
+        [_RawOrder(order_type=_OrderType(), stop_price="820.00", limit_price="819.50")]
+    )
+
+    order = _alpaca_with(trading).get_open_orders()[0]
+
+    assert order.order_type == "stop_limit"
+    assert order.is_stop is True
+    assert order.stop_price == 820.00
+    assert order.limit_price == 819.50
+
+
+def test_an_order_type_this_code_has_never_heard_of_still_travels():
+    """Raw string rather than an enum, so a new broker order type is displayed
+    rather than coerced into the nearest member this code happens to know."""
+    trading = _ListingTrading([_RawOrder(order_type="trailing_stop", stop_price="815.00")])
+
+    order = _alpaca_with(trading).get_open_orders()[0]
+
+    assert order.order_type == "trailing_stop"
+    assert order.is_stop is True
+    assert order.stop_price == 815.00

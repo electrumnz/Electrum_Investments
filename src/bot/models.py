@@ -357,9 +357,56 @@ class WorkingOrder(BaseModel):
     direction: Direction
     qty: float = Field(gt=0)
     limit_price: float | None = None
+
+    # The level a stop or stop-limit leg TRIGGERS at, read back from the
+    # broker.
+    #
+    # Its absence was most of the way to having no stop at all. Every entry now
+    # goes out as a bracket or an OTO, so the stop leg resting at Alpaca is the
+    # thing the operator's third rule actually depends on — and with only
+    # `limit_price` on this model, a stop leg rendered as `limit_price=None` on
+    # every surface that shows working orders. An operator could see that a leg
+    # existed while nothing in this repository could state what price it fires
+    # at. The journal's `planned_stop` and the broker's real trigger are two
+    # different facts, and only one of them was visible.
+    stop_price: float | None = None
+
+    # What the broker calls this order: "limit", "stop", "stop_limit",
+    # "trailing_stop", "market". Lowercased; empty means the broker did not say.
+    #
+    # Carried because without it `stop_price is None` cannot be read. On a plain
+    # limit order that None is correct and uninteresting; on a stop leg it means
+    # nobody can say where the stop is. Same rule as everywhere else here —
+    # absent and unknown are different facts and must not share a
+    # representation. Kept as a raw string rather than an enum on purpose: an
+    # order type this code has never heard of should travel through and be
+    # displayed, not be coerced into the nearest known member.
+    order_type: str = ""
+
     status: OrderStatus = OrderStatus.NEW
     submitted_at: datetime | None = None
     filled_qty: float = 0.0
+
+    @property
+    def is_stop(self) -> bool:
+        """Does this order TRIGGER at a price, rather than rest at one?
+
+        Substring rather than equality, because "stop", "stop_limit" and
+        "trailing_stop" are all stops and the set grows with the broker.
+        """
+        return "stop" in self.order_type.lower()
+
+    @property
+    def trigger_price_unknown(self) -> bool:
+        """A stop leg whose trigger price the broker did not report.
+
+        This is the state worth showing loudly, and it is the reason
+        `order_type` is carried alongside `stop_price`. A renderer that only
+        checks `stop_price is None` cannot tell "this is a limit order and has
+        no stop" from "this is the stop leg protecting a live position and its
+        level is unreadable" — and it would print the same blank for both.
+        """
+        return self.is_stop and self.stop_price is None
 
     @property
     def remaining_qty(self) -> float:

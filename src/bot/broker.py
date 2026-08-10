@@ -629,6 +629,16 @@ class AlpacaBroker:
                 continue
             side = str(getattr(o, "side", "buy")).lower()
             limit_price = getattr(o, "limit_price", None)
+            # The trigger on a stop or stop-limit leg. Read back rather than
+            # assumed: the journal's `planned_stop` says what was intended and
+            # this says what is actually resting at the broker, and a stop leg
+            # nobody can read the level of is most of the way to no stop.
+            stop_price = getattr(o, "stop_price", None)
+            # `order_type` on newer SDKs, `type` on older ones. Both are enums
+            # that stringify to things like "OrderType.STOP_LIMIT", so take the
+            # `.value` when there is one and normalise what is left.
+            raw_type = getattr(o, "order_type", None) or getattr(o, "type", None)
+            order_type = str(getattr(raw_type, "value", raw_type) or "").lower()
             orders.append(
                 WorkingOrder(
                     order_id=str(o.id),
@@ -636,6 +646,8 @@ class AlpacaBroker:
                     direction=Direction.BUY if "buy" in side else Direction.SELL,
                     qty=qty,
                     limit_price=float(limit_price) if limit_price else None,
+                    stop_price=float(stop_price) if stop_price else None,
+                    order_type=order_type,
                     status=_order_status(str(getattr(o, "status", ""))),
                     submitted_at=getattr(o, "submitted_at", None),
                     filled_qty=float(getattr(o, "filled_qty", 0) or 0),
