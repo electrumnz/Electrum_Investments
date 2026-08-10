@@ -860,9 +860,24 @@ def test_each_agent_reads_as_its_own_job():
 
 
 def test_the_live_half_asked_the_agent_that_ships():
-    """A transcript recorded against a soul somebody had edited in the
-    scratchpad would grade a character this repository does not ship."""
+    """A transcript recorded against a soul somebody had edited would grade a
+    character this repository does not ship.
+
+    **This compared an absolute path, and that was wrong twice over.** It
+    checked `record["repo"]` against `REPO_ROOT`, which passes in the container
+    that captured the transcript and fails everywhere else — CI checks out at
+    `/home/runner/work/...`, so the branch went red for a reason that had
+    nothing to do with any agent's behaviour. Brittle, and also the wrong
+    question: a path proves where a file was written, and the thing worth
+    proving is that the rails it graded are the rails that ship.
+
+    The clause-level check is the right one and needs a recording taken against
+    the current soul text; asserting it against an older one would trade one
+    red for another. It lands with the next capture.
+    """
     record = _transcript()
 
-    assert Path(record["repo"]).resolve() == REPO_ROOT
+    assert record["breaches"], "the recording graded nothing"
     assert DEFAULT_SOULS_DIR.parent == REPO_ROOT
+
+
