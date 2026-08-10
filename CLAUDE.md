@@ -2018,6 +2018,43 @@ A position with no journal row renders **STOP UNKNOWN in words** — never a
 blank that reads as "no stop needed", never a zero. The exposure is real and
 the protection is unknown, and those are different facts.
 
+### A heading is a claim, and a wrong one is not fixed by the row being right
+
+The Board filed the resting stop leg under **"Pending orders"**. Every value in
+that row was correct. The heading was not, and the heading is what got read.
+
+"Pending" asserts that something is about to happen — that the agent is part of
+the way into a new position. A resting stop leg is the opposite: it is the
+guarantee that something will *not* happen. So the page told the operator the
+bot was mid-way into another trade, every time they looked at the one row that
+exists to promise otherwise. The operator said it plainly: *"for the ui its not
+a pending order it's a stop loss isn't it? Pending infers the trading agent is
+going to put another trade down."*
+
+**This is the second time that same leg was mistaken for junk.** The first was
+`str()` on an SDK enum rendering its status as `other`, which is already
+recorded here as *a badly rendered safety mechanism gets mistaken for junk and
+asked to be removed*. That one was a VALUE. This one was a LABEL, and the value
+was fine — which is why it survived the first fix.
+
+Two groups now, and the split is what makes both headings honest:
+
+- **Protective, in force** — anything that would REDUCE something held, so a
+  bracket's take-profit counts too rather than only `is_stop`. It states the
+  trigger level, and `trigger_price_unknown` renders as an explicit alert: on a
+  plain limit a missing stop price is correct and dull, on a stop leg it means
+  nobody can say where the stop is.
+- **Pending entries** — orders that will become positions, which is the only
+  case where "the agent is about to put a trade down" is a true reading.
+
+**The best part was unplanned: the ABSENCE became legible.** Once protection
+has its own section, a position with nothing resting behind it can be shouted
+about — and when the check itself fails, the page says so and refuses to claim
+either way, so "nothing returned" never reads as "nothing resting". That state
+was invisible while everything sat in one list, which is the general form worth
+carrying: **grouping by what a thing IS makes the missing member visible, and a
+mixed list hides it.**
+
 ### A two-class element is decided by DECLARATION ORDER, and it has bitten three times
 
 `class="note alert"` renders **pewter, not amber**. Both are single-class
