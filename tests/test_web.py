@@ -23,6 +23,7 @@ from bot.config import Env, load_rules
 from bot.dreaming import DreamStore, DreamSummary
 from bot.journal import Journal
 from bot.models import (
+    AccountSnapshot,
     Decision,
     Direction,
     MarketInputs,
@@ -3484,3 +3485,307 @@ def test_the_stream_client_tells_a_401_from_a_dropped_connection():
     # re-enter a password they never lost.
     assert "stream closed" in script
     assert any("background:var(--rust)" in d for d in _css_blocks(".live.link-out i"))
+
+
+# ------------------------- the stop in force, and the moves nobody explained
+# Two stop figures live on a `Trade` and they answer different questions. The
+# Board is "what is at risk right now", so it shows `effective_stop`; the
+# Trades page sits beside R, so it keeps `planned_stop`. The tests below pin
+# each to the right one, and pin the three states the broker/journal
+# comparison can be in — found, could-not-read, and never ran.
+
+
+def _held(symbol: str = "SPY", qty: float = 21.0, price: float = 810.0) -> AccountSnapshot:
+    from bot.models import Position
+
+    return AccountSnapshot(
+        equity_usd=100_000.0,
+        cash_usd=100_000.0,
+        buying_power_usd=100_000.0,
+        open_positions=[
+            Position(
+                symbol=symbol,
+                direction=Direction.SELL,
+                qty=qty,
+                entry_price=773.32,
+                opened_at=ENTRY,
+                current_price=price,
+                unrealised_pnl_usd=-770.0,
+            )
+        ],
+    )
+
+
+def _short_spy(current_stop: float | None = None) -> Trade:
+    trade = Trade(
+        symbol="SPY",
+        direction=Direction.SELL,
+        qty=21,
+        entry_time=ENTRY,
+        entry_price=773.32,
+        planned_stop=820.0,
+        rationale="Operator test short.",
+    )
+    trade.current_stop = current_stop
+    return trade
+
+
+def test_the_board_shows_the_stop_in_force_rather_than_the_sizing_one():
+    """A stop tightened from 820 to 800 means the position stands to lose less,
+    and the Board is the surface that has to say so.
+
+    `planned_stop` is what the position was SIZED against and stays the
+    denominator of R. Showing it here would report a loss this position can no
+    longer take: 980.19 of risk against a real 565.32.
+    """
+    trade = _short_spy(current_stop=800.0)
+    account = _held()
+
+    body = render.board(
+        account, load_rules(), [], [trade], StandDownState(), 0, env=_env()
+    )
+
+    assert "800.0000" in body, "the stop in force is not on the page"
+    assert render._money(trade.current_risk_usd) in body      # the real figure
+    assert render._money(trade.planned_risk_usd) not in body  # what it was sized to
+    # And the row says WHY the two differ, so a reader holding a journal row
+    # that still reads 820 is not left thinking the page is wrong. Asserted on
+    # the badge itself: the caption explains the tag, so the words alone would
+    # pass with no tag on any row.
+    assert '<span class="pill moved">' in body
+    assert "was sized against 820.0000" in body
+
+
+def test_an_unmoved_stop_renders_exactly_as_it_always_did():
+    """`effective_stop` falls back to `planned_stop`, which is every trade this
+    bot has placed. The switch above must change none of them."""
+    trade = _short_spy()
+    body = render.board(
+        _held(), load_rules(), [], [trade], StandDownState(), 0, env=_env()
+    )
+
+    assert "820.0000" in body
+    assert render._money(trade.planned_risk_usd) in body
+    assert '<span class="pill moved">' not in body
+
+
+def test_the_trades_page_keeps_the_stop_the_trade_was_sized_with():
+    """The mirror of the test above, and the reason it is a separate rule.
+
+    A closed row's Stop column sits beside R, and R is the result as a multiple
+    of what the trade was DESIGNED to lose. Swapping in a tightened level would
+    silently redefine every historical R on the page.
+    """
+    from bot.metrics import build_report
+
+    trade = _short_spy(current_stop=800.0)
+    trade.exit_time = ENTRY + timedelta(hours=3)
+    trade.exit_price = 760.0
+    trade.realised_pnl_usd = 280.0
+
+    body = render.trades_page([trade], build_report([trade]))
+
+    assert "820.0000" in body, "the sizing stop must stay on a closed row"
+    assert "800.0000" not in body
+    assert render._money(trade.planned_risk_usd) in body
+
+
+def test_a_move_with_no_reason_on_file_is_tagged_on_the_board():
+    """The inverse tag: the broker's figure differs from the journal's and
+    nothing recorded says why.
+
+    The whole point of storing a reason with every move is that its ABSENCE is
+    visible. A feature that only displayed the moves it managed to capture
+    would hide its own failures.
+    """
+    from bot.position_actions import UnexplainedMove, UnexplainedMoveReport
+
+    report = UnexplainedMoveReport(
+        moves=[
+            UnexplainedMove(
+                symbol="SPY", kind="stop", journal_value=820.0, broker_value=805.0
+            )
+        ]
+    )
+
+    body = render.board(
+        _held(), load_rules(), [], [_short_spy()], StandDownState(), 0,
+        env=_env(), unexplained=report,
+    )
+
+    assert "unexplained-move" in body
+    assert "805.0000" in body and "820.0000" in body
+    assert "no recorded action" in body
+
+
+def test_the_two_caveats_render_as_their_own_states_rather_than_as_silence():
+    """"We could not read it" and "there is no leg there" are different facts
+    from "nothing has moved", and neither may render as a clean row.
+
+    Same rule as `stops_unchecked` beside `stops_breached`: an absence of
+    evidence is its own state and must not share a shape with the good outcome.
+    """
+    from bot.position_actions import UnexplainedMoveReport
+
+    body = render.board(
+        _held(), load_rules(), [], [_short_spy()], StandDownState(), 0,
+        env=_env(),
+        unexplained=UnexplainedMoveReport(
+            unreadable_stops=["SPY"], positions_without_a_resting_stop=["SPY"]
+        ),
+    )
+
+    assert "stop unreadable" in body
+    assert "UNKNOWN rather than" in body
+    assert "no resting stop" in body
+    assert "third rule" in body
+
+
+def test_an_unreadable_order_book_is_not_a_clean_comparison():
+    """`get_open_orders` returns `[]` on failure, so an outage looks exactly
+    like an account with nothing resting. An empty `moves` list then means
+    nothing at all, and the page has to say so above the table."""
+    from bot.position_actions import UnexplainedMoveReport
+
+    body = render.board(
+        _held(), load_rules(), [], [_short_spy()], StandDownState(), 0,
+        env=_env(), unexplained=UnexplainedMoveReport(can_check=False),
+    )
+
+    assert "resting orders could not be read" in body
+    assert "means UNKNOWN here, not clean" in body
+    assert "unexplained-move</span>" not in body
+
+
+def test_a_board_given_no_report_does_not_imply_a_clean_one():
+    """The third state. A render with nothing to compare must not let the
+    absence of a tag read as a finding — that is `has_cycles` and
+    `can_grade_anything` arriving on the Board."""
+    body = render.board(
+        _held(), load_rules(), [], [_short_spy()], StandDownState(), 0, env=_env()
+    )
+
+    assert "were not compared against the journal" in body
+
+
+def test_the_board_route_compares_the_broker_against_the_journal(journal, dreams):
+    """End to end against `MockBroker`, because the wiring is the thing that
+    was missing rather than the renderer.
+
+    A short SPY position, a stop leg resting at 805, a journal row that says
+    820 and no recorded action anywhere: the Board must tag it.
+    """
+    from bot.broker import MockBroker
+    from bot.models import OrderStatus, Position
+
+    broker = MockBroker(starting_equity=100_000.0)
+    broker.connect()
+    broker.set_price("SPY", bid=809.98, ask=810.02)
+    broker._positions["SPY"] = Position(
+        symbol="SPY",
+        direction=Direction.SELL,
+        qty=21,
+        entry_price=773.32,
+        opened_at=ENTRY,
+        current_price=810.0,
+    )
+    broker.set_open_orders(
+        [
+            WorkingOrder(
+                order_id="stop-1",
+                symbol="SPY",
+                direction=Direction.BUY,
+                qty=21,
+                # A plain string, as the broker reports it. `WorkingOrder.is_stop`
+                # reads it, so this is what makes the leg a stop leg.
+                order_type="stop",
+                stop_price=805.0,
+                status=OrderStatus.NEW,
+                submitted_at=ENTRY,
+            )
+        ]
+    )
+    journal.record_entry(_short_spy())
+
+    import bot.main as main_mod
+
+    def _fixed(env: object, force_mock: bool = False) -> MockBroker:
+        return broker
+
+    original = main_mod.build_broker
+    main_mod.build_broker = _fixed
+    try:
+        primed = live.build_poller(journal=journal, env=_env(), force_mock=True)
+        primed.poll_once()
+        app = build_app(
+            journal=journal, rules=load_rules(), env=_env(),
+            dreams=dreams, poller=primed, force_mock=True
+        )
+        body = TestClient(app).get("/").text
+    finally:
+        main_mod.build_broker = original
+
+    assert "unexplained-move" in body
+    assert "805.0000" in body
+    assert "no recorded action" in body
+
+
+def test_a_symbol_and_its_badges_travel_inside_one_element():
+    """The same 760px trap as the "at risk" cell, one column across.
+
+    A `td` is a `space-between` flex row down there with the label injected as
+    generated content, so `<b>SPY</b>` beside two bare pills is four flex items
+    flung across the card as though the symbol and its tags were four separate
+    fields.
+    """
+    from bot.position_actions import UnexplainedMove, UnexplainedMoveReport
+
+    body = render._positions(
+        _held(),
+        [_short_spy(current_stop=800.0)],
+        100_000.0,
+        UnexplainedMoveReport(
+            moves=[
+                UnexplainedMove(
+                    symbol="SPY", kind="stop", journal_value=800.0, broker_value=795.0
+                )
+            ]
+        ),
+    )
+
+    assert '<td data-l="Symbol"><span><b>SPY</b>' in body
+    assert '</span></span></td>' in body
+    # Adjacent pills are bordered inline-blocks, so with no whitespace between
+    # them the two borders meet and read as one badge.
+    assert "</span> <span class=\"pill unexplained\">" in body
+    assert "justify-content:space-between" in render.STYLES
+
+
+def test_a_recorded_tighten_is_not_dressed_as_a_warning():
+    """The alert colour has to keep meaning something.
+
+    A stop that moved WITH a reason on file is the feature working; a stop that
+    moved without one is the finding. Colouring both amber spends the warning
+    colour on the ordinary case, after which it says nothing on the row where
+    it matters.
+    """
+    from bot.position_actions import UnexplainedMove, UnexplainedMoveReport
+
+    body = render._positions(
+        _held(),
+        [_short_spy(current_stop=800.0)],
+        100_000.0,
+        UnexplainedMoveReport(
+            moves=[
+                UnexplainedMove(
+                    symbol="SPY", kind="stop", journal_value=800.0, broker_value=795.0
+                )
+            ]
+        ),
+    )
+
+    assert '<p class="note">SPY was sized against 820.0000' in body
+    assert '<p class="note"><span class="alert">SPY: stop is 795.0000' in body
+    # And never both classes on one element: `.note` is declared after `.alert`,
+    # so the two together resolve to pewter and the warning loses its colour.
+    assert 'class="note alert"' not in body

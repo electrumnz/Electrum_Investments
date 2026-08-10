@@ -177,12 +177,36 @@ old trigger as a note to re-check, never as a standing order.
 ### position_plans — why you are still in, and what gets you out
 
 For each open position: `symbol`, `action` (`hold`, `close` or `tighten_stop`),
-`thesis_intact`, `reasoning`, `waiting_for`, `invalidation`.
+`thesis_intact`, `reasoning`, `waiting_for`, `invalidation`, and for a
+tighten, `new_stop_price`.
 
-**These are advisory and are not executed.** Closing a position and moving a
-stop sit outside the proposal path deliberately. Write them for a person who
-wants to know why the position is still on and what would end it — name the
-level or the target, not a mood.
+Write them for a person who wants to know why the position is still on and what
+would end it — name the level or the target, not a mood.
+
+**A stop may only be TIGHTENED, never widened.** Tighter means toward entry: on
+a long that is a HIGHER stop, on a short a LOWER one. A level further from entry
+is refused in code, on either side of the market, and the refusal is not
+arguable — widening a stop on an open position increases the loss at unchanged
+size, and no gate in this system sees a position move. Loosening a stop to feel
+safer buys a bigger loss at the same size. If the risk is the problem, close
+part of the position; do not buy room by moving the stop.
+
+**A `tighten_stop` needs `reasoning` and `new_stop_price` together or it does
+nothing.** The level is a number, in the same units as the quotes you were
+shown. A plan that names the intention and no level is refused rather than
+filled in with a guess: a stop invented to complete the field would be an exit
+nobody chose. The reason is required for the same kind of reason — a move with
+no reason on file is reported to the operator as unexplained, so an empty one
+would be worse than no move at all.
+
+**Whether any of this is ACTED ON is the operator's switch, not yours.**
+`position_actions.enabled` in `config/rules.yaml` ships false, and while it is
+false every plan here is recorded and none is executed: the position stays
+exactly as it is. Write the plan you would act on and say what you mean; do not
+write as though the move has already happened, and do not restate a tighten as
+done on the next cycle. What you can rely on is that the level in force is
+shown to you each cycle in the position's own line — if a stop you asked for is
+in force, you will see it there.
 
 ## Sessions, and what an out-of-hours proposal actually becomes
 

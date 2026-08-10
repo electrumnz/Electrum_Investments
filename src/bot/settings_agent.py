@@ -1,14 +1,14 @@
 """The settings agent: the only route to changing `config/rules.yaml` from the
-interface, and it does not change it.
+interface, and it changes it.
 
 ## What this is
 
-An operator wants a limit moved. Today that means editing a YAML file over SSH,
-which is fine when the change is considered and offers nothing at all when it is
-not — the file does not know what a number is for, and it will take any value
-that parses. What was missing is the argument: somebody who states what the new
-number actually costs, makes the operator say what it is for, and then gets out
-of the way.
+An operator wants a limit moved. Without this that means editing a YAML file
+over SSH, which is fine when the change is considered and offers nothing at all
+when it is not — the file does not know what a number is for, and it will take
+any value that parses. What was missing is the argument: somebody who states
+what the new number actually costs, makes the operator say what it is for, and
+then gets out of the way.
 
 **It pushes back; it does not deny.** That distinction is the whole design.
 There was briefly a validator in `config.py` that refused a per-class limit
@@ -18,31 +18,60 @@ of the trade-off and no way for the operator to say "yes, I mean it". This is
 what replaced it. If it ends up refusing a change the operator has heard the
 consequence of and still wants, it has become the thing it was built to replace.
 
-## Why it produces a request instead of writing the file
+## It applies the change itself now, and that reverses an earlier decision
 
-`config/` is owned by root on the droplet (`deploy/bootstrap.sh`) precisely so
-the service account cannot edit its own limits. The web process runs as
-`mudhorn`. **A bot that can widen its own risk limits is exactly what this
-architecture is built to prevent**, so an agent that wrote `rules.yaml` directly
-would require removing a deliberate safety property to make a convenience work.
+This module used to argue and then record a `ChangeRequest` for a human to
+apply later at a root shell. The operator rejected that: *"Settings agent can't
+edit settings?? That's broken. That's what the settings agent is for."* They
+have heard the reasoning and decided, so the Armorer applies her own changes,
+in the conversation, and the deferred half is what remains when she cannot.
 
-And `CLAUDE.md` already says it plainly: limits change deliberately, in their
-own commit, with a reason.
+**What did NOT change is who owns the file.** `config/` is still root-owned on
+the droplet (`deploy/bootstrap.sh`) and the web process still runs as `mudhorn`,
+which still cannot write `rules.yaml` with its own hands. What was added is the
+pattern this repository already uses for exactly this problem, in
+`deploy/run-chat.sh`:
 
-So the split is:
+- **`deploy/apply-settings.sh`** — root-owned, named in a sudoers rule, taking
+  **no arguments**. The request id travels on **stdin**, where nothing a
+  signed-in operator types can be read as a flag.
+- It invokes `electrum-bot settings-apply <id>`, which re-validates the edited
+  file through `Rules.load` on a **staged copy** and only then `os.replace`s it.
+  A malformed or unknown id is refused before anything is written.
 
-- **Here, unprivileged.** Argue, compute the arithmetic consequence, and record
-  a `ChangeRequest` in `data/settings_requests.db` — its own file, never the
-  journal, and one the service account already owns. It carries the exact key,
-  the old value, the new value, the operator's stated reason, the agent's stated
-  objection, the transcript, and a digest of the rules file as it stood.
-- **There, privileged.** `electrum-bot settings-apply <id>`, run as root, which
-  re-validates the edited file through `Rules.load` before replacing anything
-  and refuses if the file has moved since the request was argued.
+So the honest description of the escalation, which belongs here rather than in
+a commit message: `mudhorn` can now move a **known numeric limit** to a value
+that **loads**, recorded and revertible, without a person at a root shell. It
+cannot write arbitrary bytes to arbitrary files as root, it cannot touch a key
+that is not in `limits_for`, and it cannot leave a config the bot will not start
+on. That is the power the operator asked for and the ownership property still
+holds around it.
+
+**When the wrapper is absent or the sudo call fails, nothing is silent.** The
+request stays recorded and pending, the failure is reported in the operator's
+own words, and the manual command is named. That is the previous behaviour kept
+as the fallback rather than as the design — the same rule as the Dreaming
+page's isolation banner: report the weaker fact rather than imply the stronger
+one.
+
+## The record outlives the argument, and now the change too
+
+A `ChangeRequest` in `data/settings_requests.db` — its own file, never the
+journal, and one the service account already owns — carries the exact key, the
+old value, the new value, the operator's stated reason, the agent's stated
+objection, the transcript, and a digest of the rules file as it stood. Applying
+adds **when** and **by which route**; reverting adds the same again without
+erasing the fact that it was ever applied.
 
 The transcript is kept because **an argument the operator won is a fact worth
 keeping, and so is one they lost.** Six months later the useful question is not
 what the limit is — the file says that — but what was said before it moved.
+
+**`old_value` is the exact text that was on the line**, which is what makes
+`settings-revert <id>` need no guesswork: a revert writes back the characters
+that were there, not a re-rendering of a number somebody parsed. A limit widened
+under pressure at 2am is exactly the thing somebody wants undone at 9am, and
+"it is in git" is not a route the operator has from the dashboard.
 
 ## The asymmetry is in the code, not only in the character
 
@@ -76,11 +105,14 @@ decision loop, or from any order path.
 from __future__ import annotations
 
 import difflib
+import getpass
 import hashlib
 import json
 import os
 import re
+import shutil
 import sqlite3
+import subprocess
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -132,6 +164,21 @@ class Unit(StrEnum):
     LIST = "list"
 
 
+#: A unit in words. `R` carries its definition because "3R" means nothing
+#: without knowing that one R is the per-trade cap.
+_UNIT_LABELS: dict[Unit, str] = {
+    Unit.PCT_OF_EQUITY: "per cent of equity",
+    Unit.PCT: "per cent",
+    Unit.USD: "US dollars",
+    Unit.COUNT: "positions or trades",
+    Unit.SECONDS: "seconds",
+    Unit.MINUTES: "minutes",
+    Unit.DAYS: "days",
+    Unit.R: "R, where one R is the per-trade risk cap",
+    Unit.LIST: "a list, not a number",
+}
+
+
 @dataclass(frozen=True)
 class LimitFact:
     """One limit, and everything a person needs to argue about it.
@@ -169,6 +216,16 @@ class LimitFact:
     @property
     def owner(self) -> str:
         return "config/rules.yaml, enforced in src/bot/risk.py"
+
+    @property
+    def unit_label(self) -> str:
+        """What the number is measured in, in words rather than in an enum name.
+
+        `pct_of_equity` is a key and "per cent of equity" is what goes under a
+        figure on screen. Kept beside the fact rather than in the renderer, so
+        the confirmation window and any other surface name a unit the same way.
+        """
+        return _UNIT_LABELS[self.unit]
 
 
 def _account_facts() -> list[LimitFact]:
@@ -1473,6 +1530,17 @@ class ChangeRequest:
       An argument made against one version of the file is not an argument about
       a different one, so applying against a moved file is refused rather than
       merged.
+
+    `old_value` is **the exact text that was on the line**, not a re-rendering
+    of the parsed number, and that is what makes `revert` need no guesswork:
+    `min_equity_floor_usd: 90000` parses to `90000.0`, and writing that back
+    would be a second change riding along with the undo.
+
+    `applied_by` and `reverted_by` name the ROUTE and never a person. The
+    dashboard has one shared password and keeps no record of who signed in
+    (`web/auth.py`), so nobody on this box can honestly say which human it was;
+    claiming otherwise would be a plausible wrong figure in the one record that
+    exists to be trusted years later.
     """
 
     key: str
@@ -1489,11 +1557,18 @@ class ChangeRequest:
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     status: str = "pending"
     applied_at: datetime | None = None
+    applied_by: str = ""
+    reverted_at: datetime | None = None
+    reverted_by: str = ""
     id: int | None = None
 
     @property
     def apply_command(self) -> str:
         return f"sudo electrum-bot settings-apply {self.id if self.id else '<id>'}"
+
+    @property
+    def revert_command(self) -> str:
+        return f"sudo electrum-bot settings-revert {self.id if self.id else '<id>'}"
 
 
 def commit_message(request: ChangeRequest) -> str:
@@ -1545,21 +1620,38 @@ CREATE TABLE IF NOT EXISTS requests (
   diff          TEXT NOT NULL,
   created_at    TEXT NOT NULL,
   status        TEXT NOT NULL,
-  applied_at    TEXT
+  applied_at    TEXT,
+  applied_by    TEXT NOT NULL DEFAULT '',
+  reverted_at   TEXT,
+  reverted_by   TEXT NOT NULL DEFAULT ''
 );
 """
+
+#: Columns added after the first shipped shape, and the migration that adds
+#: them. See `SettingsRequestStore._migrate` for why this exists at all.
+_ADDED_COLUMNS: dict[str, str] = {
+    "applied_by": "TEXT NOT NULL DEFAULT ''",
+    "reverted_at": "TEXT",
+    "reverted_by": "TEXT NOT NULL DEFAULT ''",
+}
 
 
 class SettingsRequestStore:
     """SQLite store for argued changes. Its own file, never the journal.
 
-    **Any future change to `SCHEMA` needs a migration beside it and a test that
-    starts from the old shape.** `CREATE TABLE IF NOT EXISTS` is a no-op on a
-    table that already exists, so editing the block above changes what a fresh
-    database gets and nothing whatever about the one on the droplet. Every test
-    here builds its store in a `tmp_path`, which makes the suite structurally
-    blind to it — that is how a live order once reached Alpaca with a journal
-    that could not store the row. The suite will not warn you.
+    **Any change to `SCHEMA` needs a migration beside it and a test that starts
+    from the old shape.** `CREATE TABLE IF NOT EXISTS` is a no-op on a table that
+    already exists, so editing the block above changes what a fresh database gets
+    and nothing whatever about the one on the droplet. Every test here builds its
+    store in a `tmp_path`, which makes the suite structurally blind to it — that
+    is how a live order once reached Alpaca with a journal that could not store
+    the row. The suite will not warn you.
+
+    This has happened once already: `applied_by`, `reverted_at` and
+    `reverted_by` arrived with the revert path, over a database that had rows in
+    it. `_migrate` is what covers that, and
+    `tests/test_settings_agent.py` builds the OLD shape deliberately, because
+    that is the only way to exercise a migration at all.
     """
 
     def __init__(self, path: Path = DEFAULT_REQUESTS_PATH) -> None:
@@ -1567,6 +1659,26 @@ class SettingsRequestStore:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as conn:
             conn.executescript(SCHEMA)
+            self._migrate(conn)
+
+    @staticmethod
+    def _migrate(conn: sqlite3.Connection) -> None:
+        """Bring an existing table up to the current shape, in place.
+
+        `ALTER TABLE ... ADD COLUMN` is the whole migration, which is only true
+        because every added column is nullable or carries a default — SQLite
+        rewrites nothing and no row is touched. A column that had to change a
+        constraint would need the table rebuilt in one transaction, the way
+        `journal._drop_planned_target_not_null` does it.
+
+        Idempotent and cheap: `PRAGMA table_info` is a lookup, so a current
+        database pays one query and stops. It runs on every open for that
+        reason.
+        """
+        held = {str(row["name"]) for row in conn.execute("PRAGMA table_info(requests)")}
+        for name, spec in _ADDED_COLUMNS.items():
+            if name not in held:
+                conn.execute(f"ALTER TABLE requests ADD COLUMN {name} {spec}")
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
@@ -1633,16 +1745,46 @@ class SettingsRequestStore:
             rows = conn.execute(sql, params).fetchall()
         return [self._to_request(row) for row in rows]
 
-    def mark(self, request_id: int, status: str, *, at: datetime | None = None) -> None:
+    def mark(
+        self,
+        request_id: int,
+        status: str,
+        *,
+        at: datetime | None = None,
+        by: str = "",
+    ) -> None:
+        """Stamp a decided request.
+
+        **Reverting does not erase the fact that it was applied.** The two
+        stamps are separate columns and a revert writes only its own pair, so
+        the row reads as what actually happened — the limit moved at this
+        moment, by this route, and was put back at that one. Clearing
+        `applied_at` would leave a record saying a change was never made, of a
+        change that was made and undone, which is a different and untrue story.
+        """
         stamp = (at or datetime.now(UTC)).isoformat()
         with self._connect() as conn:
-            conn.execute(
-                "UPDATE requests SET status=?, applied_at=? WHERE id=?",
-                (status, stamp if status == "applied" else None, request_id),
-            )
+            if status == "applied":
+                conn.execute(
+                    "UPDATE requests SET status=?, applied_at=?, applied_by=? WHERE id=?",
+                    (status, stamp, by, request_id),
+                )
+            elif status == "reverted":
+                conn.execute(
+                    "UPDATE requests SET status=?, reverted_at=?, reverted_by=? WHERE id=?",
+                    (status, stamp, by, request_id),
+                )
+            else:
+                conn.execute(
+                    "UPDATE requests SET status=? WHERE id=?", (status, request_id)
+                )
 
     @staticmethod
     def _to_request(row: sqlite3.Row) -> ChangeRequest:
+        def _stamp(column: str) -> datetime | None:
+            value = row[column]
+            return datetime.fromisoformat(str(value)) if value else None
+
         return ChangeRequest(
             id=int(row["id"]),
             key=str(row["key"]),
@@ -1658,12 +1800,66 @@ class SettingsRequestStore:
             diff=str(row["diff"]),
             created_at=datetime.fromisoformat(str(row["created_at"])),
             status=str(row["status"]),
-            applied_at=(
-                datetime.fromisoformat(str(row["applied_at"]))
-                if row["applied_at"]
-                else None
-            ),
+            applied_at=_stamp("applied_at"),
+            applied_by=str(row["applied_by"] or ""),
+            reverted_at=_stamp("reverted_at"),
+            reverted_by=str(row["reverted_by"] or ""),
         )
+
+
+@dataclass(frozen=True)
+class Preview:
+    """The two values and the cut, before anything is recorded or applied.
+
+    Exists so that **"the old value is the exact text on the line" has one
+    implementation.** The confirmation window shows the operator two numbers and
+    a diff; `build_request` stores the same two numbers and the same diff. Two
+    copies of that rule would drift, and the drift would be invisible: a window
+    saying `90000.0` over a file saying `90000` is one limit and two spellings,
+    and the operator is left comparing them and wondering which is real.
+
+    `digest` travels with it because it is a statement about the same read of
+    the same file.
+    """
+
+    old_value: str
+    new_value: str
+    diff: str
+    rules_digest: str
+    text: str = ""
+
+
+def preview(argument: Argument, *, rules_path: Path | None = None) -> Preview:
+    """What this change would look like in the file, read from disk right now.
+
+    The old value is the EXACT text on the line, not a re-rendering of the
+    loaded number. `min_equity_floor_usd: 90000` parses to 90000.0, and a
+    request recorded as "90000.0" would never match the file again — so
+    `apply_request`'s "is this still the value that was argued about" check
+    would refuse every request it was built to let through.
+
+    A line that cannot be located falls back to the formatted number and an
+    empty diff, which is honest: the surface shows what it can and the
+    recordability check has already said this one cannot become an edit.
+    """
+    path = rules_path or DEFAULT_RULES_PATH
+    text = path.read_text(encoding="utf-8")
+    located = locate(text, argument.key)
+    return Preview(
+        old_value=(
+            located.value_text
+            if located is not None
+            else (
+                format_value(argument.fact, argument.current)
+                if argument.current is not None
+                else ""
+            )
+        ),
+        new_value=format_value(argument.fact, argument.proposed),
+        diff=render_diff(text, argument.fact, argument.proposed, name=path.name),
+        rules_digest=digest(text),
+        text=text,
+    )
 
 
 def build_request(
@@ -1679,33 +1875,19 @@ def build_request(
     which is what makes the staleness check at apply time meaningful.
     """
     path = rules_path or DEFAULT_RULES_PATH
-    text = path.read_text(encoding="utf-8")
-    # The old value is the EXACT text on the line, not a re-rendering of the
-    # loaded number. `min_equity_floor_usd: 90000` parses to 90000.0, and a
-    # request recorded as "90000.0" would never match the file again — so
-    # `apply_request`'s "is this still the value that was argued about" check
-    # would refuse every request it was built to let through.
-    located = locate(text, argument.key)
+    shown = preview(argument, rules_path=path)
     return ChangeRequest(
         key=argument.key,
-        old_value=(
-            located.value_text
-            if located is not None
-            else (
-                format_value(argument.fact, argument.current)
-                if argument.current is not None
-                else ""
-            )
-        ),
-        new_value=format_value(argument.fact, argument.proposed),
+        old_value=shown.old_value,
+        new_value=shown.new_value,
         stance=str(argument.stance),
         reason=reason.strip(),
         objection=argument.objection,
         consequence=list(argument.consequence),
         transcript=list(transcript or []),
-        rules_digest=digest(text),
+        rules_digest=shown.rules_digest,
         rules_path=str(path),
-        diff=render_diff(text, argument.fact, argument.proposed, name=path.name),
+        diff=shown.diff,
     )
 
 
@@ -1717,6 +1899,97 @@ class ApplyResult:
     ok: bool
     detail: str
     diff: str = ""
+    via: str = ""
+
+
+def actor_now() -> str:
+    """Who is making this change, as far as this box can honestly say.
+
+    **This is a route, not an identity, and it must never be rendered as one.**
+    The dashboard has a single shared password and keeps no record of who signed
+    in — `web/auth.py` says so in its own docstring — so nothing on this machine
+    knows which person clicked. `SUDO_USER` is the nearest true fact available:
+    it names the account the escalation came FROM, which distinguishes the
+    service account going through the wrapper from an operator at a shell, and
+    that distinction is the one worth having in the record.
+
+    Never raises. A box with no passwd entry for the current uid still has to be
+    able to apply a change; "unknown" is the answer, and it is a real one.
+    """
+    escalated_from = os.environ.get("SUDO_USER", "").strip()
+    try:
+        here = getpass.getuser()
+    except Exception:  # pragma: no cover - needs a box with no passwd entry
+        here = "unknown"
+    return f"{here} (sudo from {escalated_from})" if escalated_from else here
+
+
+def _staged_replace(
+    path: Path, updated: str, *, diff: str, dry_run: bool, what: str
+) -> ApplyResult | None:
+    """Validate the edited file and put it in place. `None` means it landed.
+
+    Shared by apply and revert because they are the same act in two directions,
+    and two copies of a validate-then-replace would be two chances for only one
+    of them to grow a check.
+
+    Validated through the real loader on a real file, not by re-parsing the
+    string. `Rules.load` is what the bot itself runs at startup, so a config that
+    passes here is one the bot can start on — anything less is a second
+    implementation of the same check waiting to disagree with the first.
+    """
+    staging = path.with_name(path.name + ".settings-apply.tmp")
+    try:
+        staging.write_text(updated, encoding="utf-8")
+    except OSError as exc:
+        return ApplyResult(
+            False,
+            f"Could not write beside {path}: {exc}. config/ is root-owned on the "
+            "box on purpose — this has to go through deploy/apply-settings.sh, "
+            "or be run as root.",
+            diff,
+        )
+    try:
+        Rules.load(staging)
+    # Broad on purpose: pydantic raises `ValidationError`, PyYAML raises its own
+    # errors, and a file that will not load is the same answer whichever it was.
+    # A narrow catch here would propagate an unanticipated one out of a command
+    # that has already staged a temporary file beside `rules.yaml`.
+    except Exception as exc:
+        staging.unlink(missing_ok=True)
+        return ApplyResult(
+            False,
+            f"The edited file does not load: {exc}. Nothing was written.",
+            diff,
+        )
+
+    if dry_run:
+        staging.unlink(missing_ok=True)
+        return ApplyResult(
+            True,
+            f"Dry run: {what} would apply cleanly and the result loads. "
+            "Nothing was written.",
+            diff,
+        )
+
+    # `os.replace` rather than a write in place: either the new file is there
+    # whole or the old one is untouched. A half-written rules file is a bot that
+    # will not start, and it would be discovered at the next restart rather than
+    # now.
+    os.replace(staging, path)
+    return None
+
+
+def _rewrite_line(text: str, located: Located, value_text: str, name: str) -> tuple[str, str]:
+    """The file with one line moved, and the diff that describes it."""
+    lines = text.splitlines(keepends=True)
+    ending = "\n" if lines[located.line_no].endswith("\n") else ""
+    updated = list(lines)
+    updated[located.line_no] = located.rewritten(value_text) + ending
+    diff = "".join(
+        difflib.unified_diff(lines, updated, fromfile=f"a/{name}", tofile=f"b/{name}")
+    )
+    return "".join(updated), diff
 
 
 def apply_request(
@@ -1725,14 +1998,22 @@ def apply_request(
     *,
     rules_path: Path | None = None,
     dry_run: bool = False,
+    actor: str = "",
 ) -> ApplyResult:
-    """The privileged half. Run as root, by a person, from a shell.
+    """Move the limit. **The write itself needs permission this process may not
+    have, and that is the guarantee.**
 
     **Nothing enforces "root" in here, and that is deliberate.** `config/` is
     owned by root on the droplet, so an unprivileged run fails on the write with
-    a permission error from the operating system — which is a guarantee, where a
+    a permission error from the operating system — which is a guarantee, where an
     `os.geteuid()` check in Python would be a comment with an if-statement round
     it. Unix permissions do not fail quietly; a check somebody can delete does.
+
+    Reached two ways and they are the same code:
+
+    - a person at a root shell running `electrum-bot settings-apply <id>`
+    - the Armorer, through `deploy/apply-settings.sh` — root-owned, no
+      arguments, id on stdin — which runs that same command
 
     Four refusals, each for a different way this could be wrong:
 
@@ -1769,8 +2050,7 @@ def apply_request(
         )
 
     rules = Rules.load(path)
-    fact = limits_for(rules).get(request.key)
-    if fact is None:
+    if limits_for(rules).get(request.key) is None:
         return ApplyResult(False, f"{request.key} is no longer a limit this agent knows.")
 
     located = locate(text, request.key)
@@ -1787,62 +2067,15 @@ def apply_request(
             "value nobody discussed.",
         )
 
-    lines = text.splitlines(keepends=True)
-    ending = "\n" if lines[located.line_no].endswith("\n") else ""
-    lines[located.line_no] = located.rewritten(request.new_value) + ending
-    updated = "".join(lines)
-    diff = "".join(
-        difflib.unified_diff(
-            text.splitlines(keepends=True),
-            lines,
-            fromfile=f"a/{path.name}",
-            tofile=f"b/{path.name}",
-        )
+    updated, diff = _rewrite_line(text, located, request.new_value, path.name)
+    refused = _staged_replace(
+        path, updated, diff=diff, dry_run=dry_run, what=f"request {request_id}"
     )
+    if refused is not None:
+        return refused
 
-    # Validated through the real loader on a real file, not by re-parsing the
-    # string. `Rules.load` is what the bot itself runs at startup, so a config
-    # that passes here is one the bot can start on — anything less is a second
-    # implementation of the same check waiting to disagree with the first.
-    staging = path.with_name(path.name + ".settings-apply.tmp")
-    try:
-        staging.write_text(updated, encoding="utf-8")
-    except OSError as exc:
-        return ApplyResult(
-            False,
-            f"Could not write beside {path}: {exc}. config/ is root-owned on the "
-            "box on purpose — run this as root.",
-            diff,
-        )
-    try:
-        Rules.load(staging)
-    # Broad on purpose: pydantic raises `ValidationError`, PyYAML raises its own
-    # errors, and a file that will not load is the same answer whichever it was.
-    # A narrow catch here would propagate an unanticipated one out of a command
-    # that has already staged a temporary file beside `rules.yaml`.
-    except Exception as exc:
-        staging.unlink(missing_ok=True)
-        return ApplyResult(
-            False,
-            f"The edited file does not load: {exc}. Nothing was written.",
-            diff,
-        )
-
-    if dry_run:
-        staging.unlink(missing_ok=True)
-        return ApplyResult(
-            True,
-            f"Dry run: request {request_id} would apply cleanly and the result "
-            "loads. Nothing was written.",
-            diff,
-        )
-
-    # `os.replace` rather than a write in place: either the new file is there
-    # whole or the old one is untouched. A half-written rules file is a bot that
-    # will not start, and it would be discovered at the next restart rather than
-    # now.
-    os.replace(staging, path)
-    store.mark(request_id, "applied")
+    who = actor or actor_now()
+    store.mark(request_id, "applied", by=who)
     log.info(
         "settings_change_applied",
         request_id=request_id,
@@ -1850,19 +2083,447 @@ def apply_request(
         old=request.old_value,
         new=request.new_value,
         path=str(path),
+        by=who,
     )
     return ApplyResult(
         True,
         f"Applied request {request_id}: {request.key} {request.old_value} -> "
-        f"{request.new_value}. Commit it with the message the request carries.",
+        f"{request.new_value}. Undo it with `electrum-bot settings-revert "
+        f"{request_id}`, and commit it with the message the request carries.",
         diff,
     )
+
+
+def revert_request(
+    store: SettingsRequestStore,
+    request_id: int,
+    *,
+    rules_path: Path | None = None,
+    dry_run: bool = False,
+    actor: str = "",
+) -> ApplyResult:
+    """Put the previous value back. Same file, same validation, same wrapper.
+
+    A limit widened under pressure at 2am is exactly the thing somebody wants
+    undone at 9am, and "it is in git" is not a route the operator has from the
+    dashboard.
+
+    **A revert can only restore a value the file already carried**, which is
+    what stops it being a way around the confirmation gate: the number it writes
+    is `old_value`, the exact text that was on the line when the change was
+    argued. Tighten-then-revert lands back where it started and reaches nothing
+    new, so there is no asymmetry to enforce here — and enforcing one would mean
+    arguing with an operator undoing something, which is the wall this whole
+    module exists instead of.
+
+    Refusals, and each is a different problem:
+
+    - the request was never applied, so there is nothing to undo
+    - it was already reverted, so the row is history
+    - the line no longer holds the value this request wrote, because something
+      or somebody moved it since — reverting then would silently overwrite a
+      value nobody in this conversation ever discussed
+
+    The whole-file digest is deliberately NOT checked. It is the right check
+    when applying, because the consequence was computed against that file; it is
+    the wrong one here, because hours pass between a change and the wish to undo
+    it and an unrelated edit elsewhere in the file must not strand the undo. The
+    line-level check is what makes that safe.
+    """
+    request = store.get(request_id)
+    if request is None:
+        return ApplyResult(False, f"No settings request {request_id}.")
+    if request.status == "reverted":
+        return ApplyResult(
+            False,
+            f"Request {request_id} was already reverted"
+            + (f" at {request.reverted_at:%Y-%m-%d %H:%M} UTC." if request.reverted_at else "."),
+        )
+    if request.status != "applied":
+        return ApplyResult(
+            False,
+            f"Request {request_id} is {request.status}, so it never moved the "
+            "file and there is nothing to put back.",
+        )
+    if not request.old_value:
+        return ApplyResult(
+            False,
+            f"Request {request_id} recorded no previous value, so a revert would "
+            "be a guess at what the line said. Edit it in a commit.",
+        )
+
+    path = rules_path or Path(request.rules_path or DEFAULT_RULES_PATH)
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        return ApplyResult(False, f"{path} could not be read: {exc}")
+
+    located = locate(text, request.key)
+    if located is None:
+        return ApplyResult(
+            False,
+            f"{request.key} could not be located unambiguously in {path.name}.",
+        )
+    if located.value_text != request.new_value:
+        return ApplyResult(
+            False,
+            f"{request.key} is {located.value_text} in the file and request "
+            f"{request_id} set it to {request.new_value}. Something moved it "
+            "since, so putting the old value back would overwrite a change "
+            "nobody here discussed.",
+        )
+
+    updated, diff = _rewrite_line(text, located, request.old_value, path.name)
+    refused = _staged_replace(
+        path, updated, diff=diff, dry_run=dry_run, what=f"reverting request {request_id}"
+    )
+    if refused is not None:
+        return refused
+
+    who = actor or actor_now()
+    store.mark(request_id, "reverted", by=who)
+    log.info(
+        "settings_change_reverted",
+        request_id=request_id,
+        key=request.key,
+        restored=request.old_value,
+        undone=request.new_value,
+        path=str(path),
+        by=who,
+    )
+    return ApplyResult(
+        True,
+        f"Reverted request {request_id}: {request.key} is {request.old_value} "
+        "again. The record still says it was applied, and now says it was put "
+        "back.",
+        diff,
+    )
+
+
+# ----------------------------------------------------- reaching the privilege
+
+
+#: The root-owned wrapper, NOT `electrum-bot` itself.
+#:
+#: Exactly the reasoning in `deploy/run-chat.sh`, at a surface where it matters
+#: more. The obvious sudoers rule is
+#:
+#:     mudhorn ALL=(root) NOPASSWD: /opt/mudhorn/.venv/bin/electrum-bot
+#:
+#: which permits ANY arguments — every subcommand this CLI has today and every
+#: one a future release adds, run as root, chosen by whoever is signed in to a
+#: dashboard that may answer on the public internet. Naming a wrapper with no
+#: arguments fixes the command in a root-owned file and leaves the untrusted
+#: part on stdin, where it cannot be read as a flag whatever it contains.
+DEFAULT_WRAPPER = Path("/opt/mudhorn/deploy/apply-settings.sh")
+
+#: Editing one line, validating one YAML file and replacing it. Nothing here
+#: waits on a network or a model, so a long timeout would only ever be a hang
+#: nobody was told about.
+WRAPPER_TIMEOUT_SECONDS = 30.0
+
+
+@dataclass(frozen=True)
+class Availability:
+    """Whether the privileged route is there, and what to say when it is not.
+
+    Two fields rather than a bool because the fallback is a real behaviour with
+    a real instruction attached: the request stays recorded and pending, and
+    somebody applies it at a shell. An operator told only "no" learns nothing —
+    the same rule as `Argument.blocked_reason`.
+    """
+
+    ok: bool
+    detail: str = ""
+
+
+@dataclass(frozen=True)
+class WrapperApplier:
+    """Runs the privileged half through the sudoers-named wrapper.
+
+    **This escalation runs UPWARD**, `mudhorn` to `root`, which the chat wrapper
+    does not — that one goes downward, to an account holding no credentials. So
+    it is worth being exact about what it grants, because "it is the same
+    pattern as chat" is true of the mechanism and not of the consequence:
+
+    - The wrapper takes no arguments. The id is on stdin and is validated
+      against `^(apply|revert) <digits>$` there before anything runs.
+    - It invokes one fixed command, `electrum-bot settings-apply/-revert`, on
+      one fixed file, with the interpreter and the path fixed in the wrapper.
+    - That command edits **one line naming a limit in `limits_for`**, to a
+      number, and only if the result loads through `Rules.load` on a staged copy.
+
+    What `mudhorn` gains is therefore the ability to move a known limit to a
+    value the bot can start on, recorded and revertible. What it does not gain
+    is writing arbitrary bytes as root, touching any other file, or leaving a
+    config the loop cannot load. `config/` stays root-owned and the file is
+    still only ever written by root.
+
+    `runner` is injectable so the suite can exercise every branch without ever
+    invoking `sudo` — a test that shelled out to the real thing would either
+    need a privileged CI box or would quietly test nothing.
+    """
+
+    wrapper: Path = DEFAULT_WRAPPER
+    sudo: str = "sudo"
+    timeout_seconds: float = WRAPPER_TIMEOUT_SECONDS
+    runner: Callable[[list[str], str, float], subprocess.CompletedProcess[str]] | None = None
+
+    @property
+    def available(self) -> Availability:
+        """Whether this looks runnable from here. Never raises.
+
+        `Path.exists()` raises rather than returning False when a parent
+        directory refuses traversal, which took the whole Chat page down with a
+        500 once. `/opt/mudhorn/deploy` is world-traversable so that is unlikely
+        here, but the answer to an `OSError` is the same as it is there: it says
+        something about this process's reach and nothing about whether the file
+        is installed, and the invocation itself reports the real error rather
+        than a guess at it.
+        """
+        if self.sudo and shutil.which(self.sudo) is None:
+            return Availability(
+                False,
+                f"`{self.sudo}` is not on PATH, so the privileged apply step "
+                "cannot be reached from this process.",
+            )
+        try:
+            if not self.wrapper.exists():
+                return Availability(
+                    False,
+                    f"{self.wrapper} is not installed, so nothing here can write "
+                    "config/rules.yaml. See deploy/README.md.",
+                )
+        except OSError:
+            return Availability(True)
+        return Availability(True)
+
+    def _argv(self) -> list[str]:
+        # argv list, never a shell string, and the wrapper takes no arguments at
+        # all — so there is nothing for a crafted id to be mistaken for. `-n` so
+        # a missing sudoers rule fails immediately instead of blocking on a
+        # password prompt no browser can answer.
+        base = [self.sudo, "-n", "-u", "root", "--"] if self.sudo else []
+        return [*base, str(self.wrapper)]
+
+    def _run(self, verb: str, request_id: int) -> ApplyResult:
+        state = self.available
+        if not state.ok:
+            return ApplyResult(False, state.detail, via="wrapper")
+        run = self.runner or _default_runner
+        try:
+            completed = run(self._argv(), f"{verb} {int(request_id)}\n", self.timeout_seconds)
+        except subprocess.TimeoutExpired:
+            log.warning("settings_wrapper_timeout", verb=verb, request_id=request_id)
+            return ApplyResult(
+                False,
+                f"{self.wrapper} did not finish within "
+                f"{self.timeout_seconds:.0f}s. Nothing can be said about whether "
+                "the file moved; check it before trying again.",
+                via="wrapper",
+            )
+        except OSError as exc:
+            log.warning("settings_wrapper_spawn_failed", error=str(exc))
+            return ApplyResult(False, f"Could not run {self.wrapper}: {exc}", via="wrapper")
+
+        output = (completed.stdout or "").strip()
+        if completed.returncode != 0:
+            detail = (completed.stderr or "").strip() or output
+            log.warning(
+                "settings_wrapper_nonzero_exit",
+                verb=verb,
+                request_id=request_id,
+                code=completed.returncode,
+                detail=detail[:500],
+            )
+            return ApplyResult(
+                False,
+                detail[:2000] or f"{self.wrapper} exited {completed.returncode}.",
+                via="wrapper",
+            )
+        return ApplyResult(True, output, via="wrapper")
+
+    def apply(self, request_id: int) -> ApplyResult:
+        return self._run("apply", request_id)
+
+    def revert(self, request_id: int) -> ApplyResult:
+        return self._run("revert", request_id)
+
+
+def _default_runner(
+    argv: list[str], stdin: str, timeout: float
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        argv, input=stdin, capture_output=True, text=True, timeout=timeout, check=False
+    )
+
+
+@dataclass(frozen=True)
+class DirectApplier:
+    """Applies in-process, for a caller that already has the permission.
+
+    The CLI run at a root shell, and the tests. **Not for the web process**: it
+    would fail on the write with `EPERM`, which is the ownership property
+    working, and the honest thing to do about that failure is to go through the
+    wrapper rather than to report it.
+    """
+
+    store: SettingsRequestStore
+    rules_path: Path | None = None
+
+    @property
+    def available(self) -> Availability:
+        return Availability(True)
+
+    def apply(self, request_id: int) -> ApplyResult:
+        result = apply_request(self.store, request_id, rules_path=self.rules_path)
+        return ApplyResult(result.ok, result.detail, result.diff, via="in process")
+
+    def revert(self, request_id: int) -> ApplyResult:
+        result = revert_request(self.store, request_id, rules_path=self.rules_path)
+        return ApplyResult(result.ok, result.detail, result.diff, via="in process")
+
+
+# ------------------------------------------------- argue, record, and apply
+
+
+@dataclass(frozen=True)
+class Decision:
+    """One turn of the forge: what was argued, what was recorded, what moved.
+
+    All three are separate because they fail separately, and collapsing them
+    would hide the case this whole design turns on: a loosening that was argued,
+    recorded and NOT applied because the operator has not yet said they heard
+    the cost.
+
+    `applied` is `None` when nothing was attempted, which is not the same as an
+    attempt that failed — the `has_cycles` rule, in a fourth place.
+    """
+
+    argument: Argument
+    request: ChangeRequest | None = None
+    applied: ApplyResult | None = None
+
+    @property
+    def recorded(self) -> bool:
+        return self.request is not None
+
+    @property
+    def changed(self) -> bool:
+        return self.applied is not None and self.applied.ok
+
+    @property
+    def summary(self) -> str:
+        """One line the agent may quote verbatim, and must not embellish.
+
+        Every branch says exactly what happened to the file, because the failure
+        this repository keeps finding is a surface that implies more than it
+        did.
+        """
+        fact = self.argument.fact
+        if not self.argument.ok:
+            return f"{fact.label} is unchanged. Nothing was recorded."
+        if self.request is None:
+            if self.argument.requires_confirmation:
+                return (
+                    f"Nothing recorded and nothing changed. {fact.label} is a "
+                    "loosening: confirm that you have read the consequence and "
+                    "it goes in."
+                )
+            return f"Nothing recorded: {self.argument.blocked_reason}"
+        if self.applied is None:
+            return (
+                f"Recorded as request {self.request.id}. Not applied — no "
+                "privileged route from this process."
+            )
+        if self.applied.ok:
+            return (
+                f"{fact.label} is now {self.request.new_value}, was "
+                f"{self.request.old_value}. Recorded as request "
+                f"{self.request.id}; undo with `settings-revert "
+                f"{self.request.id}`."
+            )
+        return (
+            f"Recorded as request {self.request.id} and NOT applied: "
+            f"{self.applied.detail} The file is unchanged and the request is "
+            f"still pending — `{self.request.apply_command}` applies it."
+        )
+
+
+def decide(
+    store: SettingsRequestStore,
+    rules: Rules,
+    key: str,
+    value: str | float | int,
+    *,
+    reason: str = "",
+    confirm: bool = False,
+    transcript: list[dict[str, str]] | None = None,
+    equity_usd: float | None = None,
+    rules_path: Path | None = None,
+    applier: WrapperApplier | DirectApplier | None = None,
+) -> Decision:
+    """Argue about one limit, record what was decided, and apply it.
+
+    The whole forge in one call, and the order of the three steps is the
+    feature:
+
+    1. **Argue.** The arithmetic consequence is computed in Python, never by the
+       model. Raises `UnknownLimit` or `ValueError` on a key or a value this
+       agent will not touch.
+    2. **The asymmetry.** A tightening records and applies on the first ask. A
+       loosening records NOTHING until `confirm` is true, so an operator cannot
+       accept a cost they were not shown. That is enforced here rather than in
+       `souls/armorer.md`, because the soul is read off disk at call time and
+       could have been edited; this cannot.
+    3. **Apply.** Through the wrapper, or in process when the caller already has
+       the permission. A failure leaves the request recorded and pending and
+       says so — the deferred behaviour is the fallback, never a silence.
+
+    Nothing here widens a limit to fit a trade. That rule is about intent rather
+    than arithmetic, so no function can enforce it; it lives in `CLAUDE.md` and
+    in the soul, and what this module contributes is that the stated reason is
+    recorded verbatim beside the objection, where a reason naming a trade is
+    legible to whoever reads the row later.
+    """
+    argument = argue(
+        rules, key, value, equity_usd=equity_usd, rules_path=rules_path
+    )
+    if not argument.can_record:
+        return Decision(argument)
+    if argument.requires_confirmation and not confirm:
+        return Decision(argument)
+
+    request = store.record(
+        build_request(
+            argument,
+            reason=reason,
+            transcript=transcript,
+            rules_path=rules_path,
+        )
+    )
+    route = applier if applier is not None else WrapperApplier()
+    state = route.available
+    if not state.ok:
+        log.info(
+            "settings_change_not_applied",
+            request_id=request.id,
+            key=request.key,
+            detail=state.detail,
+        )
+        return Decision(argument, request, ApplyResult(False, state.detail))
+    return Decision(argument, request, route.apply(int(request.id or 0)))
 
 
 # ---------------------------------------------------- what the model is told
 
 
-def render_briefing(rules: Rules, *, equity_usd: float | None = None) -> str:
+def render_briefing(
+    rules: Rules,
+    *,
+    equity_usd: float | None = None,
+    applier: WrapperApplier | DirectApplier | None = None,
+) -> str:
     """The limit table, as text handed to the agent before it speaks.
 
     The model must not derive any of this. Every current value is read off the
@@ -1872,6 +2533,13 @@ def render_briefing(rules: Rules, *, equity_usd: float | None = None) -> str:
 
     Equity is stated or its absence is stated. There is no third option and no
     assumed $100,000.
+
+    **What the agent can DO is checked, not assumed.** It used to be told flatly
+    that it could not change anything, which was true then and is a lie now on a
+    box with the wrapper installed. Telling it the other flat thing would be a
+    lie on a box without one. So the privileged route is probed and the briefing
+    describes what is actually there — the same rule as the Dreaming page's
+    isolation banner, arriving in a prompt instead of on a page.
     """
     lines = [
         "THE LIMITS YOU MAY BE ASKED ABOUT.",
@@ -1902,13 +2570,50 @@ def render_briefing(rules: Rules, *, equity_usd: float | None = None) -> str:
             f"    looser means {fact.looser.value}"
             + ("" if fact.requestable else "; not editable through this path")
         )
-    lines.extend(
-        [
-            "",
-            "YOU CANNOT CHANGE ANY OF THESE. config/ is root-owned so the service "
-            "account cannot edit its own limits. What the surface produces is a "
-            "change request the operator applies as root with "
-            "`electrum-bot settings-apply <id>`. Say recorded, never changed.",
-        ]
-    )
+    route = applier if applier is not None else WrapperApplier()
+    state = route.available
+    lines.append("")
+    if state.ok:
+        lines.extend(
+            [
+                "YOU CAN CHANGE THESE, and the arrangement around it matters.",
+                "",
+                "config/rules.yaml is root-owned so the service account cannot "
+                "edit its own limits with its own hands. Your change goes "
+                "through one root-owned wrapper that takes no arguments, which "
+                "re-validates the whole file through the real loader on a staged "
+                "copy before replacing it. A value that would stop the bot "
+                "starting is refused and nothing is written.",
+                "",
+                "A TIGHTENING applies on the first ask. A LOOSENING states the "
+                "arithmetic above and applies NOTHING until the operator "
+                "confirms they have read it — that is enforced in code, not by "
+                "you, so do not offer to skip it and do not apologise for it.",
+                "",
+                "Say APPLIED only when the tool tells you it applied, and quote "
+                "the request id. If it reports a failure, say the change was "
+                "recorded and NOT made, and name the command that applies it: "
+                "`electrum-bot settings-apply <id>`. Never describe a change as "
+                "made because you asked for it.",
+                "",
+                "Every change is revertible with `electrum-bot settings-revert "
+                "<id>`, which puts back the exact previous value. Offer it when "
+                "an operator sounds unsure afterwards.",
+            ]
+        )
+    else:
+        lines.extend(
+            [
+                "YOU CANNOT CHANGE ANY OF THESE FROM HERE, on this box, today.",
+                "",
+                f"{state.detail} config/ is root-owned so the service account "
+                "cannot edit its own limits, and the privileged route that "
+                "normally carries your change is not reachable. What you produce "
+                "is a change request the operator applies with "
+                "`electrum-bot settings-apply <id>` as root.",
+                "",
+                "Say RECORDED, never changed, applied, updated or done. Say "
+                "plainly that the file has not moved.",
+            ]
+        )
     return "\n".join(lines)

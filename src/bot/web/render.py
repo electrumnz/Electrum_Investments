@@ -64,6 +64,7 @@ from ..models import (
 )
 from ..news_history import NewsItem, NewsRecall, Sightings, sightings
 from ..options import ExpiryAlert
+from ..position_actions import UnexplainedMoveReport
 from ..session_calendar import SessionCalendar
 from ..settings_agent import (
     ChangeRequest,
@@ -73,6 +74,14 @@ from ..settings_agent import (
     format_value,
 )
 from ..tailnet import TailnetStatus
+
+# At module scope for consistency with everything else here rather than for
+# FastAPI's sake — the annotation rule that forces `Request` to the top of
+# `app.py` does not apply to a plain string constant. Two constants, kept in
+# their own file because the confirmation window is a self-contained thing with
+# its own reasoning, and this module is long enough.
+from .forge_window import CSS as FORGE_WINDOW_CSS
+from .forge_window import SCRIPT as FORGE_WINDOW_SCRIPT
 from .live import SessionDayView, TickerQuote
 from .seen import SinceLastVisit
 
@@ -664,6 +673,15 @@ tr.why .quote{border-left:2px solid var(--patina);padding-left:.875rem;
 .pill.win{color:var(--gain)} .pill.loss{color:var(--loss)}
 .pill.ok{color:var(--patina)} .pill.no{color:var(--rust)}
 .pill.hold{color:var(--pewter)}
+/* The position tags. Colour only, no layout, for the reason
+   `test_no_stylesheet_rule_collides_with_a_state_badge` exists: a word that
+   names a state is a bad name for a box, and a modifier that also sets a box
+   property restyles whatever else happens to carry the word.
+   `--rust-text` rather than `--rust`: these are 9px uppercase mono at .1em
+   tracking, which is small text needing 4.5:1, and `--rust` gives 3.48:1. */
+.pill.unexplained{color:var(--rust-text)}
+.pill.unreadable{color:var(--amber)} .pill.stopless{color:var(--amber)}
+.pill.moved{color:var(--pewter)}
 
 .curve{border:1px solid var(--slate);border-radius:2px;background:var(--graphite);
   padding:1.125rem}
@@ -1099,13 +1117,21 @@ nav a:hover::after,nav a[aria-current=page]::after{transform:scaleX(1)}
   font-size:.6875rem;color:var(--pewter)}
 .hops li.open .src{color:var(--amber)}
 
-.dream .weak{margin:.875rem 0 0;padding:.6rem .75rem;font-size:.8125rem;
+/* UNSCOPED, and that is the fix rather than an oversight. These were
+   `.dream .weak`, which silently did not reach `WORKED_EXAMPLE` -- the
+   illustration sits in `.worked`, not `.dream`. The label lost `display:block`
+   and rendered as "Weakest hopWhether the brood overlap...", the amber box did
+   not draw, and it was valid CSS producing a plausible page. Found by the
+   operator on a phone, which is now the FOURTH time a stylesheet fault has
+   been invisible to the suite and visible to a pair of eyes.
+   A scoped rule with two use sites is a rule with one place to forget. */
+.weak{margin:.875rem 0 0;padding:.6rem .75rem;font-size:.8125rem;
   border:1px solid rgba(192,138,62,.35);border-left-width:3px;border-radius:2px;
   background:rgba(192,138,62,.07);color:var(--bone)}
-.dream .weak b{font-family:var(--mono);font-size:.625rem;letter-spacing:.14em;
+.weak b{font-family:var(--mono);font-size:.625rem;letter-spacing:.14em;
   text-transform:uppercase;color:var(--amber);display:block;margin-bottom:.2rem}
-.dream .trigger{margin:.75rem 0 0;font-size:.8125rem;color:var(--pewter)}
-.dream .trigger b{color:var(--bone);font-weight:400}
+.trigger{margin:.75rem 0 0;font-size:.8125rem;color:var(--pewter)}
+.trigger b{color:var(--bone);font-weight:400}
 
 /* The thoughts stream: the working, in order, including the steps where it
    changed its mind. That is usually the interesting part, which is why this is
@@ -1484,6 +1510,13 @@ nav a:hover::after,nav a[aria-current=page]::after{transform:scaleX(1)}
 # colour is stated. A hand-maintained second list is how a kind gets added to
 # the config and silently renders in the fallback grey.
 STYLES += _kind_css()
+
+# The confirmation window's styling, in its own file for the same reason its
+# script is: it is one self-contained thing with its own argument about why it
+# looks the way it does. Concatenated here so it lives under the same
+# no-backslash rule as everything above — `tests/test_web.py` fails the build if
+# a control character reaches `STYLES`, and that check has to see this too.
+STYLES += FORGE_WINDOW_CSS
 
 SCRIPT = """
 /* The projection layer for the command centre: starfield, hyperspace jump,
@@ -3524,6 +3557,7 @@ def board(
     env: Env | None = None,
     read_at: datetime | None = None,
     stale: bool = False,
+    unexplained: UnexplainedMoveReport | None = None,
 ) -> str:
     """The account at a glance.
 
@@ -3553,14 +3587,26 @@ def board(
     stream corrects it rather than leaving a false timestamp standing for as
     long as the tab is open. Omitted, it reads as unknown: a caller that cannot
     say when the figures were read must not be given a timestamp by default.
+
+    **`unexplained` is what `reconcile` found when it compared the broker's
+    stops and quantities against the journal's.** Optional, and `None` is a
+    third state rather than a clean one: it means this render was given nothing
+    to compare, so the absence of a tag below says nothing at all. See
+    `_unexplained_note`.
     """
     if account is None:
         return _board_waiting(env)
 
     equity = account.equity_usd
     open_risk_pct = (account.open_risk_usd / equity * 100) if equity else 0.0
+    # `current_risk_usd`, so this agrees with the Open risk tile beside it —
+    # that figure comes from `apply_journal_state`, which counts the stops in
+    # force. The card claims "the most any one open position can lose", which is
+    # a statement about the stop protecting it now; `planned_risk_usd` is what
+    # it was SIZED to lose and would report a position whose stop has been
+    # pulled in as still risking the original amount.
     largest = max(
-        (t.planned_risk_usd / equity * 100 for t in open_trades if equity), default=0.0
+        (t.current_risk_usd / equity * 100 for t in open_trades if equity), default=0.0
     )
     unrealised = sum(p.unrealised_pnl_usd for p in account.open_positions)
 
@@ -3652,7 +3698,7 @@ def board(
         + f'<div class="grid g2">{risk_cards}</div></section>'
         + '<section class="block"><h2>Open positions</h2>'
         + fixed
-        + _positions(account, open_trades, equity)
+        + _positions(account, open_trades, equity, unexplained)
         + "</section>"
         + _working_orders(orders or [], prices or {}, fixed_reading=fixed)
     )
@@ -3927,9 +3973,104 @@ def _curve(points: list[tuple[str, float]]) -> str:
     )
 
 
+def _position_tags(
+    symbol: str, trade: Trade | None, unexplained: UnexplainedMoveReport | None
+) -> tuple[str, list[tuple[str, bool]]]:
+    """The badges on one position row, and the sentence behind each.
+
+    Two returns rather than one because they go in different places: the pill
+    sits beside the symbol where it is scanned, the sentence sits under the row
+    where it is read. A tag whose meaning lives only in a `title` attribute is a
+    tag a phone cannot show and a screen reader announces as decoration.
+
+    Each sentence carries whether it is a WARNING. A recorded tighten and an
+    unexplained move are not the same kind of fact, and colouring both amber
+    would spend the alert colour on the feature working correctly — after which
+    it stops meaning anything on the one row where it does.
+
+    **Three states, never two.** `moves` is the finding; `unreadable_stops` and
+    `positions_without_a_resting_stop` are the two ways the finding could not be
+    established, and folding either into silence would let "we could not look"
+    read as "nothing has moved". Same rule as `stops_unchecked` beside
+    `stops_breached`, and it is the whole reason the inverse tag exists at all:
+    a record that only showed the moves it captured would hide its own failures.
+    """
+    pills: list[str] = []
+    notes: list[tuple[str, bool]] = []
+
+    if trade is not None and trade.stop_has_moved:
+        # Not a warning, and NOT conditional on the broker comparison having
+        # run: a recorded tighten is a fact about the journal row, and the two
+        # figures on the row need explaining whether or not anything could be
+        # read back from the broker. An explained move is the feature working.
+        pills.append('<span class="pill moved">stop moved</span>')
+        notes.append(
+            (
+                f"{symbol} was sized against {trade.planned_stop:,.4f} and its "
+                f"stop is now {trade.effective_stop:,.4f}. The Stop and At-risk "
+                "columns show the level in force; R on the Trades page stays "
+                "measured against the level it was sized with.",
+                False,
+            )
+        )
+
+    if unexplained is None:
+        return " ".join(pills), notes
+
+    for move in unexplained.moves:
+        if move.symbol != symbol:
+            continue
+        pills.append('<span class="pill unexplained">unexplained-move</span>')
+        notes.append((move.describe(), True))
+
+    if symbol in unexplained.unreadable_stops:
+        pills.append('<span class="pill unreadable">stop unreadable</span>')
+        notes.append(
+            (
+                f"A stop leg is resting on {symbol} and the broker reported no "
+                "trigger price, so whether it has moved is UNKNOWN rather than "
+                "fine. Nothing here can state the level it would fire at.",
+                True,
+            )
+        )
+
+    if symbol in unexplained.positions_without_a_resting_stop:
+        pills.append('<span class="pill stopless">no resting stop</span>')
+        notes.append(
+            (
+                f"No stop order is resting on {symbol}. The journal's stop is a "
+                "figure rather than an order, so the third rule is being met by "
+                "stop_watch reporting a breach on the loop's pulse and by "
+                "nothing at the broker. Crypto is excluded from this — Alpaca "
+                "accepts no bracket on it — so this is an equity whose bracket "
+                "is gone.",
+                True,
+            )
+        )
+
+    return " ".join(pills), notes
+
+
 def _positions(
-    account: AccountSnapshot, open_trades: list[Trade], equity: float
+    account: AccountSnapshot,
+    open_trades: list[Trade],
+    equity: float,
+    unexplained: UnexplainedMoveReport | None = None,
 ) -> str:
+    """The open positions, at the stop that is PROTECTING each one.
+
+    `effective_stop` and `current_risk_usd` rather than `planned_stop` and
+    `planned_risk_usd`. The Board answers "what is at risk right now", so a stop
+    the agent or the operator has pulled in has to be the one on screen; showing
+    the sizing figure would report a loss the position can no longer take. The
+    Trades page keeps `planned_stop`, because a closed row's R is measured
+    against what it was sized with and changing that would redefine every
+    historical R.
+
+    `unexplained` is optional so a caller with no broker order book — a test, a
+    cold start — renders exactly as before rather than claiming a clean check it
+    never ran.
+    """
     if not account.open_positions:
         return (
             '<div class="scroll" role="region" tabindex="0" '
@@ -3941,16 +4082,37 @@ def _positions(
     rows: list[str] = []
     for p in account.open_positions:
         trade = by_symbol.get(p.symbol)
-        stop = f"{trade.planned_stop:,.4f}" if trade else "unknown"
-        risk = _money(trade.planned_risk_usd) if trade else "unknown"
+        # The stop IN FORCE, which is the tightened one where there is one. A
+        # position whose stop has been pulled in stands to lose less, and the
+        # Board is the surface that has to say so.
+        stop = f"{trade.effective_stop:,.4f}" if trade else "unknown"
+        risk = _money(trade.current_risk_usd) if trade else "unknown"
         risk_pct = (
-            _pct(trade.planned_risk_usd / equity * 100)
+            _pct(trade.current_risk_usd / equity * 100)
             if trade and equity
             else "unknown"
         )
         current = p.current_price or p.entry_price
+        tags, notes = _position_tags(p.symbol, trade, unexplained)
+        # `.alert` on an INNER span, never beside `.note` on the `<p>`. Both are
+        # single-class rules and `.note` is declared after `.alert`, so
+        # `class="note alert"` resolves to pewter and the warning quietly loses
+        # its colour. See `_feed_rung`.
+        detail = "".join(
+            f'<p class="note"><span class="alert">{_e(text)}</span></p>'
+            if warn
+            else f'<p class="note">{_e(text)}</p>'
+            for text, warn in notes
+        )
         rows.append(
-            f'<tr class="data"><td data-l="Symbol"><b>{_e(p.symbol)}</b></td>'
+            # Symbol and its badges inside ONE wrapper. Under 760px a `td` is a
+            # `space-between` flex row with the label injected as generated
+            # content, so a bare `<b>SPY</b>` beside two bare pills is four flex
+            # items flung across the card as though they were four fields. Same
+            # trap as the "at risk" cell below and as `_working_orders`.
+            f'<tr class="data"><td data-l="Symbol"><span><b>{_e(p.symbol)}</b>'
+            + (f" {tags}" if tags else "")
+            + "</span></td>"
             f'<td data-l="Side">{_e(p.direction.value)}</td>'
             f'<td data-l="Qty" class="r num">{p.qty:g}</td>'
             f'<td data-l="Entry" class="r num">{p.entry_price:,.4f}</td>'
@@ -3965,19 +4127,30 @@ def _positions(
             f'<td data-l="Unrealised" class="r num {_cls(p.unrealised_pnl_usd)}">'
             f"{_money(p.unrealised_pnl_usd, sign=True)}</td></tr>"
             + (
-                f'<tr class="why"><td colspan="8"><div class="quote">'
-                f"{_e(trade.rationale)}</div></td></tr>"
-                if trade and trade.rationale
+                f'<tr class="why"><td colspan="8">{detail}'
+                + (
+                    f'<div class="quote">{_e(trade.rationale)}</div>'
+                    if trade and trade.rationale
+                    else ""
+                )
+                + "</td></tr>"
+                if detail or (trade and trade.rationale)
                 else ""
             )
         )
 
     return (
-        '<div class="scroll" role="region" tabindex="0" '
+        _unexplained_note(unexplained)
+        + '<div class="scroll" role="region" tabindex="0" '
         'aria-labelledby="pos-cap"><table>'
-        '<caption id="pos-cap">A stop reading "unknown" means the '
-        "position is held at the broker with no journal entry, so its risk cannot "
-        "be counted. That is reported rather than guessed at.</caption>"
+        '<caption id="pos-cap">The stop shown is the one IN FORCE — the '
+        "tightened level where a move has been recorded, tagged "
+        "&ldquo;stop moved&rdquo; — and &ldquo;at risk&rdquo; follows it. A stop "
+        'reading "unknown" means the position is held at the broker with no '
+        "journal entry, so its risk cannot be counted. That is reported rather "
+        "than guessed at. &ldquo;unexplained-move&rdquo; means the broker's own "
+        "figure differs from the journal's with no recorded reason for the "
+        "change.</caption>"
         "<thead><tr><th scope=col>Symbol</th><th scope=col>Side</th>"
         "<th scope=col class=r>Qty</th>"
         "<th scope=col class=r>Entry</th><th scope=col class=r>Now</th>"
@@ -3986,6 +4159,42 @@ def _positions(
         "<th scope=col class=r>Unrealised</th></tr></thead>"
         f"<tbody>{''.join(rows)}</tbody></table></div>"
     )
+
+
+def _unexplained_note(unexplained: UnexplainedMoveReport | None) -> str:
+    """Whether the broker/journal comparison ran at all, said above the table.
+
+    Three states and they are not interchangeable:
+
+    - **No report** — this render was given nothing to compare, so no row can
+      carry a tag and the absence of tags means nothing. A cold start and a test
+      are both here.
+    - **`can_check` false** — the resting orders could not be read. An empty
+      order book from a failed fetch looks exactly like an account with nothing
+      resting, so an empty `moves` list means nothing either. This is the
+      `FinnhubCalendar.is_degraded` rule on the position-management side.
+    - **Checked** — the tags on the rows are the whole finding, and no tags
+      means nothing has moved unexplained. That claim is only worth making
+      because the two states above are stated apart from it.
+    """
+    if unexplained is None:
+        return (
+            '<p class="note">The broker\'s stops and quantities were not '
+            "compared against the journal for this render, so no row below can "
+            "carry an unexplained-move tag and their absence says nothing.</p>"
+        )
+    if not unexplained.can_check:
+        return (
+            # `.alert` on an inner span — see `_position_tags`' sibling comment
+            # and `_feed_rung`: `.note` is declared after `.alert`, so the two
+            # on one element resolve to pewter.
+            '<p class="note"><span class="alert">The resting orders could not be '
+            "read, so no stop could be compared against the journal. An empty "
+            "order book from a failed fetch looks exactly like an account with "
+            "nothing resting — no unexplained-move tag below means UNKNOWN "
+            "here, not clean.</span></p>"
+        )
+    return ""
 
 
 # ---------------------------------------------------------------- decisions
@@ -4676,6 +4885,12 @@ def trades_page(recent: list[Trade], report: JournalReport) -> str:
             f'<span class="note">to {_e(exit_date)}</span></span></td>'
             f'<td data-l="Qty" class="r num">{t.qty:g}</td>'
             f'<td data-l="Entry" class="r num">{t.entry_price:,.4f}</td>'
+            # `planned_stop` here, deliberately, where the Board shows
+            # `effective_stop`. This row is a CLOSED trade and the column sits
+            # beside R: R is the result as a multiple of what the trade was
+            # designed to lose, so the stop printed next to it has to be the one
+            # it was sized against. Swapping in the tightened level would
+            # silently redefine every historical R on the page.
             f'<td data-l="Stop" class="r num">{t.planned_stop:,.4f}</td>'
             f'<td data-l="Exit" class="r num">{exit_price}</td>'
             f'<td data-l="At risk" class="r num">{_money(t.planned_risk_usd)}</td>'
@@ -5020,12 +5235,26 @@ def _social_card(state: FeedState, *, window_hours: float) -> str:
 # it: `<select>` picks WHICH limit, `<input>` and `<textarea>` carry the
 # proposed value and the operator's reason, and two `<button>`s ask and confirm.
 #
-# **What matters is that none of it can change a limit.** The controls POST to
-# `/settings/request`, which records a change request in
-# `data/settings_requests.db` and writes nothing else. `config/` is root-owned
-# on the droplet so this process could not edit `config/rules.yaml` even if a
-# route tried; applying a request is `electrum-bot settings-apply <id>`, run as
-# root, by a person, which re-validates through `Rules.load` first.
+# **These controls CAN change a limit now, and that paragraph used to say the
+# opposite.** It was true when it was written and the operator reversed it —
+# *"Settings agent can't edit settings?? That's broken"* — so it is rewritten
+# rather than left, because prose asserting a guarantee that no longer holds is
+# the exact thing this file has already been caught doing once.
+#
+# What is true, and what a person tightening this page needs to know:
+#
+# - The controls POST to `/settings/request` and nowhere else. There is no
+#   `<form>`: nothing here works with the script blocked, which is the
+#   affordance this surface must not have.
+# - **This process still cannot write `config/rules.yaml`.** `config/` is
+#   root-owned on the droplet, and the route asks root to make the edit through
+#   `deploy/apply-settings.sh` — no arguments, id on stdin — which re-validates
+#   the whole file through `Rules.load` on a staged copy first. Without that
+#   wrapper and its sudoers rule, the change is recorded and the page says
+#   plainly that the file did not move.
+# - **A loosening still cannot be agreed to in the click that asked about it.**
+#   The confirmation is a second, separate act, enforced in
+#   `settings_agent.decide` rather than here.
 
 
 def _forge_option(fact: LimitFact, rules: Rules) -> str:
@@ -5131,22 +5360,60 @@ def _forge_requests(requests: Sequence[ChangeRequest]) -> str:
                 else ""
             )
             + (f'<pre class="readout">{_e(req.diff)}</pre>' if req.diff else "")
-            + (
-                f'<p class="note">Apply with <code>{_e(req.apply_command)}</code>, '
-                "as root. It re-validates the edited file through "
-                "<code>Rules.load</code> and refuses if the file has moved.</p>"
-                if req.status == "pending"
-                else f'<p class="note">Status: {_e(req.status)}.</p>'
-            )
+            + _forge_request_status(req)
             + "</details>"
         )
     return (
         '<div class="card"><h3>Change requests</h3>'
         '<p class="note">Recorded in <code>data/settings_requests.db</code>, '
-        "which is not the journal and is not backed up. Nothing here has "
-        "changed a limit; each one waits on a person running the apply "
-        "command.</p>" + "".join(rows) + "</div>"
+        "which is not the journal and is not backed up. A <b>pending</b> one did "
+        "not move the file and waits on the apply command; an <b>applied</b> one "
+        "did, and says when and by which route.</p>" + "".join(rows) + "</div>"
     )
+
+
+def _forge_request_status(req: ChangeRequest) -> str:
+    """What actually happened to the file, per request.
+
+    Three states rather than two, and the third is the reason this is its own
+    function: **reverted is not pending.** A row that was applied and then put
+    back has a history, and collapsing it to "not currently in force" would
+    lose the fact that the limit moved at all — which is the fact somebody
+    reading this months later is looking for.
+
+    The route is named and the person is not, because nobody on this box can
+    honestly say which person it was: the dashboard has one shared password and
+    keeps no record of who signed in.
+    """
+    if req.status == "pending":
+        return (
+            f'<p class="note">Not applied. The file still holds '
+            f"<code>{_e(req.old_value)}</code>. Apply with "
+            f"<code>{_e(req.apply_command)}</code>, which re-validates the "
+            "edited file through <code>Rules.load</code> and refuses if the "
+            "file has moved.</p>"
+        )
+    if req.status == "applied":
+        when = f"{req.applied_at:%Y-%m-%d %H:%M} UTC" if req.applied_at else "at an unrecorded time"
+        route = f", via {_e(req.applied_by)}" if req.applied_by else ""
+        return (
+            f'<p class="note"><b>Applied</b> {_e(when)}{route}. Undo it with '
+            f"<code>{_e(req.revert_command)}</code>, which puts back the exact "
+            "previous value.</p>"
+        )
+    if req.status == "reverted":
+        when = (
+            f"{req.reverted_at:%Y-%m-%d %H:%M} UTC"
+            if req.reverted_at
+            else "at an unrecorded time"
+        )
+        route = f", via {_e(req.reverted_by)}" if req.reverted_by else ""
+        return (
+            f'<p class="note"><b>Applied and then reverted</b> {_e(when)}'
+            f"{route}. The limit moved and was put back; the file holds "
+            f"<code>{_e(req.old_value)}</code>.</p>"
+        )
+    return f'<p class="note">Status: {_e(req.status)}.</p>'
 
 
 #: The forge's client half.
@@ -5241,14 +5508,31 @@ FORGE_SCRIPT = """
     if (!d.can_record) {
       box.appendChild(el('p', d.blocked_reason || 'This cannot be recorded.', 'note'));
     } else if (d.recorded) {
-      box.appendChild(el('p',
-        'Recorded as request #' + d.recorded.id + '. Nothing has changed yet.',
-        'note'));
+      /* What actually happened to the file, never inferred from the fact that
+         a request exists. `applied` carries its own ok, and a recorded request
+         whose write failed says so in the operator's own words rather than
+         reading as a change that landed. */
+      if (d.applied && d.applied.ok) {
+        box.appendChild(el('p',
+          d.label + ' is now ' + d.new_value + ', was ' + d.old_value +
+          '. Recorded as request #' + d.recorded.id + '.', 'note'));
+      } else if (d.applied) {
+        box.appendChild(el('p',
+          'Recorded as request #' + d.recorded.id + ' and NOT applied. ' +
+          d.applied.detail, 'note'));
+      } else {
+        box.appendChild(el('p',
+          'Recorded as request #' + d.recorded.id + '. Nothing has changed yet.',
+          'note'));
+      }
       box.appendChild(el('pre', d.recorded.diff, 'readout'));
       box.appendChild(el('pre', d.recorded.commit_message, 'readout'));
       box.appendChild(el('p',
-        'Apply it as root: ' + d.recorded.apply_command +
-        '. Reload this page to see it in the request list.', 'note'));
+        (d.applied && d.applied.ok)
+          ? ('Undo it with ' + d.recorded.revert_command +
+             '. Reload this page to see it in the request list.')
+          : ('Apply it as root: ' + d.recorded.apply_command +
+             '. Reload this page to see it in the request list.'), 'note'));
     } else if (d.requires_confirmation) {
       /* The asymmetry, on screen. A loosening change cannot be accepted in the
          same click that asked about it, so the cost has been read before it is
@@ -5256,10 +5540,29 @@ FORGE_SCRIPT = """
       box.appendChild(el('p',
         'Nothing has been recorded. Confirm only if you still want this after '
         + 'reading the above.', 'note'));
-      var yes = el('button', 'I have read that. Record the request.', 'btn');
-      yes.type = 'button';
-      yes.addEventListener('click', function () { post(true); });
-      box.appendChild(yes);
+      if (window.MUDHORN_FORGE) {
+        var open = el('button', 'Put it on the anvil', 'btn');
+        open.type = 'button';
+        open.addEventListener('click', function () {
+          window.MUDHORN_FORGE.confirm({
+            key: d.key, label: d.label, unit: d.unit, stance: d.stance,
+            oldText: d.old_value, newText: d.new_value,
+            consequence: d.consequence || [],
+            objection: d.objection, diff: d.diff
+          }).then(function (agreed) { if (agreed) post(true); });
+        });
+        box.appendChild(open);
+      } else {
+        /* The fallback, and it is deliberate. A throw or a blocked file up
+           there must cost a nicer confirmation, never the ability to confirm —
+           the same principle as the Cmd+K console falling back to an ordinary
+           navigation when the projection layer is absent. Do not delete this on
+           the grounds that the module is always there. */
+        var yes = el('button', 'I have read that. Make the change.', 'btn');
+        yes.type = 'button';
+        yes.addEventListener('click', function () { post(true); });
+        box.appendChild(yes);
+      }
     }
     out.appendChild(box);
   }
@@ -5290,16 +5593,23 @@ def _forge(
         "before anything is written down. A limit getting <b>tighter</b> is "
         "recorded as asked. A limit getting <b>looser</b> states the arithmetic "
         "and waits for you to confirm after reading it.</p>"
-        '<p class="note" style="max-width:68ch"><b>Nothing here writes '
-        f"<code>{_e(path_name)}</code>.</b> That file is owned by root on the "
-        "box precisely so the service account cannot edit its own limits, and "
-        "this dashboard runs as the service account. What the forge produces is "
-        "a change request: the exact key, the old value, the new value, your "
-        "reason, the objection it made, the YAML diff and a commit message. "
-        "Applying one is <code>electrum-bot settings-apply &lt;id&gt;</code>, "
-        "run as root at a shell, which re-validates the edited file through "
-        "<code>Rules.load</code> and refuses if the file has moved since the "
-        "argument was had.</p>"
+        '<p class="note" style="max-width:68ch"><b>This dashboard still cannot '
+        f"write <code>{_e(path_name)}</code> with its own hands.</b> That file "
+        "is owned by root on the box precisely so the service account cannot "
+        "edit its own limits, and this dashboard runs as the service account. "
+        "It asks root to make the edit, through one root-owned wrapper that "
+        "takes no arguments and re-validates the whole file through "
+        "<code>Rules.load</code> on a staged copy before replacing it &mdash; a "
+        "value that would stop the bot starting is refused and nothing is "
+        "written. Every change is recorded either way: the exact key, the old "
+        "value, the new value, your reason, the objection it made, the YAML "
+        "diff and a commit message. Undo one with "
+        "<code>electrum-bot settings-revert &lt;id&gt;</code>.</p>"
+        '<p class="note" style="max-width:68ch">If that wrapper is not installed '
+        "&mdash; on a laptop, or on a box where the grant was never made &mdash; "
+        "the change is <b>recorded and not applied</b>, this page says so, and "
+        "<code>electrum-bot settings-apply &lt;id&gt;</code> at a root shell "
+        "finishes the job.</p>"
     )
 
     if not enabled:
@@ -5336,6 +5646,11 @@ def _forge(
     body = intro + (
         f'<div class="grid g2">{panel}{_forge_reference(limits, rules)}</div>'
         f'<div style="margin-top:1rem">{_forge_requests(requests)}</div>'
+        # The window first, so `window.MUDHORN_FORGE` exists by the time the
+        # forge's own script wires a button to it. It guards against a double
+        # load and interpolates nothing, so it needs no `.replace` and no brace
+        # doubling — unlike the script below, which carries the token.
+        + FORGE_WINDOW_SCRIPT
         + FORGE_SCRIPT.replace("__TOKEN__", json.dumps(token))
     )
 
@@ -5367,27 +5682,35 @@ def _forge(
                 "What does raising a per-class limit above the total do?",
                 "Which limit is most likely to be the one that refuses a trade?",
             ],
-            footnote="It argues, it records, and it cannot write the file. "
-            "Every figure it quotes is computed in Python and handed to it; ask "
-            "it for the arithmetic and it will name where the number came from.",
+            footnote="It argues, it records, and it applies what you agree to "
+            "— through root, never with its own hands. Every figure it quotes "
+            "is computed in Python and handed to it; ask it for the arithmetic "
+            "and it will name where the number came from.",
             extra_notes=ARMORER_NOTES,
         )
     return body + "</section>"
 
 
 # Notes specific to the ARMORER, in the shape `ACCOUNT_AGENT_NOTES` established.
-# Both describe reach. This one has to say what the agent cannot do, because the
-# obvious reading of a settings agent is that it changes settings.
+# Both describe reach. This one has to say exactly how far the agent's reaches,
+# because the obvious reading of a settings agent is that it changes settings —
+# which is now true, and was not when this constant was first written.
 #
 # Raw HTML rather than escaped text, and a module constant for that reason:
 # nothing user-supplied reaches it.
 ARMORER_NOTES = """
-  <p class="note"><b>It records; it never applies.</b> The Armorer has no way to
-  write <code>config/rules.yaml</code> and neither does this dashboard.
-  <code>config/</code> is owned by root on the box so the service account cannot
-  edit its own limits, and the only thing this surface writes is a row in
-  <code>data/settings_requests.db</code>. If it ever says it changed something,
-  it is wrong &mdash; check the request list above.</p>
+  <p class="note"><b>It records, and it applies.</b> Every change is a row in
+  <code>data/settings_requests.db</code> first &mdash; the key, both values,
+  your reason and its objection &mdash; and the edit to
+  <code>config/rules.yaml</code> is made by root through one wrapper that takes
+  no arguments, after the whole file has been re-validated on a staged copy. A
+  tightening goes in on the first ask. A loosening waits for you to agree to the
+  cost. Check the request list above: it says what was applied, when, and by
+  which route.</p>
+  <p class="note"><b>It cannot write the file itself, and a failure is not
+  silent.</b> If the privileged route is missing, the change is recorded and NOT
+  made, and it will tell you so and name the command that finishes it. Take
+  "recorded" and "applied" as different words, because they are.</p>
   <p class="note"><b>The arithmetic is not its own.</b> Every consequence is
   computed in <code>src/bot/settings_agent.py</code> against the rules actually
   loaded and handed to it as figures, the same way indicators are computed in

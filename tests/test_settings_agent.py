@@ -22,30 +22,46 @@ from __future__ import annotations
 
 import re
 import shutil
+import sqlite3
+import subprocess
 from pathlib import Path
 
 import pytest
 
 from bot.config import DEFAULT_RULES_PATH, Rules
 from bot.settings_agent import (
+    DirectApplier,
     Looser,
     SettingsRequestStore,
     Stance,
     Unit,
     UnknownLimit,
+    WrapperApplier,
     apply_request,
     argue,
     build_request,
     commit_message,
+    decide,
     digest,
     effective_value,
     limits_for,
     locate,
     render_briefing,
     render_diff,
+    revert_request,
 )
 
 EQUITY = 100_000.0
+
+#: The wrapper script, as the suite sees it.
+#:
+#: **No test in this file may invoke `sudo` or run the real wrapper against the
+#: real `config/rules.yaml`.** Every applier below either has its subprocess
+#: stubbed at the boundary or writes to a `tmp_path` copy. A test that depended
+#: on `/opt/mudhorn` being absent would pass for a reason that has nothing to do
+#: with the code, and would start editing a live risk limit the day somebody ran
+#: the suite on the droplet.
+WRAPPER_SOURCE = Path(__file__).resolve().parents[1] / "deploy" / "apply-settings.sh"
 
 
 @pytest.fixture
@@ -64,6 +80,49 @@ def rules(rules_file) -> Rules:
 @pytest.fixture
 def store(tmp_path) -> SettingsRequestStore:
     return SettingsRequestStore(tmp_path / "settings_requests.db")
+
+
+def _always_available() -> WrapperApplier:
+    """An applier whose wrapper is this file, which certainly exists.
+
+    Used only where the QUESTION is "what does the surface say when the
+    privileged route is there" — nothing is ever run through it.
+    """
+    return WrapperApplier(wrapper=Path(__file__), sudo="")
+
+
+def _stub_wrapper(
+    store: SettingsRequestStore, rules_file: Path, tmp_path: Path
+) -> tuple[WrapperApplier, list[tuple[list[str], str]]]:
+    """A `WrapperApplier` stubbed at the process boundary, and its call log.
+
+    The real argv construction, the real stdin string and the real return-code
+    handling all run; only `subprocess.run` is replaced, by something that does
+    what the wrapper would have done — call the same `apply_request` the CLI
+    calls, against a `tmp_path` copy of the rules.
+
+    That seam is the right one. Shelling out to the real script would need sudo
+    and a provisioned box, and stubbing any higher would stop testing the thing
+    the sudoers rule actually points at: what goes down stdin.
+    """
+    script = tmp_path / "apply-settings.sh"
+    script.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    script.chmod(0o755)
+    calls: list[tuple[list[str], str]] = []
+
+    def runner(argv: list[str], stdin: str, timeout: float) -> subprocess.CompletedProcess[str]:
+        calls.append((argv, stdin))
+        verb, _, raw = stdin.strip().partition(" ")
+        run = revert_request if verb == "revert" else apply_request
+        result = run(store, int(raw), rules_path=rules_file, actor="stub")
+        return subprocess.CompletedProcess(
+            argv,
+            0 if result.ok else 1,
+            result.detail,
+            "" if result.ok else result.detail,
+        )
+
+    return WrapperApplier(wrapper=script, sudo="", runner=runner), calls
 
 
 # ------------------------------------------------------------------- the table
@@ -598,6 +657,475 @@ def test_the_digest_is_what_makes_the_staleness_check_mean_anything(rules_file):
     assert digest(text) != digest(text + "\n")
 
 
+# ------------------------------------------------------------- the revert
+
+def test_a_revert_puts_back_the_exact_text_that_was_on_the_line(
+    rules, rules_file, store
+):
+    """`90000` and `90000.0` are one limit and two different diffs.
+
+    The previous value is recorded as the exact characters on the line, which is
+    what makes the undo need no guesswork — and what stops a revert being a
+    second change riding along with the first.
+    """
+    before = rules_file.read_text()
+    argument = argue(rules, "account.min_equity_floor_usd", "80000", rules_path=rules_file)
+    record = store.record(
+        build_request(argument, reason="More room to breathe.", rules_path=rules_file)
+    )
+
+    assert record.old_value == "90000"  # not "90000.0"
+    assert apply_request(store, record.id, rules_path=rules_file).ok
+    assert Rules.load(rules_file).account.min_equity_floor_usd == 80000.0
+
+    result = revert_request(store, record.id, rules_path=rules_file)
+
+    assert result.ok, result.detail
+    # Byte-identical, comments and notation included.
+    assert rules_file.read_text() == before
+
+
+def test_reverting_does_not_erase_that_it_was_applied(rules, rules_file, store):
+    """The row has to read as what actually happened: the limit moved at this
+    moment, and was put back at that one. Clearing the apply stamp would leave a
+    record saying a change was never made, of a change that was made."""
+    argument = argue(rules, "account.max_position_pct", "40.0", rules_path=rules_file)
+    record = store.record(build_request(argument, reason="Tighter.", rules_path=rules_file))
+
+    apply_request(store, record.id, rules_path=rules_file, actor="root")
+    revert_request(store, record.id, rules_path=rules_file, actor="mudhorn via sudo")
+
+    kept = store.get(record.id)
+    assert kept is not None
+    assert kept.status == "reverted"
+    assert kept.applied_at is not None and kept.applied_by == "root"
+    assert kept.reverted_at is not None and kept.reverted_by == "mudhorn via sudo"
+
+
+def test_a_revert_can_only_restore_a_value_the_file_already_carried(
+    rules, rules_file, store
+):
+    """So it is not a route around the confirmation gate.
+
+    Tighten on the first ask, then undo, and the file is back where it started —
+    it cannot reach a number the file never held. That is why reverting a
+    tightening is not itself gated as a loosening: gating it would mean arguing
+    with an operator undoing something, which is the wall this module exists
+    instead of.
+    """
+    started_at = Rules.load(rules_file).account.max_risk_per_trade_pct
+    tighten = argue(rules, "account.max_risk_per_trade_pct", "0.5", rules_path=rules_file)
+    assert tighten.stance is Stance.TIGHTENING
+    record = store.record(build_request(tighten, reason="Careful.", rules_path=rules_file))
+
+    apply_request(store, record.id, rules_path=rules_file)
+    assert Rules.load(rules_file).account.max_risk_per_trade_pct == 0.5
+
+    revert_request(store, record.id, rules_path=rules_file)
+
+    assert Rules.load(rules_file).account.max_risk_per_trade_pct == started_at
+
+
+def test_a_line_moved_since_the_change_refuses_to_be_reverted(rules, rules_file, store):
+    """Putting the old value back would overwrite a change nobody in this
+    conversation discussed."""
+    first = argue(rules, "account.max_position_pct", "40.0", rules_path=rules_file)
+    record = store.record(build_request(first, reason="Tighter.", rules_path=rules_file))
+    apply_request(store, record.id, rules_path=rules_file)
+
+    # Somebody else moves the same line afterwards.
+    moved = argue(
+        Rules.load(rules_file), "account.max_position_pct", "45.0", rules_path=rules_file
+    )
+    second = store.record(build_request(moved, reason="Bit more.", rules_path=rules_file))
+    apply_request(store, second.id, rules_path=rules_file)
+
+    result = revert_request(store, record.id, rules_path=rules_file)
+
+    assert not result.ok
+    assert "Something moved it since" in result.detail
+    assert Rules.load(rules_file).account.max_position_pct == 45.0
+
+
+def test_a_request_that_never_moved_the_file_cannot_be_reverted(rules, rules_file, store):
+    argument = argue(rules, "account.max_position_pct", "40.0", rules_path=rules_file)
+    record = store.record(build_request(argument, reason="Tighter.", rules_path=rules_file))
+
+    result = revert_request(store, record.id, rules_path=rules_file)
+
+    assert not result.ok
+    assert "nothing to put back" in result.detail
+
+
+def test_a_revert_cannot_be_run_twice(rules, rules_file, store):
+    argument = argue(rules, "account.max_position_pct", "40.0", rules_path=rules_file)
+    record = store.record(build_request(argument, reason="Tighter.", rules_path=rules_file))
+    apply_request(store, record.id, rules_path=rules_file)
+    assert revert_request(store, record.id, rules_path=rules_file).ok
+
+    again = revert_request(store, record.id, rules_path=rules_file)
+
+    assert not again.ok
+    assert "already reverted" in again.detail
+
+
+def test_a_revert_that_would_not_load_is_refused_and_writes_nothing(
+    rules, rules_file, store
+):
+    """The undo goes through the same staged validation as the change. A file
+    that will not load is refused whichever direction it was moving in."""
+    # Tighten the total below what the per-trade cap needs, in two steps, so the
+    # revert of the FIRST would restore an incoherent pair.
+    step_one = argue(rules, "account.max_risk_per_trade_pct", "0.4", rules_path=rules_file)
+    first = store.record(build_request(step_one, reason="Smaller.", rules_path=rules_file))
+    apply_request(store, first.id, rules_path=rules_file)
+
+    reloaded = Rules.load(rules_file)
+    step_two = argue(reloaded, "account.max_total_risk_pct", "0.5", rules_path=rules_file)
+    second = store.record(build_request(step_two, reason="Smaller too.", rules_path=rules_file))
+    apply_request(store, second.id, rules_path=rules_file)
+
+    before = rules_file.read_text()
+    result = revert_request(store, first.id, rules_path=rules_file)
+
+    assert not result.ok
+    assert "does not load" in result.detail
+    assert rules_file.read_text() == before
+    assert not list(rules_file.parent.glob("*.tmp"))
+
+
+# ------------------------------------------------- reaching the privilege
+
+
+def test_the_id_travels_on_stdin_and_the_wrapper_takes_no_arguments(
+    rules, rules_file, store, tmp_path
+):
+    """The whole reason the sudoers rule names a wrapper rather than the binary.
+
+    Anything in argv is something a future release could interpret as a flag.
+    The id goes down stdin, where it cannot be read as one whatever it contains.
+    """
+    fake_sudo = tmp_path / "sudo"
+    fake_sudo.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    fake_sudo.chmod(0o755)
+    applier, calls = _stub_wrapper(store, rules_file, tmp_path)
+    applier = WrapperApplier(
+        wrapper=applier.wrapper, sudo=str(fake_sudo), runner=applier.runner
+    )
+    argument = argue(rules, "account.max_position_pct", "40.0", rules_path=rules_file)
+    record = store.record(build_request(argument, reason="Tighter.", rules_path=rules_file))
+
+    assert applier.apply(record.id).ok
+
+    argv, stdin = calls[0]
+    assert argv == [str(fake_sudo), "-n", "-u", "root", "--", str(applier.wrapper)]
+    assert stdin == f"apply {record.id}\n"
+    # Nothing about the change is in argv. Not the key, not the value, not the
+    # path to the rules file.
+    assert not any("max_position_pct" in part for part in argv)
+
+
+def test_a_missing_wrapper_is_reported_rather_than_guessed_at(tmp_path):
+    applier = WrapperApplier(wrapper=tmp_path / "not-installed.sh", sudo="")
+
+    state = applier.available
+
+    assert not state.ok
+    assert "not installed" in state.detail
+    assert not applier.apply(1).ok
+
+
+def test_a_wrapper_that_fails_reports_what_it_said(tmp_path):
+    """The operator gets the wrapper's own words. A generic "could not apply"
+    would hide which of several different problems it was."""
+    script = tmp_path / "apply-settings.sh"
+    script.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+
+    def runner(argv, stdin, timeout):
+        return subprocess.CompletedProcess(argv, 1, "", "sudo: a password is required")
+
+    result = WrapperApplier(wrapper=script, sudo="", runner=runner).apply(3)
+
+    assert not result.ok
+    assert "a password is required" in result.detail
+
+
+def test_a_wrapper_that_hangs_says_the_file_state_is_unknown(tmp_path):
+    """A timeout is the one failure where "nothing was written" cannot be
+    claimed, so it is not claimed."""
+    script = tmp_path / "apply-settings.sh"
+    script.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+
+    def runner(argv, stdin, timeout):
+        raise subprocess.TimeoutExpired(argv, timeout)
+
+    result = WrapperApplier(wrapper=script, sudo="", runner=runner).apply(3)
+
+    assert not result.ok
+    assert "Nothing can be said about whether the file moved" in result.detail
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="needs bash")
+def test_the_wrapper_refuses_anything_that_is_not_an_id(tmp_path):
+    """The script is what the sudoers rule points at, so it validates its own
+    input rather than trusting the caller.
+
+    Run directly, never through sudo, against a fake APP_DIR whose
+    `electrum-bot` only echoes its arguments. That is enough to prove both
+    halves: junk is refused before anything runs, and a well-formed id reaches
+    exactly one fixed command.
+    """
+    app = tmp_path / "app"
+    (app / ".venv" / "bin").mkdir(parents=True)
+    (app / "config").mkdir()
+    (app / "data").mkdir()
+    shutil.copy(DEFAULT_RULES_PATH, app / "config" / "rules.yaml")
+    stub = app / ".venv" / "bin" / "electrum-bot"
+    stub.write_text('#!/bin/sh\necho "CALLED $*"\n', encoding="utf-8")
+    stub.chmod(0o755)
+
+    def run(text: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["bash", str(WRAPPER_SOURCE)],
+            input=text,
+            capture_output=True,
+            text=True,
+            env={"PATH": "/usr/bin:/bin", "APP_DIR": str(app), "APP_USER": "nobody"},
+            check=False,
+        )
+
+    for junk in ("", "; rm -rf /", "apply --rules /etc/shadow", "revert 4x", "apply 4; id"):
+        refused = run(junk + "\n")
+        assert refused.returncode == 2, junk
+        assert "Nothing was done" in refused.stderr
+        assert "CALLED" not in refused.stdout
+
+    applied = run("apply 4\n")
+    assert applied.returncode == 0
+    assert applied.stdout.startswith("CALLED settings-apply 4 --rules ")
+
+    # A bare number is an apply, which is what "reads a request id on stdin"
+    # means at its narrowest.
+    assert run("4\n").stdout.startswith("CALLED settings-apply 4 ")
+    assert run("revert 4\n").stdout.startswith("CALLED settings-revert 4 ")
+
+
+# ------------------------------------------- argue, record and apply, in one
+
+
+def test_a_tightening_is_applied_on_the_first_ask(rules, rules_file, store, tmp_path):
+    """Somebody choosing to lose less is not interrogated for it, and now it
+    also takes effect in the same breath."""
+    applier, _ = _stub_wrapper(store, rules_file, tmp_path)
+
+    outcome = decide(
+        store,
+        rules,
+        "account.max_risk_per_trade_pct",
+        "0.5",
+        reason="Smaller size while I watch it.",
+        equity_usd=EQUITY,
+        rules_path=rules_file,
+        applier=applier,
+    )
+
+    assert outcome.argument.stance is Stance.TIGHTENING
+    assert outcome.changed
+    assert outcome.request is not None
+    assert Rules.load(rules_file).account.max_risk_per_trade_pct == 0.5
+    assert store.get(outcome.request.id).status == "applied"
+    assert "is now 0.5, was 1.0" in outcome.summary
+
+
+def test_a_loosening_is_not_applied_until_the_operator_confirms(
+    rules, rules_file, store, tmp_path
+):
+    """The whole feature, and the half that had to survive the reversal.
+
+    The first ask states the arithmetic and writes NOTHING — not the file, not
+    a row. The second, confirmed, applies it, and the objection is on the record
+    even though the Armorer lost the argument.
+    """
+    applier, _ = _stub_wrapper(store, rules_file, tmp_path)
+    before = rules_file.read_text()
+    ask = dict(
+        reason="I am comfortable with a larger single loss.",
+        equity_usd=EQUITY,
+        rules_path=rules_file,
+        applier=applier,
+    )
+
+    challenged = decide(
+        store, rules, "account.max_risk_per_trade_pct", "2.0", **ask
+    )
+
+    assert challenged.argument.requires_confirmation
+    assert "2.00x the loss" in " ".join(challenged.argument.consequence)
+    assert challenged.request is None
+    assert challenged.applied is None
+    assert store.recent() == []
+    assert rules_file.read_text() == before
+
+    agreed = decide(
+        store, rules, "account.max_risk_per_trade_pct", "2.0", confirm=True, **ask
+    )
+
+    assert agreed.changed
+    assert agreed.request is not None
+    assert Rules.load(rules_file).account.max_risk_per_trade_pct == 2.0
+    kept = store.get(agreed.request.id)
+    assert kept is not None and kept.status == "applied"
+    assert "bigger position at the same stop" in kept.objection
+    assert "comfortable with a larger single loss" in kept.reason
+
+
+def test_a_value_that_would_not_load_is_refused_with_the_file_untouched(
+    rules, rules_file, store, tmp_path
+):
+    """`max_total_risk_pct` below the per-trade cap means no trade could ever
+    open. The staged copy is where that is found, so the file the loop reads
+    never holds it."""
+    applier, _ = _stub_wrapper(store, rules_file, tmp_path)
+    before = rules_file.read_text()
+
+    outcome = decide(
+        store,
+        rules,
+        "account.max_total_risk_pct",
+        "0.5",
+        reason="Much tighter.",
+        rules_path=rules_file,
+        applier=applier,
+    )
+
+    assert outcome.recorded, "the argument still happened and is still on file"
+    assert outcome.request is not None and outcome.applied is not None
+    assert not outcome.changed
+    assert "does not load" in outcome.applied.detail
+    assert rules_file.read_text() == before
+    assert store.get(outcome.request.id).status == "pending"
+    assert not list(rules_file.parent.glob("*.tmp"))
+
+
+def test_without_a_privileged_route_the_request_survives_and_says_so(
+    rules, rules_file, store, tmp_path
+):
+    """The fallback is the previous behaviour, reported plainly — never a
+    silence. Same rule as the Dreaming page's isolation banner: report the
+    weaker fact rather than imply the stronger one."""
+    before = rules_file.read_text()
+
+    outcome = decide(
+        store,
+        rules,
+        "account.max_position_pct",
+        "40.0",
+        reason="Tighter.",
+        rules_path=rules_file,
+        applier=WrapperApplier(wrapper=tmp_path / "absent.sh", sudo=""),
+    )
+
+    assert outcome.recorded
+    assert outcome.request is not None and outcome.applied is not None
+    assert not outcome.changed
+    assert "not installed" in outcome.applied.detail
+    assert rules_file.read_text() == before
+    assert store.get(outcome.request.id).status == "pending"
+    assert "NOT applied" in outcome.summary
+    assert "settings-apply" in outcome.summary
+
+
+def test_an_unrecordable_limit_never_reaches_the_privileged_route(
+    rules, rules_file, store, tmp_path
+):
+    """A list is explained and cannot become a diff, so nothing is asked of
+    root about it."""
+    applier, calls = _stub_wrapper(store, rules_file, tmp_path)
+
+    outcome = decide(
+        store,
+        rules,
+        "instruments.us_equity.max_class_total_risk_pct",
+        "1.5",
+        confirm=True,
+        rules_path=rules_file,
+        applier=applier,
+    )
+
+    assert not outcome.argument.can_record
+    assert outcome.request is None
+    assert calls == []
+    assert store.recent() == []
+
+
+def test_the_direct_applier_is_the_shell_route_and_says_which(
+    rules, rules_file, store
+):
+    """A caller that already holds the permission does not need sudo, and the
+    result names which route wrote the file."""
+    applier = DirectApplier(store, rules_path=rules_file)
+    argument = argue(rules, "account.max_position_pct", "40.0", rules_path=rules_file)
+    record = store.record(build_request(argument, reason="Tighter.", rules_path=rules_file))
+
+    result = applier.apply(record.id)
+
+    assert result.ok and result.via == "in process"
+    assert Rules.load(rules_file).account.max_position_pct == 40.0
+    assert applier.revert(record.id).ok
+    assert Rules.load(rules_file).account.max_position_pct == 50.0
+
+
+# ------------------------------------------------------------- the migration
+
+
+def test_a_store_that_predates_the_revert_columns_keeps_its_rows(tmp_path):
+    """The lesson `journal.SCHEMA` cost a live order, in a second store.
+
+    `CREATE TABLE IF NOT EXISTS` is a no-op on a table that already exists, and
+    every other test here builds its store fresh in a `tmp_path` — so the suite
+    is structurally blind to a schema change that never reaches the database on
+    the droplet. This test builds the OLD shape deliberately, which is the only
+    way to exercise a migration at all, and asserts the existing row survives.
+    """
+    path = tmp_path / "old.db"
+    conn = sqlite3.connect(path)
+    conn.executescript(
+        """
+        CREATE TABLE requests (
+          id INTEGER PRIMARY KEY AUTOINCREMENT, key TEXT NOT NULL,
+          old_value TEXT NOT NULL, new_value TEXT NOT NULL, stance TEXT NOT NULL,
+          reason TEXT NOT NULL, objection TEXT NOT NULL, consequence TEXT NOT NULL,
+          transcript TEXT NOT NULL, rules_digest TEXT NOT NULL,
+          rules_path TEXT NOT NULL, diff TEXT NOT NULL, created_at TEXT NOT NULL,
+          status TEXT NOT NULL, applied_at TEXT
+        );
+        """
+    )
+    conn.execute(
+        "INSERT INTO requests VALUES (1,'account.max_position_pct','50.0','40.0',"
+        "'tightening','because','','[]','[]','','rules.yaml','','2026-01-01T00:00:00+00:00',"
+        "'applied','2026-01-02T00:00:00+00:00')"
+    )
+    conn.commit()
+    conn.close()
+
+    store = SettingsRequestStore(path)
+    kept = store.get(1)
+
+    assert kept is not None
+    assert kept.key == "account.max_position_pct"
+    assert kept.status == "applied"
+    assert kept.applied_at is not None
+    # The new columns read as empty rather than raising, which is the honest
+    # answer for a change made before anything recorded a route.
+    assert kept.applied_by == ""
+    assert kept.reverted_at is None and kept.reverted_by == ""
+
+    # And the migration is idempotent: opening it again changes nothing.
+    reopened = SettingsRequestStore(path).get(1)
+    assert reopened is not None and reopened.status == "applied"
+
+
 # -------------------------------------------------------- what the model gets
 
 
@@ -613,14 +1141,29 @@ def test_the_briefing_hands_over_figures_rather_than_asking_for_them(rules):
     assert "Do not compute a consequence yourself" in briefing
 
 
-def test_the_briefing_says_the_agent_cannot_change_anything(rules):
-    """The obvious reading of a settings agent is that it changes settings."""
-    briefing = render_briefing(rules)
+def test_the_briefing_describes_the_reach_it_actually_has(rules, tmp_path):
+    """What the agent can DO is probed, never assumed.
 
-    assert "YOU CANNOT CHANGE ANY OF THESE" in briefing
-    assert "root-owned" in briefing
-    assert "settings-apply" in briefing
-    assert "Say recorded, never changed." in briefing
+    It used to be told flatly that it could not change anything, which was true
+    then and is a lie on a box with the wrapper installed. Telling it the other
+    flat thing would be a lie on a box without one. Both halves are asserted
+    here because getting either wrong puts a confident false claim in front of
+    an operator deciding what to risk.
+    """
+    absent = render_briefing(rules, applier=WrapperApplier(wrapper=tmp_path / "nope.sh"))
+
+    assert "YOU CANNOT CHANGE ANY OF THESE FROM HERE" in absent
+    assert "root-owned" in absent
+    assert "settings-apply" in absent
+    assert "Say RECORDED, never changed" in absent
+
+    present = render_briefing(rules, applier=_always_available())
+
+    assert "YOU CAN CHANGE THESE" in present
+    # The asymmetry reaches the model as a fact about the code, not as advice.
+    assert "applies NOTHING until the operator confirms" in present
+    assert "Say APPLIED only when the tool tells you it applied" in present
+    assert "settings-revert" in present
 
 
 def test_the_briefing_states_a_missing_equity_reading(rules):
@@ -643,12 +1186,22 @@ from bot.web.app import build_app  # noqa: E402
 TOKEN = "forge-token"
 
 
-def _client(tmp_path, rules_file, store, *, token: str = TOKEN, read: bool = True):
+def _client(
+    tmp_path, rules_file, store, *, token: str = TOKEN, read: bool = True, applier=None
+):
     """An app with every store pointed at `tmp_path`.
 
     All of them, deliberately. `tests/conftest.py` fails the suite if anything
     lands in the repository's own `data/` or `audit/`, and a new store with a
     production default is exactly how that regressed the last time.
+
+    **The applier is injected for the same class of reason and a sharper
+    version of it.** Left to its default the route reaches for
+    `/opt/mudhorn/deploy/apply-settings.sh`, which is absent here — so every
+    test would pass because of a path that does not exist rather than because of
+    the code, and the suite would start editing a live risk limit the day
+    somebody ran it on the droplet. `None` means "no privileged route", which is
+    a real deployment and is asserted as one below.
     """
     env = Env(_env_file=None)  # type: ignore[call-arg]
     env.dashboard_chat_token = token
@@ -670,6 +1223,7 @@ def _client(tmp_path, rules_file, store, *, token: str = TOKEN, read: bool = Tru
         dreams=DreamStore(tmp_path / "dreams.db"),
         poller=poller,
         settings_requests=store,
+        settings_applier=applier or WrapperApplier(wrapper=tmp_path / "absent.sh", sudo=""),
         rules_path=rules_file,
         force_mock=True,
     )
@@ -716,16 +1270,23 @@ def test_the_forge_adds_exactly_the_controls_that_were_decided_on(
     assert posted <= {"/settings/request", "/chat", "/session", "/live"}, posted
 
 
-def test_the_page_says_it_cannot_write_the_file(tmp_path, rules_file, store):
-    """The obvious reading of a settings screen with controls on it is that the
-    controls change settings. The page has to say otherwise, plainly, where a
-    reader is looking."""
+def test_the_page_says_how_the_change_actually_reaches_the_file(
+    tmp_path, rules_file, store
+):
+    """The controls change a limit now, so the page has to describe the
+    arrangement rather than deny it — and the denial is exactly the prose that
+    stops being checked once it is no longer true."""
     body = _client(tmp_path, rules_file, store).get("/settings").text
 
     assert "The forge" in body
-    assert "owned by root on the" in body
+    # Still true, and still the reason any of this is safe.
+    assert "owned by root on the box" in body
+    assert "cannot write" in body
+    assert "with its own hands" in body
+    # And the fallback is named where an operator on a laptop will meet it.
+    assert "recorded and not applied" in body.lower()
     assert "settings-apply" in body
-    assert "change request" in body
+    assert "settings-revert" in body
 
 
 def test_the_forge_is_off_without_a_token_and_says_why(tmp_path, rules_file, store):
@@ -782,11 +1343,22 @@ def test_the_route_challenges_a_loosening_before_it_will_record_it(
     assert challenged["stance"] == "loosening"
     assert challenged["requires_confirmation"] is True
     assert challenged["recorded"] is None
+    assert challenged["applied"] is None
     assert store.recent() == []
     said = " ".join(challenged["consequence"])
     assert "2.00x the loss" in said
     assert "$2,000.00 instead of $1,000.00" in said
     assert "1 full-size trade fits" in said
+
+    # Everything the confirmation window renders is on the UNCONFIRMED leg. It
+    # has no arithmetic and no fetch in it, so a payload missing these would ask
+    # the operator to agree to a number with nothing to compare it against.
+    assert challenged["label"] == "Risk per trade"
+    assert challenged["unit"] == "per cent of equity"
+    assert (challenged["old_value"], challenged["new_value"]) == ("1.0", "2.0")
+    assert "-  max_risk_per_trade_pct: 1.0" in challenged["diff"]
+    assert "+  max_risk_per_trade_pct: 2.0" in challenged["diff"]
+    assert "bigger position at the same stop" in challenged["objection"]
 
     confirmed = client.post("/settings/request", json={**ask, "confirm": True}).json()
     recorded = confirmed["recorded"]
@@ -795,11 +1367,11 @@ def test_the_route_challenges_a_loosening_before_it_will_record_it(
     assert "-  max_risk_per_trade_pct: 1.0" in recorded["diff"]
     assert "+  max_risk_per_trade_pct: 2.0" in recorded["diff"]
     assert "settings-apply 1" in recorded["apply_command"]
+    assert "settings-revert 1" in recorded["revert_command"]
     assert "The Armorer objected" in recorded["commit_message"]
 
     kept = store.get(1)
     assert kept is not None
-    assert kept.status == "pending"
     assert "bigger position at the same stop" in kept.objection
 
 
@@ -822,14 +1394,20 @@ def test_the_route_records_a_tightening_on_the_first_ask(tmp_path, rules_file, s
     assert store.get(1).objection == ""
 
 
-def test_nothing_the_surface_does_touches_the_rules_file(tmp_path, rules_file, store):
-    """The property the whole arrangement exists for, asserted rather than
-    assumed. Recording is not applying, and the file must be byte-identical
-    afterwards."""
+def test_with_no_privileged_route_the_surface_records_and_the_file_stands(
+    tmp_path, rules_file, store
+):
+    """The fallback deployment, asserted rather than assumed.
+
+    A laptop, or a box where the sudoers rule was never installed. Every request
+    is argued and recorded; the file is byte-identical afterwards; and the
+    answer says so in the operator's own words rather than reading as a change
+    that landed.
+    """
     before = rules_file.read_text()
     client = _client(tmp_path, rules_file, store)
 
-    for value in ("2.0", "0.5", "9.9"):
+    answers = [
         client.post(
             "/settings/request",
             json={
@@ -839,10 +1417,69 @@ def test_nothing_the_surface_does_touches_the_rules_file(tmp_path, rules_file, s
                 "reason": "testing",
                 "confirm": True,
             },
-        )
+        ).json()
+        for value in ("2.0", "0.5", "0.9")
+    ]
 
     assert rules_file.read_text() == before
     assert len(store.recent()) == 3
+    for answer in answers:
+        assert answer["recorded"]["id"]
+        assert answer["applied"]["ok"] is False
+        assert "not installed" in answer["applied"]["detail"]
+        assert "NOT applied" in answer["summary"]
+    assert all(req.status == "pending" for req in store.recent())
+
+
+def test_the_surface_applies_the_change_when_the_route_is_there(
+    tmp_path, rules_file, store
+):
+    """The reversal, end to end over HTTP and with no model in it.
+
+    A tightening lands on the first ask. A loosening is refused until the
+    operator confirms having read the cost, then lands — with the objection
+    still on the record, because an argument the operator won is a fact worth
+    keeping and so is one they lost.
+    """
+    applier, calls = _stub_wrapper(store, rules_file, tmp_path)
+    client = _client(tmp_path, rules_file, store, applier=applier)
+
+    tightened = client.post(
+        "/settings/request",
+        json={
+            "token": TOKEN,
+            "key": "account.max_position_pct",
+            "value": "40.0",
+            "reason": "Smaller concentration backstop.",
+        },
+    ).json()
+
+    assert tightened["applied"]["ok"] is True
+    assert Rules.load(rules_file).account.max_position_pct == 40.0
+    assert "is now 40.0, was 50.0" in tightened["summary"]
+
+    ask = {
+        "token": TOKEN,
+        "key": "account.max_risk_per_trade_pct",
+        "value": "2.0",
+        "reason": "I am comfortable with a larger single loss.",
+    }
+    challenged = client.post("/settings/request", json=ask).json()
+
+    assert challenged["applied"] is None
+    assert Rules.load(rules_file).account.max_risk_per_trade_pct == 1.0
+
+    agreed = client.post("/settings/request", json={**ask, "confirm": True}).json()
+
+    assert agreed["applied"]["ok"] is True
+    assert Rules.load(rules_file).account.max_risk_per_trade_pct == 2.0
+    kept = store.get(agreed["recorded"]["id"])
+    assert kept.status == "applied" and kept.applied_at is not None
+    assert "bigger position at the same stop" in kept.objection
+
+    # Two changes, two trips through the wrapper, and the id on stdin both
+    # times. Nothing about either change was ever in argv.
+    assert [stdin for _, stdin in calls] == ["apply 1\n", "apply 2\n"]
 
 
 def test_the_transcript_is_kept_with_the_request(tmp_path, rules_file, store):
@@ -1064,3 +1701,128 @@ def test_a_non_numeric_id_is_refused_before_anything_is_read(rules_file, capsys)
 
     assert code == 2
     assert "is not a request id" in capsys.readouterr().out
+
+
+def test_the_revert_command_puts_the_previous_value_back(
+    rules, rules_file, store, capsys
+):
+    """A limit moved under pressure at 2am is the thing somebody wants undone at
+    9am, and "it is in git" is not a route the operator has from the
+    dashboard."""
+    from bot.main import cmd_settings_apply
+
+    record = store.record(
+        build_request(
+            argue(rules, "account.max_position_pct", "40.0", rules_path=rules_file),
+            reason="Tighter, at 2am.",
+            rules_path=rules_file,
+        )
+    )
+    assert cmd_settings_apply(str(record.id), rules_file, requests_path=store.path) == 0
+    capsys.readouterr()
+
+    code = cmd_settings_apply(
+        str(record.id), rules_file, revert=True, requests_path=store.path
+    )
+    out = capsys.readouterr().out
+
+    assert code == 0
+    assert "is 50.0 again" in out
+    assert Rules.load(rules_file).account.max_position_pct == 50.0
+    # A revert is not a change to commit, so it does not print a commit message
+    # for one — the original request is still the row that describes what
+    # happened.
+    assert "Commit it with" not in out
+
+
+def test_the_revert_command_lists_what_can_be_undone(rules, rules_file, store, capsys):
+    """A different list from the pending one. Offering pending requests here
+    would invite reverting an id that never moved the file."""
+    from bot.main import cmd_settings_apply
+
+    applied = store.record(
+        build_request(
+            argue(rules, "account.max_position_pct", "40.0", rules_path=rules_file),
+            reason="Applied one.",
+            rules_path=rules_file,
+        )
+    )
+    cmd_settings_apply(str(applied.id), rules_file, requests_path=store.path)
+    store.record(
+        build_request(
+            argue(
+                Rules.load(rules_file),
+                "frequency.max_trades_per_day",
+                "2",
+                rules_path=rules_file,
+            ),
+            reason="Pending one.",
+            rules_path=rules_file,
+        )
+    )
+    capsys.readouterr()
+
+    code = cmd_settings_apply(None, rules_file, revert=True, requests_path=store.path)
+    out = capsys.readouterr().out
+
+    assert code == 1
+    assert "Applied settings requests:" in out
+    assert "account.max_position_pct 50.0 -> 40.0" in out
+    assert "max_trades_per_day" not in out
+    assert "settings-revert <id>" in out
+
+
+def test_a_dry_run_revert_proves_it_loads_and_writes_nothing(
+    rules, rules_file, store, capsys
+):
+    from bot.main import cmd_settings_apply
+
+    record = store.record(
+        build_request(
+            argue(rules, "account.max_position_pct", "40.0", rules_path=rules_file),
+            reason="Tighter.",
+            rules_path=rules_file,
+        )
+    )
+    cmd_settings_apply(str(record.id), rules_file, requests_path=store.path)
+    after_apply = rules_file.read_text()
+    capsys.readouterr()
+
+    code = cmd_settings_apply(
+        str(record.id), rules_file, revert=True, dry_run=True, requests_path=store.path
+    )
+
+    assert code == 0
+    assert "Nothing was written" in capsys.readouterr().out
+    assert rules_file.read_text() == after_apply
+    assert store.get(record.id).status == "applied"
+
+
+def test_the_request_list_separates_pending_applied_and_reverted(
+    tmp_path, rules_file, store
+):
+    """Reverted is not pending. A row that was applied and then put back has a
+    history, and collapsing it to "not in force" loses the fact that the limit
+    moved at all — which is what somebody reading this months later wants."""
+    applier, _ = _stub_wrapper(store, rules_file, tmp_path)
+    client = _client(tmp_path, rules_file, store, applier=applier)
+
+    client.post(
+        "/settings/request",
+        json={
+            "token": TOKEN,
+            "key": "account.max_position_pct",
+            "value": "40.0",
+            "reason": "Applied and kept.",
+        },
+    )
+    body = client.get("/settings").text
+    assert "<b>Applied</b>" in body
+    assert "settings-revert 1" in body
+    assert "via stub" in body
+
+    revert_request(store, 1, rules_path=rules_file, actor="stub")
+    body = client.get("/settings").text
+
+    assert "<b>Applied and then reverted</b>" in body
+    assert "The limit moved and was put back" in body

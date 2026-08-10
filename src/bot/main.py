@@ -54,10 +54,12 @@ from .models import (
     Decision,
     MarketInputs,
     OrderProposal,
+    PositionAction,
     RiskVerdict,
     SymbolAssessment,
 )
 from .options import alerts_for_positions
+from .position_actions import execute_position_plan, loop_execution_state
 from .reconcile import apply_journal_state, reconcile, record_fill
 from .risk import RiskGate
 from .session_calendar import SessionCalendar
@@ -241,9 +243,31 @@ def cmd_loop(
         execution_mode=env.execution_mode,
     )
 
+    # Whether this loop may act on its own position plans, and the sentence
+    # saying so. Read once at startup and stated out loud, because it is the
+    # kind of switch whose OFF state is otherwise indistinguishable from a
+    # feature that is broken: a model that proposes a tighten every cycle and a
+    # loop that silently ignores every one looks exactly like a loop whose
+    # plans are empty. `execute_position_plan` reads the flag again for itself
+    # on every plan — this is a statement, not the guard.
+    actions_enabled, actions_note = loop_execution_state(rules)
     audit.record_event(
         "loop_start",
-        {"tier": env.claude_tier.value, "execute": execute, "paper": env.alpaca_paper_trade},
+        {
+            "tier": env.claude_tier.value,
+            "execute": execute,
+            "paper": env.alpaca_paper_trade,
+            "position_actions_enabled": actions_enabled,
+            "position_actions_note": actions_note,
+        },
+    )
+    log.info(
+        "position_actions_state",
+        enabled=actions_enabled,
+        # Both switches, because either one being off is enough. `--execute` off
+        # means no broker call of any kind this run, plans included.
+        execute=execute,
+        detail=actions_note,
     )
     if not execute:
         log.info("dry_run_no_orders_will_be_placed")
@@ -426,6 +450,12 @@ def cmd_loop(
                     symbol=breach.trade.symbol,
                     direction=breach.trade.direction.value,
                     price=round(breach.price, 4),
+                    # The level the breach was measured against — the one in
+                    # FORCE, which is the tightened one where a move has been
+                    # recorded. `planned_stop` beside it because `through_by` is
+                    # arithmetic against `stop`, and a reader given only the
+                    # sizing figure would find the numbers did not add up.
+                    stop=round(breach.stop, 4),
                     planned_stop=round(breach.trade.planned_stop, 4),
                     through_by=round(breach.distance_usd, 4),
                     loss_if_closed_now=round(breach.loss_if_closed_now_usd, 2),
@@ -637,6 +667,115 @@ def cmd_loop(
                     if trade_id is not None:
                         account = apply_journal_state(account, journal)
 
+            # ---------------------------------------- acting on the positions
+            #
+            # AFTER the proposal loop, deliberately. A close frees risk, and
+            # freeing it first would let a proposal in this same cycle be gated
+            # against room that a close has only just been submitted for — an
+            # order at the broker is not a settled position, and the cap would
+            # be counting against a reading nobody has taken. The plans manage
+            # what is already open; they are not an input to what opens next.
+            #
+            # Two switches, and they are not the same switch:
+            #
+            # - `--execute` is this process's: without it the loop reaches the
+            #   broker for nothing at all, and `electrum-bot loop` is documented
+            #   as placing nothing. A close or a stop replace IS a broker call.
+            # - `position_actions.enabled` is the operator's, ships false, and
+            #   is checked INSIDE `execute_position_plan` so a call site that
+            #   forgets it still fails closed. It is deliberately not read here
+            #   first: letting the refusal come back from the function is what
+            #   keeps that guard exercised on every cycle rather than only in a
+            #   test.
+            #
+            # HOLD is skipped before either. A hold is not a move, it is already
+            # in the audit log with the rest of the cycle, and calling through
+            # for one would write a log line every fifteen minutes for every
+            # open position — burying the moves that matter in the ones that are
+            # not moves at all.
+            actions_taken: list[str] = []
+            actions_refused: list[str] = []
+            for plan in decision.position_plans:
+                if plan.action is PositionAction.HOLD:
+                    continue
+                if not execute:
+                    actions_refused.append(f"{plan.symbol}:{plan.action.value}")
+                    log.info(
+                        "position_plan_not_executed",
+                        symbol=plan.symbol,
+                        action=plan.action.value,
+                        reason=(
+                            "--execute is off, so this cycle reaches the broker "
+                            "for nothing. The plan is recorded in the audit log "
+                            "and the position is untouched."
+                        ),
+                    )
+                    continue
+                # Caught broadly, and for the reason `claude.propose` and
+                # `fetch_market_ticks` are. Every broker method here reports a
+                # refusal rather than raising, so the exception that reaches
+                # this is the unanticipated one — a locked journal, an SDK
+                # change — and letting it out ends the decision loop with real
+                # orders resting at the broker and nothing on screen to say the
+                # bot has gone. A failed move leaves the position exactly as it
+                # was, which is the safe direction, and the next cycle tries
+                # again.
+                try:
+                    outcome = execute_position_plan(
+                        plan, rules=rules, journal=journal, broker=broker
+                    )
+                except Exception as exc:
+                    detail = f"{type(exc).__name__}: {exc}"
+                    actions_refused.append(f"{plan.symbol}:{plan.action.value}")
+                    log.error(
+                        "position_plan_failed",
+                        symbol=plan.symbol,
+                        action=plan.action.value,
+                        error=detail,
+                    )
+                    audit.record_event(
+                        "position_action_failed",
+                        {
+                            "symbol": plan.symbol,
+                            "action": plan.action.value,
+                            "error": detail,
+                        },
+                    )
+                    continue
+                if outcome.ok:
+                    actions_taken.append(f"{plan.symbol}:{plan.action.value}")
+                else:
+                    actions_refused.append(f"{plan.symbol}:{plan.action.value}")
+                log.info(
+                    "position_plan_executed" if outcome.ok else "position_plan_refused",
+                    symbol=plan.symbol,
+                    action=plan.action.value,
+                    reached_broker=outcome.reached_broker,
+                    risk_before_usd=outcome.risk_before_usd,
+                    risk_after_usd=outcome.risk_after_usd,
+                    reasons=outcome.reasons,
+                    warnings=outcome.warnings,
+                    detail=outcome.detail,
+                )
+                audit.record_event(
+                    "position_action",
+                    {
+                        "symbol": plan.symbol,
+                        "action": plan.action.value,
+                        "ok": outcome.ok,
+                        "reached_broker": outcome.reached_broker,
+                        "reasons": outcome.reasons,
+                        "warnings": outcome.warnings,
+                        "detail": outcome.detail,
+                    },
+                )
+            if actions_taken:
+                # A tightened stop lowers what the position stands to lose and a
+                # close removes it, so the figures reported below have to be
+                # read again. Without this the cycle line states the risk the
+                # account carried BEFORE the loop acted on it.
+                account = apply_journal_state(account, journal)
+
             audit.record(
                 Decision(
                     timestamp=datetime.now(UTC),
@@ -672,6 +811,15 @@ def cmd_loop(
                     "untracked_positions": recon.untracked_positions,
                     "risk_understated": recon.risk_is_understated,
                     "open_risk_usd": round(account.open_risk_usd, 2),
+                    # What changed at the broker with nothing on file to say
+                    # why, in full rather than as a count: the audit log is
+                    # where a reader goes to find out WHICH position and by how
+                    # much, and the count on the cycle line is only a pointer
+                    # to it.
+                    "unexplained_moves": [
+                        m.describe() for m in recon.unexplained.moves
+                    ],
+                    "unexplained_check_ran": recon.unexplained.can_check,
                 },
             )
 
@@ -701,6 +849,31 @@ def cmd_loop(
                 # which is what an outage also looks like.
                 stops_breached=len(breaches),
                 stops_unchecked=unchecked_stops,
+                # A stop or a quantity that differs from the journal with no
+                # recorded reason. On the cycle line for the same reason
+                # `stops_breached` is: a stated zero each cycle is a fact, and
+                # an absent field is what an outage looks like.
+                unexplained_moves=len(recon.unexplained.moves),
+                # And whether the comparison could be made at all. `[]` from a
+                # failed order fetch is indistinguishable from an account with
+                # nothing resting, so a zero above means nothing when this is
+                # False — `FinnhubCalendar.is_degraded` again.
+                unexplained_check_ran=recon.unexplained.can_check,
+                # The two states that are not findings: a stop leg whose
+                # trigger the broker would not report, and a position with no
+                # stop resting behind it at all. Neither is "clean", and
+                # neither is warned about anywhere else every cycle.
+                stops_unreadable=recon.unexplained.unreadable_stops,
+                positions_without_a_resting_stop=(
+                    recon.unexplained.positions_without_a_resting_stop
+                ),
+                # What the loop DID about its own position plans, and what it
+                # deliberately did not. Both switches are off by default, so
+                # two empty lists is the ordinary reading — and it has to be
+                # stated, or "the loop is not acting on plans" and "the model
+                # proposed no moves" look identical.
+                position_actions_taken=actions_taken,
+                position_actions_not_taken=actions_refused,
                 news_windows=len(news_windows),
                 # Every symbol an adopted dream is currently widening the
                 # allowlist by. On the cycle line for the same reason
@@ -1266,14 +1439,24 @@ def cmd_settings_apply(
     rules_path: Path,
     *,
     dry_run: bool = False,
+    revert: bool = False,
+    requests_path: Path | None = None,
 ) -> int:
-    """Apply a change request the settings agent recorded. **Run this as root.**
+    """Apply — or revert — a change the settings agent argued. **As root.**
 
-    The privileged half of the settings agent, and the reason there is a half at
-    all: `config/` is owned by root on the droplet so the service account cannot
-    edit its own limits, and the dashboard runs as the service account. A bot
-    that can widen its own risk limits is exactly what this architecture is
-    built to prevent, so the interface argues and records, and a person applies.
+    The privileged half of the settings agent. `config/` is owned by root on the
+    droplet so the service account cannot edit its own limits, and the dashboard
+    runs as the service account; this command is the only thing that writes
+    `config/rules.yaml`, and it is reached two ways:
+
+    - a person at a root shell, which is this file's original audience
+    - the Armorer, through `deploy/apply-settings.sh` — root-owned, named in a
+      sudoers rule, taking no arguments, with the id on stdin
+
+    Both run the same code, and the second is why the wrapper exists rather than
+    a sudoers rule naming this binary: a rule on `electrum-bot` would permit
+    every subcommand it has and every one a future release adds, chosen by
+    whoever is signed in to the dashboard.
 
     **Nothing here checks for root**, deliberately. An unprivileged run fails on
     the write with a permission error from the operating system, which is a
@@ -1285,7 +1468,12 @@ def cmd_settings_apply(
     guessing at a number, and a wrong guess here edits a risk limit. It exits
     non-zero in that case so a script cannot read "nothing applied" as success.
     """
-    from .settings_agent import SettingsRequestStore, apply_request, commit_message
+    from .settings_agent import (
+        SettingsRequestStore,
+        apply_request,
+        commit_message,
+        revert_request,
+    )
 
     # Parsed BEFORE the store is opened, which is not tidiness: opening it
     # creates `data/settings_requests.db`, and a typo at the shell should not
@@ -1298,14 +1486,22 @@ def cmd_settings_apply(
             print(f"'{target}' is not a request id. Run with no id to list them.")
             return 2
 
-    store = SettingsRequestStore()
+    store = (
+        SettingsRequestStore(requests_path)
+        if requests_path is not None
+        else SettingsRequestStore()
+    )
     if request_id is None:
-        pending = store.recent(limit=25, status="pending")
-        if not pending:
-            print("No pending settings requests.")
+        # A revert with no id lists what there is to undo, which is a different
+        # list from what is waiting to be applied. Offering the pending ones
+        # here would invite reverting an id that never moved the file.
+        wanted = "applied" if revert else "pending"
+        listed = store.recent(limit=25, status=wanted)
+        if not listed:
+            print(f"No {wanted} settings requests.")
             return 1
-        print("Pending settings requests:")
-        for req in pending:
+        print(f"{wanted.capitalize()} settings requests:")
+        for req in listed:
             print(
                 f"  {req.id}: {req.key} {req.old_value} -> {req.new_value} "
                 f"({req.stance}, argued {req.created_at:%Y-%m-%d %H:%M} UTC)"
@@ -1313,15 +1509,22 @@ def cmd_settings_apply(
             print(f"      because: {req.reason or 'no reason recorded'}")
             if req.objection.strip():
                 print(f"      objection: {req.objection}")
-        print("\nApply one with: electrum-bot settings-apply <id>")
+            if req.applied_at is not None:
+                print(
+                    f"      applied {req.applied_at:%Y-%m-%d %H:%M} UTC"
+                    + (f" by {req.applied_by}" if req.applied_by else "")
+                )
+        verb = "settings-revert" if revert else "settings-apply"
+        print(f"\n{'Revert' if revert else 'Apply'} one with: electrum-bot {verb} <id>")
         return 1
 
     request = store.get(request_id)
-    result = apply_request(store, request_id, rules_path=rules_path, dry_run=dry_run)
+    run = revert_request if revert else apply_request
+    result = run(store, request_id, rules_path=rules_path, dry_run=dry_run)
     if result.diff:
         print(result.diff)
     print(result.detail)
-    if result.ok and request is not None and not dry_run:
+    if result.ok and request is not None and not dry_run and not revert:
         # The commit message goes to stdout rather than into a file, because
         # `CLAUDE.md` is explicit that a limit changes in its own commit with a
         # reason — and the reason, along with the objection the operator
@@ -1385,6 +1588,7 @@ def main() -> int:
             "vault-expire",
             "reindex",
             "settings-apply",
+            "settings-revert",
         ],
         help=(
             "smoketest: one-shot connectivity check. loop: run the decision "
@@ -1397,10 +1601,11 @@ def main() -> int:
             "dreams past their shelf's TTL and withdraw the grants that "
             "lapsed; it marks and never deletes, and never closes a position. "
             "reindex: rebuild the searchable history from audit/. "
-            "settings-apply: apply a change request the settings agent recorded "
-            "— RUN AS ROOT, because config/ is root-owned so the service "
-            "account cannot edit its own limits. With no id it lists what is "
-            "pending."
+            "settings-apply: apply a change the settings agent argued — RUN AS "
+            "ROOT, because config/ is root-owned so the service account cannot "
+            "edit its own limits. settings-revert: put the previous value back, "
+            "through the same validation. With no id either one lists what it "
+            "could act on."
         ),
     )
     parser.add_argument(
@@ -1408,16 +1613,25 @@ def main() -> int:
         nargs="?",
         default=None,
         help=(
-            "The settings request id, for settings-apply. Ignored by every "
-            "other command."
+            "The settings request id, for settings-apply and settings-revert. "
+            "Ignored by every other command."
         ),
     )
     parser.add_argument(
         "--dry-run",
         action="store_true",
         help=(
-            "settings-apply only: show the diff and prove the edited file loads, "
-            "then write nothing."
+            "settings-apply and settings-revert only: show the diff and prove "
+            "the edited file loads, then write nothing."
+        ),
+    )
+    parser.add_argument(
+        "--requests",
+        default=None,
+        help=(
+            "Path to the settings request store (default: "
+            "data/settings_requests.db, relative to the working directory). "
+            "settings-apply and settings-revert only."
         ),
     )
     parser.add_argument(
@@ -1453,9 +1667,18 @@ def main() -> int:
     # It cannot loosen anything on its own: the request it applies was argued,
     # confirmed and recorded already, and the file is re-validated through
     # `Rules.load` before it is replaced.
-    if args.command == "settings-apply":
+    #
+    # The revert path is here for a stronger version of the same reason. Undoing
+    # a limit that was moved under pressure is the most time-critical safe action
+    # this CLI has, and refusing it because a broker key is missing would withhold
+    # it at precisely the moment it is wanted.
+    if args.command in {"settings-apply", "settings-revert"}:
         return cmd_settings_apply(
-            args.target, Path(args.rules), dry_run=args.dry_run
+            args.target,
+            Path(args.rules),
+            dry_run=args.dry_run,
+            revert=args.command == "settings-revert",
+            requests_path=Path(args.requests) if args.requests else None,
         )
 
     env = Env()

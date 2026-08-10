@@ -14,6 +14,7 @@ No network, no real account: the broker is a `MockBroker` and Claude is stubbed.
 
 from __future__ import annotations
 
+import sqlite3
 import time
 from collections.abc import MutableMapping
 from datetime import UTC, datetime, timedelta
@@ -905,3 +906,366 @@ def test_a_cycle_that_recorded_no_numeric_readings_is_skipped(tmp_path):
     audit.record(Decision(timestamp=datetime(2026, 6, 1, 10, tzinfo=UTC), inputs=None))
 
     assert main_mod.recent_readings(audit.read()) == []
+
+
+# --------------------------- acting on a position, and saying what was not done
+
+
+def _cycle_with_broker(
+    monkeypatch,
+    tmp_path,
+    decision: ClaudeDecision,
+    broker: Any,
+    *,
+    execute: bool = False,
+    position_actions: bool = False,
+    journal: Journal | None = None,
+) -> list[MutableMapping[str, Any]]:
+    """One cycle against a broker the test built, with both switches settable.
+
+    `_run_one_cycle` builds its own `MockBroker` inside `build_broker`, so a
+    test that needs a POSITION — which is the only thing a position plan can
+    act on — has no way to reach it. This swaps the factory instead, the same
+    way `tests/test_web.py` primes the poller.
+    """
+
+    def _stop(_seconds: float) -> None:
+        raise KeyboardInterrupt
+
+    store = journal or Journal(tmp_path / "journal.db")
+    monkeypatch.setattr(time, "sleep", _stop)
+    monkeypatch.setattr(main_mod, "Journal", lambda: store)
+    monkeypatch.setattr(main_mod, "AuditLog", lambda: AuditLog(tmp_path / "audit"))
+    monkeypatch.setattr(main_mod, "ClaudeClient", lambda *a, **k: _StubClaude(decision))
+    monkeypatch.setattr(main_mod, "DreamStore", lambda: DreamStore(tmp_path / "dreams.db"))
+    monkeypatch.setattr(main_mod, "build_broker", lambda env, force_mock=False: broker)
+
+    env = Env(_env_file=None)  # type: ignore[call-arg]
+    rules = load_rules()
+    rules.loop.skip_model_call_when_all_markets_closed = False
+    rules.position_actions.enabled = position_actions
+
+    with structlog.testing.capture_logs() as logs:
+        assert main_mod.cmd_loop(env, rules, execute=execute, force_mock=True) == 0
+    return logs
+
+
+def _short_spy_at_the_broker(stop_leg: float | None = 805.0):
+    """A held short with a stop leg resting at a level the journal will disagree
+    with. The live position's own shape."""
+    from bot.broker import MockBroker
+    from bot.models import Direction, OrderStatus, Position, WorkingOrder
+
+    broker = MockBroker(starting_equity=100_000.0)
+    broker.connect()
+    broker.set_price("SPY", bid=789.98, ask=790.02)
+    broker._positions["SPY"] = Position(
+        symbol="SPY",
+        direction=Direction.SELL,
+        qty=21,
+        entry_price=773.32,
+        opened_at=datetime(2026, 5, 4, 15, 0, tzinfo=UTC),
+        current_price=790.0,
+    )
+    if stop_leg is not None:
+        broker.set_open_orders(
+            [
+                WorkingOrder(
+                    order_id="stop-1",
+                    symbol="SPY",
+                    direction=Direction.BUY,
+                    qty=21,
+                    order_type="stop",
+                    stop_price=stop_leg,
+                    status=OrderStatus.NEW,
+                    submitted_at=datetime(2026, 5, 4, 15, 0, tzinfo=UTC),
+                )
+            ]
+        )
+    return broker
+
+
+def _journal_with_the_short(tmp_path) -> Journal:
+    from bot.models import Direction, Trade
+
+    journal = Journal(tmp_path / "journal.db")
+    journal.record_entry(
+        Trade(
+            symbol="SPY",
+            direction=Direction.SELL,
+            qty=21,
+            entry_time=datetime(2026, 5, 4, 15, 0, tzinfo=UTC),
+            entry_price=773.32,
+            planned_stop=820.0,
+            rationale="Operator test short, journalled by hand.",
+        )
+    )
+    return journal
+
+
+def _tighten(new_stop: float | None = 810.0):
+    from bot.models import PositionAction, PositionPlan
+
+    return ClaudeDecision(
+        market_assessment="Holding the short, pulling the stop in.",
+        proposals=[],
+        position_plans=[
+            PositionPlan(
+                symbol="SPY",
+                action=PositionAction.TIGHTEN_STOP,
+                reasoning="Price has come 17 points my way; taking the risk down.",
+                new_stop_price=new_stop,
+            )
+        ],
+    )
+
+
+def test_the_heartbeat_states_the_unexplained_move_count(monkeypatch, tmp_path):
+    """A stop resting at 805 against a journal that says 820, with nothing on
+    file to explain the difference.
+
+    On the cycle line rather than only in a warning, and for the same reason
+    `stops_breached` is: a stated zero each cycle is a fact, where an absent
+    field is what an outage looks like.
+    """
+    logs = _cycle_with_broker(
+        monkeypatch,
+        tmp_path,
+        ClaudeDecision(market_assessment="Holding.", proposals=[]),
+        _short_spy_at_the_broker(),
+        journal=_journal_with_the_short(tmp_path),
+    )
+
+    beat = _heartbeat(logs)
+    assert beat["unexplained_moves"] == 1
+    assert beat["unexplained_check_ran"] is True
+    assert beat["stops_unreadable"] == []
+    assert beat["positions_without_a_resting_stop"] == []
+
+
+def test_the_heartbeat_states_a_zero_rather_than_leaving_the_field_out(
+    monkeypatch, tmp_path
+):
+    """The stop at the broker matches the journal, so there is nothing to
+    report — and the field still has to be there saying so."""
+    logs = _cycle_with_broker(
+        monkeypatch,
+        tmp_path,
+        ClaudeDecision(market_assessment="Holding.", proposals=[]),
+        _short_spy_at_the_broker(stop_leg=820.0),
+        journal=_journal_with_the_short(tmp_path),
+    )
+
+    beat = _heartbeat(logs)
+    assert beat["unexplained_moves"] == 0
+    assert beat["unexplained_check_ran"] is True
+
+
+def test_a_position_with_no_resting_stop_is_named_rather_than_counted_clean(
+    monkeypatch, tmp_path
+):
+    """Not a move and not nothing: an equity position with no stop order behind
+    it means rule 3 is being met by `stop_watch` and by nothing at the broker."""
+    logs = _cycle_with_broker(
+        monkeypatch,
+        tmp_path,
+        ClaudeDecision(market_assessment="Holding.", proposals=[]),
+        _short_spy_at_the_broker(stop_leg=None),
+        journal=_journal_with_the_short(tmp_path),
+    )
+
+    beat = _heartbeat(logs)
+    assert beat["unexplained_moves"] == 0
+    assert beat["positions_without_a_resting_stop"] == ["SPY"]
+
+
+def test_a_tighten_is_executed_when_both_switches_are_on(monkeypatch, tmp_path):
+    """The wiring that was missing: nothing called `execute_position_plan` at
+    all, so a plan naming a level did nothing whatever.
+
+    Both halves are asserted — the broker leg is replaced AND the journal
+    records the move with the model's reasoning as the reason, because a
+    journal saying 810 with 805 still resting would be worse than no record.
+    """
+    journal = _journal_with_the_short(tmp_path)
+    broker = _short_spy_at_the_broker(stop_leg=820.0)
+
+    logs = _cycle_with_broker(
+        monkeypatch, tmp_path, _tighten(810.0), broker,
+        execute=True, position_actions=True, journal=journal,
+    )
+
+    beat = _heartbeat(logs)
+    assert beat["position_actions_taken"] == ["SPY:tighten_stop"]
+    assert beat["position_actions_not_taken"] == []
+
+    trade = journal.open_trade_for("SPY")
+    assert trade is not None
+    assert trade.current_stop == 810.0
+    assert trade.planned_stop == 820.0, "the sizing figure must not be overwritten"
+    assert trade.current_risk_usd < trade.planned_risk_usd
+
+    assert [o.stop_price for o in broker.get_open_orders()] == [810.0]
+    action = journal.position_actions()[0]
+    assert action.after_stop == 810.0
+    assert action.reason.startswith("Price has come 17 points")
+    # And the risk the cycle reports is re-read after the move, or the line
+    # would state the figure the account carried before the loop acted.
+    assert beat["open_risk_usd"] == pytest.approx(trade.current_risk_usd, abs=0.01)
+
+
+def test_a_widening_plan_is_refused_and_the_position_is_untouched(
+    monkeypatch, tmp_path
+):
+    """A short's stop tightens DOWNWARD, so 830 is a widen — the one position
+    move that increases the loss at unchanged size, with no gate anywhere in
+    this system that would catch it. Refused in code, and the loop says so."""
+    journal = _journal_with_the_short(tmp_path)
+    broker = _short_spy_at_the_broker(stop_leg=820.0)
+
+    logs = _cycle_with_broker(
+        monkeypatch, tmp_path, _tighten(830.0), broker,
+        execute=True, position_actions=True, journal=journal,
+    )
+
+    beat = _heartbeat(logs)
+    assert beat["position_actions_taken"] == []
+    assert beat["position_actions_not_taken"] == ["SPY:tighten_stop"]
+
+    trade = journal.open_trade_for("SPY")
+    assert trade is not None and trade.current_stop is None
+    assert [o.stop_price for o in broker.get_open_orders()] == [820.0]
+
+    refusal = next(e for e in logs if e["event"] == "position_plan_refused")
+    assert any("REFUSED" in r for r in refusal["reasons"])
+
+
+def test_the_switch_being_off_is_stated_rather_than_silent(monkeypatch, tmp_path):
+    """`position_actions.enabled` ships false, so the ordinary reading is that
+    a plan is recorded and not acted on.
+
+    It has to be SAID: a model proposing a tighten every cycle against a loop
+    that silently ignores every one looks exactly like a loop whose plans are
+    empty. The refusal comes back from `execute_position_plan` rather than
+    being pre-empted here, which is what keeps that fail-closed check exercised
+    on a real cycle rather than only in its own unit test.
+    """
+    journal = _journal_with_the_short(tmp_path)
+    broker = _short_spy_at_the_broker(stop_leg=820.0)
+
+    logs = _cycle_with_broker(
+        monkeypatch, tmp_path, _tighten(810.0), broker,
+        execute=True, position_actions=False, journal=journal,
+    )
+
+    beat = _heartbeat(logs)
+    assert beat["position_actions_taken"] == []
+    assert beat["position_actions_not_taken"] == ["SPY:tighten_stop"]
+
+    state = next(e for e in logs if e["event"] == "position_actions_state")
+    assert state["enabled"] is False
+    assert "records its position plans and acts on none of them" in state["detail"]
+
+    refusal = next(e for e in logs if e["event"] == "position_plan_refused")
+    assert any("position_actions.enabled is false" in r for r in refusal["reasons"])
+
+    trade = journal.open_trade_for("SPY")
+    assert trade is not None and trade.current_stop is None
+    assert [o.stop_price for o in broker.get_open_orders()] == [820.0]
+
+
+def test_a_dry_run_reaches_the_broker_for_nothing_at_all(monkeypatch, tmp_path):
+    """`electrum-bot loop` without `--execute` is documented as placing nothing,
+    and a stop replace is a broker call like any other.
+
+    So the plan is recorded and named as not taken, even with the operator's
+    own switch on — the two switches are different questions and either being
+    off is enough.
+    """
+    journal = _journal_with_the_short(tmp_path)
+    broker = _short_spy_at_the_broker(stop_leg=820.0)
+
+    logs = _cycle_with_broker(
+        monkeypatch, tmp_path, _tighten(810.0), broker,
+        execute=False, position_actions=True, journal=journal,
+    )
+
+    beat = _heartbeat(logs)
+    assert beat["position_actions_taken"] == []
+    assert beat["position_actions_not_taken"] == ["SPY:tighten_stop"]
+
+    skipped = next(e for e in logs if e["event"] == "position_plan_not_executed")
+    assert "--execute is off" in skipped["reason"]
+
+    trade = journal.open_trade_for("SPY")
+    assert trade is not None and trade.current_stop is None
+    assert [o.stop_price for o in broker.get_open_orders()] == [820.0]
+
+
+def test_a_hold_is_not_recorded_as_an_action(monkeypatch, tmp_path):
+    """A hold is not a move. Writing a row for one every fifteen minutes for
+    every open position would bury the moves that matter in the ones that are
+    not moves at all — and it is already in the audit log with the cycle."""
+    from bot.models import PositionAction, PositionPlan
+
+    journal = _journal_with_the_short(tmp_path)
+    logs = _cycle_with_broker(
+        monkeypatch,
+        tmp_path,
+        ClaudeDecision(
+            market_assessment="Thesis intact.",
+            proposals=[],
+            position_plans=[
+                PositionPlan(
+                    symbol="SPY",
+                    action=PositionAction.HOLD,
+                    reasoning="Still short against the 820 level; nothing has changed.",
+                )
+            ],
+        ),
+        _short_spy_at_the_broker(stop_leg=820.0),
+        execute=True,
+        position_actions=True,
+        journal=journal,
+    )
+
+    beat = _heartbeat(logs)
+    assert beat["position_actions_taken"] == []
+    assert beat["position_actions_not_taken"] == []
+    assert journal.position_actions() == []
+
+
+def test_a_failed_position_move_degrades_the_cycle_rather_than_ending_the_loop(
+    monkeypatch, tmp_path
+):
+    """Every broker method here reports a refusal rather than raising, so the
+    exception that reaches the loop is the unanticipated one.
+
+    Letting it out would end the decision loop with real orders resting at the
+    broker and nothing on screen to say the bot has gone — the same failure as
+    the unwrapped model call, arriving on the position path. The position is
+    left exactly as it was, which is the safe direction.
+    """
+    journal = _journal_with_the_short(tmp_path)
+    broker = _short_spy_at_the_broker(stop_leg=820.0)
+
+    def _explode(*args: Any, **kwargs: Any) -> None:
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(main_mod, "execute_position_plan", _explode)
+
+    logs = _cycle_with_broker(
+        monkeypatch, tmp_path, _tighten(810.0), broker,
+        execute=True, position_actions=True, journal=journal,
+    )
+
+    beat = _heartbeat(logs)
+    assert beat["position_actions_taken"] == []
+    assert beat["position_actions_not_taken"] == ["SPY:tighten_stop"]
+
+    failure = next(e for e in logs if e["event"] == "position_plan_failed")
+    assert "database is locked" in failure["error"]
+
+    trade = journal.open_trade_for("SPY")
+    assert trade is not None and trade.current_stop is None
+    assert [o.stop_price for o in broker.get_open_orders()] == [820.0]

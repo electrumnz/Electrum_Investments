@@ -353,6 +353,92 @@ a day and Alpha Arena's lesson was that frequency is itself a risk parameter,
 so `journalctl -u mudhorn-bot -f` and the Decisions page are worth watching for
 the first few sessions rather than checked at the end of the week.
 
+## The settings agent can change settings, and that is a grant you install
+
+The Armorer on `/settings` argues about a limit, states what moving it costs in
+figures, and then **applies the change herself**. That reverses an earlier
+arrangement where she recorded a request and a person applied it later, and the
+operator's reason for the reversal was short: *"Settings agent can't edit
+settings?? That's broken. That's what the settings agent is for."*
+
+**What did not change is who owns the file.** `config/` is still root-owned and
+the web process still runs as `mudhorn`, which still cannot write
+`rules.yaml` with its own hands. What was added is the pattern already used for
+the chat panel:
+
+```sh
+sudo /opt/mudhorn/deploy/enable-forge.sh          # on
+sudo /opt/mudhorn/deploy/enable-forge.sh --status # what is set now
+sudo /opt/mudhorn/deploy/enable-forge.sh --off    # back to recording only
+```
+
+That installs exactly one line, in `/etc/sudoers.d/mudhorn-forge`:
+
+```
+mudhorn ALL=(root) NOPASSWD: /opt/mudhorn/deploy/apply-settings.sh
+```
+
+**It names the wrapper, never the Python binary.** A rule on
+`/opt/mudhorn/.venv/bin/electrum-bot` would permit every subcommand this CLI has
+today and every one a future release adds, run as root, with arguments chosen by
+whoever is signed in to a dashboard that may answer on the public internet.
+`apply-settings.sh` takes **no arguments at all**: it reads `apply <id>` or
+`revert <id>` on **stdin**, validates it against a regex before running
+anything, and invokes one fixed command against one fixed file.
+
+**This is the only sudo grant here that runs upward.** `run-chat.sh` and
+`run-dream.sh` go from `mudhorn` down to `hermes`, an account with no
+credentials. This one goes to root, so it is its own script and its own sudoers
+file — turning the chat panel on must not quietly hand the service account a way
+to edit its own risk limits.
+
+Be exact about what it grants:
+
+| It can | It cannot |
+|---|---|
+| Move a key listed in `settings_agent.limits_for` | Touch any other line, or any other file |
+| Set it to a number | Write arbitrary bytes as root |
+| …only if the whole file still loads through `Rules.load` on a staged copy | Leave a config the loop cannot start on |
+| Undo it later with `settings-revert <id>` | Escape the record — every change is a row with the reason, the objection and the diff |
+
+**The asymmetry is enforced in code, not in the character file.** A tightening
+applies on the first ask. A loosening states the arithmetic consequence and
+applies **nothing** until the operator confirms they have read it. `souls/armorer.md`
+shapes how that is said; `settings_agent.decide` is what decides it, because a
+soul is read off disk at call time and could have been edited.
+
+**Without the sudoers rule everything still works and says less.** The wrapper
+sits on disk inert, the agent argues exactly as before, the change is recorded
+as a pending request, and both the page and the agent's own briefing say the
+file has not moved. That is the fallback, reported plainly — not a silent
+failure — and it is also what a laptop deployment gets.
+
+**It also needs the unit to permit `sudo` at all**, which is the same
+prerequisite the chat panel has: `NoNewPrivileges` and `RestrictSUIDSGID` both
+block it, and `mudhorn-web.service` ships without them for that reason. Watch
+for the trap `enable-chat.sh` records — systemd sandboxing is a mount namespace
+every child inherits and `sudo` does not escape one, so a `sudo` run from a
+console shell can pass while the service is refused. `enable-forge.sh` checks
+the unit setting rather than trusting its own shell.
+
+From a root shell, with or without the grant:
+
+```sh
+sudo -u mudhorn /opt/mudhorn/.venv/bin/electrum-bot settings-apply      # list pending
+sudo /opt/mudhorn/.venv/bin/electrum-bot settings-apply 7 --dry-run     # prove it loads
+sudo /opt/mudhorn/.venv/bin/electrum-bot settings-apply 7
+sudo /opt/mudhorn/.venv/bin/electrum-bot settings-revert 7              # put it back
+```
+
+`settings-revert` restores **the exact text that was on the line**, which is why
+the request records it at apply time rather than reconstructing it later. A limit
+widened under pressure at 2am is the thing somebody wants undone at 9am, and "it
+is in git" is not a route the operator has from the dashboard.
+
+Neither command needs a broker credential, on purpose: they are meant to be run
+on a box that may be halfway through a problem, and tightening or undoing a limit
+is exactly what somebody wants at that moment.
+
 ## Do not install the Alpaca CLI here
 
 [`alpacahq/cli`](https://github.com/alpacahq/cli) submits orders from a shell,

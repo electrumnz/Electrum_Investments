@@ -53,14 +53,17 @@ from ..market_clock import market_state
 from ..metrics import build_report
 from ..models import AccountSnapshot, WorkingOrder
 from ..options import alerts_for_positions
+from ..position_actions import detect_unexplained_moves
 from ..settings_agent import (
     DEFAULT_REQUESTS_PATH,
+    DirectApplier,
     SettingsRequestStore,
     UnknownLimit,
-    argue,
-    build_request,
+    WrapperApplier,
     commit_message,
+    decide,
     limits_for,
+    preview,
     render_briefing,
 )
 from ..souls import ARMORER, GROGU, KNOWN_SOULS, YODA, load_soul
@@ -97,6 +100,17 @@ def build_app(
     dreams: DreamStore | None = None,
     poller: live.LivePoller | None = None,
     settings_requests: SettingsRequestStore | None = None,
+    # How a change actually reaches `config/rules.yaml`. `None` means the
+    # production arrangement: `deploy/apply-settings.sh` through sudo, which is
+    # absent on a laptop and on a box where the grant was never installed — so
+    # the default degrades to "recorded, not applied" and says so, rather than
+    # to a write this process could not make anyway.
+    #
+    # Injectable so the suite can prove both halves. A test that depended on
+    # /opt/mudhorn not existing would pass for a reason that has nothing to do
+    # with the code, and would start applying changes the day somebody ran the
+    # suite on the droplet.
+    settings_applier: WrapperApplier | DirectApplier | None = None,
     rules_path: Path | None = None,
     force_mock: bool = False,
 ) -> Any:
@@ -210,6 +224,12 @@ def build_app(
             held_requests.append(SettingsRequestStore(DEFAULT_REQUESTS_PATH))
         return held_requests[0]
 
+    # Resolved once. `WrapperApplier` holds no connection and no state — it
+    # stats a path and shells out — so constructing it here costs nothing and
+    # keeps "which route writes the file" a single answer for the process
+    # rather than one taken per request.
+    resolved_applier = settings_applier or WrapperApplier()
+
     # One poller for the whole application. Polling per connected browser would
     # multiply broker load for nothing, and every page render would still be
     # paying a round trip.
@@ -228,6 +248,7 @@ def build_app(
             list[WorkingOrder],
             dict[str, float],
             datetime | None,
+            bool,
             bool,
         ]
     ):
@@ -259,6 +280,14 @@ def build_app(
         expiries and untracked positions off them, all in the present tense.
         A reading is only as good as the moment it was taken, so the moment
         travels with it.
+
+        **The last flag is `orders_unavailable`, and dropping it was the same
+        mistake one field along.** `AlpacaBroker.get_open_orders` catches its
+        own errors and returns `[]`, so an order book that could not be read
+        arrives here indistinguishable from an account with nothing resting.
+        Anything comparing the broker's stops against the journal's has to know
+        which of the two it is looking at, or an outage renders as a clean
+        comparison — `FinnhubCalendar.is_degraded` in a third place.
         """
         # NOT `ensure_running()`. That schedules an asyncio task and this runs
         # in FastAPI's threadpool, where there is no loop to schedule onto. The
@@ -267,13 +296,17 @@ def build_app(
         # broker every five seconds all night.
         snapshot = resolved_poller.latest()
         if snapshot is None:
-            return None, [], {}, None, False
+            # A cold start has read nothing, so the order book is not "empty",
+            # it is unknown. `True` here rather than `False` for the same reason
+            # the account comes back as `None`.
+            return None, [], {}, None, False, True
         return (
             snapshot.account,
             snapshot.orders,
             snapshot.prices,
             snapshot.taken_at,
             resolved_poller.reading_is_stale(),
+            snapshot.orders_unavailable,
         )
 
     def _tape() -> str:
@@ -405,7 +438,14 @@ def build_app(
             **seen.cookie_for(visit, secure=request.url.scheme == "https")
         )
 
-        account, orders, prices, read_at, reading_stale = _account_orders_prices()
+        (
+            account,
+            orders,
+            prices,
+            read_at,
+            reading_stale,
+            orders_unavailable,
+        ) = _account_orders_prices()
         open_trades = resolved_journal.open_trades()
 
         if account is None:
@@ -472,6 +512,25 @@ def build_app(
             env=resolved_env,
             read_at=read_at,
             stale=reading_stale,
+            # What the broker holds against what the journal says, and whether
+            # anything on file explains the difference. Pure — it takes the
+            # poller's last reading and a bounded read of the recorded actions,
+            # so the render still costs no network.
+            #
+            # Computed here rather than read off the loop's `ReconcileResult`
+            # because the dashboard and the loop are separate processes: a box
+            # running the web unit with the loop stopped would otherwise show
+            # the last comparison the loop happened to make, aged arbitrarily,
+            # with nothing on screen to say when.
+            unexplained=detect_unexplained_moves(
+                positions=account.open_positions,
+                orders=orders,
+                open_trades=open_trades,
+                # Newest first and bounded, for the reason `reconcile` gives:
+                # an explanation for a level resting NOW is a recent move.
+                actions=resolved_journal.position_actions(limit=200),
+                orders_degraded=orders_unavailable,
+            ),
         )
         return _page("Board", "/", body)
 
@@ -614,25 +673,35 @@ def build_app(
 
     @app.post("/settings/request", response_class=JSONResponse)
     def settings_request(payload: dict[str, Any]) -> dict[str, Any]:
-        """Argue about a limit, and record the argument. **Never write the file.**
+        """Argue about a limit, record the argument, and apply it.
 
         This is the second write route on a dashboard that was wholly read-only,
         and the reasoning has to sit here rather than in a commit message.
 
-        **What it cannot do is the point.** `config/` is root-owned on the
-        droplet (`deploy/bootstrap.sh`) precisely so the service account cannot
-        edit its own limits, and this process runs as `mudhorn`. A settings
-        screen that could widen a cap would be used to widen one during a losing
-        run, which is exactly when the cap is doing its job — so what this
-        produces is a `ChangeRequest` in `data/settings_requests.db`, and
-        applying it is `electrum-bot settings-apply <id>`, run as root, which
-        re-validates through `Rules.load` and refuses if the file has moved.
+        **It used to be unable to change anything, and the operator rejected
+        that.** *"Settings agent can't edit settings?? That's broken."* So the
+        change is applied in the conversation now — and the property that made
+        the old arrangement worth having is kept rather than waived. `config/`
+        is still root-owned (`deploy/bootstrap.sh`), this process still runs as
+        `mudhorn`, and it still cannot write `config/rules.yaml` with its own
+        hands. It asks root to, through `deploy/apply-settings.sh`: root-owned,
+        named in a sudoers rule, taking **no arguments**, with the request id on
+        **stdin** where nothing typed here can be read as a flag. That command
+        re-validates the whole file through `Rules.load` on a staged copy before
+        replacing it.
+
+        **When there is no privileged route the request stays recorded and
+        pending and the answer says so.** That is the previous behaviour kept as
+        the fallback, never a silence — the same rule as the Dreaming page's
+        isolation banner.
 
         **The asymmetry is enforced here and not only in the character.** A
-        tightening change records on the first ask. A loosening one states the
-        arithmetic consequence and records NOTHING until `confirm` comes back
-        true — so the operator has to have been shown the cost before they can
-        accept it. `souls/armorer.md` shapes how that is said; this decides it.
+        tightening change records and applies on the first ask. A loosening one
+        states the arithmetic consequence and records NOTHING until `confirm`
+        comes back true — so the operator has to have been shown the cost before
+        they can accept it. `souls/armorer.md` shapes how that is said;
+        `settings_agent.decide` decides it, because a soul is read off disk at
+        call time and could have been edited.
 
         Behind `DASHBOARD_CHAT_TOKEN` as well as the dashboard password, for the
         same reason `POST /chat` is: viewing an account and driving an agent are
@@ -648,62 +717,77 @@ def build_app(
         if payload.get("token") != resolved_env.dashboard_chat_token:
             raise HTTPException(status_code=403, detail="bad token")
 
-        key = str(payload.get("key", ""))
         try:
-            argument = argue(
+            outcome = decide(
+                _requests(),
                 resolved_rules,
-                key,
+                str(payload.get("key", "")),
                 str(payload.get("value", "")),
+                reason=str(payload.get("reason", "")),
+                confirm=bool(payload.get("confirm")),
+                # The conversation with the Armorer, as the browser holds it. An
+                # argument the operator won is a fact worth keeping, and so is
+                # one they lost; the objection is stored in its own column
+                # either way, so an empty transcript costs context and never the
+                # record.
+                transcript=[
+                    {"role": str(t.get("role", "")), "text": str(t.get("text", ""))}
+                    for t in payload.get("transcript") or []
+                ],
                 equity_usd=_equity_reading(),
                 rules_path=resolved_rules_path,
+                applier=resolved_applier,
             )
         except (UnknownLimit, ValueError) as exc:
             return {"ok": False, "error": str(exc)}
 
+        argument = outcome.argument
+        # Both values and the cut, on the UNCONFIRMED leg as well as the
+        # recorded one. The confirmation window renders only what it is handed —
+        # there is no arithmetic and no fetch in it — so a payload missing these
+        # would leave it asking the operator to agree to a number with nothing
+        # to compare it against, which is the thing it exists to fix.
+        shown = preview(argument, rules_path=resolved_rules_path)
         view: dict[str, Any] = {
             "ok": True,
             "key": argument.key,
             "label": argument.fact.label,
+            "unit": argument.fact.unit_label,
             "current": argument.current,
             "current_source": argument.current_source,
             "proposed": argument.proposed,
+            "old_value": shown.old_value,
+            "new_value": shown.new_value,
+            "diff": shown.diff,
             "stance": str(argument.stance),
             "consequence": argument.consequence,
             "objection": argument.objection,
             "requires_confirmation": argument.requires_confirmation,
             "can_record": argument.can_record,
             "blocked_reason": argument.blocked_reason,
+            "summary": outcome.summary,
             "recorded": None,
+            "applied": None,
         }
 
-        if not argument.can_record:
-            return view
-        # The confirmation gate. A loosening change that has not been confirmed
-        # returns the consequence and stops — nothing is written, so the
-        # operator cannot accept a cost they were not shown.
-        if argument.requires_confirmation and not bool(payload.get("confirm")):
-            return view
-
-        record = build_request(
-            argument,
-            reason=str(payload.get("reason", "")),
-            # The conversation with the Armorer, as the browser holds it. An
-            # argument the operator won is a fact worth keeping, and so is one
-            # they lost; the objection is stored in its own column either way,
-            # so an empty transcript costs context and never the record.
-            transcript=[
-                {"role": str(t.get("role", "")), "text": str(t.get("text", ""))}
-                for t in payload.get("transcript") or []
-            ],
-            rules_path=resolved_rules_path,
-        )
-        _requests().record(record)
-        view["recorded"] = {
-            "id": record.id,
-            "diff": record.diff,
-            "commit_message": commit_message(record),
-            "apply_command": record.apply_command,
-        }
+        record = outcome.request
+        if record is not None:
+            view["recorded"] = {
+                "id": record.id,
+                "diff": record.diff,
+                "commit_message": commit_message(record),
+                "apply_command": record.apply_command,
+                "revert_command": record.revert_command,
+            }
+        if outcome.applied is not None:
+            # `ok` and `detail` both, always. "Applied" and "recorded but the
+            # write failed" are different outcomes and a surface that collapsed
+            # them would tell the operator a limit moved when it did not.
+            view["applied"] = {
+                "ok": outcome.applied.ok,
+                "detail": outcome.applied.detail,
+                "via": outcome.applied.via,
+            }
         return view
 
     def _equity_reading() -> float | None:

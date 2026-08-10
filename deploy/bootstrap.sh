@@ -84,6 +84,13 @@ chmod 600 "$APP_DIR/.env"
 
 # The checkout itself stays root-owned so the service account cannot rewrite its
 # own code. Only the two paths that must be written at runtime are handed over.
+#
+# `config/` stays here EVEN THOUGH the settings agent can now change a limit.
+# It changes one by asking root to, through deploy/apply-settings.sh, which
+# validates the whole file before replacing it — the file is still only ever
+# written by root, and handing it to the service account to save a wrapper would
+# trade that for nothing. A bot that can rewrite its own limits with its own
+# hands is what this line exists to prevent.
 chown -R root:root "$APP_DIR/src" "$APP_DIR/config" "$APP_DIR/deploy"
 chown -R "$APP_USER:$APP_USER" "$APP_DIR/data" "$APP_DIR/audit" "$APP_DIR/backups"
 
@@ -98,17 +105,26 @@ install -m 644 "$APP_DIR/deploy/systemd/mudhorn-dream.service" /etc/systemd/syst
 install -m 644 "$APP_DIR/deploy/systemd/mudhorn-dream.timer" /etc/systemd/system/
 install -m 644 "$APP_DIR/deploy/systemd/mudhorn-confer.service" /etc/systemd/system/
 install -m 644 "$APP_DIR/deploy/systemd/mudhorn-confer.timer" /etc/systemd/system/
-# run-mcp.sh, run-chat.sh and run-dream.sh are named in sudoers rules, so they
-# must be executable and — from the chown above — root-owned and not writable by
-# the account the rule grants FROM. A wrapper writable by that account turns its
-# sudoers rule into arbitrary code execution as the target user.
+# run-mcp.sh, run-chat.sh, run-dream.sh and apply-settings.sh are named in
+# sudoers rules, so they must be executable and — from the chown above —
+# root-owned and not writable by the account the rule grants FROM. A wrapper
+# writable by that account turns its sudoers rule into arbitrary code execution
+# as the target user.
 #
 # run-dream.sh is made executable here whether or not the second Hermes instance
 # exists. It is inert without one: nothing invokes it unless a sudoers rule names
 # it, and the dashboard falls back to the account agent and says so on the page.
+#
+# apply-settings.sh is the same, and its inertness is load-bearing rather than
+# convenient. It is the ONE wrapper here whose sudo runs upward — `mudhorn` to
+# root — so it is installed and not granted: without a rule in
+# /etc/sudoers.d/mudhorn-forge nothing can invoke it, the settings agent reports
+# that it cannot write the file, and the change stays a recorded request a
+# person applies. `deploy/enable-forge.sh` is the deliberate act that grants it.
 chmod 755 "$APP_DIR/deploy/backup-journal.sh" "$APP_DIR/deploy/check-tailscale.sh" \
           "$APP_DIR/deploy/run-mcp.sh" "$APP_DIR/deploy/run-chat.sh" \
-          "$APP_DIR/deploy/run-dream.sh"
+          "$APP_DIR/deploy/run-dream.sh" "$APP_DIR/deploy/apply-settings.sh" \
+          "$APP_DIR/deploy/enable-forge.sh"
 systemctl daemon-reload
 systemctl enable --quiet mudhorn-bot.service mudhorn-web.service
 echo "    enabled at boot, not started"
