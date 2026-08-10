@@ -316,6 +316,41 @@ Deliberately NOT on the Board: dream chains and reasoning (that is the Dreaming
 page), and `DreamLedger` rates (reasoning-quality statistics, which belong
 beside `metrics.py` on Analytics and reach the operator, never the model).
 
+### Running it end to end found two gaps no test could show
+
+Three real dreams were generated against the live model, then the vault and a
+conference were driven. Both worked exactly as written, and the pipeline still
+cannot function, for two reasons neither the suite nor either audit caught.
+
+**1. Nothing promotes a dream out of the workbench.** `Dream.is_offerable` is
+defined and **never called**; `dreamer.py` never moves a dream. The dreamer
+writes to `WORKBENCH`, the conference reads only `Vault.VAULT`, and no code
+joins the two. Observed: three dreams, two of them at `verdict` stage, all
+three still on the workbench; `vault 0/12`; and `confer` completing honestly
+with `considered: 0, calls: 0, cost 0`. **The vault is always empty and the
+conference always no-ops.**
+
+The missing piece is the promotion rule, and it is a decision rather than
+plumbing: a dream reaching a `keep` verdict is not automatically worth
+offering, and the whole point of the prophecy shelf is that a dream with
+*checkable conditions* is a different thing from one with a conclusion. The
+honest shape is probably `verdict=keep` **plus** at least one condition with a
+number in it → `PROPHECY`, and conditions all met → `VAULT`. That is what
+`all_conditions_met` and `has_conditions` were built for.
+
+**2. The dreamer never names a symbol.** All three dreams came back with
+`symbols: []` and `symbols_dropped: 0`, so nothing was filtered — the model
+simply did not fill the field. `DreamStore.adopt` refuses an empty symbol
+list, so even a dream sitting in the vault could grant nothing. This is a
+prompt gap rather than a code one, and it is a **second, independent** reason
+the permission path is inert, on top of the prompt-and-feeds gap below.
+
+Worth keeping in mind while fixing it: the field must not be coaxed into being
+filled for its own sake. A dream about French reactor cooling water genuinely
+may have no tradeable symbol, and `instruments` free text is the right home for
+"what this is about". An empty `symbols` is a valid answer; what is wrong is
+that it is currently the *only* answer.
+
 ### The feature is wired and INERT, and that is the next thing to fix
 
 `RiskGate` honours a grant. Nothing else does. The system prompt lists
