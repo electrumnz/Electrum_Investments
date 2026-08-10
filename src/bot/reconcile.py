@@ -37,6 +37,7 @@ from .config import Rules
 from .journal import Journal
 from .models import (
     AccountSnapshot,
+    Direction,
     ExecutionMode,
     OrderProposal,
     OrderResult,
@@ -229,11 +230,29 @@ def apply_journal_state(
     open_trades = journal.open_trades()
 
     by_symbol: dict[str, float] = {}
+    stops: dict[str, float] = {}
     for trade in open_trades:
         by_symbol[trade.symbol] = by_symbol.get(trade.symbol, 0.0) + trade.planned_risk_usd
+        # The stop LEVEL, so the model can be shown the price it is being asked
+        # to manage. Aggregating risk across two trades in one symbol is
+        # arithmetic; aggregating two stop levels is not, so the widest — the
+        # furthest from entry, i.e. the one that would fill last — is the honest
+        # single answer, and it is the one that describes the position's real
+        # exposure rather than the tightest leg of it.
+        held = stops.get(trade.symbol)
+        stops[trade.symbol] = (
+            trade.planned_stop
+            if held is None
+            else (
+                max(held, trade.planned_stop)
+                if trade.direction == Direction.SELL
+                else min(held, trade.planned_stop)
+            )
+        )
 
     snapshot.open_risk_usd = sum(by_symbol.values())
     snapshot.open_risk_by_symbol = by_symbol
+    snapshot.planned_stop_by_symbol = stops
     # Missing, never zero. An empty entry above would read as "risks nothing".
     snapshot.symbols_with_unknown_risk = untracked_positions(snapshot, open_trades)
     return snapshot

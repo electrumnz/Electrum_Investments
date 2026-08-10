@@ -296,3 +296,81 @@ def test_no_instruments_means_no_session_block_rather_than_a_guessed_one(account
     )
 
     assert "## Session" not in context
+
+
+# --------------------------------------------- the position the agent manages
+#
+# `claude_client` asks for a `position_plan` on every open position, with an
+# action of hold, close or TIGHTEN_STOP. The context block used to render
+# direction, quantity, entry, current price and P&L and no stop at all, so the
+# model was asked whether to tighten a level it had never been shown, and
+# whether a thesis still held without the figure that says what being wrong
+# costs. These pin the fix.
+
+
+def _short_spy() -> AccountSnapshot:
+    """The live position's own shape: SHORT 21 SPY, stop 820, risk $980.19."""
+    from bot.models import Direction, Position
+
+    return AccountSnapshot(
+        equity_usd=100_000.0,
+        cash_usd=116_239.81,
+        buying_power_usd=200_000.0,
+        open_positions=[
+            Position(
+                symbol="SPY",
+                direction=Direction.SELL,
+                qty=21,
+                entry_price=773.324285,
+                opened_at=START,
+                current_price=774.18,
+                unrealised_pnl_usd=-18.39,
+            )
+        ],
+    )
+
+
+def test_a_position_shows_the_stop_the_agent_is_asked_to_manage():
+    account = _short_spy()
+    account.planned_stop_by_symbol = {"SPY": 820.0}
+    account.open_risk_by_symbol = {"SPY": 980.19}
+
+    text = build_market_context(account=account, ticks={}, headlines=[], news_windows=[])
+
+    assert "stop 820.0000" in text
+    assert "980.19" in text
+    # And it is framed as the agent's own position, not a thing it comments on.
+    assert "yours to manage" in text
+
+
+def test_a_position_with_no_journal_row_says_UNKNOWN_rather_than_nothing():
+    """The failure this guards is a blank that reads like "no stop needed".
+
+    A held position whose journal row is missing has real exposure and unknown
+    protection. Those are different facts from "flat" and from "unprotected",
+    and the prompt has to say which one it is. Same rule as
+    `symbols_with_unknown_risk` refusing to be counted as zero.
+    """
+    account = _short_spy()  # no planned_stop_by_symbol, no open_risk_by_symbol
+
+    text = build_market_context(account=account, ticks={}, headlines=[], news_windows=[])
+
+    assert "STOP UNKNOWN" in text
+    # Never a plausible wrong figure in place of the missing one.
+    assert "stop 0" not in text
+    assert "risking $0.00" not in text
+
+
+def test_the_journalled_stop_is_not_presented_as_the_brokers():
+    """planned_stop and the resting leg's trigger are two different facts.
+
+    `WorkingOrder.stop_price` is the other half of the pair, and the whole
+    reason both exist is that they can disagree. The prompt must not let the
+    model assume they agree.
+    """
+    account = _short_spy()
+    account.planned_stop_by_symbol = {"SPY": 820.0}
+
+    text = build_market_context(account=account, ticks={}, headlines=[], news_windows=[])
+
+    assert "the JOURNAL planned" in text

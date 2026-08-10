@@ -209,6 +209,25 @@ class AccountSnapshot(BaseModel):
     # cost rather than about the mark.
     open_risk_by_symbol: dict[str, float] = Field(default_factory=dict)
 
+    # The journalled stop LEVEL per symbol, from that same read.
+    #
+    # This exists because the model is asked to manage stops it could not see.
+    # `claude_client` asks for a `position_plan` on every open position with an
+    # action of hold, close or **tighten_stop**, while the context block
+    # rendered direction, quantity, entry, current price and P&L — and no stop
+    # at all. So the agent was being asked whether to tighten a level that was
+    # never put in front of it, and whether a thesis still held without the
+    # number that defines what being wrong costs.
+    #
+    # It is the PLANNED stop from the journal, which is not necessarily what
+    # rests at the broker; `WorkingOrder.stop_price` is the other half of that
+    # pair and the two are deliberately reported separately, because the
+    # interesting case is when they disagree.
+    #
+    # A symbol absent here has no journalled stop, which is the same fact as
+    # its presence in `symbols_with_unknown_risk` — never a stop of zero.
+    planned_stop_by_symbol: dict[str, float] = Field(default_factory=dict)
+
     # Held positions the journal has never seen. Their planned stop is
     # unknowable, so their risk is MISSING rather than zero — an empty entry in
     # `open_risk_by_symbol` would read as "risks nothing", which is the

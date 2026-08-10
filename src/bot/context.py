@@ -112,16 +112,46 @@ def build_market_context(
         lines.append(f"- Trades this week: {activity.trades_this_week}")
         lines.append("")
 
-    lines.append("## Open positions")
+    # ## Open positions — and these are YOURS to manage.
+    #
+    # The stop and the risk are rendered here because the model is ASKED about
+    # them. `claude_client` requests a `position_plan` for every open position
+    # with an action of hold, close or **tighten_stop**, and this block used to
+    # carry direction, quantity, entry, current price and P&L — and no stop at
+    # all. So the agent was being asked whether to tighten a level it had never
+    # been shown, and whether a thesis still held without the number that
+    # defines what being wrong costs.
+    #
+    # A position with no journalled stop says so in words. It must never render
+    # as a blank that reads like "no stop", nor as a zero: the position is real,
+    # the protection is unknown, and those are different facts.
+    lines.append("## Open positions — these are yours to manage")
     if not account.open_positions:
         lines.append("- (none)")
     else:
         for p in account.open_positions:
             current = f"{p.current_price:,.4f}" if p.current_price else "n/a"
+            stop = account.planned_stop_by_symbol.get(p.symbol)
+            risk = account.open_risk_by_symbol.get(p.symbol)
+            if stop is None:
+                protection = (
+                    "STOP UNKNOWN — no journal entry, so this position's "
+                    "protection and its risk cannot be stated"
+                )
+            else:
+                protection = f"stop {stop:,.4f}"
+                if risk is not None:
+                    protection += f", risking ${risk:,.2f} if it fills"
             lines.append(
                 f"- {p.direction.value} {p.qty:g} {p.symbol} @ {p.entry_price:,.4f} "
-                f"(now {current}, P&L ${p.unrealised_pnl_usd:,.2f})"
+                f"(now {current}, P&L ${p.unrealised_pnl_usd:,.2f}) — {protection}"
             )
+        lines.append("")
+        lines.append(
+            "  The stop shown is the one the JOURNAL planned. What actually "
+            "rests at the broker is a separate fact and may differ; say so "
+            "rather than assuming they agree."
+        )
     lines.append("")
 
     lines.append("## Market snapshot")
