@@ -368,13 +368,33 @@ def test_a_broken_dream_store_costs_the_grants_and_not_the_cycle(monkeypatch, tm
     def _explode() -> DreamStore:
         raise RuntimeError("unable to open database file")
 
-    monkeypatch.setattr(main_mod, "DreamStore", _explode)
+    def _stop(_seconds: float) -> None:
+        raise KeyboardInterrupt
 
-    logs = _run_one_cycle(
-        monkeypatch,
-        tmp_path,
-        ClaudeDecision(market_assessment="Quiet, with the store unavailable.", proposals=[]),
+    # Set up by hand rather than through `_run_one_cycle`, which installs its
+    # own tmp_path store and would overwrite the failing one.
+    monkeypatch.setattr(time, "sleep", _stop)
+    monkeypatch.setattr(main_mod, "Journal", lambda: Journal(tmp_path / "journal.db"))
+    monkeypatch.setattr(main_mod, "AuditLog", lambda: AuditLog(tmp_path / "audit"))
+    monkeypatch.setattr(main_mod, "DreamStore", _explode)
+    monkeypatch.setattr(
+        main_mod,
+        "ClaudeClient",
+        lambda *a, **k: _StubClaude(
+            ClaudeDecision(market_assessment="The store is unavailable.", proposals=[])
+        ),
     )
+
+    rules = load_rules()
+    rules.loop.skip_model_call_when_all_markets_closed = False
+
+    with structlog.testing.capture_logs() as logs:
+        assert main_mod.cmd_loop(
+            Env(_env_file=None),  # type: ignore[call-arg]
+            rules,
+            execute=False,
+            force_mock=True,
+        ) == 0
 
     beat = _heartbeat(logs)
     assert beat["granted_symbols"] == []

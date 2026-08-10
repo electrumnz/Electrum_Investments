@@ -279,6 +279,178 @@ def test_only_open_dreams_are_offered_and_the_list_is_capped(rules, journal, sto
     assert prompt.count("[id ") == CARRY_FORWARD
 
 
+# --------------------------------------------- the fence round the instruments
+#
+# The operator's rule: the dreamer may look OUTSIDE `allowed_symbols` to other
+# Alpaca instruments, and may not go around the hard block on a GROUP of them.
+# Two locks, and only one of them is here — `grants.resolve_granted_symbols`
+# enforces the same block deterministically at permission time. This one is the
+# earlier, friendlier half.
+
+
+def test_a_symbol_outside_the_watch_list_is_kept_when_its_class_is_enabled(rules):
+    """The whole point of the feature. `allowed_symbols` is six names; the
+    dreamer is allowed to be interested in a seventh."""
+    scope = scope_symbols(["NVDA", "TSLA"], rules)
+
+    assert scope.kept == ("NVDA", "TSLA")
+    assert scope.dropped == ()
+    assert scope.asset_class_key == "us_equity"
+
+
+def test_a_symbol_in_a_disabled_class_is_dropped(rules):
+    """Crypto is off in the shipped config, so `BTC/USD` is not the dreamer's to
+    name — however good the chain that reaches it."""
+    scope = scope_symbols(["SPY", "BTC/USD"], rules)
+
+    assert scope.kept == ("SPY",)
+    assert [symbol for symbol, _ in scope.dropped] == ["BTC/USD"]
+    assert "crypto" in scope.dropped[0][1]
+
+
+def test_enabling_a_class_admits_it_and_disabling_it_shuts_it_again(rules):
+    """'If crypto is enabled the dreamer should see this, and vice versa.' The
+    fence is derived from `enabled_instruments` rather than from a list here, so
+    it follows the config in both directions with no second edit."""
+    assert scope_symbols(["ETH/USD"], rules).kept == ()
+
+    opened = rules.model_copy(deep=True)
+    opened.instruments["crypto"].enabled = True
+
+    assert scope_symbols(["ETH/USD"], opened).kept == ("ETH/USD",)
+
+
+def test_a_dropped_symbol_is_recorded_rather_than_silently_discarded(rules):
+    """A filter that left no trace is indistinguishable from a model that had
+    simply stopped naming symbols."""
+    scope = scope_symbols(["BTC/USD"], rules)
+
+    assert "Dropped 1 symbol(s)" in scope.summary
+    assert "BTC/USD" in scope.summary
+    assert scope_symbols(["SPY"], rules).summary == ""
+
+
+def test_a_dream_spanning_two_classes_resolves_to_no_class_at_all(rules):
+    """Unresolved grants nothing. Picking one of two would be choosing which
+    risk cap applies by accident — the same reason `granted_symbols` drops a
+    symbol claimed by two live grants rather than resolving it."""
+    opened = rules.model_copy(deep=True)
+    opened.instruments["crypto"].enabled = True
+
+    scope = scope_symbols(["SPY", "BTC/USD"], opened)
+
+    assert scope.kept == ("SPY", "BTC/USD")
+    assert scope.asset_class_key == ""
+
+
+def test_symbols_are_normalised_without_being_truncated(rules):
+    """Structural, so it is cleaned and never trimmed: a truncated symbol is a
+    different symbol, exactly as a truncated price is a different price."""
+    scope = scope_symbols([" spy ", "SPY", "", "qqq"], rules)
+
+    assert scope.kept == ("SPY", "QQQ")
+
+
+@pytest.mark.parametrize(
+    ("symbol", "expected"),
+    [
+        ("BTC/USD", "crypto"),
+        ("SPY", "us_equity"),
+        ("NVDA", "us_equity"),
+        ("SPY260918C00500000", "us_option"),
+        ("", ""),
+    ],
+)
+def test_a_symbols_class_is_read_from_its_shape(symbol, expected):
+    """A shape test rather than a lookup, because the point of the feature is
+    that the dreamer may name symbols nobody has listed anywhere. A table of
+    known symbols would refuse exactly the case this exists to permit."""
+    assert class_key_for_symbol(symbol) == expected
+
+
+def test_an_option_contract_is_dropped_because_the_bot_trades_no_options(rules):
+    """`us_option` is not an `instruments:` key in the shipped config, so the
+    fence answers this one without anybody having written a rule for it."""
+    scope = scope_symbols(["SPY260918C00500000"], rules)
+
+    assert scope.kept == ()
+    assert "us_option" in scope.dropped[0][1]
+
+
+def test_the_prompt_names_the_enabled_and_the_blocked_classes(rules, journal):
+    """The opposite of what `build_system_prompt` does for the decision loop,
+    and deliberate in both places. There, naming a class the bot cannot trade
+    only invites proposals for it. Here the permission is 'look outside the
+    watch list, inside the fence', so the dreamer has to be able to see it."""
+    prompt = build_prompt(rules, journal, [])
+
+    assert "us_equity — ENABLED" in prompt
+    assert "crypto — BLOCKED" in prompt
+    assert "not on the watch list" in prompt
+
+
+def test_a_blocked_symbol_never_reaches_the_stored_dream(rules, journal, store):
+    """The refusal happens at the point of STORAGE, not at the point of use. A
+    dream that reached the vault naming a crypto pair would be an offer the
+    trading agent could accept."""
+    client = _StubClient(_step(symbols=["SPY", "BTC/USD"]))
+
+    result = Dreamer(_env(), rules, store, journal, client=client).run_once()
+
+    assert result is not None
+    assert result.dream.symbols == ["SPY"]
+    assert result.dream.asset_class_key == "us_equity"
+    assert [s for s, _ in result.scope.dropped] == ["BTC/USD"]
+
+    stored = store.recent()[0]
+    assert stored.symbols == ["SPY"]
+
+
+def test_the_drop_is_written_into_the_dreams_own_transcript(rules, journal, store):
+    """Where the question 'why does this dream name nothing' actually gets
+    asked. The speaker is neither agent, so `confer.last_agent_turn_at` cannot
+    read it as a turn of anybody's conversation."""
+    client = _StubClient(_step(symbols=["BTC/USD"]))
+
+    result = Dreamer(_env(), rules, store, journal, client=client).run_once()
+
+    assert result is not None
+    notes = store.messages(int(result.dream.id or 0))
+    assert [m.speaker for m in notes] == [SCOPE]
+    assert "BTC/USD" in notes[0].text
+
+
+def test_a_dream_that_names_nothing_writes_no_note(rules, journal, store):
+    client = _StubClient(_step())
+
+    result = Dreamer(_env(), rules, store, journal, client=client).run_once()
+
+    assert result is not None
+    assert result.dream.symbols == []
+    assert store.messages(int(result.dream.id or 0)) == []
+
+
+def test_widening_a_dream_across_classes_clears_the_class_rather_than_keeping_it(
+    rules, journal, store
+):
+    """A permission described by a claim that is no longer true is worse than no
+    permission. Unresolved is refused by `DreamStore.adopt` and dropped by
+    `granted_symbols`, which is the direction to fail in."""
+    opened = rules.model_copy(deep=True)
+    opened.instruments["crypto"].enabled = True
+
+    dream_id = store.save(
+        Dream(title="t", seed="s", symbols=["SPY"], asset_class_key="us_equity")
+    )
+    client = _StubClient(_step(advance_id=dream_id, symbols=["SPY", "BTC/USD"]))
+
+    Dreamer(_env(), opened, store, journal, client=client).run_once()
+
+    stored = store.get(dream_id)
+    assert stored is not None
+    assert stored.asset_class_key == ""
+
+
 # ------------------------------------------------------------------ failure
 
 
