@@ -820,6 +820,89 @@ A session is grouped by **UTC date**, which is exactly right for US equities
 be wrong for a market whose session spans midnight UTC, which is CME Globex if a
 second broker ever arrives.
 
+### The deck is live, and one poller owns the broker conversation
+
+`src/bot/web/live.py` streams the account to the browser over Server-Sent
+Events. No new dependency: `StreamingResponse` with `text/event-stream` on this
+side, the browser's native `EventSource` on the other, and it is plain HTTP so
+a Funnel or a reverse proxy passes it through untouched. It also reconnects by
+itself, which matters on a phone that has been in a pocket.
+
+**The Board no longer talks to the broker during a render.** It used to open a
+session inline, so a slow Alpaca held the page with nothing on screen — and
+after a hyperspace jump that promised speed, which made the wait read as a
+broken deck rather than a slow one. `_account_orders_prices` now reads whatever
+the poller has and returns immediately.
+
+**A cold start renders unknown, never zero.** `latest()` is `None` until the
+first read comes back, and `render.board` answers that with its own shape: four
+tiles at the width the figures will occupy, a banner saying this is a cold start
+rather than an empty account, and the shimmer carrying the wait. `0.00` equity
+would be a plausible wrong figure, which is the thing this repository exists to
+refuse. The route returns before the banners in that case, because every one of
+them is a statement about a broker reading.
+
+**Do not call `ensure_running()` from a render path.** It schedules an asyncio
+task and FastAPI runs `def` routes in a threadpool, where there is no loop to
+schedule onto. The stream starts the poller when a browser subscribes.
+
+**Only a page with `data-live` targets opens the stream.** Without that guard
+the sign-in page opened it too — it inlines `SCRIPT` like every other page — and
+took a 401, because `/live` sits behind the same password as the pages that
+render an account. One pointless request and one console error per view of the
+login form. It has a second effect worth keeping: Decisions, Trades, Settings
+and Chat have no live figures either, so a session that never opens the Board
+never talks to Alpaca at all.
+
+**The client may only UPDATE a figure the server already rendered**, never be
+what reveals one. Same rule as the projection layer. Every value is in the
+markup before the script runs, so a blocked script shows the reading it was
+served — one page-load old and honest about it — rather than an empty box.
+
+**That bug was invisible to the test suite.** 731 tests, `ruff` and `mypy
+--strict` were all green while the login page 401ed on every view. It took
+driving the thing in a browser. Same shape as the `.gitignore` finding below: a
+green local suite says nothing about what actually happens.
+
+### A visit is a sitting, and the marker never advances to now
+
+`src/bot/web/seen.py` answers "what changed since I last looked?", which is the
+question an operator opening this two or three times a day actually arrives
+with. A cookie carries three stamps: the marker, the previous request, and when
+the sitting began.
+
+**The marker advances to the PREVIOUS request's time, never to `now`.**
+Stamping `now` marks as seen anything recorded between the render and the next
+click — which was never on screen. `last` is the latest moment the operator
+provably *was* shown the state of the world.
+
+**A sitting ends two ways and both are needed.** A thirty-minute gap ends one
+that stopped; a six-hour ceiling ends one that never stops. Without the second,
+anything requesting more often than the gap holds a sitting open forever: a
+refresh timer, a phone on the Board, or an `EventSource` reconnecting on a flaky
+link. On a first sitting that is worse than a frozen marker, because none is
+ever established and the delta stays empty for the life of the tab.
+
+**The cookie is stamped on HTML page routes only.** Not `/live`, for the
+reconnect reason above. Not `/login`, which would advance the marker to a moment
+the operator was shown a password form. Not `/healthz`, where a probe every
+thirty seconds does the same thing as a reconnect.
+
+**First visit is a third state, not "nothing happened"**, and every count is
+`int | None` rather than `0` when there is no marker — so a renderer that
+ignores the state prints something visibly broken rather than plausibly wrong.
+Same rule as `has_cycles` in `news_history` and `can_grade_anything` in
+`triggers`. That rule was missing once already: the caveat "the loop may have
+stopped" fired for a caller that simply never opened the audit log, and the
+module's own test pinned the wrong behaviour.
+
+**`reaches_past_marker` covers the audit reader and NOT
+`Journal.closed_trades(limit=...)`.** That query sorts `exit_time` ascending
+before its LIMIT, so a limited call drops the NEWEST closes while leaving the
+earlier bucket full — trades that closed since the marker would be reported as
+nothing, with no caveat. No caller passes a limit; do not add one without
+sorting descending first.
+
 ### The projection layer must fail to VISIBLE, and it is built that way
 
 Both surfaces carry a starfield, a hyperspace jump on navigation, HUD bracket
@@ -1240,6 +1323,11 @@ src/bot/
                         profit and loss.
   web/                  Operator command centre: Board, Decisions, Trades,
                         Analytics, Dreaming, Chat, Settings. Binds 127.0.0.1.
+                        live.py streams the account over SSE from ONE poller,
+                        so a render costs no network and a cold start says
+                        unknown rather than zero. seen.py answers "what changed
+                        since I last looked", with the marker advancing to the
+                        previous request rather than to now.
                         Read-only apart from POST /chat, which is off unless
                         DASHBOARD_CHAT_TOKEN is set. auth.py is the shared
                         password gate; chat.py runs one Hermes process per
@@ -1287,7 +1375,7 @@ reference/              Third-party projects we borrow from. See reference/STATU
 ## Running it
 
 ```sh
-.venv/bin/python -m pytest              # full suite (651 tests)
+.venv/bin/python -m pytest              # full suite (733 tests)
 electrum-bot smoketest --mock           # no credentials needed
 electrum-bot smoketest                  # needs Alpaca paper keys
 electrum-bot dream                      # one lateral-thinking step; places nothing
