@@ -251,6 +251,39 @@ Three properties there are load-bearing:
   confirmation" is not a plan, and rendering it as one would let the model look
   like it has a view when it does not.
 
+**Hermes' own memory DOES survive across chat turns, and that is measured
+rather than assumed.** `run-chat.sh` ends in `exec hermes -z`, so every message
+is a fresh process — which made it reasonable to think each turn started blank,
+and the page note only ever claimed the *dashboard* keeps nothing. Tested
+directly: told it a fact, reloaded the page to clear the browser-held replay,
+asked again, and it answered correctly.
+
+Two things follow.
+
+- **There is no Hermes daemon to restart.** No `hermes.service` exists, and
+  `deploy/systemd/` installs none. Tools are re-enumerated on every message, so
+  a new MCP tool is live the moment the server changes — no restart step, and
+  telling an operator to run one sends them chasing a unit that is not there.
+- **Chat content is persisted on disk under `/home/hermes/`.** Account
+  questions and their answers therefore outlive the browser tab. That directory
+  is not backed up, which is right — it is not authoritative — but it is also
+  not pruned, and nothing in this repo manages it. Worth knowing before
+  treating the Chat page as ephemeral.
+
+The dashboard's own continuity is separate and deliberately small: the browser
+holds the turns, POSTs them, and `chat.py` replays only the last
+`HISTORY_TURNS` (6). Refresh the page and that replay is empty — which is
+exactly what makes the test above valid.
+
+**A textarea inserts nothing on Ctrl/Cmd+Enter.** Plain Enter is the key that
+inserts a newline by default, so making Enter *send* means the newline chord
+has to insert one **by hand** at the caret and move the caret past it.
+Rebinding Enter and assuming the browser still handles the other chord leaves a
+key that silently does nothing — the worst kind of broken, because it looks
+like the app ignored you. Shift+Enter is left alone precisely because the
+browser does handle it. `e.isComposing` is checked first, or an Enter
+confirming an IME candidate sends the message mid-word.
+
 **Never put a backslash in `render.STYLES`.** It is an ordinary Python string,
 so a CSS hex escape is read by *Python* first, as an octal escape: the
 stylesheet receives a control character and the browser draws a tofu box beside
@@ -572,6 +605,14 @@ and one failed fetch anywhere in it makes that false.
 surface genuinely needs live news, the prerequisite is a paid tier with its own
 quota, kept separate from the loop's — not a second consumer of the same 100
 requests.
+
+Web access more broadly is a deferred decision rather than a settled no, and
+`docs/HANDOFF.md` records the four separate things it could mean and how their
+risk differs. Two rules hold whichever is chosen: **nothing web-derived may
+become a gating input**, because `RiskGate` has to stay deterministic and must
+not fail open on a network call; and **the model reads rendered, attributable
+text, never raw pages**, which is the `indicators.py` rule arriving from a new
+direction.
 
 ### The query index is derived, and that is what makes open SQL safe
 
@@ -1198,9 +1239,11 @@ src/bot/
                         Shown headlines, posts and what CLOSED; never shown
                         profit and loss.
   web/                  Operator command centre: Board, Decisions, Trades,
-                        Analytics, Dreaming, Settings, Chat. Binds 127.0.0.1.
+                        Analytics, Dreaming, Chat, Settings. Binds 127.0.0.1.
                         Read-only apart from POST /chat, which is off unless
-                        DASHBOARD_CHAT_TOKEN is set.
+                        DASHBOARD_CHAT_TOKEN is set. auth.py is the shared
+                        password gate; chat.py runs one Hermes process per
+                        message and keeps no state of its own.
                         render.STYLES and render.SCRIPT carry the projection
                         layer: starfield, hyperspace jump, panel materialisation.
 souls/                  Character files for the two agents, in the SOUL.md shape.
@@ -1244,7 +1287,7 @@ reference/              Third-party projects we borrow from. See reference/STATU
 ## Running it
 
 ```sh
-.venv/bin/python -m pytest              # full suite (650 tests)
+.venv/bin/python -m pytest              # full suite (651 tests)
 electrum-bot smoketest --mock           # no credentials needed
 electrum-bot smoketest                  # needs Alpaca paper keys
 electrum-bot dream                      # one lateral-thinking step; places nothing

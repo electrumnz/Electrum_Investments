@@ -239,6 +239,20 @@ details.step summary:hover{color:var(--bone)}
   text-transform:uppercase;color:var(--pewter)}
 .turn .msg{white-space:pre-wrap;font-size:.9375rem}
 .turn.agent .msg{border-left:2px solid var(--patina);padding-left:.875rem}
+/* Three bouncing dots for the pending turn. Built from elements rather than
+   an animated `content`, which is not reliable across browsers, and driven by
+   CSS rather than a JS timer so nothing has to be torn down when the reply
+   lands — replacing the message text removes the dots with it. */
+.dots i{display:inline-block;width:.28em;height:.28em;margin-left:.2em;
+  border-radius:50%;background:currentColor;opacity:.35;
+  animation:bounce 1.05s infinite ease-in-out}
+.dots i:nth-child(2){animation-delay:.15s}
+.dots i:nth-child(3){animation-delay:.3s}
+@keyframes bounce{
+  0%,80%,100%{transform:translateY(0);opacity:.35}
+  40%{transform:translateY(-.3em);opacity:1}}
+@media (prefers-reduced-motion:reduce){
+  .dots i{animation:none;opacity:.55}}
 .turn.err .msg{border-left:2px solid var(--rust);padding-left:.875rem;
   color:var(--loss);font-family:var(--mono);font-size:.8125rem}
 .composer{display:flex;gap:.6rem;align-items:flex-end}
@@ -1078,8 +1092,12 @@ PAGES: tuple[tuple[str, str], ...] = (
     ("/trades", "Trades"),
     ("/analytics", "Analytics"),
     ("/dreaming", "Dreaming"),
-    ("/settings", "Settings"),
     ("/chat", "Chat"),
+    # Settings last, beside Sign out. The order is a scan path: the pages you
+    # open several times a day sit left, and the one you touch when something
+    # needs configuring sits at the far end with the other administrative
+    # control rather than between two you use constantly.
+    ("/settings", "Settings"),
 )
 
 # The dreamer's avatar. Drawn here in primitives rather than shipped as an
@@ -2293,10 +2311,11 @@ def chat_page(*, enabled: bool, token: str, hermes_available: bool) -> str:
         token=token,
         soul="yoda",
         who="Yoda",
-        intro="Ask about the account, the journal, open risk, a particular "
-        "decision, or the news the bot has read. I reach the same journal and "
-        "audit log this dashboard renders, through the MCP tools, and every "
-        "order path behind me runs the risk gate first.",
+        # Deliberately one line. What this used to say is already said twice
+        # on the page: the note above states what Hermes reaches and that it
+        # cannot route around the gate, and the buttons below are a better list
+        # of what to ask than a sentence describing one.
+        intro="Active. Ask away.",
         placeholder="Ask about the account, a trade, a rejection, or the news",
         suggestions=[
             "What is my open risk right now, and how close is it to the cap?",
@@ -2377,9 +2396,11 @@ def chat_panel(
   <div class="prompts">{chips}</div>
   <div class="composer">
     <textarea id="msg" rows="2" placeholder="{_e(placeholder)}"
-      aria-label="Message"></textarea>
+      aria-label="Message" aria-describedby="key-hint"></textarea>
     <button class="btn" id="send" type="submit">Send</button>
   </div>
+  <p class="note" id="key-hint"><b>Enter</b> sends. <b>Ctrl+Enter</b> or
+  <b>Shift+Enter</b> for a new line.</p>
   <p class="note">{_e(footnote)}</p>{extra_notes}
 </div>
 <script>
@@ -2409,8 +2430,8 @@ def chat_panel(
     if (!text) return;
     box.value = '';
     turn('You', text, 'user');
-    var pending = turn(WHO, 'Thinking. A question that fans out across the '
-      + 'MCP tools can take a while.', 'agent');
+    var pending = turn(WHO, 'Thinking', 'agent');
+    pending.appendChild(dots());
     send.disabled = true;
     /* Means "a request is open", never "an idea is forming". The avatar must
        not imply the agent is doing something it is not. */
@@ -2442,9 +2463,37 @@ def chat_panel(
       }});
   }}
 
+  function dots() {{
+    // Elements rather than text, so the animation is CSS. `turn()` sets
+    // textContent, so this is appended afterwards; when the reply arrives it
+    // overwrites textContent and takes the dots with it.
+    var s = document.createElement('span');
+    s.className = 'dots';
+    s.setAttribute('aria-hidden', 'true');
+    for (var i = 0; i < 3; i++) s.appendChild(document.createElement('i'));
+    return s;
+  }}
+
+  function newlineAtCaret() {{
+    // Ctrl/Cmd+Enter does NOT insert a newline in a textarea by default, so
+    // taking it over for that means putting one in by hand and leaving the
+    // caret after it. Shift+Enter needs none of this: the browser already
+    // inserts one, so that path just returns and lets the default run.
+    var start = box.selectionStart, end = box.selectionEnd;
+    box.value = box.value.slice(0, start) + '\\n' + box.value.slice(end);
+    box.selectionStart = box.selectionEnd = start + 1;
+  }}
+
   send.addEventListener('click', ask);
   box.addEventListener('keydown', function (e) {{
-    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {{ e.preventDefault(); ask(); }}
+    if (e.key !== 'Enter') return;
+    // Enter also confirms a candidate in an IME. Sending on it would swallow
+    // the word being composed rather than the message.
+    if (e.isComposing || e.keyCode === 229) return;
+    if (e.ctrlKey || e.metaKey) {{ e.preventDefault(); newlineAtCaret(); return; }}
+    if (e.shiftKey) return;
+    e.preventDefault();
+    ask();
   }});
   document.querySelectorAll('.prompts button').forEach(function (b) {{
     b.addEventListener('click', function () {{ box.value = b.dataset.q; ask(); }});
