@@ -748,3 +748,48 @@ def test_a_degraded_social_feed_is_not_shown_as_a_quiet_morning(audited):
 
     assert "social feed was DEGRADED" in body
     assert "not that nothing was posted" in body
+
+
+def test_enter_sends_and_ctrl_enter_makes_a_new_line():
+    """The composer's key handling, which is easy to regress into silence.
+
+    A textarea sends nothing on its own, so every one of these is a deliberate
+    branch rather than a default:
+
+    - Enter sends, which is what anyone typing into a chat box expects.
+    - Ctrl/Cmd+Enter inserts a newline BY HAND, because the browser does not
+      insert one for that combination — taking the key over without doing this
+      would make it silently do nothing at all.
+    - Shift+Enter falls through to the browser, which does insert one.
+    - An Enter that is confirming an IME candidate must not send, or the
+      message goes off mid-word.
+
+    And the page has to say which key does what, since none of it is guessable.
+    """
+    import re
+
+    from bot.web.render import chat_page
+
+    body = chat_page(enabled=True, token="tok", hermes_available=True)
+    js = body[body.index("<script>") :]
+
+    # Enter sends: no modifier check guarding the send path any more.
+    assert "if (e.key !== 'Enter') return;" in js
+    assert "e.preventDefault();\n    ask();" in js
+
+    # Ctrl/Cmd+Enter inserts the newline itself.
+    assert "if (e.ctrlKey || e.metaKey) { e.preventDefault(); newlineAtCaret(); return; }" in js
+    assert "box.selectionStart" in js and "'\\n'" in js
+
+    # Shift+Enter defers to the browser rather than being swallowed.
+    assert "if (e.shiftKey) return;" in js
+
+    # Composition must not be mistaken for a send.
+    assert "e.isComposing" in js
+
+    # And it is stated on the page, wired to the textarea for screen readers.
+    assert 'aria-describedby="key-hint"' in body
+    assert 'id="key-hint"' in body
+    collapsed = re.sub(r"\s+", " ", body)
+    assert "<b>Enter</b> sends." in collapsed
+    assert "<b>Ctrl+Enter</b> or <b>Shift+Enter</b> for a new line." in collapsed
