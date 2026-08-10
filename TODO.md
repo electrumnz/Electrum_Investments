@@ -171,6 +171,76 @@ Do not report these as done from a container that cannot see them.
 
 ---
 
+## 0. `electrum-bot dream` cannot make its model call — THE blocking one
+
+Found by running it for real against a pristine export of HEAD. Transcript:
+`tests/fixtures/dream_cycle_2026-08-10.json`, field `shipped_transport_probe`.
+
+`ClaudeClient.dream` calls `messages.parse(output_format=DreamStep)` and the API
+refuses it — **"Schema is too complex."**, **"Grammar compilation timed out."**,
+and twice a plain `APITimeoutError`.
+
+**Bisected to a COUNT of optional properties, not to anything about dreaming.**
+Synthetic models of N optional strings and nothing else: 8 compiles (in 18
+seconds, already slow), 10, 11 and 12 fail. `DreamStep` has **eleven** optional
+top-level fields, plus `DreamHop` (2) and `StepCondition` (5). `DreamStep` minus
+`conditions` compiles; `StepCondition` alone compiles; together they do not.
+
+**Operationally worse than a refusal.** `timeout=900` plus two SDK retries means
+the dream timer hangs for up to **forty-five minutes** and then logs
+`dream_call_failed`. On a daily timer that is a whole day's dreaming lost to a
+process that looks busy.
+
+**Every test uses a stub client, so the suite is structurally blind.** Same shape
+as the journal schema that could not store what the models allowed, and the
+`.gitignore` pattern that hid three modules while everything was green. A stub
+must never again be the only thing standing behind this call.
+
+Blast radius CHECKED rather than assumed: `ClaudeDecision` maxes at five
+optional (`PositionPlan`), the conference turns at one or two, and both compile
+in about four seconds. **The decision loop and the conference are fine. Only the
+dreamer is dead.**
+
+---
+
+## 0b. An honest dreamer can never leave the workbench
+
+Not a bug — a conflict between two rules, and the honest one is losing.
+
+`promotion_for` needs a `keep`, at least one `is_checkable` condition, and one of
+those pinned to the weakest hop. Every `TriggerField` is price or technical —
+`close`, `sma_20`, `atr_14`. **The weakest hop of a second-order supply-chain
+dream is never a price fact.**
+
+So the only route to the prophecy shelf is to invent a price threshold for a
+non-price claim, which the system prompt forbids. Over eight real steps the
+honesty rule won every time: **zero `is_checkable` conditions, vault empty,
+conference candidates zero.** The model named the problem itself, unprompted:
+
+> "No field available to me — technical or otherwise — measures wholesale egg
+> price or gross margin directly, and CALM's stock price already bakes in the
+> market's own guess about this rather than testing it independently."
+
+**Compounding it: `build_prompt` shows the dreamer no market figures at all**
+while instructing it to read the level off the figures and write it down.
+Measured on a fresh prompt — the only digit runs present are the timestamp.
+
+Two directions, and this is a design decision rather than a patch:
+
+- **Widen what a condition may be measured against**, so a supply-chain claim
+  can be settled by something that is not a share price. That means a new source
+  of gradeable facts, and every one of them has to be a figure the loop already
+  records — the `indicators.py` rule, or the model is deriving again.
+- **Accept that most dreams stay on the workbench** and make the prophecy shelf
+  the rare case it then is. Defensible, but it should be a stated choice rather
+  than an accident of the field list.
+
+Do not "fix" this by loosening the number-not-a-name rule. A threshold that
+names another figure tests a level nobody ever saw, which is the failure the
+rule exists to prevent.
+
+---
+
 ## 1. Fill an entry OUT OF HOURS — the blocking one
 
 **The operator asked for a position ON in the pre-market and got a resting
