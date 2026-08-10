@@ -949,6 +949,93 @@ badge as a full-width block. Valid CSS, silently styling the wrong element, and
 invisible unless somebody looks. `tests/test_web.py` now fails the build on the
 shape rather than the instance.
 
+**The Cmd+K console is NOT part of this layer, and lives in its own closure.**
+`render.SCRIPT` answers `prefers-reduced-motion` by returning on line one, which
+is right for a starfield and wrong for the only keyboard route to every page:
+somebody asking for less motion is asking for fewer moving pixels, not for a way
+around the site to be withdrawn. So the palette sits after the projection
+closure, outside the bail-out, animating through the stylesheet — which has a
+reduced-motion block of its own, so the preference is honoured where it applies.
+It reaches hyperspace through `window.MUDHORN_FX` if that layer built one and
+falls back to an ordinary navigation if it did not, so a throw up there costs the
+starfield rather than the way around the deck. Same principle as the settle
+timer: the recovery path must not depend on the code it is recovering from.
+
+Focus returning from the palette is **checked, never assumed**. The shortcut is
+global, so it is usually pressed with nothing focused and `activeElement` is the
+body — and `body.focus()` silently does nothing, raising no error while a
+keyboard user is stranded at the top of the document anyway.
+
+Both were found in a browser and neither was visible from the suite, which is
+the general lesson: a closure boundary and a silent no-op are not things a unit
+test sees. `tests/test_web.py` pins the shapes; the Playwright pass in the
+scratchpad checks the behaviour.
+
+### A timestamp on a page describes the READING, never the render
+
+The Board printed `as at <now>` above figures that came from whatever the poller
+last read. Those are different moments, and the gap between them is not small:
+`LivePoller` idle-stops once nobody is watching and **keeps its snapshot**, so
+the first load of a morning served an overnight reading stamped with the current
+time. Every figure a present-tense claim about an account nobody had read since
+the night before, and the one element a reader checks to find out saying it was
+current.
+
+That is the confident-partial-answer failure this repository exists to prevent,
+arriving through the furniture rather than through the model. The whole suite was
+green throughout.
+
+Three properties now, and they are the same rule three times:
+
+- **The stamp names `taken_at`**, and a caller that cannot say when the figures
+  were read gets "read time unknown" rather than a default of now.
+- **A stale reading is announced ahead of everything it qualifies.** The expiry
+  and untracked-position banners are each a claim about a broker reading; an
+  eight-hour-old one still deserves showing — erring towards warning is the safe
+  direction — but a reader has to be told which account state they describe.
+- **The stamp carries `data-live-read` so the stream owns it.** A
+  server-rendered timestamp is right for exactly one instant, and the figures
+  under it repaint every few seconds. Left alone it becomes a time attached to a
+  reading it no longer describes, and stays wrong for as long as the tab is open.
+
+**`Broker.orders_degraded` is the `FinnhubCalendar.is_degraded` lesson in a
+third place.** `AlpacaBroker.get_open_orders` catches its own SDK errors and
+returns `[]` — it has to, because it feeds a display beside positions and risk —
+so the poller's `except` around it was dead for the only broker that can
+actually fail, and an outage rendered as an account with nothing resting. The
+existing test passed because the stub raises where the real one does not, which
+is the trap worth remembering: a test double that fails differently from the
+thing it doubles pins a path production never takes.
+
+**Four live states must not collapse into two.** `slow` fell through to the
+`else` in `paint()` and painted the link green, which said "live" while a read
+was outstanding and the figures on screen were the previous ones.
+
+**A poller that has been stopped stays stopped.** Cancelling
+`asyncio.to_thread` abandons the future while the worker thread runs on, so an
+abandoned poll could reach `_connected_broker`, authenticate a *new* session and
+store it after `stop()` had cleared the old one — a connected broker with nobody
+left to close it. The closed flag is set before the cancel, the release runs
+either side of the await, and `ensure_running` refuses to restart. The idle stop
+releases the session too; stopping the reads and holding the session is half an
+idle stop.
+
+**An injectable clock must be honoured everywhere or not offered.** `LiveState`
+falls back to the wall clock because it is a value object with no clock of its
+own, so a poller with an injected one stamped readings with it and measured
+their ages against the real one. Figures that look like measurements and are not
+are the exact thing this repository refuses.
+
+**`/live` was missing from `tests/test_auth.py` entirely**, and that is the
+shape of the miss worth naming: it is not a *page*, so it never came up when
+somebody wrote "every page is refused". It serves equity, cash, buying power,
+every open position and every resting order. Moving it into `OPEN_PATHS` would
+have published all of that with the suite green. The fix is not one more line in
+a hand-maintained list — that list failed exactly the way per-route dependencies
+were rejected for failing. **The routes are enumerated from the application
+now**, and a new one must be classified as refused or as deliberately open
+before the suite passes.
+
 ### Two agents, two souls, and Hermes only holds one
 
 `souls/yoda.md` answers about the account on `/chat`; `souls/grogu.md` dreams on
