@@ -1769,6 +1769,23 @@ for a while and agree with them.
   trades is noise, a model shown three losses will confidently change approach,
   and that is the Alpha Arena failure arriving as a feature request. The
   operator learns from the track record; the model learns from nothing.
+- **Holiday calendars for TSE, ASX and NZX.** The tape's exchange badges are
+  weekday-shaped for those three, so Boxing Day renders the ASX as open. The
+  badge says so in its own tooltip — `ClockFace.tracks_holidays` is False and
+  the limit travels with the claim — which is why this is deferred rather than
+  wrong. New York is already covered, through `session_calendar` and Alpaca.
+  **yfinance is NOT the tool**, despite being the obvious guess: it serves
+  quotes, not calendars. The nearest thing is `Ticker.info["marketState"]` on
+  an index like `^N225`, which is a live per-symbol state from an unofficial
+  scraped API, one network call per exchange per poll, answering "now" rather
+  than "which days". `exchange_calendars` is the right library — XTKS, XASX
+  and XNZE with real holiday rules, offline — and it is a dependency on the
+  box that runs the trading loop, added to colour a badge for three markets
+  the bot does not trade. That is the trade-off to weigh, and today it does
+  not clear. **Do not hardcode three holiday lists instead.** They go stale in
+  silence, and a stale list still looks answered, which is strictly worse than
+  a stated limit.
+
 - **Multi-agent dreaming.** Several dreamers working a topic independently and
   then debating it out before a verdict. `Thought.by` already carries the
   attribution that needs.
