@@ -219,6 +219,20 @@ details.step summary:hover{color:var(--bone)}
   text-transform:uppercase;color:var(--pewter)}
 .turn .msg{white-space:pre-wrap;font-size:.9375rem}
 .turn.agent .msg{border-left:2px solid var(--patina);padding-left:.875rem}
+/* Three bouncing dots for the pending turn. Built from elements rather than
+   an animated `content`, which is not reliable across browsers, and driven by
+   CSS rather than a JS timer so nothing has to be torn down when the reply
+   lands — replacing the message text removes the dots with it. */
+.dots i{display:inline-block;width:.28em;height:.28em;margin-left:.2em;
+  border-radius:50%;background:currentColor;opacity:.35;
+  animation:bounce 1.05s infinite ease-in-out}
+.dots i:nth-child(2){animation-delay:.15s}
+.dots i:nth-child(3){animation-delay:.3s}
+@keyframes bounce{
+  0%,80%,100%{transform:translateY(0);opacity:.35}
+  40%{transform:translateY(-.3em);opacity:1}}
+@media (prefers-reduced-motion:reduce){
+  .dots i{animation:none;opacity:.55}}
 .turn.err .msg{border-left:2px solid var(--rust);padding-left:.875rem;
   color:var(--loss);font-family:var(--mono);font-size:.8125rem}
 .composer{display:flex;gap:.6rem;align-items:flex-end}
@@ -1439,9 +1453,11 @@ def chat_page(*, enabled: bool, token: str, hermes_available: bool) -> str:
   <div class="prompts">{chips}</div>
   <div class="composer">
     <textarea id="msg" rows="2" placeholder="Ask about the account, a trade, a rejection, or the news"
-      aria-label="Message"></textarea>
+      aria-label="Message" aria-describedby="key-hint"></textarea>
     <button class="btn" id="send" type="submit">Send</button>
   </div>
+  <p class="note" id="key-hint"><b>Enter</b> sends. <b>Ctrl+Enter</b> or
+  <b>Shift+Enter</b> for a new line.</p>
   <p class="note">Turns are replayed for continuity but this is not a long-lived
   session. Hermes keeps its own memory; the dashboard does not.</p>
   <p class="note"><b>News here is a recording, not a search.</b> Hermes has no
@@ -1481,8 +1497,8 @@ def chat_page(*, enabled: bool, token: str, hermes_available: bool) -> str:
     if (!text) return;
     box.value = '';
     turn('You', text, 'user');
-    var pending = turn('Hermes', 'Thinking. A question that fans out across the '
-      + 'MCP tools can take a while.', 'agent');
+    var pending = turn('Hermes', 'Thinking', 'agent');
+    pending.appendChild(dots());
     send.disabled = true;
 
     fetch('/chat', {{
@@ -1507,9 +1523,37 @@ def chat_page(*, enabled: bool, token: str, hermes_available: bool) -> str:
       .finally(function () {{ send.disabled = false; box.focus(); }});
   }}
 
+  function dots() {{
+    // Elements rather than text, so the animation is CSS. `turn()` sets
+    // textContent, so this is appended afterwards; when the reply arrives it
+    // overwrites textContent and takes the dots with it.
+    var s = document.createElement('span');
+    s.className = 'dots';
+    s.setAttribute('aria-hidden', 'true');
+    for (var i = 0; i < 3; i++) s.appendChild(document.createElement('i'));
+    return s;
+  }}
+
+  function newlineAtCaret() {{
+    // Ctrl/Cmd+Enter does NOT insert a newline in a textarea by default, so
+    // taking it over for that means putting one in by hand and leaving the
+    // caret after it. Shift+Enter needs none of this: the browser already
+    // inserts one, so that path just returns and lets the default run.
+    var start = box.selectionStart, end = box.selectionEnd;
+    box.value = box.value.slice(0, start) + '\\n' + box.value.slice(end);
+    box.selectionStart = box.selectionEnd = start + 1;
+  }}
+
   send.addEventListener('click', ask);
   box.addEventListener('keydown', function (e) {{
-    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {{ e.preventDefault(); ask(); }}
+    if (e.key !== 'Enter') return;
+    // Enter also confirms a candidate in an IME. Sending on it would swallow
+    // the word being composed rather than the message.
+    if (e.isComposing || e.keyCode === 229) return;
+    if (e.ctrlKey || e.metaKey) {{ e.preventDefault(); newlineAtCaret(); return; }}
+    if (e.shiftKey) return;
+    e.preventDefault();
+    ask();
   }});
   document.querySelectorAll('.prompts button').forEach(function (b) {{
     b.addEventListener('click', function () {{ box.value = b.dataset.q; ask(); }});
