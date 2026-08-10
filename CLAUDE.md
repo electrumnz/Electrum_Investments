@@ -1382,6 +1382,49 @@ the general lesson: a closure boundary and a silent no-op are not things a unit
 test sees. `tests/test_web.py` pins the shapes; the Playwright pass in the
 scratchpad checks the behaviour.
 
+### `prefers-reduced-motion` has TWO right answers, and which one depends on whether the thing is decoration
+
+The starfield answers it by **not existing**: the script returns on line one,
+never starts the canvas and never builds the boot overlay, so the work is not
+done rather than done invisibly. That is correct for a full-screen radial
+starfield accelerating to lightspeed, which is close to a worked example of a
+vestibular trigger.
+
+Applying that reading to a **control** is a bug, and it is an easy one to write
+because it looks like consistency. The Cmd+K console already got this right by
+sitting outside the projection layer's bail-out: somebody asking for fewer
+moving pixels is asking for fewer moving pixels, not for the only keyboard
+route around the deck to be withdrawn.
+
+So the rule generalises, and both halves are now tested rather than remembered:
+
+- **Decoration switches off.** The wisps drifting around a dream's trade
+  (`web/dream_fx.py`) are `display:none` under the preference. Nothing is lost,
+  because a badge was never the point of them.
+- **A control keeps working and loses only its motion.** The forge window
+  (`web/forge_window.py`) is the only route to agreeing to a limit change, so
+  the reduced-motion block may touch `animation` and is tested for **not**
+  touching `display`, `visibility` or `opacity` on the dialog.
+- **Anything carrying information survives either way.** `.from-dream` names
+  WHICH dream a trade came from and is tested for surviving the preference, for
+  the same reason the treatment exists at all: a marking that cannot be traced
+  back to a record is decoration pretending to be provenance.
+
+**A state and the animation announcing it are different things, on different
+clocks.** Symbiosis is the worked case. Two dreams fuse in the backend whenever
+they fuse — a vault that only joined while a browser was open would make the
+feature a function of the operator's attention, which is the opposite of what a
+background dreamer is for. The *reveal* waits, because an animation that played
+at 3am played to an empty room. `seen.py` answers which one this view is, and
+its marker advances to the PREVIOUS request rather than to now, so nothing is
+ever marked seen that was not on screen.
+
+The trap underneath is the fail-to-visible rule in its least obvious costume:
+it is very natural to draw two cards and have JavaScript merge them, and **that
+fails to two cards and a lie.** The card is rendered fused; the animation is
+the arrival of something already true. The client may only ever add the
+transient `joining` class, never `fused` itself, and a test pins it.
+
 ### A timestamp on a page describes the READING, never the render
 
 The Board printed `as at <now>` above figures that came from whatever the poller
