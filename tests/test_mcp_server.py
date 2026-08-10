@@ -901,6 +901,302 @@ def test_the_dream_tools_are_not_an_order_path():
         assert not (used & forbidden), f"{tool} reaches {sorted(used & forbidden)}"
 
 
+# ------------------------------------ putting something to the dreamer from chat
+#
+# The operator asked for this in two sentences and then corrected the shape of
+# it: "Dreaming agent can raise a dream from chat if it feels inspired, two
+# brains are better than one... I'm not talking convince, or being agreeable
+# though" — and then: "Chat agents can't raise Dream, the agent can merely put
+# it to consideration, hence the chat log."
+#
+# So there are two properties to hold here and they are different jobs.
+#
+# **Containment.** A dream is the first link of a chain that ends in a live
+# trading permission. A conversational surface must not be able to insert at the
+# top of it, so `raise_consideration` writes a note to the audit log and cannot
+# reach `data/dreams.db` at all. These tests assert that structurally — by field
+# sets, by the parsed syntax of the tool, and by the dream store file never even
+# being created — rather than by trusting the docstring.
+#
+# **Sincerity, which cannot be tested.** What can be is that the insincere
+# version is easy to SPOT afterwards: the operator's own words are stored
+# verbatim beside the spark they supposedly produced, and `prompt_echo` is
+# arithmetic on the resemblance.
+
+
+def _put_args(**overrides: Any) -> dict[str, Any]:
+    args: dict[str, Any] = {
+        "speaker": "grogu",
+        "spark": (
+            "Evaporation ponds run on sunshine, so a cloudy Atacama season "
+            "defers brine tonnage by a quarter"
+        ),
+        "why_now": (
+            "The operator asked about lithium demand; the part nobody was "
+            "pricing is the evaporation side of supply, not the demand side."
+        ),
+        "prompted_by": "what do you make of lithium demand right now",
+    }
+    args.update(overrides)
+    return args
+
+
+def test_a_consideration_is_recorded_and_no_dream_exists(wired_session):
+    """The demonstration, and the whole shape of the correction.
+
+    Chat puts something up; nothing lands on a shelf. `list_dreams` is what
+    would show a dream, and it shows none — the dream store file is not even
+    created, because this path never opens it.
+    """
+    result = mcp_server.raise_consideration(**_put_args())
+
+    assert result["recorded"] is True
+    assert result["refusals"] == []
+    assert result["origin"] == "chat:grogu"
+    assert result["speaker"] == "grogu"
+    assert result["why_now"].startswith("The operator asked about lithium")
+    assert result["prompted_by"] == "what do you make of lithium demand right now"
+    assert "never enforced" in result["note"]
+    assert "not as a dream" in result["note"]
+
+    # Stronger than an empty shelf, and asserted BEFORE anything reads the
+    # dreams: this path never opened the store at all, so there is no code path
+    # here that could have written to it. (`list_dreams` below creates the file
+    # by opening it, which is why the order matters.)
+    assert not wired_session._dreams_path.exists()
+
+    assert mcp_server.list_dreams()["counts_by_vault"] == {
+        "workbench": 0,
+        "prophecy": 0,
+        "vault": 0,
+        "adopted": 0,
+        "archive": 0,
+    }
+
+
+def test_a_consideration_cannot_become_a_permission_on_its_own(wired_session):
+    """The containment claim, asserted rather than described.
+
+    A dream reaches a symbol permission through dream -> prophecy -> vault ->
+    adopted -> `grants.resolve_granted_symbols`. A consideration enters none of
+    those, so there is nothing for the later steps to catch — which is the
+    difference between "it cannot create one" and "it can, and something else
+    will stop it".
+    """
+    for i in range(mcp_server.MAX_CONSIDERATIONS_PER_DAY):
+        assert mcp_server.raise_consideration(**_put_args(spark=f"A spark {i}"))["recorded"]
+
+    status = mcp_server.dream_vault_status()
+    assert status["symbols_in_force"] == {}
+    assert status["symbols_claimed_by_adoptions"] == {}
+    assert status["live_adoptions"] == []
+    assert all(shelf["held"] == 0 for shelf in status["shelves"].values())
+    assert wired_session.dreams.recent() == []
+    assert wired_session.dreams.adoptions() == []
+
+
+def test_a_consideration_shares_no_field_with_a_grant(wired_session):
+    """The same blunt net `tests/test_dreaming.py` throws over `Dream` and
+    `OrderProposal`, one layer out.
+
+    Three fields are what make a dream capable of becoming a permission:
+    `symbols` is the only field that can become a grant, `asset_class_key` is
+    which risk limits it would run under, and `chain` is the causal argument
+    whose absence is what keeps this a note. A consideration carrying any of
+    them would be a dream wearing a different noun, so the overlap is asserted
+    empty rather than left to review.
+    """
+    grant_bearing = {"symbols", "asset_class_key", "chain", "conditions", "verdict", "vault"}
+
+    assert mcp_server.CONSIDERATION_FIELDS & grant_bearing == set()
+
+    recorded = mcp_server.raise_consideration(**_put_args())
+    stored = mcp_server.list_considerations()["considerations"][0]
+    assert set(stored) <= mcp_server.CONSIDERATION_FIELDS
+    assert set(stored) & grant_bearing == set()
+    # And nothing sneaks in through the tool's own response either.
+    assert set(recorded) & grant_bearing == set()
+
+
+def test_the_consideration_tool_cannot_reach_the_dream_store(wired_session):
+    """Checked over the parsed syntax, like `test_the_dream_tools_are_not_an_order_path`.
+
+    The docstring names `Dream` and `dreams.db` on purpose — it has to explain
+    what this is not — so a grep-shaped test would fail on its own explanation.
+    What must be absent is any USE of the store, the model, or a shelf.
+    """
+    import ast
+    import inspect
+    import textwrap
+
+    forbidden = {
+        "Dream",
+        "DreamStore",
+        "DreamStage",
+        "Hop",
+        "Vault",
+        "_store",
+        "dreams",
+        "save",
+        "adopt",
+        "promote",
+        "broker",
+        "place_order",
+        "OrderProposal",
+    }
+    for tool in ("raise_consideration", "list_considerations"):
+        tree = ast.parse(textwrap.dedent(inspect.getsource(getattr(mcp_server, tool))))
+        used = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
+        used |= {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)}
+        assert not (used & forbidden), f"{tool} reaches {sorted(used & forbidden)}"
+
+
+def test_a_consideration_is_readable_back_as_the_record(wired_session):
+    """"Hence the chat log": the note is only worth anything if somebody can
+    read it later, so the reader is part of the feature rather than a follow-up."""
+    mcp_server.raise_consideration(**_put_args(spark="First thought"))
+    mcp_server.raise_consideration(**_put_args(speaker="yoda", spark="Second thought"))
+
+    listing = mcp_server.list_considerations()
+
+    assert listing["found"] == 2
+    assert listing["record_is_incomplete"] is False
+    assert [c["spark"] for c in listing["considerations"]] == [
+        "Second thought",
+        "First thought",
+    ]
+    assert [c["origin"] for c in listing["considerations"]] == ["chat:yoda", "chat:grogu"]
+    # Every row carries when it was said and what the operator said, because a
+    # note with no time on it reads as current forever.
+    assert all(c["at"] for c in listing["considerations"])
+    assert all(c["prompted_by"] for c in listing["considerations"])
+    assert "never dreams" in listing["note"]
+
+
+def test_an_empty_list_is_not_read_as_a_quiet_week(wired_session):
+    """The `FinnhubCalendar.is_degraded` lesson again: a log that could not be
+    read produces the same empty list as one nobody wrote to."""
+    listing = mcp_server.list_considerations()
+
+    assert listing["found"] == 0
+    assert "record_is_incomplete" in listing
+    assert "means nothing at all if record_is_incomplete" in listing["note"]
+
+
+def test_raise_consideration_refuses_the_fourth_in_a_day(wired_session):
+    """An enthusiastic session must not spray the dreamer's inbox.
+
+    The count is read off the audit log by date rather than kept as a counter,
+    so it cannot drift out of step with what is actually on file.
+    """
+    for i in range(mcp_server.MAX_CONSIDERATIONS_PER_DAY):
+        result = mcp_server.raise_consideration(**_put_args(spark=f"Spark {i}"))
+        assert result["recorded"] is True, result["refusals"]
+        assert result["raised_today"] == i + 1
+
+    fourth = mcp_server.raise_consideration(**_put_args(spark="One more"))
+
+    assert fourth["recorded"] is False
+    assert fourth["refusals"] == ["daily_cap_reached"]
+    assert fourth["raised_today"] == mcp_server.MAX_CONSIDERATIONS_PER_DAY
+    assert mcp_server.list_considerations()["found"] == 3
+
+
+def test_the_daily_cap_counts_the_surface_not_each_agent(wired_session):
+    """Both chat agents share one allowance. The scarce thing is the dreamer's
+    attention, not either agent's quota — counted per speaker it would be six."""
+    for i in range(mcp_server.MAX_CONSIDERATIONS_PER_DAY):
+        assert mcp_server.raise_consideration(**_put_args(speaker="grogu", spark=f"s{i}"))[
+            "recorded"
+        ]
+
+    assert mcp_server.raise_consideration(**_put_args(speaker="yoda"))["refusals"] == [
+        "daily_cap_reached"
+    ]
+
+
+def test_raise_consideration_collects_every_refusal_at_once(wired_session):
+    """The `RiskGate` property on a new surface: an agent told one thing wrong
+    at a time asks repeatedly, and an unattended surface must not encourage
+    that."""
+    result = mcp_server.raise_consideration(speaker="the-mandalorian", spark="  ", why_now="")
+
+    assert set(result["refusals"]) == {"unknown_speaker", "needs_spark", "needs_why_now"}
+    assert "Nothing was written." in result["note"]
+    assert mcp_server.list_considerations()["found"] == 0
+
+
+def test_an_unknown_speaker_is_refused_rather_than_defaulted(wired_session):
+    """This inverts what `bot.web.app.chat` does with an unknown soul, on
+    purpose. There a wrong guess costs the wrong voice on one answer; here it is
+    the whole attribution on a note the dreamer will read later, and a
+    misattributed record is worse than a refused one."""
+    result = mcp_server.raise_consideration(**_put_args(speaker="armorer"))
+
+    assert result["recorded"] is False
+    assert result["refusals"] == ["unknown_speaker"]
+    assert mcp_server.list_considerations()["found"] == 0
+
+
+def test_the_record_tells_on_a_spark_that_is_the_operators_own_sentence(wired_session):
+    """The half the operator asked to be VISIBLE rather than prevented.
+
+    A guard on this number could be walked around by rewording, and the
+    walk-around would leave the record looking clean. Arithmetic a reader can
+    see cannot be argued with in the same way.
+    """
+    quote = "what do you make of lithium demand right now"
+    echoed = mcp_server.raise_consideration(
+        **_put_args(spark="Lithium demand is worth a look right now", prompted_by=quote)
+    )
+    added = mcp_server.raise_consideration(
+        **_put_args(
+            spark="Evaporation ponds run on sunshine and the season has been overcast",
+            prompted_by=quote,
+        )
+    )
+
+    assert echoed["prompt_echo"] >= 0.8
+    assert added["prompt_echo"] == 0.0
+    # And it survives the round trip, so an operator reading the log next week
+    # sees the same figure the agent was shown when it put the note up.
+    stored = {c["spark"]: c["prompt_echo"] for c in mcp_server.list_considerations()["considerations"]}
+    assert stored["Lithium demand is worth a look right now"] == echoed["prompt_echo"]
+
+
+def test_an_unprompted_consideration_has_no_echo_rather_than_a_perfect_one(wired_session):
+    """`None`, never `0.0`. The flattering reading must not be what an absence of
+    evidence looks like — the same rule as `has_cycles` and
+    `can_grade_anything`."""
+    result = mcp_server.raise_consideration(**_put_args(prompted_by=""))
+
+    assert result["recorded"] is True
+    assert result["prompted_by"] == ""
+    assert result["prompt_echo"] is None
+    assert mcp_server.list_considerations()["considerations"][0]["prompt_echo"] is None
+
+
+def test_the_quote_is_stored_verbatim(wired_session):
+    """A paraphrased quote takes the reader's judgement away from them, so what
+    goes on file is what was said, whitespace aside."""
+    quote = "hmm, what about LITHIUM — is that anything?"
+    mcp_server.raise_consideration(**_put_args(prompted_by=f"  {quote}  "))
+
+    assert mcp_server.list_considerations()["considerations"][0]["prompted_by"] == quote
+
+
+def test_a_refusal_is_recorded_as_well_as_a_note(wired_session):
+    """How often this surface tries and how often it is prompted is a fact about
+    the surface, and a log that only kept the successes could not answer it. The
+    refusals go under their own kind, so they never read back as considerations."""
+    mcp_server.raise_consideration(**_put_args())
+    mcp_server.raise_consideration(**_put_args(speaker="armorer"))
+
+    kinds = [e["kind"] for e in mcp_server.get_recent_decisions()["events"]]
+    assert kinds == ["chat_consideration_refused", "chat_consideration"]
+    assert mcp_server.list_considerations()["found"] == 1
+
+
 # ---------------------------------- the blackout gate applies on THIS path too
 
 

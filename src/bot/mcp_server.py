@@ -13,7 +13,9 @@ and let `place_order` here be the only write path.
 
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime, timedelta
+from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
@@ -51,6 +53,7 @@ from .position_actions import (
 from .position_actions import tighten_stop as tighten_stop_action
 from .reconcile import apply_journal_state, record_fill
 from .risk import RiskGate
+from .souls import GROGU, YODA
 from .stand_down import describe
 from .triggers import render as render_watches
 
@@ -93,7 +96,15 @@ server = MCPServer(
         "in config/rules.yaml still runs on anything traded under one. Quote "
         "the ages these tools report — a dream offered three months ago and one "
         "offered this morning are different facts — and never read an empty "
-        "list as 'nothing is happening' without checking store_readable first."
+        "list as 'nothing is happening' without checking store_readable first.\n\n"
+        "**Neither chat agent can create a dream, and raise_consideration is "
+        "not a way to.** It records a NOTE to the dreamer — a spark, why now, "
+        "and the operator's own words verbatim — which the dreamer reads on its "
+        "own run and may ignore. Nothing it writes is on a shelf, offered, or "
+        "permitted, so never tell the operator a dream now exists; "
+        "list_considerations reads them back. Put one up when you have a link "
+        "the operator does not, and remember that 'I have nothing worth passing "
+        "on here' is a good answer."
     ),
 )
 
@@ -1464,6 +1475,198 @@ def _expiry(dream: Dream, now: datetime, ttls: VaultTTLs) -> dict[str, Any]:
     }
 
 
+# ------------------------------------------- a consideration put to the dreamer
+#
+# **The operator's correction, and it changes the shape rather than the wording:
+# "Chat agents can't raise Dream, the agent can merely put it to consideration,
+# hence the chat log."**
+#
+# A first pass at this gave chat a tool that wrote a `Dream`. That was wrong,
+# and not as a matter of taste. A dream is the FIRST LINK of a chain that ends
+# in a live trading permission — dream, prophecy, vault, adopted,
+# `grants.resolve_granted_symbols`, and then a symbol `RiskGate` will admit that
+# `config/rules.yaml` never listed. Handing a conversational surface a tool that
+# inserts at the top of that chain means a signed-in user can talk a model into
+# the first link of a permission path. Every step after it still gates, so no
+# rule would have been broken today — but "it cannot create one" and "it can
+# create one and the later steps will catch it" are different claims, and only
+# the first is worth making. Same reasoning that put the dreamer on its own
+# Hermes instance rather than trusting a sentence in `souls/grogu.md`.
+#
+# So what chat writes is a CONSIDERATION: a note addressed to the dreamer,
+# saying here is a spark, here is why now, and here is what the operator
+# actually said. The dreamer picks it up on its own run and decides for itself
+# whether any of it becomes a seed. **It may ignore it**, and that is the
+# feature: the operator can point at something and the thing that dreams still
+# chooses.
+#
+# Three fields a `Dream` has are deliberately ABSENT here, and they are the
+# three that make a dream capable of becoming a permission:
+#
+# - `symbols` — the only field on a dream that can become a grant.
+# - `asset_class_key` — which risk limits such a grant would run under.
+# - `chain` — the hops. Requiring them was what made the first attempt a
+#   dream-authoring tool; producing them is the dreamer's job, not chat's.
+#
+# A consideration carrying any of those would be a dream wearing a different
+# noun, so `tests/test_mcp_server.py` asserts the field sets do not overlap —
+# the same blunt net `tests/test_dreaming.py` throws over `Dream` and
+# `OrderProposal`.
+#
+# **It is written to the AUDIT LOG, not to `data/dreams.db`.** That is the
+# containment, and it is structural rather than careful: nothing in
+# `dreaming.py` reads the audit log, so there is no code path that turns one of
+# these into a row on a shelf. It is also the right shape on its own terms —
+# append-only, never migrated, tolerant of a torn final line, already backed up
+# by `deploy/backup-journal.sh`, and already indexed into `insight.py`'s
+# `events` table, so `query_history` can answer "what has chat put up lately"
+# across the whole history rather than a window.
+#
+# What survives from the first attempt, because all of it applies to a note as
+# much as to a dream: `why_now` in the agent's own words, `prompted_by` as the
+# operator's verbatim phrasing, `origin` recording `chat:grogu` or `chat:yoda`,
+# and a small daily cap. `prompt_echo` survives too — arithmetic over words,
+# REPORTED and never enforced, the same posture as `Verification` counting
+# `checked` flags rather than asking a model how well sourced it feels. A guard
+# on that number could be walked around by rewording, and the walk-around would
+# leave the record looking clean; a record that tells on itself cannot be.
+
+# Which chat agents may put something up. Both, because the operator's reason
+# for wanting this was "two brains are better than one" — and deliberately not
+# `armorer`, whose whole job is arguing about `config/rules.yaml`.
+#
+# An unrecognised speaker is REFUSED rather than defaulted, which inverts the
+# rule `bot.web.app.chat` applies to `load_soul`, and the inversion is about
+# what the field is for in each place. There, getting it wrong costs the wrong
+# voice on one answer. Here it is the whole attribution on a note the dreamer
+# will read later, and a misattributed record is worse than a refused one.
+CHAT_RAISERS: frozenset[str] = frozenset({GROGU, YODA})
+
+# The surface half of `origin`. A dreamt dream carries whatever the model said
+# the spark was; a consideration carries `chat:<soul>`, so a reader can always
+# tell a thing said in conversation from a thing the dreamer worked out.
+CHAT_ORIGIN_PREFIX = "chat:"
+
+# The audit `kind` these are stored under. One string, named once, because it is
+# what every reader — this module, `query_history`, and anything that later
+# renders these on the Dreaming page — has to agree on.
+CONSIDERATION_EVENT = "chat_consideration"
+
+# How many may be put up in one UTC day. Small on purpose.
+#
+# Counted across BOTH agents rather than per speaker, because the scarce thing
+# is the dreamer's attention rather than either agent's quota — a per-speaker
+# cap would simply be six.
+MAX_CONSIDERATIONS_PER_DAY = 3
+
+# How many audit events to scan when counting today's, and how many days of
+# dated files to open. Counted from the log rather than held as a counter, so
+# the figure cannot drift out of step with what is actually on file.
+_CONSIDERATION_SCAN = 400
+
+# Words too common to say anything about whether a spark is the operator's
+# sentence given back. Deliberately short: a longer list starts encoding a view
+# about which words are meaningful, and the ratio is only ever an observation.
+_ECHO_STOPWORDS = frozenset(
+    {
+        "the", "and", "but", "for", "are", "was", "were", "have", "has", "had",
+        "what", "about", "with", "that", "this", "from", "into", "your", "you",
+        "its", "can", "could", "would", "should", "any", "some", "them", "they",
+        "there", "then", "how", "why", "who", "when", "where", "which", "does",
+        "did", "not", "out", "get", "got", "one", "two", "all", "more", "most",
+        "much", "very", "just", "like", "look", "see", "think", "thoughts",
+    }
+)
+
+
+class RaiseRefusal(StrEnum):
+    """Why a consideration was not recorded. Machine-readable, like `MoveRefusal`.
+
+    Every one is an ordinary answer rather than an error, and they are collected
+    rather than short-circuited — the property `RiskGate` and `DreamStore` both
+    have, for the same reason: an agent told one thing wrong at a time asks
+    repeatedly, and an unattended surface must not encourage that.
+    """
+
+    UNKNOWN_SPEAKER = "unknown_speaker"
+    NEEDS_SPARK = "needs_spark"
+    NEEDS_WHY_NOW = "needs_why_now"
+    DAILY_CAP_REACHED = "daily_cap_reached"
+
+
+# Every field a consideration has. Named as a constant rather than left implicit
+# in a dict literal so the containment test has something to assert against:
+# none of these may be a field of `Dream` that can become a permission. See the
+# block comment above, and `test_a_consideration_shares_no_field_with_a_grant`.
+CONSIDERATION_FIELDS: frozenset[str] = frozenset(
+    {"origin", "speaker", "spark", "why_now", "prompted_by", "prompt_echo", "at"}
+)
+
+
+def _content_words(text: str) -> set[str]:
+    """Words worth comparing. Lowercased, punctuation dropped, stopwords removed."""
+    return {
+        word
+        for word in re.findall(r"[a-z0-9]+", text.lower())
+        if len(word) >= 3 and word not in _ECHO_STOPWORDS
+    }
+
+
+def _prompt_echo(prompted_by: str, spark: str) -> float | None:
+    """What share of the operator's own words came straight back in the spark.
+
+    Arithmetic, reported and never enforced. A consideration whose spark is
+    nearly the operator's own sentence is one nobody actually had, and the
+    operator was explicit that this should be VISIBLE rather than prevented: a
+    guard on a number can be walked around by rewording, and the walk-around
+    would leave the record looking clean.
+
+    `None` when nothing was quoted, never `0.0`. An unprompted note has no ratio
+    rather than a perfect one, which is the `has_cycles` rule again: the
+    flattering reading must not be what an absence of evidence looks like.
+    """
+    prompt = _content_words(prompted_by)
+    if not prompt:
+        return None
+    return round(len(prompt & _content_words(spark)) / len(prompt), 2)
+
+
+def _utc_day(moment: datetime) -> str:
+    """The UTC calendar day of a moment, as `YYYY-MM-DD`.
+
+    A naive timestamp is read as UTC rather than raising. Everything here
+    reasons in UTC, and a `TypeError` out of a date comparison would take the
+    tool down over a line somebody hand-edited.
+    """
+    aware = moment if moment.tzinfo else moment.replace(tzinfo=UTC)
+    return aware.astimezone(UTC).date().isoformat()
+
+
+def _considerations(days: int) -> tuple[list[dict[str, Any]], bool]:
+    """Every consideration on file across `days`, newest first, and whether the
+    read was degraded.
+
+    Returned as plain rows plus the degraded flag rather than as a bare list,
+    because a log that could not be fully read produces the same empty list as a
+    quiet week — the `FinnhubCalendar.is_degraded` lesson, and the reason
+    `list_considerations` reports `record_is_incomplete` beside the count.
+    """
+    view = _session.audit.read(limit=_CONSIDERATION_SCAN, days=max(1, days))
+    rows = [
+        dict(event.payload, at=event.timestamp.isoformat(timespec="minutes"))
+        for event in view.events
+        if event.kind == CONSIDERATION_EVENT
+    ]
+    return rows, view.is_degraded
+
+
+def _considerations_today(now: datetime) -> list[dict[str, Any]]:
+    """Today's, for the cap. Counted off the log, never off a counter."""
+    today = _utc_day(now)
+    rows, _ = _considerations(days=2)
+    return [r for r in rows if str(r.get("at", ""))[:10] == today]
+
+
 def _dream_brief(dream: Dream, now: datetime, ttls: VaultTTLs) -> dict[str, Any]:
     """One row in a list. Every age it can state, it states.
 
@@ -2015,6 +2218,195 @@ def post_dream_message(
         # Prose trims rather than being rejected, so a caller is told when the
         # stored turn is not the turn it sent.
         "truncated": message.text != text.strip(),
+    }
+
+
+@server.tool()
+def raise_consideration(
+    speaker: str,
+    spark: str,
+    why_now: str,
+    prompted_by: str = "",
+) -> dict[str, Any]:
+    """Put something to the dreamer for consideration. It is a note, not a dream.
+
+    **This does not create a dream and cannot.** It writes one line to the audit
+    log saying: here is a spark, here is why now, and here is what the operator
+    actually said. The dreamer reads it on its own run, on its own timer, and
+    decides for itself whether any of it becomes a seed — **it may ignore it
+    entirely**, and that is the point. You can point at something; the thing
+    that dreams still chooses.
+
+    The reason this is a note rather than a dream is worth knowing, because it
+    tells you what to write. A dream is the first link of a chain that ends in a
+    live trading permission — dream, prophecy, vault, adopted, and then a symbol
+    the risk gate will admit that `config/rules.yaml` never listed. A
+    conversation must not be able to insert at the top of that chain, so this
+    carries no symbols, no instrument class and no causal hops. Do not try to
+    smuggle a ticker into the prose; it grants nothing and it makes the note
+    read as a recommendation, which is exactly what it is not.
+
+    **Put one up when you have a LINK the operator does not.** A topic they just
+    named is a subject, not a consideration. If what you would write is their
+    sentence with a noun swapped, you have nothing to put up.
+
+    **"I have nothing worth passing on here" is a good answer**, and it is the
+    right one most of the time. Nothing counts these as productivity. One raised
+    to be agreeable is worse than none, because the dreamer reads them and its
+    attention is the scarce thing.
+
+    `why_now` and `prompted_by` are stored side by side on purpose. Do not
+    paraphrase, tidy or summarise the quote — a reader puts the operator's own
+    words beside your spark and decides for themselves whether anything was
+    added, and a smoothed quote takes that judgement away from them. Leave it
+    empty only when nobody prompted you.
+
+    Refused, with every reason at once, when the speaker is not a chat agent,
+    when the spark or why_now is blank, or when three have already gone up
+    today. A refusal is an ordinary answer and asking again will not change it.
+
+    Read them back with list_considerations, or across the whole history with
+    query_history: `SELECT ts, payload FROM events WHERE kind =
+    'chat_consideration' ORDER BY ts DESC`.
+
+    Args:
+        speaker: Which agent is putting it up — "grogu" or "yoda". Recorded as
+            `chat:<speaker>`; do not sign it as the other one.
+        spark: The thought itself, in a sentence or two. Not a recommendation
+            and not a trade — a place you think it is worth the dreamer looking.
+        why_now: What prompted this, in your own words: what you noticed, and
+            why it is worth the dreamer's attention today rather than at some
+            point.
+        prompted_by: The operator's own words, verbatim, when something they
+            said led to this. Empty only when nothing did.
+    """
+    now = datetime.now(UTC)
+    who = speaker.strip().lower()
+    clean_spark = spark.strip()
+    clean_why = why_now.strip()
+    quote = prompted_by.strip()
+
+    refusals: list[RaiseRefusal] = []
+    if who not in CHAT_RAISERS:
+        refusals.append(RaiseRefusal.UNKNOWN_SPEAKER)
+    if not clean_spark:
+        refusals.append(RaiseRefusal.NEEDS_SPARK)
+    if not clean_why:
+        refusals.append(RaiseRefusal.NEEDS_WHY_NOW)
+
+    already = _considerations_today(now)
+    if len(already) >= MAX_CONSIDERATIONS_PER_DAY:
+        refusals.append(RaiseRefusal.DAILY_CAP_REACHED)
+
+    origin = f"{CHAT_ORIGIN_PREFIX}{who}"
+    echo = _prompt_echo(quote, clean_spark)
+    payload: dict[str, Any] = {
+        "recorded": not refusals,
+        "refusals": [str(r) for r in refusals],
+        "raised_today": len(already),
+        "daily_cap": MAX_CONSIDERATIONS_PER_DAY,
+    }
+
+    if refusals:
+        payload["note"] = (
+            "Refused by deterministic code, not by a judgement call. Fix what it "
+            "names or let the thought go; asking again will not change the "
+            "answer. Nothing was written."
+        )
+        # Recorded even when nothing was put up, for the reason
+        # `mcp_adopt_dream` records its refusals: how often this surface tries
+        # and how often it is prompted is a fact about the surface, and a log
+        # that only kept the successes could not answer it.
+        _session.audit.record_event(
+            "chat_consideration_refused",
+            {"speaker": who, "origin": origin, "refusals": payload["refusals"]},
+        )
+        return payload
+
+    # The record itself. Deliberately these fields and no others — see
+    # `CONSIDERATION_FIELDS` and the block comment above: no symbols, no
+    # instrument class, no chain. Written to the audit log rather than to
+    # `data/dreams.db`, so nothing in `dreaming.py` can read it as a shelf row.
+    _session.audit.record_event(
+        CONSIDERATION_EVENT,
+        {
+            "origin": origin,
+            "speaker": who,
+            "spark": clean_spark,
+            "why_now": clean_why,
+            "prompted_by": quote,
+            "prompt_echo": echo,
+        },
+    )
+
+    payload.update(
+        {
+            "origin": origin,
+            "speaker": who,
+            "spark": clean_spark,
+            "why_now": clean_why,
+            "prompted_by": quote,
+            "prompt_echo": echo,
+            "raised_today": len(already) + 1,
+            "at": now.isoformat(timespec="minutes"),
+            "note": (
+                "Recorded as a consideration, not as a dream. Nothing is on a "
+                "shelf, nothing is offered and no symbol is permitted by this. "
+                "The dreamer reads it on its own run and may ignore it. Say that "
+                "plainly rather than telling the operator a dream now exists — "
+                "list_dreams is what would show one, and it will not show this. "
+                "prompt_echo is arithmetic on how much of the operator's own "
+                "wording came back in the spark; it is reported for a reader to "
+                "judge, never enforced."
+            ),
+        }
+    )
+    return payload
+
+
+@server.tool()
+def list_considerations(days: int = 14, limit: int = 20) -> dict[str, Any]:
+    """What the chat surface has put to the dreamer lately, newest first.
+
+    These are notes awaiting the dreamer, **not dreams**. None of them is on a
+    shelf, none is offered to the trading agent and none permits a symbol. A
+    consideration that has been picked up looks identical here to one that has
+    not — the dreamer's own run is what turns any of this into a seed, and it is
+    free to ignore every one.
+
+    Each row carries `prompted_by`, the operator's own words verbatim when there
+    were any, beside the agent's `spark`. Read the two together: one whose spark
+    is the operator's sentence given back is one nobody actually had.
+    `prompt_echo` is the arithmetic on that — reported, never enforced, and
+    `null` rather than zero when nobody prompted it.
+
+    An empty list is an ordinary state and says nothing on its own. Check
+    `record_is_incomplete` first: a log that could not be fully read produces
+    exactly the same empty list, and reporting that as a quiet week is the
+    failure this tool has to avoid.
+
+    Args:
+        days: How many dated log files back to read (default 14).
+        limit: Maximum rows returned (default 20).
+    """
+    rows, degraded = _considerations(days=days)
+    now = datetime.now(UTC)
+    shown = rows[: max(1, limit)]
+    return {
+        "days_read": max(1, days),
+        "found": len(rows),
+        "returned": len(shown),
+        "raised_today": len(_considerations_today(now)),
+        "daily_cap": MAX_CONSIDERATIONS_PER_DAY,
+        "considerations": shown,
+        # Say the record is incomplete rather than imply nothing happened.
+        "record_is_incomplete": degraded,
+        "note": (
+            "Notes put to the dreamer, never dreams. Nothing here is on a shelf, "
+            "offered, or permitted, and the dreamer may ignore any of it. An "
+            "empty list means nothing was put up, which is the ordinary state — "
+            "but it means nothing at all if record_is_incomplete is true."
+        ),
     }
 
 

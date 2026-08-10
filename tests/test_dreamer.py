@@ -34,7 +34,9 @@ from bot.dreaming import (
     DreamStore,
     DreamVerdict,
     Hop,
+    MoveRefusal,
     Vault,
+    fusion_candidates,
 )
 from bot.journal import Journal
 from bot.models import (
@@ -1008,3 +1010,185 @@ def test_promote_dreams_says_when_it_had_no_readings_to_grade_against(store):
     store.save(_prophecy_ready(vault=Vault.PROPHECY))
 
     assert promote_dreams(store).cycles_available == 0
+
+
+# ============================================ symbiosis: arithmetic proposes,
+# the dreamer confirms, and nothing combines unattended.
+
+
+def _pair(store: DreamStore) -> tuple[int, int]:
+    """Two dreams that share a hop, on the workbench."""
+    a = store.save(
+        Dream(
+            title="Drought and hydro",
+            seed="the reservoir is at a decade low",
+            chain=[
+                Hop("the reservoir is at a decade low", True, "the gauge"),
+                Hop("that region's power gets scarce and dear", True, "auction prints"),
+            ],
+            symbols=["SPY"],
+            asset_class_key="us_equity",
+        )
+    )
+    b = store.save(
+        Dream(
+            title="Smelters chase cheap power",
+            seed="the marginal smelter moves for a cent",
+            chain=[
+                Hop("that region's power gets scarce and dear"),
+                Hop("the marginal smelter curtails first"),
+            ],
+            symbols=["QQQ"],
+            asset_class_key="us_equity",
+        )
+    )
+    return a, b
+
+
+def test_the_prompt_offers_the_dreams_that_share_a_hop(rules, journal, store):
+    """The shared hop is rendered verbatim rather than summarised, because it is
+    the thing being asked about — a paraphrase would ask the model to confirm a
+    match it cannot see."""
+    a, b = _pair(store)
+
+    prompt = build_prompt(
+        rules, journal, [], fusions=fusion_candidates(store.recent()), now=ENTRY
+    )
+
+    assert f"[id {a}] Drought and hydro" in prompt
+    assert f"[id {b}] Smelters chase cheap power" in prompt
+    assert "shared hop: that region's power gets scarce and dear" in prompt
+    assert "cannot improve either one's verification" in prompt
+
+
+def test_a_prompt_with_no_candidates_says_nothing_about_fusing(rules, journal):
+    """An empty heading is noise, and noise in a prompt is paid for on every
+    run."""
+    prompt = build_prompt(rules, journal, [], now=ENTRY)
+
+    assert "shared hop" not in prompt
+
+
+def test_a_step_that_asks_to_fuse_writes_the_fusion_and_no_second_dream(
+    rules, store, journal
+):
+    """The step's title, seed and thought describe the CHILD, so folding the
+    same text into an ordinary dream as well would put one idea on the workbench
+    twice."""
+    a, b = _pair(store)
+    step = _step(
+        fuse_ids=[a, b],
+        title="Drought, power and the marginal smelter",
+        thought="Both routes arrive at the same scarce megawatt.",
+    )
+    dreamer = Dreamer(_env(), rules, store, journal, client=_StubClient(step))
+
+    result = dreamer.run_once(now=ENTRY)
+
+    assert result is not None
+    assert result.fusion is not None and result.fusion.ok
+    assert result.advanced is False
+    assert result.dream.is_fusion
+    assert result.dream.parents == [a, b]
+    assert result.dream.title == "Drought, power and the marginal smelter"
+    # Three dreams in the store, not four: the two parents and the one child.
+    assert len(store.recent()) == 3
+    assert [t.text for t in result.dream.thoughts] == [
+        "Both routes arrive at the same scarce megawatt."
+    ]
+
+
+def test_fuse_ids_are_looked_up_in_what_was_offered_and_never_trusted(
+    rules, store, journal
+):
+    """The `advance_id` rule, and here it is sharper: two unrelated chains
+    combined on a hallucinated id would produce a dream carrying both their
+    symbols, which is a permission assembled out of an invented number."""
+    a, b = _pair(store)
+    step = _step(fuse_ids=[a, 4242], title="not this")
+    dreamer = Dreamer(_env(), rules, store, journal, client=_StubClient(step))
+
+    result = dreamer.run_once(now=ENTRY)
+
+    assert result is not None
+    # Nothing was fused, and the run still produced its ordinary step.
+    assert result.fusion is None
+    assert result.dream.is_fusion is False
+    assert store.children_of(a) == [] and store.children_of(b) == []
+
+
+def test_a_refused_fusion_keeps_the_step_and_reports_the_refusal(
+    rules, store, journal
+):
+    """A full workbench must not cost the thought the model just had — and a
+    silent refusal would be indistinguishable from a model that stopped
+    suggesting them.
+
+    The cap comes from the rules FILE rather than the dataclass default, so the
+    limit an operator can read is the one that applies. Same miss as
+    `Conference._caps` was written for.
+    """
+    a, b = _pair(store)
+    rules.dreaming.caps.workbench = 2
+    step = _step(fuse_ids=[a, b])
+    dreamer = Dreamer(_env(), rules, store, journal, client=_StubClient(step))
+
+    result = dreamer.run_once(now=ENTRY)
+
+    assert result is not None
+    assert result.dream.is_fusion is False  # the ordinary step still ran
+    assert result.fusion is not None and result.fusion.refused
+    assert MoveRefusal.FULL in result.fusion.refusals
+    assert store.children_of(a) == []
+
+
+def test_a_fusion_cannot_carry_a_symbol_out_of_a_class_since_disabled(
+    rules, store, journal
+):
+    """The class fence, applied to the union on the way in. A parent written
+    while crypto was enabled must not smuggle its symbol into a child written
+    after it was switched off — and `DreamStore.fuse` refuses anything wider
+    than the union anyway, which is the lock that does not depend on this."""
+    a, b = _pair(store)
+    crypto = store.get(b)
+    crypto.symbols = ["BTC/USD"]
+    crypto.asset_class_key = "crypto"
+    store.save(crypto)
+    assert "crypto" not in rules.enabled_instruments
+
+    step = _step(fuse_ids=[a, b])
+    dreamer = Dreamer(_env(), rules, store, journal, client=_StubClient(step))
+    result = dreamer.run_once(now=ENTRY)
+
+    assert result is not None
+    assert result.fusion is not None and result.fusion.ok
+    assert result.dream.symbols == ["SPY"]
+    assert [s for s, _ in result.scope.dropped] == ["BTC/USD"]
+    # And the drop is on the record beside the dream, not only in the log.
+    notes = [m for m in store.messages(int(result.dream.id or 0)) if m.speaker == SCOPE]
+    assert notes and "BTC/USD" in notes[0].text
+
+
+def test_most_runs_fuse_nothing(rules, store, journal):
+    """Empty is the normal answer, and an ordinary step must not pay for the
+    feature existing."""
+    _pair(store)
+    dreamer = Dreamer(_env(), rules, store, journal, client=_StubClient(_step()))
+
+    result = dreamer.run_once(now=ENTRY)
+
+    assert result is not None
+    assert result.fusion is None
+    assert result.dream.is_fusion is False
+
+
+def test_the_system_prompt_says_fusing_does_not_improve_verification(rules):
+    """The one thing a model would otherwise assume. Combining is an argument,
+    not evidence, and a fused chain that read as better sourced than its parents
+    would be the Alpha Arena failure arriving through the merge."""
+    from bot.dreamer import SYSTEM_PROMPT
+
+    assert "Two unverified chains do not" in SYSTEM_PROMPT
+    assert "**The parents survive.**" in SYSTEM_PROMPT
+    assert "It is harder to promote, not easier." in SYSTEM_PROMPT
+    assert "Combining is an argument, not evidence." in SYSTEM_PROMPT

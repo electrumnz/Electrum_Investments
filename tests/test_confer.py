@@ -1,7 +1,7 @@
 """The agent-to-agent conference: the caps, and the things the caps protect.
 
 No test here touches the network. `Conference` takes both of its clients, so
-every model call is a canned turn, which is what makes the five caps testable at
+every model call is a canned turn, which is what makes the caps testable at
 all — the interesting question about a cap is what happens when it is reached,
 and that is exactly the case a live call would be expensive to produce.
 
@@ -9,6 +9,12 @@ The file is organised by cap, because the caps are the feature. `has_something_c
 gets the longest section for the reason its own docstring gives: it is the one
 that stops two agents having the same conversation every day forever, and it is
 the one most likely to look redundant to somebody tidying up.
+
+The exchange budget is an EPOCH rather than a life sentence: three exchanges
+since the last thing that changed, twelve over a whole life. Both caps are
+tested here because they do different jobs — the first stops the same argument
+repeating and the second stops an infinite sequence of new ones — and a suite
+that only exercised one would let the other be "simplified" away.
 """
 
 from __future__ import annotations
@@ -24,15 +30,20 @@ from bot.claude_client import CallUsage
 from bot.confer import (
     CONFERENCE,
     MAX_DREAMS_PER_RUN,
-    MAX_EXCHANGES_PER_DREAM,
+    MAX_EXCHANGES_LIFETIME,
+    MAX_EXCHANGES_PER_EPOCH,
     MAX_TURNS_PER_EXCHANGE,
     Change,
+    ChangeKind,
     Conference,
     ConferOutcome,
     DreamerTurn,
     TraderPowers,
     TraderTurn,
     TraderVerdict,
+    change_signals,
+    epoch_started_at,
+    exchanges_in_epoch,
     exchanges_so_far,
     has_something_changed,
     last_agent_turn_at,
@@ -289,30 +300,41 @@ def test_a_skip_costs_no_model_call_and_does_not_use_up_the_run(rules, store):
     assert report.conferred == 2
 
 
-# ================================================ cap 3: three exchanges, ever
+# ========================= cap 3: three exchanges per epoch, twelve for a life
 
 
-def test_a_dream_is_conferred_at_most_three_times(rules, store):
-    """A fourth conference would be the same argument again, and a fourth in a
-    different order is still the same argument."""
+def test_three_exchanges_since_the_last_change_is_the_cap(rules, store):
+    """A fourth conference about an unchanged dream would be the same argument
+    again, and a fourth in a different order is still the same argument."""
     dream_id = _vaulted(store)
+    conference = _conference(rules, store, trader=_declines())
 
-    for day in range(MAX_EXCHANGES_PER_DREAM + 2):
-        # Something changes every day, so only the exchange cap can stop them.
+    for hour in range(MAX_EXCHANGES_PER_EPOCH + 2):
+        # `confer_once` rather than `run`, so the change gate is out of the way
+        # and this measures the exchange cap alone.
         dream = store.get(dream_id)
-        assert dream is not None
-        dream.updated_at = LATER + timedelta(days=day)
-        store.save(dream)
-        _conference(rules, store, trader=_declines()).run(
-            now=LATER + timedelta(days=day, hours=1)
-        )
+        conference.confer_once(dream, now=LATER + timedelta(hours=hour))
 
-    assert exchanges_so_far(store.messages(dream_id)) == MAX_EXCHANGES_PER_DREAM
+    messages = store.messages(dream_id)
+    dream = store.get(dream_id)
+    assert exchanges_in_epoch(dream, messages) == MAX_EXCHANGES_PER_EPOCH + 2
+    # And the run loop refuses the next one without spending anything.
+    dreamer, trader = _Speaker(), _Speaker()
+    report = _conference(rules, store, dreamer=dreamer, trader=trader).run(now=LATER)
+    assert report.exchanges[0].outcome is ConferOutcome.EXCHANGES_EXHAUSTED
+    assert report.calls == 0
 
 
-def test_the_fourth_attempt_is_skipped_without_calling_a_model(rules, store):
+def test_the_budget_resets_when_the_dream_actually_changes(rules, store):
+    """**The cap stops the same argument repeating, not a new one starting.**
+
+    A dream that had used its three conferences used to be closed to discussion
+    for good — after its prophecy fired, after an operator note, after the
+    trading agent handed it back. The count runs from the last thing that
+    changed now, so news buys a fresh three and an unchanged dream buys nothing.
+    """
     dream_id = _vaulted(store)
-    for index in range(MAX_EXCHANGES_PER_DREAM):
+    for index in range(MAX_EXCHANGES_PER_EPOCH):
         store.add_message(
             dream_id,
             speaker=DREAMER,
@@ -320,33 +342,122 @@ def test_the_fourth_attempt_is_skipped_without_calling_a_model(rules, store):
             text=f"offer {index}",
             at=BASE + timedelta(hours=index),
         )
+
+    spent = store.get(dream_id)
+    assert exchanges_in_epoch(spent, store.messages(dream_id)) == MAX_EXCHANGES_PER_EPOCH
+
+    # The dreamer checks a hop. `updated_at` moves, which is the same signal the
+    # change gate reads, so the epoch starts again and the offers before it stop
+    # counting.
+    spent.chain[1] = Hop("assumed", True, "the brood map, second edition")
+    spent.updated_at = LATER
+    store.save(spent)
+
+    reworked = store.get(dream_id)
+    assert exchanges_in_epoch(reworked, store.messages(dream_id)) == 0
+    assert exchanges_so_far(store.messages(dream_id)) == MAX_EXCHANGES_PER_EPOCH
+
+
+def test_the_lifetime_ceiling_stops_an_infinite_sequence_of_new_arguments(rules, store):
+    """The epoch cap alone would let a dream edited every morning be conferred
+    every morning forever, politely, at cost. Both caps exist and they do
+    different jobs."""
+    dream_id = _vaulted(store)
+    for index in range(MAX_EXCHANGES_LIFETIME):
+        store.add_message(
+            dream_id,
+            speaker=DREAMER,
+            kind="offer",
+            text=f"offer {index}",
+            at=BASE + timedelta(hours=index),
+        )
+    # Something changed a moment ago, so the EPOCH is empty and only the ceiling
+    # can stop them.
+    dream = store.get(dream_id)
+    dream.updated_at = LATER
+    store.save(dream)
+    assert exchanges_in_epoch(store.get(dream_id), store.messages(dream_id)) == 0
+
     dreamer, trader = _Speaker(), _Speaker()
+    report = _conference(rules, store, dreamer=dreamer, trader=trader).run(
+        now=LATER + timedelta(hours=1)
+    )
 
-    report = _conference(rules, store, dreamer=dreamer, trader=trader).run(now=LATER)
-
-    assert report.exchanges[0].outcome is ConferOutcome.EXCHANGES_EXHAUSTED
+    assert report.exchanges[0].outcome is ConferOutcome.LIFETIME_EXHAUSTED
     assert dreamer.prompts == [] and trader.prompts == []
     assert report.calls == 0
+    # Not the same fact as the epoch cap, and it must not be reported as one:
+    # "not until something changes" and "never again" are different answers, and
+    # only one of them is worth an operator's attention.
+    assert "ceiling" in report.exchanges[0].detail
+    assert "starts a fresh three" not in report.exchanges[0].detail
+
+
+def test_a_hand_back_reopens_a_dream_that_had_spent_its_budget(rules, store):
+    """**The operator's case, and the one the lifetime cap used to swallow.**
+
+    It was adopted, it came back, and the reason it came back is information
+    neither of them had during the last exchange. The change gate cannot see it
+    — `return_to_vault` stamps the dream and the marker turn at one instant and
+    that comparison has to stay strict — so the hand-back is answered as the
+    fact it is.
+    """
+    dream_id = _vaulted(store)
+    for index in range(MAX_EXCHANGES_PER_EPOCH):
+        store.add_message(
+            dream_id, speaker=DREAMER, kind="offer", text=f"offer {index}",
+            at=BASE + timedelta(hours=index),
+        )
+    exhausted = _conference(rules, store, trader=_declines()).run(now=LATER)
+    assert exhausted.exchanges[0].outcome is ConferOutcome.EXCHANGES_EXHAUSTED
+
+    store.adopt(dream_id, at=LATER + timedelta(days=1))
+    store.return_to_vault(
+        dream_id, reason="the smelter shut before the chain paid off",
+        at=LATER + timedelta(days=2),
+    )
+
+    report = _conference(rules, store, trader=_declines()).run(
+        now=LATER + timedelta(days=3)
+    )
+
+    assert report.exchanges[0].outcome is ConferOutcome.DECLINED
+    assert report.calls > 0
+
+
+def test_a_hand_back_buys_one_conversation_and_not_a_standing_licence(rules, store):
+    """Self-clearing, like the full-shelf blocker. Once the next exchange has
+    written its offer the same return is older than it and stops qualifying."""
+    dream_id = _vaulted(store)
+    store.adopt(dream_id, at=BASE + timedelta(days=1))
+    store.return_to_vault(dream_id, reason="no slot", at=BASE + timedelta(days=2))
+
+    first = _conference(rules, store, trader=_declines()).run(now=LATER + timedelta(days=3))
+    second = _conference(rules, store, trader=_declines()).run(now=LATER + timedelta(days=4))
+
+    assert first.exchanges[0].outcome is ConferOutcome.DECLINED
+    assert second.exchanges[0].outcome is ConferOutcome.NOTHING_NEW
 
 
 def test_the_dream_is_told_once_that_it_has_parked(rules, store):
     """At the boundary, not on every later skip. A warning that repeats teaches
     an operator to ignore it — the same reason the tailnet banner names the
-    command that clears it."""
+    command that clears it.
+
+    And it must say what would restart the conversation. "They will not confer
+    this again" would be a plausible wrong statement about the system's own
+    behaviour now that a fired condition reopens it.
+    """
     dream_id = _vaulted(store)
+    conference = _conference(rules, store, trader=_declines())
 
-    for day in range(MAX_EXCHANGES_PER_DREAM + 1):
-        dream = store.get(dream_id)
-        assert dream is not None
-        dream.updated_at = LATER + timedelta(days=day)
-        store.save(dream)
-        _conference(rules, store, trader=_declines()).run(
-            now=LATER + timedelta(days=day, hours=1)
-        )
+    for hour in range(MAX_EXCHANGES_PER_EPOCH + 1):
+        conference.confer_once(store.get(dream_id), now=LATER + timedelta(hours=hour))
 
-    parked = [m for m in store.messages(dream_id) if "parks" in m.text]
+    parked = [m for m in store.messages(dream_id) if "parks until" in m.text]
     assert len(parked) == 1
     assert parked[0].speaker == CONFERENCE
+    assert "condition firing" in parked[0].text
 
 
 def test_an_offer_written_by_hand_counts_as_an_exchange(rules, store):
@@ -356,6 +467,19 @@ def test_an_offer_written_by_hand_counts_as_an_exchange(rules, store):
     store.add_message(dream_id, speaker=DREAMER, kind="offer", text="by hand", at=BASE)
 
     assert exchanges_so_far(store.messages(dream_id)) == 1
+
+
+def test_an_exchange_stamped_with_the_reset_belongs_to_the_new_epoch(rules, store):
+    """`>=`, where the change gate's comparison is `>`, and the two are opposite
+    questions. An offer written at the same instant as the reset counts against
+    the new budget, which is the direction that talks less."""
+    dream = Dream(title="t", seed="s", updated_at=BASE, vault_entered_at=BASE)
+    messages = [
+        DreamMessage(dream_id=1, at=BASE, speaker=DREAMER, kind="offer", text="o")
+    ]
+
+    assert epoch_started_at(dream, messages) == BASE
+    assert exchanges_in_epoch(dream, messages) == 1
 
 
 # ============================================== cap 4: one prose cap, not two
@@ -382,6 +506,46 @@ def test_a_long_turn_is_trimmed_by_the_existing_cap_rather_than_a_new_one(rules,
 
 
 # ============================ cap 5: the one that actually stops them talking
+
+
+def test_the_gate_and_the_epoch_read_ONE_definition_of_changed():
+    """Two questions over one list of dated facts.
+
+    The change gate asks whether any of them lands after the last exchange; the
+    epoch asks when the most recent one was. A second list would be a second
+    thing to keep in step, and the one that was wrong would be the one nobody
+    was reading — which is the argument for `TEXT_MAX_CHARS` being imported
+    rather than redefined, one file across.
+    """
+    dream = Dream(
+        title="t",
+        seed="s",
+        updated_at=BASE,
+        vault_entered_at=BASE + timedelta(days=1),
+        conditions=[
+            DreamCondition(text="fired", fulfilled=True, fulfilled_at=BASE + timedelta(days=2))
+        ],
+    )
+    note = DreamMessage(
+        dream_id=1, at=BASE + timedelta(days=3), speaker=OPERATOR, text="look again"
+    )
+
+    signals = change_signals(dream, [note])
+
+    assert {s.kind for s in signals} == {
+        ChangeKind.EDIT,
+        ChangeKind.VAULT_MOVE,
+        ChangeKind.CONDITION,
+        ChangeKind.VOICE,
+    }
+    # Ascending, and the epoch starts at the most recent one.
+    assert [s.at for s in signals] == sorted(s.at for s in signals)
+    assert epoch_started_at(dream, [note]) == BASE + timedelta(days=3)
+    # And the gate's reasons come from the same list, filtered by the marker.
+    assert has_something_changed(dream, BASE + timedelta(days=1), messages=[note]).reasons == (
+        "1 condition(s) fulfilled since the last exchange",
+        f"new message(s) from {OPERATOR}",
+    )
 
 
 def test_a_dream_that_has_never_been_conferred_always_qualifies():
@@ -471,6 +635,38 @@ def test_an_operator_note_reopens_the_conversation():
 
     assert change
     assert OPERATOR in change.summary
+
+
+def test_a_fusion_note_reopens_the_conversation_on_the_parent(rules, store):
+    """A deliberate consequence of the fusion note being a NEW VOICE.
+
+    `dreaming.FUSION` is neither agent, so it cannot be read as a turn — and it
+    is not this module narrating itself either, so it counts as a change. That
+    is the honest reading: "this argument now exists in a stronger form" changes
+    what adopting the parent means, and the trading agent should hear it.
+    """
+    dream_id = _vaulted(store)
+    other = store.save(
+        Dream(title="second chain", seed="s", chain=[Hop("the brood map is published")])
+    )
+    _conference(rules, store, trader=_declines()).run(now=LATER)
+    assert _conference(rules, store, trader=_declines()).run(
+        now=LATER + timedelta(days=1)
+    ).exchanges[0].outcome is ConferOutcome.NOTHING_NEW
+
+    assert store.fuse([dream_id, other], by=DREAMER, at=LATER + timedelta(days=2)).ok
+
+    # And for the right reason: the fusion touches nothing on the parent row, so
+    # the note is the only signal there is.
+    parent, messages = store.get(dream_id), store.messages(dream_id)
+    change = has_something_changed(parent, last_agent_turn_at(messages), messages=messages)
+    assert change.reasons == ("new message(s) from fusion",)
+
+    report = _conference(rules, store, trader=_declines()).run(
+        now=LATER + timedelta(days=3)
+    )
+    outcomes = {e.dream_id: e.outcome for e in report.exchanges}
+    assert outcomes[dream_id] is ConferOutcome.DECLINED
 
 
 def test_this_modules_own_notes_never_count_as_a_change():

@@ -48,14 +48,15 @@ considered; `RiskGate.evaluate` still runs on anything actually traded under it,
 the four operator rules still hold, and the size still follows from the stop.
 See the `dreaming.py` module docstring, which is where that argument lives.
 
-## The five caps, and why the fifth is the one that matters
+## The caps, and why the last one is the one that matters
 
-Four of them bound a conversation. The fifth bounds the *series* of them, and
-without it the other four are decoration:
+Two of them bound a conversation, two bound the *series* of them, and one is
+the ceiling under which the whole arrangement sits:
 
 - `MAX_TURNS_PER_EXCHANGE` — six turns, three each.
 - `MAX_DREAMS_PER_RUN` — two dreams a day.
-- `MAX_EXCHANGES_PER_DREAM` — three exchanges, lifetime.
+- `MAX_EXCHANGES_PER_EPOCH` — three exchanges since the last thing that changed.
+- `MAX_EXCHANGES_LIFETIME` — twelve exchanges on one dream, ever.
 - `TEXT_MAX_CHARS` — reused from `dreaming.py`, not redefined here.
 - `has_something_changed` — a dream may only be conferred AGAIN if something
   changed since the last exchange.
@@ -64,6 +65,22 @@ Read `has_something_changed`'s own docstring before touching any of it. A turn
 limit bounds one conversation and says nothing whatever about having the same
 conversation again tomorrow, politely, at cost, with every other cap still
 holding while it happens.
+
+**The exchange budget is an EPOCH and not a life sentence.** It used to be
+three exchanges counted over the whole life of a dream, so a dream that spent
+them was closed to discussion forever — including after its prophecy fired,
+after the operator posted a note, and after the trading agent adopted it and
+handed it back with a new reason. That is the cap doing something it was never
+for. The cap exists to stop the SAME argument repeating, not to stop a new one
+starting, so the count runs from the last resetting event: see
+`epoch_started_at`, which reads the same signals `has_something_changed` does
+rather than growing a second definition of "changed".
+
+`MAX_EXCHANGES_LIFETIME` is what makes that safe. Both exist and they do
+different jobs, which is the sentence to keep: **the per-epoch cap stops the
+same argument, and the lifetime cap stops an infinite sequence of new ones.**
+Without the second, a dream edited every morning would buy a fresh three every
+morning forever.
 
 ## Failure
 
@@ -134,16 +151,33 @@ MAX_TURNS_PER_EXCHANGE = 6
 # counting it would make a quiet day eat the budget of a busy one.
 MAX_DREAMS_PER_RUN = 2
 
-# Three exchanges per dream, for its whole life. If the two of them cannot agree
-# in three conferences the dream parks: a fourth would be the same argument
-# again, and a fourth in a different order is still the same argument.
+# Three exchanges per EPOCH — that is, since the last thing that changed about
+# the dream. If the two of them cannot agree in three conferences on an
+# unchanged dream it parks: a fourth would be the same argument again, and a
+# fourth in a different order is still the same argument.
 #
 # Counted off the transcript rather than from a counter column, deliberately.
 # A counter is a second fact about the same thing and eventually disagrees with
 # the first, which is the reasoning that keeps `Adoption.is_live` computed; and
 # a column would need a migration in `dreaming.SCHEMA`, which this module has no
-# business owning.
-MAX_EXCHANGES_PER_DREAM = 3
+# business owning. An epoch needs no column either — `epoch_started_at` reads
+# the same stamps the change gate already reads.
+MAX_EXCHANGES_PER_EPOCH = 3
+
+# Twelve exchanges on one dream, ever, whatever changes.
+#
+# **Both caps exist and they do different jobs.** The per-epoch cap stops the
+# same argument repeating; this one stops an infinite sequence of new ones. A
+# dream the dreamer edits every morning legitimately clears the epoch cap every
+# morning, and without a ceiling that is a conversation with no end and a bill
+# with no end either — the exact failure `has_something_changed` was written
+# for, arriving through the door the epoch opened.
+#
+# Twelve is four epochs' worth. It is a working constraint rather than a risk
+# rule — nothing in this module can lose money — and when it bites it is logged
+# at warning rather than info, because a dream that has been conferred twelve
+# times is a fact about the two agents worth reading.
+MAX_EXCHANGES_LIFETIME = 12
 
 # The fourth cap is `TEXT_MAX_CHARS`, imported from `dreaming.py` rather than
 # redefined. `DreamStore.add_message` already trims to it, so a long turn is
@@ -220,12 +254,25 @@ class ConferOutcome(StrEnum):
     ADOPTION_REFUSED = "adoption_refused"
     CALL_FAILED = "call_failed"
     NOTHING_NEW = "nothing_new"
+    # Three exchanges since the last thing that changed. NOT the end of the
+    # conversation: something changing starts a fresh epoch and a fresh three.
     EXCHANGES_EXHAUSTED = "exchanges_exhausted"
+    # Twelve exchanges, ever. This one IS the end, whatever changes, and it is
+    # kept apart from the epoch cap rather than folded into it because "not
+    # until something changes" and "never again" are different facts about a
+    # dream and only one of them is worth an operator's attention.
+    LIFETIME_EXHAUSTED = "lifetime_exhausted"
 
 
 # The outcomes that cost nothing, because no model was called. Named rather than
 # inlined so `ExchangeResult.conferred` and the per-run cap read off one list.
-SKIPPED_OUTCOMES = frozenset({ConferOutcome.NOTHING_NEW, ConferOutcome.EXCHANGES_EXHAUSTED})
+SKIPPED_OUTCOMES = frozenset(
+    {
+        ConferOutcome.NOTHING_NEW,
+        ConferOutcome.EXCHANGES_EXHAUSTED,
+        ConferOutcome.LIFETIME_EXHAUSTED,
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -336,8 +383,10 @@ def last_agent_turn_at(messages: Sequence[DreamMessage]) -> datetime | None:
     return None
 
 
-def exchanges_so_far(messages: Sequence[DreamMessage]) -> int:
-    """How many exchanges this dream has already had.
+def exchanges_so_far(
+    messages: Sequence[DreamMessage], *, since: datetime | None = None
+) -> int:
+    """How many exchanges this dream has had, in total or since a moment.
 
     Counted as the number of opening `offer` turns from the dreamer, because an
     exchange is defined by its opening: every conversation this module starts
@@ -349,8 +398,138 @@ def exchanges_so_far(messages: Sequence[DreamMessage]) -> int:
     An offer written by hand from the Dreaming page counts too. That is the
     conservative direction — it can only make this module talk less — and it is
     also the honest reading, since an offer is an offer whoever wrote it.
+
+    `since` is what makes this answer the epoch question as well as the lifetime
+    one, so there is ONE definition of "an exchange" rather than two that can
+    drift. **The comparison is `>=`, where the change gate's is `>`.** They are
+    asking opposite questions: the gate asks whether anything happened AFTER the
+    last conversation and must not be tripped by the conversation's own ending,
+    while this asks how much talking has happened since the epoch opened — and
+    an offer stamped at the same instant as the reset belongs to the new epoch,
+    which is the direction that talks less.
     """
-    return sum(1 for m in messages if m.speaker == DREAMER and m.kind == "offer")
+    offers = [m for m in messages if m.speaker == DREAMER and m.kind == "offer"]
+    if since is None:
+        return len(offers)
+    return sum(1 for m in offers if m.at >= since)
+
+
+class ChangeKind(StrEnum):
+    """What kind of thing changed. Machine-readable so a page can group them."""
+
+    CONDITION = "condition"
+    VAULT_MOVE = "vault_move"
+    EDIT = "edit"
+    VOICE = "voice"
+
+
+@dataclass(frozen=True)
+class ChangeSignal:
+    """One dated thing that could reopen the conversation on a dream.
+
+    Dated, because two different questions are asked of the same set of facts
+    and only one of them is a boolean. `has_something_changed` asks whether any
+    of these lands after a marker; `epoch_started_at` asks when the most recent
+    one was. Splitting the signals out is what lets both read the same
+    definition of "changed" rather than growing a second one that drifts.
+    """
+
+    at: datetime
+    kind: ChangeKind
+    # The vault moved into, or the speaker who spoke. Empty for an edit.
+    subject: str = ""
+
+
+def change_signals(
+    dream: Dream, messages: Sequence[DreamMessage] = ()
+) -> tuple[ChangeSignal, ...]:
+    """Every dated event that makes a dream worth conferring again. Pure.
+
+    **The single definition of "something changed" in this repository.** Both
+    the change gate and the exchange epoch read it, so there is no second list
+    to fall out of step with this one.
+
+    The signals, and each is a decision rather than plumbing:
+
+    - **A condition was fulfilled.** The prophecy did something. A condition
+      fulfilled with no stamp yields NO signal: an undated fact cannot say when
+      it happened, and guessing that it happened recently would be a plausible
+      wrong answer.
+    - **The dream was edited** — a hop added, a `checked` flag flipped, the
+      chain reworked, a thought recorded, a fusion written. Observed through
+      `updated_at`, which every write path in `DreamStore.save` and `move`
+      stamps. Detecting hop-level deltas directly would need a snapshot of the
+      chain taken at the last exchange, and a second copy of a dream is a second
+      thing that can disagree with the dream. One stamp, one answer.
+    - **A vault move**, through `vault_entered_at`, which nothing else sets.
+      This is the dreamer pulling a chain back for a rework and returning it,
+      and it is also the trading agent handing an adopted dream back.
+    - **A new voice.** An operator note, a fusion note, or anything from a
+      speaker that is neither of the two conferring agents nor this module
+      narrating itself. Written as an exclusion rather than as
+      `speaker == OPERATOR` so that a second dreamer — the intended direction,
+      and why `DreamMessage` keeps `speaker` open — counts as the new voice it
+      is.
+    """
+    signals: list[ChangeSignal] = [
+        ChangeSignal(at=dream.updated_at, kind=ChangeKind.EDIT),
+        ChangeSignal(
+            at=dream.vault_entered_at,
+            kind=ChangeKind.VAULT_MOVE,
+            subject=str(dream.vault),
+        ),
+    ]
+    signals += [
+        ChangeSignal(at=c.fulfilled_at, kind=ChangeKind.CONDITION)
+        for c in dream.conditions
+        if c.fulfilled and c.fulfilled_at is not None
+    ]
+    signals += [
+        ChangeSignal(at=m.at, kind=ChangeKind.VOICE, subject=m.speaker)
+        for m in messages
+        if m.speaker not in AGENT_SPEAKERS and m.speaker != CONFERENCE
+    ]
+    return tuple(sorted(signals, key=lambda s: s.at))
+
+
+def epoch_started_at(
+    dream: Dream, messages: Sequence[DreamMessage] = ()
+) -> datetime:
+    """When the current exchange budget last reset. Pure; the same signals as above.
+
+    **The cap exists to stop the same argument repeating, not to stop a new one
+    starting.** So the three exchanges are counted from the most recent thing
+    that genuinely changed about the dream rather than over its whole life: a
+    prophecy that fired, a hop that got checked, an operator's note, a rework,
+    or the trading agent handing it back — that last one being a new situation
+    by definition, since it was adopted, it came back, and the reason it came
+    back is new information.
+
+    Reads `change_signals` rather than listing the events again. A second
+    definition of "changed" would be a second thing to keep in step, and the one
+    that was wrong would be the one nobody was reading.
+
+    Never `None`: every dream carries `updated_at`, so there is always a moment
+    to count from. A dream nothing has ever happened to counts its exchanges
+    from the moment it was last written, which is the whole of its life.
+    """
+    signals = change_signals(dream, messages)
+    # `change_signals` always yields the edit and vault stamps, so this default
+    # is unreachable — it is here so a future signal list that could be empty
+    # degrades to "count everything" rather than raising inside a scheduled job.
+    return max((s.at for s in signals), default=dream.updated_at)
+
+
+def exchanges_in_epoch(
+    dream: Dream, messages: Sequence[DreamMessage]
+) -> int:
+    """How many exchanges have happened since the last resetting event.
+
+    The composition of the two functions above, named because both `_consider`
+    and `_closing` need it and two call sites spelling it out is two places to
+    get the argument order wrong.
+    """
+    return exchanges_so_far(messages, since=epoch_started_at(dream, messages))
 
 
 def has_something_changed(
@@ -374,26 +553,21 @@ def has_something_changed(
     cooldown: a cooldown says "wait a while and have the same argument", which
     is the same failure with a delay in front of it.
 
-    A dream qualifies again when one of five things has happened since `since`:
-
-    - **A condition was fulfilled.** The prophecy did something.
-    - **The dream itself was edited** — a hop added, a `checked` flag flipped,
-      the chain reworked, a thought recorded. Observed through `updated_at`,
-      which every write path in `DreamStore.save` and `move` stamps. Detecting
-      hop-level deltas directly would need a snapshot of the chain taken at the
-      last exchange, and a second copy of a dream is a second thing that can
-      disagree with the dream. One stamp, one answer.
-    - **A new voice.** An operator note, or anything from a speaker that is
-      neither of the two conferring agents nor this module narrating itself.
-    - **A vault move.** `vault_entered_at` is what expiry is measured from and
-      is set only by a move, so it is the honest signal for one.
-    - There has never been an exchange at all, which is `since is None`.
+    A dream qualifies again when one of the signals in `change_signals` lands
+    after `since`, or when there has never been an exchange at all, which is
+    `since is None`. That list is read rather than repeated here, so the gate
+    and the exchange epoch cannot come to disagree about what "changed" means.
 
     Comparisons are STRICT. That is not fussiness: `DreamStore.return_to_vault`
     writes its `return` message and stamps `updated_at` and `vault_entered_at`
     with the same moment, so a non-strict test would report a change created by
     the end of the exchange itself and hand the two agents a fresh round
-    immediately. The same is true of `adopt`.
+    immediately. The same is true of `adopt`. A hand-back genuinely IS a new
+    situation and is meant to reopen the conversation — but it is a fact about
+    the ADOPTION rather than about the dream, so it is answered by
+    `Conference._handed_back_since_the_last_offer`, which can see that it
+    happened without loosening a comparison that has to stay strict for
+    everything else.
 
     Pure. No store, no clock, no network — everything it needs is the dream and
     the transcript the caller already read.
@@ -401,35 +575,23 @@ def has_something_changed(
     if since is None:
         return Change(True, ("no exchange on this dream yet",))
 
+    fired = [s for s in change_signals(dream, messages) if s.at > since]
     reasons: list[str] = []
 
-    fulfilled = [
-        c
-        for c in dream.conditions
-        if c.fulfilled and c.fulfilled_at is not None and c.fulfilled_at > since
-    ]
-    if fulfilled:
+    conditions = [s for s in fired if s.kind is ChangeKind.CONDITION]
+    if conditions:
         reasons.append(
-            f"{len(fulfilled)} condition(s) fulfilled since the last exchange"
+            f"{len(conditions)} condition(s) fulfilled since the last exchange"
         )
 
-    if dream.vault_entered_at > since:
-        reasons.append(f"moved into {dream.vault} since the last exchange")
+    for signal in fired:
+        if signal.kind is ChangeKind.VAULT_MOVE:
+            reasons.append(f"moved into {signal.subject} since the last exchange")
 
-    if dream.updated_at > since:
+    if any(s.kind is ChangeKind.EDIT for s in fired):
         reasons.append("the dream was edited since the last exchange")
 
-    # Anything that is not one of the two agents and is not this module talking
-    # to itself. Written as an exclusion rather than as `speaker == OPERATOR` so
-    # that a second dreamer — the intended direction, and why `DreamMessage`
-    # keeps `speaker` open — counts as the new voice it is.
-    voices = sorted(
-        {
-            m.speaker
-            for m in messages
-            if m.at > since and m.speaker not in AGENT_SPEAKERS and m.speaker != CONFERENCE
-        }
-    )
+    voices = sorted({s.subject for s in fired if s.kind is ChangeKind.VOICE})
     if voices:
         reasons.append(f"new message(s) from {', '.join(voices)}")
 
@@ -819,32 +981,67 @@ class Conference:
     def _consider(
         self, dream: Dream, *, now: datetime, caps: VaultCaps | None
     ) -> ExchangeResult:
-        """Apply the two free caps, then confer if both pass."""
+        """Apply the free caps, then confer if all of them pass.
+
+        Three questions, in order of how final the answer is: has this dream
+        used its whole life, has it used the current epoch, and is there
+        anything new to talk about. The first two cost a transcript read and the
+        third costs nothing more, so a skip never reaches a model.
+        """
         dream_id = int(dream.id or 0)
         messages = self._store.messages(dream_id)
 
-        held = exchanges_so_far(messages)
-        if held >= MAX_EXCHANGES_PER_DREAM:
+        lifetime = exchanges_so_far(messages)
+        if lifetime >= MAX_EXCHANGES_LIFETIME:
+            # Warning rather than info, unlike every other skip here. The epoch
+            # cap is an ordinary Tuesday; twelve exchanges on one dream is a
+            # fact about the two agents that somebody should read.
+            log.warning(
+                "confer_lifetime_ceiling",
+                dream_id=dream_id,
+                exchanges=lifetime,
+                detail=(
+                    "This dream has been conferred to its lifetime ceiling. It "
+                    "will not be conferred again whatever changes about it; the "
+                    "dreamer can still rework it and the operator can still act "
+                    "on it."
+                ),
+            )
+            return ExchangeResult(
+                dream_id=dream_id,
+                outcome=ConferOutcome.LIFETIME_EXHAUSTED,
+                detail=(
+                    f"{lifetime} exchanges over this dream's life, which is the "
+                    f"ceiling of {MAX_EXCHANGES_LIFETIME}. Nothing reopens it."
+                ),
+            )
+
+        held = exchanges_in_epoch(dream, messages)
+        if held >= MAX_EXCHANGES_PER_EPOCH:
             log.info(
                 "confer_skipped",
                 dream_id=dream_id,
                 reason="exchanges_exhausted",
                 exchanges=held,
+                lifetime=lifetime,
             )
             return ExchangeResult(
                 dream_id=dream_id,
                 outcome=ConferOutcome.EXCHANGES_EXHAUSTED,
                 detail=(
-                    f"{held} exchanges already, which is the lifetime cap. A "
-                    "fourth would be the same argument again."
+                    f"{held} exchanges since the last thing that changed, which "
+                    "is the cap. A fourth would be the same argument again. "
+                    "Something changing about the dream starts a fresh three."
                 ),
             )
 
         change = has_something_changed(
             dream, last_agent_turn_at(messages), messages=messages
         )
-        if not change and not self._blocked_by_a_full_shelf(
-            messages, now=now, caps=caps
+        if (
+            not change
+            and not self._handed_back_since_the_last_offer(messages)
+            and not self._blocked_by_a_full_shelf(messages, now=now, caps=caps)
         ):
             log.info("confer_skipped", dream_id=dream_id, reason="nothing_new")
             return ExchangeResult(
@@ -854,6 +1051,41 @@ class Conference:
             )
 
         return self.confer_once(dream, now=now, caps=caps)
+
+    @staticmethod
+    def _handed_back_since_the_last_offer(messages: Sequence[DreamMessage]) -> bool:
+        """Did the trading agent take this dream and give it back since they last spoke?
+
+        **A hand-back is a new situation by definition** — it was adopted, it
+        came back, and the reason it came back is information neither of them
+        had during the last exchange. So it reopens the conversation and it
+        resets the exchange epoch.
+
+        It needs its own answer for a mechanical reason worth knowing.
+        `DreamStore.return_to_vault` writes the `return` message and stamps
+        `updated_at` and `vault_entered_at` in one transaction, at one instant,
+        so the marker `has_something_changed` measures against IS the moment of
+        the change — and that gate's comparison is strict on purpose, because a
+        non-strict one would hand the two agents a fresh round created by the
+        end of every exchange. Loosening it to catch this would break the thing
+        it is for. This looks at the fact instead: a `return` later than the
+        last offer means an adoption happened and ended since they last talked.
+
+        Deliberately narrow, and self-clearing. Once the next exchange writes
+        its offer, the same `return` is older than it and stops qualifying, so
+        one hand-back buys one conversation. Same shape as
+        `_blocked_by_a_full_shelf`, which is the other thing that changes
+        without the dream changing.
+        """
+        returns = [m for m in messages if m.speaker == TRADER and m.kind == "return"]
+        if not returns:
+            return False
+        offers = [m.at for m in messages if m.speaker == DREAMER and m.kind == "offer"]
+        # No offer at all means the dream was adopted and handed back without
+        # the two of them ever conferring — through the MCP tool, or the vault
+        # expiry command. That is the strongest case for a conversation, not the
+        # weakest.
+        return not offers or returns[-1].at > max(offers)
 
     def _blocked_by_a_full_shelf(
         self, messages: Sequence[DreamMessage], *, now: datetime, caps: VaultCaps | None
@@ -969,11 +1201,14 @@ class Conference:
                     caps=caps,
                 )
 
+        remaining = MAX_EXCHANGES_PER_EPOCH - exchanges_in_epoch(
+            dream, self._store.messages(dream_id)
+        )
         self._note(
             dream_id,
             f"Six turns and no verdict. The exchange is closed; "
-            f"{MAX_EXCHANGES_PER_DREAM - exchanges_so_far(self._store.messages(dream_id))} "
-            "exchange(s) remain on this dream.",
+            f"{max(remaining, 0)} exchange(s) remain before something has to "
+            "change about this dream.",
             at=now,
         )
         log.info("confer_turns_exhausted", dream_id=dream_id, turns=turns)
@@ -1081,20 +1316,55 @@ class Conference:
         — the same reasoning as the tailnet banner naming the command that
         clears it: a warning that repeats teaches an operator to ignore it.
 
+        **Two boundaries, two sentences, and they must not be one.** The epoch
+        cap parks the dream UNTIL SOMETHING CHANGES, and the note says what
+        would restart it, because a note that read "they will not confer this
+        again" when a fired condition would reopen it tomorrow is a plausible
+        wrong statement about the system's own behaviour. The lifetime ceiling
+        is the one that means never, and it says so.
+
         An adopted dream never reaches here: it has left the vault, so it is not
-        a candidate again and the sentence would be false.
+        a candidate again and either sentence would be false.
+
+        **The comparisons are `==` rather than `>=`, and that is what "once"
+        means.** An exchange adds exactly one offer, so the count passes through
+        the cap rather than jumping it, and `confer_once` is reachable directly
+        from a command — with `>=` it would repeat the note on every exchange
+        past the cap, which is the thing this method exists to prevent.
         """
-        held = exchanges_so_far(self._store.messages(result.dream_id))
-        if held >= MAX_EXCHANGES_PER_DREAM:
+        messages = self._store.messages(result.dream_id)
+        lifetime = exchanges_so_far(messages)
+        dream = self._store.get(result.dream_id)
+        held = exchanges_in_epoch(dream, messages) if dream is not None else lifetime
+
+        if lifetime == MAX_EXCHANGES_LIFETIME:
             self._note(
                 result.dream_id,
-                f"That was exchange {held} of {MAX_EXCHANGES_PER_DREAM}. This "
-                "dream parks: the two of them will not confer it again. The "
-                "dreamer can still rework it, and the operator can still act "
-                "on it.",
+                f"That was exchange {lifetime}, the lifetime ceiling of "
+                f"{MAX_EXCHANGES_LIFETIME}. The two of them will not confer this "
+                "dream again whatever changes about it. The dreamer can still "
+                "rework it, and the operator can still act on it.",
                 at=now,
             )
-            log.info("confer_dream_parked", dream_id=result.dream_id, exchanges=held)
+            log.warning(
+                "confer_dream_closed", dream_id=result.dream_id, exchanges=lifetime
+            )
+        elif held == MAX_EXCHANGES_PER_EPOCH:
+            self._note(
+                result.dream_id,
+                f"That was exchange {held} of {MAX_EXCHANGES_PER_EPOCH} since "
+                "the last thing that changed. This dream parks until something "
+                "does change — a condition firing, a hop checked or added, an "
+                "operator note, a rework, or the trading agent handing it back. "
+                "Any of those starts a fresh three.",
+                at=now,
+            )
+            log.info(
+                "confer_dream_parked",
+                dream_id=result.dream_id,
+                exchanges=held,
+                lifetime=lifetime,
+            )
         return result
 
     # ---------------------------------------------------------------- calls
@@ -1250,10 +1520,13 @@ __all__ = [
     "AGENT_SPEAKERS",
     "CONFERENCE",
     "MAX_DREAMS_PER_RUN",
-    "MAX_EXCHANGES_PER_DREAM",
+    "MAX_EXCHANGES_LIFETIME",
+    "MAX_EXCHANGES_PER_EPOCH",
     "MAX_TURNS_PER_EXCHANGE",
     "TEXT_MAX_CHARS",
     "Change",
+    "ChangeKind",
+    "ChangeSignal",
     "ConferOutcome",
     "Conference",
     "ConferenceReport",
@@ -1263,6 +1536,9 @@ __all__ = [
     "TraderTurn",
     "TraderVerdict",
     "TurnCaller",
+    "change_signals",
+    "epoch_started_at",
+    "exchanges_in_epoch",
     "exchanges_so_far",
     "has_something_changed",
     "last_agent_turn_at",

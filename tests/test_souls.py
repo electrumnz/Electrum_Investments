@@ -115,6 +115,45 @@ def test_the_gate_cannot_be_argued_with_in_character():
     assert "Never argue with the risk gate" in load_soul(YODA).text
 
 
+def test_neither_chat_agent_raises_a_dream_to_be_agreeable():
+    """Both may start a dream from chat, and that invites the exact failure a
+    chat surface is worst at.
+
+    The bad version: the operator says "what about lithium", the agent hears
+    interest, and dutifully raises a lithium dream. That is not inspiration, it
+    is sycophancy with a database write behind it, and it fills the vault with
+    ideas nobody had. The test the files carry is whether the agent could state
+    the second hop unprompted — a link the operator does not have, rather than
+    a topic they seemed keen on.
+
+    Nothing in prose can enforce it. What prose can do is refuse to invite it,
+    and name the easy way out: "I have nothing here worth recording" is a good
+    answer and has to read as one.
+    """
+    for name in (YODA, GROGU):
+        text = load_soul(name).text
+        assert "Never raise a dream to be agreeable" in text, name
+        assert "unprompted" in text, name
+        # Line-wrapped in the files, so the assertion is on the phrase rather
+        # than the sentence: a soul that reflows must not fail this.
+        assert "worth recording" in text, name
+        assert "not a dream" in text, name
+
+
+def test_neither_chat_agent_is_a_mirror():
+    """A companion sometimes says no.
+
+    The operator asked for something they can ask questions of, and an agent
+    that agrees with everything answers every question with the operator's own
+    opinion. Grogu has to be able to say a chain does not hold; Yoda has to be
+    able to say an idea is worse than it looks.
+    """
+    assert "Never let being liked cost a disagreement" in load_soul(GROGU).text
+    assert "Never let being liked cost the operator a disagreement" in load_soul(YODA).text
+    for name in (YODA, GROGU):
+        assert "it is a mirror" in load_soul(name).text, name
+
+
 def test_the_dreamer_states_its_weakest_hop():
     """Confidence in a chain is the minimum across its links, not the average."""
     assert "Never present a chain as stronger than its weakest hop" in load_soul(GROGU).text
@@ -139,18 +178,28 @@ def test_the_armorer_pushes_back_and_does_not_deny():
     assert "Loosening is an argument" in text
 
 
-def test_the_armorer_never_claims_to_have_changed_anything():
-    """It cannot write `config/rules.yaml` and must never say it did.
+def test_the_armorer_never_claims_more_than_the_tool_reported():
+    """It applies changes now, and the clause had to change with it.
 
-    The structural guarantee is that `config/` is root-owned so the service
-    account cannot edit its own limits. This clause is what stops the agent
-    *describing* an outcome the arrangement did not produce, which is the
-    confident-partial-answer failure arriving through the voice.
+    This test used to assert `Never claim to have changed anything`, which was
+    right while the agent could not write the file and became false the moment
+    it could — so it is rewritten rather than deleted. What survives is the
+    thing it was actually protecting: the agent must not *describe* an outcome
+    the arrangement did not produce.
+
+    The structural guarantee is unchanged. `config/` is still root-owned, the
+    change is still carried by root through one no-argument wrapper, and the
+    file is still re-validated on a staged copy first. What is new is that a
+    failed apply is a real outcome with its own words, and "recorded" and
+    "applied" must not be used as if they were the same one.
     """
     text = load_soul(ARMORER).text
 
-    assert "Never claim to have changed anything" in text
-    assert 'Say "recorded"' in text
+    assert "Never claim more than the tool reported" in text
+    assert '"Recorded" and "applied" are' in text
+    assert "the file did not move" in text
+    # The asymmetry survives the reversal, which is the whole point of it.
+    assert "Never apply a loosening in the breath that was asked for it" in text
 
 
 def test_the_armorer_will_not_widen_a_limit_for_a_specific_trade():

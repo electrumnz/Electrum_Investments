@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from dataclasses import fields
+from dataclasses import fields, replace
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 
@@ -17,6 +17,7 @@ import pytest
 
 from bot.dreaming import (
     DREAMER,
+    FUSION,
     OPERATOR,
     TRADER,
     Dream,
@@ -32,8 +33,11 @@ from bot.dreaming import (
     VaultTTLs,
     Verification,
     carry_forward_grading,
+    fusion_candidates,
     grade_conditions,
+    plan_fusion,
     promotion_for,
+    weaker_of,
 )
 from bot.models import IndicatorSnapshot, OrderProposal, TriggerField, TriggerOp
 from bot.triggers import CycleReadings
@@ -1876,3 +1880,644 @@ def test_a_condition_written_before_symbols_existed_reads_as_ungradeable():
     assert old.symbol == ""
     assert old.is_checkable is True  # still promotes to the prophecy shelf
     assert old.is_gradeable is False  # but nothing can settle it
+
+
+# =========================================================== symbiosis: fusing
+#
+# Two chains that meet at the same hop. The tests are organised around the six
+# properties in the module docstring, because those are the decisions; the store
+# mechanics underneath them are not.
+
+
+def _hydro() -> Dream:
+    """Drought cuts hydro output, so power in that region gets scarce and dear."""
+    return Dream(
+        title="Drought and hydro",
+        seed="the reservoir is at a decade low",
+        chain=[
+            Hop("the reservoir is at a decade low", True, "the operator's own gauge"),
+            Hop("that region's power gets scarce and dear", True, "spot auction prints"),
+        ],
+        instruments=["hydro", "the South Island"],
+        symbols=["SPY"],
+        asset_class_key="us_equity",
+        conditions=[_checkable(value=100.0)],
+    )
+
+
+def _smelters() -> Dream:
+    """Smelters chase cheap power, and they meet the hydro chain at the same hop."""
+    return Dream(
+        title="Smelters chase cheap power",
+        seed="the marginal smelter moves for a cent",
+        chain=[
+            # The SAME claim, and this parent never sourced it.
+            Hop("that region's power gets scarce and dear"),
+            Hop("the marginal smelter curtails first"),
+        ],
+        instruments=["aluminium"],
+        symbols=["QQQ"],
+        asset_class_key="us_equity",
+        conditions=[
+            DreamCondition(
+                text="aluminium holds above 2,400",
+                symbol="QQQ",
+                field=TriggerField.CLOSE,
+                op=TriggerOp.ABOVE,
+                value=2400.0,
+            )
+        ],
+    )
+
+
+def _fused(store: DreamStore, **kw) -> tuple[int, int, int]:
+    """Two parents sharing a hop, fused. Returns (child, parent a, parent b)."""
+    a = store.save(_hydro())
+    b = store.save(_smelters())
+    result = store.fuse([a, b], by=DREAMER, **kw)
+    assert result.ok, result.detail
+    assert result.dream_id is not None
+    return result.dream_id, a, b
+
+
+def test_a_fusion_is_a_new_dream_and_both_parents_survive(store):
+    """History is the point. A fused dream that ate its sources would destroy
+    the ability to attack either of them, which is the whole activity."""
+    child_id, a, b = _fused(store)
+
+    child = store.get(child_id)
+    assert child is not None
+    assert child.parents == [a, b]
+    assert child.is_fusion
+
+    for parent_id, expected in ((a, _hydro()), (b, _smelters())):
+        parent = store.get(parent_id)
+        assert parent is not None
+        assert [h.claim for h in parent.chain] == [h.claim for h in expected.chain]
+        assert parent.vault is Vault.WORKBENCH
+        assert parent.symbols == expected.symbols
+
+
+def test_the_back_reference_is_derived_rather_than_stored(store):
+    """A second copy of one fact is a second thing that can disagree with it —
+    the reasoning that keeps `Adoption.is_live` computed rather than flagged."""
+    child_id, a, b = _fused(store)
+
+    assert store.children_of(a) == [child_id]
+    assert store.children_of(b) == [child_id]
+    assert store.children_of(child_id) == []
+
+
+def test_the_chain_is_the_union_and_the_shared_hop_is_named(store):
+    """The overlap is the REASON the fusion exists, so it is a field rather than
+    something a reader has to spot by holding two chains side by side."""
+    child_id, _, _ = _fused(store)
+
+    child = store.get(child_id)
+    assert child is not None
+    assert [h.claim for h in child.chain] == [
+        "the reservoir is at a decade low",
+        "that region's power gets scarce and dear",
+        "the marginal smelter curtails first",
+    ]
+    assert child.shared_hops == ["that region's power gets scarce and dear"]
+
+
+def test_verification_never_improves_by_fusing(store):
+    """**Two unverified chains do not make a sourced one.**
+
+    The union of a SOURCED parent and an UNVERIFIED one contains checked hops,
+    which counts as PARTIAL — strictly better than the worse parent. The
+    ceiling is what stops the badge reading better than the argument it came
+    from, and it is the assertion this feature turns on.
+    """
+    sourced = Dream(
+        title="sourced",
+        seed="s",
+        chain=[Hop("a shared claim", True, "a real source"), Hop("b", True, "another")],
+    )
+    unverified = Dream(
+        title="unverified", seed="s", chain=[Hop("a shared claim"), Hop("c")]
+    )
+    assert sourced.verification is Verification.SOURCED
+    assert unverified.verification is Verification.UNVERIFIED
+
+    a, b = store.save(sourced), store.save(unverified)
+    result = store.fuse([a, b], by=DREAMER)
+    child = store.get(int(result.dream_id or 0))
+
+    assert child is not None
+    assert child.verification is Verification.UNVERIFIED
+    assert child.verification_ceiling is Verification.UNVERIFIED
+    # And it survives the round trip, because the cap is what the badge means.
+    reopened = store.get(int(child.id or 0))
+    assert reopened is not None and reopened.verification is Verification.UNVERIFIED
+
+
+def test_a_hop_one_parent_sourced_and_the_other_did_not_arrives_unchecked(store):
+    """A link whose sourcing is in dispute must not come across as the more
+    flattering of the two readings. The source is not lost: it is on the parent,
+    which survives."""
+    child_id, a, _ = _fused(store)
+
+    child = store.get(child_id)
+    assert child is not None
+    shared = next(h for h in child.chain if h.claim in child.shared_hops)
+    assert shared.checked is False
+    assert shared.source == ""
+
+    # The parent that did source it still has the source.
+    parent = store.get(a)
+    assert parent is not None
+    assert parent.chain[1].checked is True
+    assert parent.chain[1].source == "spot auction prints"
+
+
+def test_the_conditions_are_the_union_so_a_fusion_is_harder_to_promote(store):
+    """A fusion is a strictly stronger claim, so it must be harder to promote
+    than either parent and never easier."""
+    child_id, _, _ = _fused(store)
+
+    child = store.get(child_id)
+    assert child is not None
+    assert len(child.conditions) == 2
+    assert child.all_conditions_met is False
+
+    # One of the two firing is not enough, which is the point.
+    child.conditions = [replace(child.conditions[0], fulfilled=True), child.conditions[1]]
+    assert child.all_conditions_met is False
+
+
+def test_a_condition_already_fulfilled_on_a_parent_arrives_fulfilled(store):
+    """`carry_forward_grading` is the one grading rule in the repository, and
+    the merge reuses it rather than growing a second copy."""
+    hydro = _hydro()
+    hydro.conditions = [_checkable(value=100.0, fulfilled=True)]
+    a, b = store.save(hydro), store.save(_smelters())
+
+    result = store.fuse([a, b], by=DREAMER)
+    child = store.get(int(result.dream_id or 0))
+
+    assert child is not None
+    assert child.conditions_met == 1
+    assert child.all_conditions_met is False
+
+
+def test_the_symbols_are_the_union_and_never_wider(store):
+    """A fusion must not become a route around the class hard-block, so it can
+    only name what its parents already claimed."""
+    child_id, _, _ = _fused(store)
+
+    child = store.get(child_id)
+    assert child is not None
+    assert child.symbols == ["SPY", "QQQ"]
+    assert child.asset_class_key == "us_equity"
+
+
+def test_an_override_may_narrow_the_union_but_not_widen_it(store):
+    """The `adopt` lock in a second place. A symbol arriving from nowhere would
+    be a permission with no argument behind it."""
+    a = store.save(_hydro())
+    b = store.save(_smelters())
+
+    narrowed = store.fuse([a, b], by=DREAMER, symbols=["SPY"])
+    assert narrowed.ok
+    child = store.get(int(narrowed.dream_id or 0))
+    assert child is not None and child.symbols == ["SPY"]
+
+    wider = store.fuse([a, b], by=DREAMER, symbols=["SPY", "TSLA"])
+    assert wider.refused
+    assert MoveRefusal.SYMBOLS_NOT_OFFERED in wider.refusals
+    assert "TSLA" in wider.detail
+
+
+def test_parents_that_disagree_about_the_class_leave_it_unresolved(store):
+    """Unresolved grants nothing — `adopt` refuses it and `granted_symbols`
+    drops it — which is the direction to fail in. A symbol whose class is
+    unknown is a symbol whose limits are unknown."""
+    equity = _hydro()
+    crypto = _smelters()
+    crypto.symbols = ["BTC/USD"]
+    crypto.asset_class_key = "crypto"
+    a, b = store.save(equity), store.save(crypto)
+
+    result = store.fuse([a, b], by=DREAMER)
+    child = store.get(int(result.dream_id or 0))
+
+    assert child is not None
+    assert child.symbols == ["SPY", "BTC/USD"]
+    assert child.asset_class_key == ""
+
+
+def test_a_fusion_of_one_dream_is_refused(store):
+    """One dream is not a fusion; it is the dream you already have."""
+    a = store.save(_hydro())
+
+    result = store.fuse([a], by=DREAMER)
+
+    assert result.refused
+    assert MoveRefusal.NEEDS_PARENTS in result.refusals
+    assert result.dream_id is None
+
+
+def test_a_fusion_of_four_dreams_is_refused(store):
+    """At four the shared-hop argument stops meaning anything: a link that many
+    chains reach is a truism rather than a mechanism."""
+    ids = [store.save(Dream(title=f"d{i}", seed="s", chain=[Hop("shared")])) for i in range(4)]
+
+    result = store.fuse(ids, by=DREAMER)
+
+    assert result.refused
+    assert MoveRefusal.TOO_MANY_PARENTS in result.refusals
+    assert result.dream_id is None
+
+
+def test_an_adopted_dream_cannot_be_fused(store):
+    """A live grant points at that row and the trading agent is holding it —
+    the same reason the dreamer may neither move nor delete one."""
+    adopted = _vaulted(store, title="taken")
+    assert store.adopt(adopted).ok
+    other = store.save(_hydro())
+
+    result = store.fuse([adopted, other], by=DREAMER)
+
+    assert result.refused
+    assert MoveRefusal.PARENT_ADOPTED in result.refusals
+    assert "return_to_vault" in result.detail
+    # Nothing was written, so the shelf and the grant are untouched.
+    assert store.get(adopted).vault is Vault.ADOPTED
+    assert store.children_of(adopted) == []
+
+
+def test_only_the_dreamer_may_fuse(store):
+    """Same actor table as `move`: the trading agent has two verbs and this is
+    not one of them, and an unrecognised name is refused rather than waved
+    through."""
+    a, b = store.save(_hydro()), store.save(_smelters())
+
+    trader = store.fuse([a, b], by=TRADER)
+    stranger = store.fuse([a, b], by="somebody")
+
+    assert MoveRefusal.FORBIDDEN_ACTOR in trader.refusals
+    assert "adopt" in trader.detail
+    assert MoveRefusal.FORBIDDEN_ACTOR in stranger.refusals
+    assert store.children_of(a) == []
+
+
+def test_a_missing_parent_is_refused_by_id_rather_than_raising(store):
+    a = store.save(_hydro())
+
+    result = store.fuse([a, 9999], by=DREAMER)
+
+    assert result.refused
+    assert MoveRefusal.NOT_FOUND in result.refusals
+    assert "9999" in result.detail
+
+
+def test_a_fusion_collects_every_refusal_rather_than_the_first_one(store):
+    """`RiskGate`'s property, in this store's third place. A caller told one
+    reason at a time fixes one thing at a time and asks again."""
+    result = DreamStore(store.path).fuse([1], by=TRADER)
+
+    assert {MoveRefusal.FORBIDDEN_ACTOR, MoveRefusal.NEEDS_PARENTS} <= set(result.refusals)
+
+
+def test_a_fusion_counts_against_the_workbench_cap(store):
+    """It is a dream on the workbench like any other, and the cap is about what
+    a person can hold in their head."""
+    a, b = store.save(_hydro()), store.save(_smelters())
+
+    result = store.fuse([a, b], by=DREAMER, caps=VaultCaps(workbench=2))
+
+    assert result.refused
+    assert MoveRefusal.FULL in result.refusals
+    assert store.children_of(a) == []
+
+
+def test_the_fusion_is_narrated_into_both_parents_transcripts(store):
+    """The transcript is what a human reads beside a dream, and a fusion is a
+    significant event in its life. The speaker is neither agent, so
+    `confer.last_agent_turn_at` cannot read it as a turn."""
+    child_id, a, b = _fused(store)
+
+    for parent_id in (a, b):
+        notes = store.messages(parent_id)
+        assert len(notes) == 1
+        assert notes[0].speaker == FUSION
+        assert notes[0].kind == "fusion"
+        assert str(child_id) in notes[0].text
+        assert "unchanged and still yours" in notes[0].text
+
+
+def test_a_fusion_starts_with_no_verdict_and_no_weakest_hop(store):
+    """Nobody has attacked the combined chain yet. Inheriting a parent's
+    weakest hop would claim it had been examined, and a verdict would let it
+    promote off the workbench without anyone working it."""
+    child_id, _, _ = _fused(store)
+
+    child = store.get(child_id)
+    assert child is not None
+    assert child.verdict is None
+    assert child.weakest_hop == ""
+    assert child.stage is DreamStage.EXPLORE
+    assert promotion_for(child).moves is False
+
+
+def test_a_fusion_names_the_shared_hop_in_its_own_seed(store):
+    child_id, _, _ = _fused(store)
+
+    child = store.get(child_id)
+    assert child is not None
+    assert "that region's power gets scarce and dear" in child.seed
+    assert child.title == "Drought and hydro + Smelters chase cheap power"
+
+
+def test_a_fusion_with_no_overlap_says_so_rather_than_implying_one(store):
+    """The good outcome must not be what an absence of evidence looks like, and
+    a seed claiming a shared mechanism where there is none would be the
+    confident wrong sentence written by the store itself."""
+    a = store.save(Dream(title="one", seed="s", chain=[Hop("nothing in common")]))
+    b = store.save(Dream(title="two", seed="s", chain=[Hop("nor here")]))
+
+    result = store.fuse([a, b], by=DREAMER)
+    child = store.get(int(result.dream_id or 0))
+
+    assert child is not None
+    assert child.shared_hops == []
+    assert "share no hop" in child.seed
+
+
+def test_a_fusion_survives_the_round_trip(store):
+    child_id, a, b = _fused(store)
+
+    reopened = DreamStore(store.path).get(child_id)
+
+    assert reopened is not None
+    assert reopened.parents == [a, b]
+    assert reopened.shared_hops == ["that region's power gets scarce and dear"]
+    assert reopened.verification_ceiling is Verification.UNVERIFIED
+
+
+def test_the_summary_counts_fusions(store):
+    child_id, a, b = _fused(store)
+
+    summary = DreamSummary.of(store.recent())
+
+    assert summary.total == 3
+    assert summary.fusions == 1
+    assert child_id and a and b
+
+
+# --------------------------------------------------- finding what could fuse
+
+
+def test_the_candidate_finder_pairs_dreams_that_share_a_hop():
+    """Arithmetic proposes, the dreamer confirms. Nothing fuses unattended:
+    a machine that combined hypotheses on its own would be generating confident
+    new claims out of arithmetic over old ones."""
+    a, b = _hydro(), _smelters()
+    a.id, b.id = 1, 2
+    unrelated = Dream(title="elsewhere", seed="s", chain=[Hop("nothing to do with it")])
+    unrelated.id = 3
+
+    found = fusion_candidates([a, b, unrelated])
+
+    assert len(found) == 1
+    assert found[0].dream_ids == (1, 2)
+    assert found[0].shared_hops == ("that region's power gets scarce and dear",)
+    assert found[0].overlap == 1
+    assert found[0].titles == ("Drought and hydro", "Smelters chase cheap power")
+
+
+def test_a_hop_four_dreams_share_is_not_a_candidate_at_all():
+    """A link that many chains reach is a truism, and truncating to the first
+    three would hide that by picking an arbitrary three of them."""
+    dreams = []
+    for index in range(4):
+        dream = Dream(title=f"d{index}", seed="s", chain=[Hop("energy prices matter")])
+        dream.id = index + 1
+        dreams.append(dream)
+
+    assert fusion_candidates(dreams) == []
+
+
+def test_a_dream_that_is_already_a_fusion_is_not_offered_again():
+    """It shares every hop with its own parents by construction, so a finder
+    that could see one would propose re-fusing it with them forever."""
+    a, b = _hydro(), _smelters()
+    a.id, b.id = 1, 2
+    child = Dream(
+        title="fused",
+        seed="s",
+        chain=[Hop("that region's power gets scarce and dear")],
+        parents=[1, 2],
+    )
+    child.id = 3
+
+    found = fusion_candidates([a, b, child])
+
+    assert [c.dream_ids for c in found] == [(1, 2)]
+
+
+def test_an_adopted_dream_is_not_offered_as_a_candidate():
+    """`fuse` refuses one anyway, so offering it would be offering a move that
+    cannot be made."""
+    a, b = _hydro(), _smelters()
+    a.id, b.id = 1, 2
+    b.vault = Vault.ADOPTED
+
+    assert fusion_candidates([a, b]) == []
+
+
+def test_candidates_are_ordered_by_overlap_and_then_stably():
+    """A list that reshuffled between runs would make 'the model picked the
+    second one' unreproducible."""
+    strong_a = Dream(title="a", seed="s", chain=[Hop("one"), Hop("two")])
+    strong_b = Dream(title="b", seed="s", chain=[Hop("one"), Hop("two")])
+    weak_a = Dream(title="c", seed="s", chain=[Hop("three")])
+    weak_b = Dream(title="d", seed="s", chain=[Hop("three")])
+    for index, dream in enumerate((strong_a, strong_b, weak_a, weak_b), start=1):
+        dream.id = index
+
+    found = fusion_candidates([strong_a, strong_b, weak_a, weak_b])
+
+    assert [c.dream_ids for c in found] == [(1, 2), (3, 4)]
+    assert found[0].overlap == 2
+
+
+def test_plan_fusion_is_pure_and_needs_no_store():
+    """The rule can be read and tested without a database, exactly as
+    `promotion_for` can. `DreamStore.fuse` is only the half that needs a
+    connection, the caps and a clock."""
+    a, b = _hydro(), _smelters()
+    a.id, b.id = 7, 9
+
+    plan = plan_fusion([a, b])
+
+    assert plan.parents == (7, 9)
+    assert plan.has_overlap
+    assert plan.verification_ceiling is Verification.UNVERIFIED
+    assert len(plan.chain) == 3
+
+
+def test_the_weaker_badge_wins_and_it_is_not_alphabetical():
+    """`Verification` is a StrEnum, so `min()` over one would compare the WORDS
+    — partial < sourced < unverified — putting the weakest badge last. A silent
+    alphabetical answer to an evidence question is the plausible wrong figure
+    this repository refuses."""
+    assert weaker_of(Verification.SOURCED, Verification.UNVERIFIED) is Verification.UNVERIFIED
+    assert weaker_of(Verification.PARTIAL, Verification.SOURCED) is Verification.PARTIAL
+    assert weaker_of(Verification.PARTIAL, Verification.PARTIAL) is Verification.PARTIAL
+
+
+# ------------------------------------------------- the migration, second time
+
+# The `dreams` table exactly as it was after the vaults and BEFORE symbiosis.
+# Written out by hand for the reason `OLD_SCHEMA` above is: importing today's
+# SCHEMA would test nothing, because the whole point is to start from the shape
+# that is actually on the droplet.
+PRE_FUSION_SCHEMA = """
+CREATE TABLE IF NOT EXISTS dreams (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  title        TEXT NOT NULL,
+  seed         TEXT NOT NULL,
+  stage        TEXT NOT NULL,
+  verdict      TEXT,
+  weakest_hop  TEXT NOT NULL DEFAULT '',
+  trigger_note TEXT NOT NULL DEFAULT '',
+  origin       TEXT NOT NULL DEFAULT '',
+  chain        TEXT NOT NULL DEFAULT '[]',
+  thoughts     TEXT NOT NULL DEFAULT '[]',
+  instruments  TEXT NOT NULL DEFAULT '[]',
+  created_at   TEXT NOT NULL,
+  updated_at   TEXT NOT NULL,
+  vault           TEXT NOT NULL DEFAULT 'workbench',
+  vault_entered_at TEXT NOT NULL DEFAULT '',
+  conditions      TEXT NOT NULL DEFAULT '[]',
+  symbols         TEXT NOT NULL DEFAULT '[]',
+  asset_class_key TEXT NOT NULL DEFAULT '',
+  wisp            TEXT NOT NULL DEFAULT ''
+);
+"""
+
+
+def _pre_fusion_store_with_a_row(path: Path) -> None:
+    conn = sqlite3.connect(path)
+    conn.executescript(PRE_FUSION_SCHEMA)
+    conn.execute(
+        "INSERT INTO dreams (title, seed, stage, verdict, weakest_hop, trigger_note,"
+        " origin, chain, thoughts, instruments, created_at, updated_at, vault,"
+        " vault_entered_at, conditions, symbols, asset_class_key, wisp)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (
+            "Drought and hydro",
+            "the reservoir is at a decade low",
+            "explore",
+            None,
+            "whether the smelter can actually curtail",
+            "the spot auction print",
+            "a headline about rainfall",
+            json.dumps([{"claim": "the reservoir is at a decade low", "checked": True,
+                         "source": "the operator's own gauge"}]),
+            json.dumps([{"stage": "explore", "text": "who buys that power",
+                         "at": "2026-07-01T09:00:00+00:00", "by": ""}]),
+            json.dumps(["hydro"]),
+            "2026-06-01T09:00:00+00:00",
+            "2026-07-01T09:00:00+00:00",
+            "vault",
+            "2026-07-01T09:00:00+00:00",
+            json.dumps([{"text": "the auction clears above 200", "fulfilled": False}]),
+            json.dumps(["SPY"]),
+            "us_equity",
+            "",
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+
+def test_a_database_that_predates_symbiosis_is_migrated_in_place(tmp_path):
+    """`CREATE TABLE IF NOT EXISTS` is a no-op on a table that already exists,
+    and every other test here builds its store from scratch — so the suite is
+    structurally blind to a missing column and cannot tell you that you have
+    forgotten one. This is the second generation of that migration and it starts
+    from the shape the droplet is actually running."""
+    path = tmp_path / "dreams.db"
+    _pre_fusion_store_with_a_row(path)
+
+    store = DreamStore(path)
+    loaded = store.recent()
+
+    assert len(loaded) == 1
+    dream = loaded[0]
+    # The row survived whole. A migration that dropped history to add a column
+    # would be a far worse trade than the missing column.
+    assert dream.title == "Drought and hydro"
+    assert dream.vault is Vault.VAULT
+    assert dream.symbols == ["SPY"]
+    assert [c.text for c in dream.conditions] == ["the auction clears above 200"]
+    # And the new columns are there, carrying the shape an ordinary dream has.
+    assert dream.parents == []
+    assert dream.shared_hops == []
+    assert dream.verification_ceiling is None
+    assert dream.is_fusion is False
+
+
+def test_a_migrated_database_can_still_be_fused_into(tmp_path):
+    """Present is not the same as usable. The migrated row round-trips through
+    a real fusion, which is the only way to know the columns actually work."""
+    path = tmp_path / "dreams.db"
+    _pre_fusion_store_with_a_row(path)
+    store = DreamStore(path)
+    old = store.recent()[0]
+    assert old.id is not None
+    assert store.move(old.id, Vault.WORKBENCH, by=DREAMER)
+    other = store.save(_smelters())
+
+    result = store.fuse([old.id, other], by=DREAMER)
+
+    assert result.ok, result.detail
+    child = store.get(int(result.dream_id or 0))
+    assert child is not None
+    assert child.parents == [old.id, other]
+    assert store.children_of(old.id) == [child.id]
+
+
+def test_a_symbiosis_migration_ends_up_identical_to_a_fresh_database(tmp_path):
+    """The columns live in two places — `SCHEMA` for a fresh store and
+    `_ADDED_DREAM_COLUMNS` for an existing one — and this is what keeps them in
+    step. Found by comparing the two, not by reading either."""
+    old = tmp_path / "old.db"
+    _pre_fusion_store_with_a_row(old)
+    DreamStore(old)
+    DreamStore(tmp_path / "fresh.db")
+
+    def columns(path: Path) -> list[str]:
+        conn = sqlite3.connect(path)
+        try:
+            return [str(row[1]) for row in conn.execute("PRAGMA table_info(dreams)")]
+        finally:
+            conn.close()
+
+    assert columns(old) == columns(tmp_path / "fresh.db")
+
+
+def test_the_symbiosis_migration_is_idempotent(tmp_path):
+    """It runs on every open, so re-running it must not duplicate a column, lose
+    a row, or disturb a fusion already written."""
+    path = tmp_path / "dreams.db"
+    _pre_fusion_store_with_a_row(path)
+    store = DreamStore(path)
+    old = store.recent()[0]
+    assert old.id is not None
+    store.move(old.id, Vault.WORKBENCH, by=DREAMER)
+    other = store.save(_smelters())
+    child_id = int((store.fuse([old.id, other], by=DREAMER)).dream_id or 0)
+
+    DreamStore(path)
+    third = DreamStore(path)
+
+    assert len(third.recent()) == 3
+    reopened = third.get(child_id)
+    assert reopened is not None
+    assert reopened.parents == [old.id, other]

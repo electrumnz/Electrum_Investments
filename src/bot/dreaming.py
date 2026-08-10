@@ -96,6 +96,58 @@ the vaults. `MoveResult` collects every reason at once rather than
 short-circuiting, exactly as `RiskGate` does, so a caller is told everything
 wrong with a move instead of the first thing.
 
+## Symbiosis: two chains that meet at the same hop
+
+Two second-order chains often share a link. A dream about drought cutting hydro
+output in one region and a dream about aluminium smelters chasing cheap power
+are separately interesting; the hop they share — *that region's power gets
+scarce and dear* — is the mechanism, and a mechanism two independent routes
+arrive at is better evidenced than either route alone. `fuse` is how that gets
+recorded rather than noticed once and forgotten.
+
+Six properties, and every one of them is a rule already used somewhere else in
+this file:
+
+- **A fusion is a NEW dream and the parents survive.** `parents` on the child,
+  nothing consumed, nothing deleted. A fused dream that ate its sources would
+  destroy the ability to attack either of them, which is the whole activity
+  this module exists to support — and it is the same reason adoption leaves the
+  chain on the row rather than trading it for a wisp.
+- **The shared hops are a first-class field, not something a reader has to
+  spot.** `shared_hops` names the overlap, because the overlap is the reason
+  the fusion exists. A fusion whose reason has to be inferred from two chains
+  side by side is a fusion nobody will check.
+- **Verification cannot improve by fusing, and `verification_ceiling` is what
+  makes that structural.** Two unverified chains do not make a sourced one. The
+  child's badge is capped at the WEAKEST parent's, so a union that happens to
+  contain some checked hops cannot read as better evidenced than the worse
+  argument it came from. A claim one parent sourced and the other did not comes
+  across UNCHECKED, with the source left on the parent that has it: the child
+  must not take the more flattering of two readings of the same link.
+- **Conditions are the union and `all_conditions_met` needs all of them.** A
+  fusion is a strictly stronger claim, so it must be HARDER to promote than
+  either parent, never easier. Nothing special is needed for that — the
+  property already requires all — but it is the property to check first if
+  somebody ever "simplifies" the merge.
+- **`symbols` is the union and never wider.** A fusion must not become a route
+  around the class hard-block, so the child can only ever name symbols its
+  parents already claimed, an override may only NARROW that set (the `adopt`
+  rule, in a second place), and the class resolves only when the parents agree
+  — `""` otherwise, which grants nothing. `grants.resolve_granted_symbols` is
+  still the lock that decides what may actually be traded.
+- **Two or three parents.** One is not a fusion, and at four the shared-hop
+  argument stops meaning anything: a hop four chains reach is a truism rather
+  than a mechanism. Both are typed refusals rather than exceptions, like every
+  other refusal here.
+
+**Only the dreamer may fuse, and an ADOPTED dream may not be fused**, for the
+same reason it may not be moved or deleted: a live grant points at that row,
+and the trading agent is the one holding it. The back-reference from a parent
+to its children is DERIVED (`children_of`) rather than stored, because a second
+copy of a relationship is a second thing that can disagree with the first —
+the reasoning that keeps `Adoption.is_live` computed and that the two answers
+to "is this grant live" already cost once.
+
 ## The wisp, and what it is not
 
 Adoption leaves the dreamer a `wisp`: a trace, in the Pensieve sense — the
@@ -233,6 +285,30 @@ class Verification(StrEnum):
     SOURCED = "sourced"  # every hop names where it came from
 
 
+# Weakest first. Written down because `Verification` is a StrEnum and `min()`
+# over one would compare the WORDS — "partial" < "sourced" < "unverified"
+# alphabetically, which puts the strongest badge in the middle and the weakest
+# last. A silent alphabetical answer to an evidence question is exactly the
+# plausible wrong figure this repository refuses, so the order is a tuple and
+# `weaker_of` reads it.
+VERIFICATION_ORDER: tuple[Verification, ...] = (
+    Verification.UNVERIFIED,
+    Verification.PARTIAL,
+    Verification.SOURCED,
+)
+
+
+def weaker_of(left: Verification, right: Verification) -> Verification:
+    """The less-evidenced of two badges. Pure, total, and never averages.
+
+    Confidence in a chain is the minimum across its links, so combining two
+    chains takes the minimum of the two badges rather than anything cleverer.
+    An average would let a sourced chain carry an invented one, which is the
+    single thing `Hop.checked` exists to prevent.
+    """
+    return min(left, right, key=VERIFICATION_ORDER.index)
+
+
 class Vault(StrEnum):
     """Where a dream is being held, and therefore who can see it.
 
@@ -260,6 +336,17 @@ class Vault(StrEnum):
 DREAMER = "dreamer"
 TRADER = "trader"
 OPERATOR = "operator"
+
+# The store narrating a fusion into the parents' transcripts. Deliberately
+# neither `DREAMER` nor `TRADER`, for the reason `dreamer.SCOPE` is neither:
+# `confer.last_agent_turn_at` would read an agent-named message as a TURN, and
+# a marker that swallowed a machine note would silence the operator's own.
+#
+# It IS a new voice to `confer.has_something_changed`, which is deliberate and
+# is the one consequence worth stating out loud: a parent sitting in the vault
+# becomes conferrable again when it is fused, because "this argument now exists
+# in a stronger form" genuinely changes what adopting the parent means.
+FUSION = "fusion"
 
 # The dreamer's own shelves. It may move a dream between any of these, in any
 # direction, and may delete from them.
@@ -694,14 +781,60 @@ class Dream:
     # dream stops occupying a slot in its head while the record stays whole.
     wisp: str = ""
 
+    # ------------------------------------------------------------- symbiosis
+
+    # The dreams this one was fused FROM. Empty for an ordinary dream, two or
+    # three ids for a fusion, and the parents are not consumed to produce it.
+    #
+    # This is the only stored half of the relationship. A parent's children are
+    # derived by `DreamStore.children_of`, because a back-reference written on
+    # the parent would be a second copy of one fact and the two would
+    # eventually disagree — the reasoning that keeps `Adoption.is_live`
+    # computed rather than stored, and that a second SQL answer to "is this
+    # grant live" already cost once.
+    parents: list[int] = field(default_factory=list)
+
+    # The hop or hops the parents had in common. THE REASON THE FUSION EXISTS,
+    # so it is a field rather than something a reader is left to spot by
+    # holding two chains side by side. Same argument as `weakest_hop`: a reader
+    # who has time for one line should be given the load-bearing one.
+    shared_hops: list[str] = field(default_factory=list)
+
+    # The best `verification` may read, inherited from the WEAKEST parent when
+    # this dream was fused. `None` on an ordinary dream, which is "no cap".
+    #
+    # It exists because the union of two chains can contain checked hops from
+    # one parent and unchecked hops from the other, which counts as PARTIAL —
+    # strictly better than an UNVERIFIED parent. Two unverified chains must not
+    # make a sourced one, and a fusion must never render as better evidenced
+    # than the worse argument it came from. Recorded at fusion time and never
+    # re-derived, the same rule as `Adoption.symbols_granted`: the parents can
+    # be edited afterwards, and a badge that moved when a parent was reworked
+    # would be a claim about evidence nobody could check.
+    verification_ceiling: Verification | None = None
+
+    @property
+    def is_fusion(self) -> bool:
+        return bool(self.parents)
+
     @property
     def verification(self) -> Verification:
-        """Derived from the chain, never set by the agent.
+        """Derived from the chain, never set by the agent, and never improved by fusing.
 
         A model asked to rate its own sourcing will rate it generously. This
         counts `checked` flags instead, so the badge on the page is arithmetic
         over what the dream actually recorded.
+
+        `verification_ceiling` caps it for a fused dream. See that field: the
+        union of two chains can read PARTIAL when one parent was UNVERIFIED,
+        and combining two arguments is not evidence for either of them.
         """
+        counted = self._counted_verification()
+        if self.verification_ceiling is None:
+            return counted
+        return weaker_of(counted, self.verification_ceiling)
+
+    def _counted_verification(self) -> Verification:
         if not self.chain:
             return Verification.UNVERIFIED
         checked = sum(1 for hop in self.chain if hop.checked)
@@ -1054,6 +1187,256 @@ def carry_forward_grading(
     return out
 
 
+# ------------------------------------------------------------------- symbiosis
+#
+# Two chains that meet at the same hop. See the module docstring for why this is
+# a feature rather than a flourish: the shared hop is the mechanism, and a
+# mechanism two independent routes arrive at is better evidenced than either
+# route alone — which is a claim about the ARGUMENT and not about the evidence,
+# and `verification_ceiling` is what stops it being read as the second thing.
+
+# One parent is not a fusion. Four is a hop so general that the shared-hop
+# argument stops meaning anything — a link four separate chains reach is a
+# truism, and a truism dressed as a mechanism is the kind of confident nothing
+# this whole module is arranged against.
+MIN_FUSION_PARENTS = 2
+MAX_FUSION_PARENTS = 3
+
+
+def _claim_key(claim: str) -> str:
+    """What makes two hops the SAME claim across two dreams.
+
+    Whitespace-normalised and case-folded, and nothing cleverer. Fuzzy matching
+    would decide that two differently-worded claims are one, which is precisely
+    the judgement a reader has to be able to check — and a fusion built on a
+    similarity score is a fusion whose reason cannot be verified by reading it.
+    """
+    return " ".join(claim.split()).casefold()
+
+
+@dataclass(frozen=True)
+class Fusion:
+    """What a set of parents would combine into, computed before anything is written.
+
+    Pure, so the merge rules can be read and tested without a database, exactly
+    as `promotion_for` holds the promotion rule away from `DreamStore.promote`.
+    `DreamStore.fuse` is the half that needs a connection, the caps and a clock.
+    """
+
+    parents: tuple[int, ...] = ()
+    chain: tuple[Hop, ...] = ()
+    # The claims that appeared in more than one parent, in chain order.
+    shared_hops: tuple[str, ...] = ()
+    conditions: tuple[DreamCondition, ...] = ()
+    symbols: tuple[str, ...] = ()
+    asset_class_key: str = ""
+    instruments: tuple[str, ...] = ()
+    # The weakest parent's badge. The child may never read better than this.
+    verification_ceiling: Verification = Verification.UNVERIFIED
+
+    @property
+    def has_overlap(self) -> bool:
+        """Whether the parents actually meet anywhere.
+
+        Deliberately NOT a refusal. Two chains with no shared hop are a weaker
+        fusion and the operator may still want it — the dreamer confirms every
+        fusion, and refusing one here would be this module forming a view on
+        whether an idea is any good, which is the posture `promotion_for` and
+        `is_offerable` both keep. It is reported so the page can say so.
+        """
+        return bool(self.shared_hops)
+
+
+def plan_fusion(parents: Sequence[Dream]) -> Fusion:
+    """Merge two or three dreams into the child they would produce.
+
+    Every rule here is stated in the module docstring and each one is a rule
+    from somewhere else in this file:
+
+    - **The chain is the UNION, deduped on the claim**, in the order the
+      parents were given. Nothing is dropped, so the child carries the whole
+      argument rather than a summary of it.
+    - **A hop is checked in the child only when EVERY parent that made the claim
+      had it checked.** A link one parent sourced and another did not is a link
+      whose sourcing is in dispute, and taking the more flattering of the two
+      readings is how a fusion would launder evidence. The source is not lost:
+      it is on the parent, which survives.
+    - **`verification_ceiling` is the weakest parent's badge.** Two unverified
+      chains do not make a sourced one, and the child must never render as
+      better evidenced than the worse argument it came from.
+    - **Conditions are the union**, deduped on `DreamCondition.key` and carried
+      through `carry_forward_grading` so a claim already fulfilled on one parent
+      arrives fulfilled. That is the one grading rule in the repository rather
+      than a second copy of it. `all_conditions_met` then needs all of them,
+      which makes a fusion harder to promote than either parent — correct, for
+      a strictly stronger claim.
+    - **`symbols` is the union and the class resolves only when the parents
+      agree.** A disagreement leaves it empty, which grants nothing: the
+      `scope_symbols` rule that one class or none may be claimed, arriving from
+      the other direction. A fusion can therefore never name a symbol no parent
+      claimed, so it is not a route around the class hard-block.
+
+    Pure: no store, no clock, no network. Takes the parents in the order they
+    should read.
+    """
+    order: list[str] = []
+    first: dict[str, Hop] = {}
+    checked: dict[str, bool] = {}
+    source: dict[str, str] = {}
+    seen_in: dict[str, set[int]] = {}
+
+    for index, parent in enumerate(parents):
+        for hop in parent.chain:
+            key = _claim_key(hop.claim)
+            if not key:
+                continue
+            if key not in first:
+                order.append(key)
+                first[key] = hop
+                checked[key] = hop.checked
+                source[key] = hop.source
+                seen_in[key] = set()
+            else:
+                # AND, never OR. See the docstring: the disputed reading wins.
+                checked[key] = checked[key] and hop.checked
+                if not source[key] and hop.checked:
+                    source[key] = hop.source
+            seen_in[key].add(index)
+
+    chain = tuple(
+        Hop(
+            claim=first[key].claim,
+            checked=checked[key],
+            source=source[key] if checked[key] else "",
+        )
+        for key in order
+    )
+    shared = tuple(first[key].claim for key in order if len(seen_in[key]) > 1)
+
+    incoming: list[DreamCondition] = []
+    keys: set[tuple[str, str, str, float | None, str]] = set()
+    for parent in parents:
+        for condition in parent.conditions:
+            if condition.key in keys:
+                continue
+            keys.add(condition.key)
+            incoming.append(condition)
+    conditions = tuple(
+        carry_forward_grading(
+            [c for parent in parents for c in parent.conditions if c.fulfilled],
+            incoming,
+        )
+    )
+
+    instruments: list[str] = []
+    for parent in parents:
+        for subject in parent.instruments:
+            if subject and subject not in instruments:
+                instruments.append(subject)
+
+    claimed = {p.asset_class_key.strip() for p in parents if p.symbols}
+    ceiling = Verification.SOURCED
+    for parent in parents:
+        ceiling = weaker_of(ceiling, parent.verification)
+
+    return Fusion(
+        parents=tuple(int(p.id or 0) for p in parents),
+        chain=chain,
+        shared_hops=shared,
+        conditions=conditions,
+        symbols=tuple(_symbols([s for p in parents for s in p.symbols])),
+        # One class or nothing. A parent claiming symbols with no class resolved
+        # puts `""` in the set, which is exactly the disagreement that has to
+        # come back empty — a symbol whose class is unknown is a symbol whose
+        # limits are unknown.
+        asset_class_key=(
+            next(iter(claimed)) if len(claimed) == 1 and "" not in claimed else ""
+        ),
+        instruments=tuple(instruments),
+        verification_ceiling=ceiling,
+    )
+
+
+@dataclass(frozen=True)
+class FusionCandidate:
+    """Two or three dreams that share a hop, offered for a human or an agent to confirm.
+
+    Produced by arithmetic over stored chains — no model call, no judgement —
+    because "these two chains meet here" is a fact and "these two ideas belong
+    together" is not. The dreamer is shown the fact and decides.
+    """
+
+    dream_ids: tuple[int, ...] = ()
+    shared_hops: tuple[str, ...] = ()
+    titles: tuple[str, ...] = ()
+
+    @property
+    def overlap(self) -> int:
+        return len(self.shared_hops)
+
+
+def fusion_candidates(
+    dreams: Sequence[Dream], *, limit: int = 4
+) -> list[FusionCandidate]:
+    """Which dreams share a hop, best overlap first. Pure; no store, no model.
+
+    **This is deliberately a finder and not a fuser.** It proposes; the dreamer
+    confirms and `DreamStore.fuse` writes. An unattended process that combined
+    dreams on its own would be generating confident new claims out of arithmetic
+    on old ones, which is the one thing this module is furthest from being
+    allowed to do.
+
+    Three exclusions, and each is a stated reason rather than a filter somebody
+    will delete as redundant:
+
+    - **A dream that is already a fusion is not a candidate.** It shares every
+      hop with its own parents by construction, so a finder that could see one
+      would propose re-fusing it with them forever. A deliberate
+      second-generation fusion is still allowed through `fuse`; it is just not
+      something to suggest.
+    - **Only dreams the dreamer holds.** An adopted dream has a live grant
+      pointing at it and `fuse` refuses one anyway, so offering it would be
+      offering a move that cannot be made.
+    - **A hop shared by more than `MAX_FUSION_PARENTS` dreams is skipped
+      entirely**, rather than truncated to the first three. A link four chains
+      reach is a truism — "energy prices matter to smelters" — and the fusion
+      it would suggest rests on nothing. Truncating would hide that by picking
+      an arbitrary three of them.
+    """
+    holdable = [
+        d
+        for d in dreams
+        if d.id is not None and d.vault in DREAMER_VAULTS and not d.is_fusion and d.chain
+    ]
+    by_claim: dict[str, list[Dream]] = {}
+    for dream in holdable:
+        for key in dict.fromkeys(_claim_key(h.claim) for h in dream.chain if h.claim):
+            by_claim.setdefault(key, []).append(dream)
+
+    groups: dict[tuple[int, ...], list[str]] = {}
+    for key, sharers in by_claim.items():
+        if not MIN_FUSION_PARENTS <= len(sharers) <= MAX_FUSION_PARENTS:
+            continue
+        ids = tuple(sorted(int(d.id or 0) for d in sharers))
+        claim = next(h.claim for h in sharers[0].chain if _claim_key(h.claim) == key)
+        groups.setdefault(ids, []).append(claim)
+
+    titles = {int(d.id or 0): d.title for d in holdable}
+    candidates = [
+        FusionCandidate(
+            dream_ids=ids,
+            shared_hops=tuple(claims),
+            titles=tuple(titles.get(i, "") for i in ids),
+        )
+        for ids, claims in groups.items()
+    ]
+    # Most overlap first, then by id, so the order is stable across runs rather
+    # than SQLite's or a dict's. A candidate list that reshuffled between runs
+    # would make "the model picked the second one" unreproducible.
+    candidates.sort(key=lambda c: (-c.overlap, c.dream_ids))
+    return candidates[:limit]
+
+
 def _as_utc(moment: datetime) -> datetime:
     """The same instant, in UTC. A naive stamp is read as UTC rather than local.
 
@@ -1141,6 +1524,78 @@ def _symbols(values: object) -> list[str]:
     return out
 
 
+def _ids(values: object) -> list[int]:
+    """Normalise a stored id list. Structural, so it is cleaned and never trimmed.
+
+    Anything that will not read as an int is DROPPED rather than defaulted to
+    zero. A parent id of 0 points at no row, and a dream claiming a parent that
+    does not exist is worse than one claiming none: `children_of` would never
+    find it and a reader would go looking.
+    """
+    if not isinstance(values, list):
+        return []
+    out: list[int] = []
+    for value in values:
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            continue
+        if parsed > 0 and parsed not in out:
+            out.append(parsed)
+    return out
+
+
+def _verification(value: object) -> Verification | None:
+    """A stored ceiling, or `None` for "no cap".
+
+    An unreadable value comes back `None` rather than `UNVERIFIED`. That looks
+    like the wrong direction and is not: `None` means the dream's own chain
+    decides, which is what an ordinary dream does, whereas guessing `UNVERIFIED`
+    would silently rewrite the badge of a fusion whose ceiling column was
+    written by a version this one cannot read.
+    """
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return Verification(text)
+    except ValueError:
+        log.warning("dream_verification_ceiling_unreadable", value=text)
+        return None
+
+
+def _dream_payload(dream: Dream) -> tuple[object, ...]:
+    """Every column of a dream row, in the order `SCHEMA` declares them.
+
+    One tuple shared by the INSERT and the UPDATE, so a column added to one
+    cannot be forgotten in the other — which is a silent write of a stale value
+    rather than an error.
+    """
+    return (
+        dream.title,
+        dream.seed,
+        str(dream.stage),
+        str(dream.verdict) if dream.verdict else None,
+        dream.weakest_hop,
+        dream.trigger,
+        dream.origin,
+        json.dumps([h.to_row() for h in dream.chain]),
+        json.dumps([t.to_row() for t in dream.thoughts]),
+        json.dumps(dream.instruments),
+        dream.created_at.isoformat(),
+        dream.updated_at.isoformat(),
+        str(dream.vault),
+        dream.vault_entered_at.isoformat(),
+        json.dumps([c.to_row() for c in dream.conditions]),
+        json.dumps(_symbols(dream.symbols)),
+        dream.asset_class_key,
+        _trim(dream.wisp),
+        json.dumps(_ids(dream.parents)),
+        json.dumps([_trim(h) for h in dream.shared_hops]),
+        str(dream.verification_ceiling) if dream.verification_ceiling else "",
+    )
+
+
 def _to_adoption(row: sqlite3.Row) -> Adoption | None:
     """One adoption row, or `None` if it will not parse.
 
@@ -1166,6 +1621,39 @@ def _to_adoption(row: sqlite3.Row) -> Adoption | None:
         returned_at=_dt(returned) if returned else None,
         return_reason=str(row["return_reason"] or ""),
         expires_at=_dt(expires) if expires else None,
+    )
+
+
+def _fusion_title(parents: Sequence[Dream]) -> str:
+    """A name for a fusion whose caller supplied none.
+
+    Derived rather than refused, because a blank title is a formatting problem
+    and refusing the fusion over one would lose the argument. It names the
+    parents rather than inventing a subject: a generated title that read like a
+    thesis would be this module writing a claim nobody made.
+    """
+    named = " + ".join(p.title.strip() for p in parents if p.title.strip())
+    return _trim(named) or "Fused dream"
+
+
+def _fusion_seed(plan: Fusion) -> str:
+    """The spark of a fusion: the hop the parents meet at, or the fact they do not.
+
+    **Says so plainly when there is no overlap.** Two chains fused with nothing
+    in common is a weaker fusion and a legal one — the dreamer confirmed it —
+    and a seed that implied a shared mechanism where there is none would be the
+    confident wrong sentence this repository refuses, written by the store
+    itself.
+    """
+    if plan.shared_hops:
+        return _trim(
+            "Two chains meet here: " + "; ".join(plan.shared_hops) + ". "
+            "That shared link is the mechanism, and a mechanism two independent "
+            "routes arrive at is better evidenced than either route alone."
+        )
+    return _trim(
+        "Fused from chains that share no hop. The combination is the claim; "
+        "nothing here is corroborated by the overlap, because there is none."
     )
 
 
@@ -1298,6 +1786,16 @@ class MoveRefusal(StrEnum):
     # something that is not in the vault, returning something that was never
     # adopted.
     WRONG_VAULT = "wrong_vault"
+    # A fusion was asked for with the wrong number of parents. Two refusals
+    # rather than one because they are opposite mistakes: one dream is not a
+    # fusion at all, and four or more is a shared hop so general that the
+    # argument for fusing stops meaning anything.
+    NEEDS_PARENTS = "needs_parents"
+    TOO_MANY_PARENTS = "too_many_parents"
+    # A parent is on the ADOPTED shelf. A live grant points at that row and the
+    # trading agent is holding it, which is the same reason the dreamer may not
+    # move or delete one.
+    PARENT_ADOPTED = "parent_adopted"
     # `promote` looked at the dream and the rule said it stays where it is. The
     # commonest answer by far — most dreams on most steps are still being worked
     # on — and an ordinary outcome rather than a fault, which is why `promote`
@@ -1340,6 +1838,45 @@ class MoveResult:
         return self.ok
 
 
+@dataclass(frozen=True)
+class FusionResult:
+    """What a fusion produced, or every reason it did not happen.
+
+    Its own type rather than a `MoveResult`, because a fusion is not a move: no
+    dream changes shelf, the id that matters is one that did not exist before,
+    and `moved_from`/`moved_to` would be two fields with nothing to say. What it
+    keeps from `MoveResult` is the part that matters — **refusals are collected
+    rather than short-circuited**, exactly as `RiskGate` collects them, and
+    **nothing raises**. A caller told one reason at a time fixes one thing at a
+    time and asks again.
+    """
+
+    ok: bool
+    # The child, when one was made. `None` on every refusal, because a fusion
+    # that did not happen has no dream to point at — and returning a parent's id
+    # here would read as though something had been written.
+    dream_id: int | None = None
+    parents: tuple[int, ...] = ()
+    shared_hops: tuple[str, ...] = ()
+    refusals: tuple[MoveRefusal, ...] = ()
+    detail: str = ""
+
+    @property
+    def refused(self) -> bool:
+        return not self.ok
+
+    def __bool__(self) -> bool:
+        return self.ok
+
+
+def _refused_fusion(
+    parents: tuple[int, ...], refusals: list[MoveRefusal], details: list[str]
+) -> FusionResult:
+    return FusionResult(
+        ok=False, parents=parents, refusals=tuple(refusals), detail=" ".join(details)
+    )
+
+
 def _refused(
     dream_id: int,
     refusals: list[MoveRefusal],
@@ -1373,20 +1910,26 @@ CREATE TABLE IF NOT EXISTS dreams (
   instruments  TEXT NOT NULL DEFAULT '[]',
   created_at   TEXT NOT NULL,
   updated_at   TEXT NOT NULL,
-  -- The vault columns. Listed here so a FRESH database gets them directly and
-  -- `SCHEMA` keeps describing the real table, and added to an existing one by
-  -- `_add_vault_columns`. Both halves are needed and neither substitutes for
-  -- the other: without this a new store would be built old-shaped and then
-  -- immediately migrated, which works but means the migration warning fires on
-  -- every first run and this block stops being the answer to "what shape is
-  -- the table". The order matches `_ADDED_DREAM_COLUMNS`, so a migrated
-  -- database and a fresh one end up column-for-column identical.
+  -- Everything added after this table first shipped. Listed here so a FRESH
+  -- database gets them directly and `SCHEMA` keeps describing the real table,
+  -- and added to an existing one by `_add_dream_columns`. Both halves are
+  -- needed and neither substitutes for the other: without this a new store
+  -- would be built old-shaped and then immediately migrated, which works but
+  -- means the migration warning fires on every first run and this block stops
+  -- being the answer to "what shape is the table". The order matches
+  -- `_ADDED_DREAM_COLUMNS`, so a migrated database and a fresh one end up
+  -- column-for-column identical.
   vault           TEXT NOT NULL DEFAULT 'workbench',
   vault_entered_at TEXT NOT NULL DEFAULT '',
   conditions      TEXT NOT NULL DEFAULT '[]',
   symbols         TEXT NOT NULL DEFAULT '[]',
   asset_class_key TEXT NOT NULL DEFAULT '',
-  wisp            TEXT NOT NULL DEFAULT ''
+  wisp            TEXT NOT NULL DEFAULT '',
+  -- The symbiosis columns. `parents` is the only stored half of the
+  -- relationship; a parent's children are derived by `children_of`.
+  parents              TEXT NOT NULL DEFAULT '[]',
+  shared_hops          TEXT NOT NULL DEFAULT '[]',
+  verification_ceiling TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS dream_messages (
@@ -1422,6 +1965,11 @@ CREATE INDEX IF NOT EXISTS ix_adoptions_live ON adoptions (returned_at, expires_
 # database is built with them and a migrated one ends up identical to it; keep
 # the two lists in step. Order matters here only in that `vault_entered_at` is
 # backfilled below and must exist first.
+#
+# **Append to this list; never reorder it.** A droplet database is migrated in
+# whatever order it first met these, so reordering would make a freshly-built
+# table and a migrated one disagree column-for-column — which is the one thing
+# `test_a_migrated_database_ends_up_identical_to_a_fresh_one` exists to catch.
 _ADDED_DREAM_COLUMNS: tuple[tuple[str, str], ...] = (
     ("vault", "TEXT NOT NULL DEFAULT 'workbench'"),
     ("vault_entered_at", "TEXT NOT NULL DEFAULT ''"),
@@ -1429,11 +1977,14 @@ _ADDED_DREAM_COLUMNS: tuple[tuple[str, str], ...] = (
     ("symbols", "TEXT NOT NULL DEFAULT '[]'"),
     ("asset_class_key", "TEXT NOT NULL DEFAULT ''"),
     ("wisp", "TEXT NOT NULL DEFAULT ''"),
+    ("parents", "TEXT NOT NULL DEFAULT '[]'"),
+    ("shared_hops", "TEXT NOT NULL DEFAULT '[]'"),
+    ("verification_ceiling", "TEXT NOT NULL DEFAULT ''"),
 )
 
 
-def _add_vault_columns(conn: sqlite3.Connection) -> None:
-    """Bring a `dreams` table that predates the vaults up to the new shape.
+def _add_dream_columns(conn: sqlite3.Connection) -> None:
+    """Bring a `dreams` table written by an older version up to the new shape.
 
     **`CREATE TABLE IF NOT EXISTS` is a no-op on a table that already exists.**
     Editing `SCHEMA` therefore changes what a FRESH database gets and nothing
@@ -1465,6 +2016,14 @@ def _add_vault_columns(conn: sqlite3.Connection) -> None:
       then, so treating that as when it entered the workbench is the reading
       that makes an abandoned chain expire and a live one not.
 
+    **It covers more than one generation of the table, and the backfill is the
+    only part that does not.** A droplet database may be missing the vault
+    columns, or have them and be missing the symbiosis ones; the loop adds
+    whatever is absent in either case. The `vault_entered_at` sweep below runs
+    on any open that added something, and is a no-op when the column was
+    already populated — which is what makes adding a later column safe rather
+    than a reason to guard it.
+
     Any future change to `SCHEMA` needs a migration beside it and a test that
     starts from the old shape. The suite will not warn you.
     """
@@ -1483,12 +2042,12 @@ def _add_vault_columns(conn: sqlite3.Connection) -> None:
         return
 
     log.warning(
-        "dreams_migrating_vault_columns",
+        "dreams_migrating_columns",
         added=added,
         detail=(
-            "This dreams database predates the vaults. Adding the new columns "
-            "in place; no existing row is modified except to backfill the vault "
-            "clock from updated_at."
+            "This dreams database was written by an older version. Adding the "
+            "new columns in place; no existing row is modified except to "
+            "backfill the vault clock from updated_at."
         ),
     )
     # Backfills the rows that were just migrated. It sits AFTER the `if not
@@ -1518,7 +2077,7 @@ class DreamStore:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as conn:
             conn.executescript(SCHEMA)
-            _add_vault_columns(conn)
+            _add_dream_columns(conn)
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
@@ -1533,53 +2092,47 @@ class DreamStore:
     def save(self, dream: Dream) -> int:
         """Insert or update. Returns the row id.
 
-        Note what this does NOT do: it does not move a dream between vaults.
-        `vault` and `vault_entered_at` are written from whatever the object
-        carries, so a caller that mutated `dream.vault` by hand and saved would
-        bypass every actor and cap check in `move`. That is why the movement
-        rules live on the store and why `move` is the only thing that sets the
-        clock — a save is for the contents of a dream, not for where it lives.
+        Note what this does NOT do: it does not move a dream between vaults, and
+        it does not fuse one. `vault`, `vault_entered_at`, `parents` and
+        `verification_ceiling` are all written from whatever the object carries,
+        so a caller that mutated them by hand and saved would bypass every actor
+        rule, cap and merge rule in `move` and `fuse`. That is why those rules
+        live on the store — a save is for the contents of a dream, not for where
+        it lives or where it came from.
         """
-        payload = (
-            dream.title,
-            dream.seed,
-            str(dream.stage),
-            str(dream.verdict) if dream.verdict else None,
-            dream.weakest_hop,
-            dream.trigger,
-            dream.origin,
-            json.dumps([h.to_row() for h in dream.chain]),
-            json.dumps([t.to_row() for t in dream.thoughts]),
-            json.dumps(dream.instruments),
-            dream.created_at.isoformat(),
-            dream.updated_at.isoformat(),
-            str(dream.vault),
-            dream.vault_entered_at.isoformat(),
-            json.dumps([c.to_row() for c in dream.conditions]),
-            json.dumps(_symbols(dream.symbols)),
-            dream.asset_class_key,
-            _trim(dream.wisp),
-        )
         with self._connect() as conn:
             if dream.id is None:
-                cursor = conn.execute(
-                    "INSERT INTO dreams (title, seed, stage, verdict, weakest_hop,"
-                    " trigger_note, origin, chain, thoughts, instruments, created_at,"
-                    " updated_at, vault, vault_entered_at, conditions, symbols,"
-                    " asset_class_key, wisp) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                    payload,
-                )
-                dream.id = int(cursor.lastrowid or 0)
+                dream.id = self._insert_dream(conn, dream)
             else:
                 conn.execute(
                     "UPDATE dreams SET title=?, seed=?, stage=?, verdict=?,"
                     " weakest_hop=?, trigger_note=?, origin=?, chain=?, thoughts=?,"
                     " instruments=?, created_at=?, updated_at=?, vault=?,"
                     " vault_entered_at=?, conditions=?, symbols=?, asset_class_key=?,"
-                    " wisp=? WHERE id=?",
-                    (*payload, dream.id),
+                    " wisp=?, parents=?, shared_hops=?, verification_ceiling=?"
+                    " WHERE id=?",
+                    (*_dream_payload(dream), dream.id),
                 )
         return dream.id or 0
+
+    @staticmethod
+    def _insert_dream(conn: sqlite3.Connection, dream: Dream) -> int:
+        """One INSERT, on a connection the caller owns.
+
+        Split out of `save` so `fuse` can write the child, its parents' notes
+        and nothing else in ONE transaction — the same reason `_apply_move` is
+        split out of `move`. A child that survived while its parents' record of
+        the fusion did not would be a dream whose reason nobody could find.
+        """
+        cursor = conn.execute(
+            "INSERT INTO dreams (title, seed, stage, verdict, weakest_hop,"
+            " trigger_note, origin, chain, thoughts, instruments, created_at,"
+            " updated_at, vault, vault_entered_at, conditions, symbols,"
+            " asset_class_key, wisp, parents, shared_hops, verification_ceiling)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            _dream_payload(dream),
+        )
+        return int(cursor.lastrowid or 0)
 
     def recent(self, limit: int = 30) -> list[Dream]:
         with self._connect() as conn:
@@ -1625,6 +2178,11 @@ class DreamStore:
                 for c in json.loads(str(cls._col(row, "conditions", "[]")) or "[]")
             ]
             symbols = _symbols(json.loads(str(cls._col(row, "symbols", "[]")) or "[]"))
+            parents = _ids(json.loads(str(cls._col(row, "parents", "[]")) or "[]"))
+            shared = [
+                str(h)
+                for h in json.loads(str(cls._col(row, "shared_hops", "[]")) or "[]")
+            ]
         except (json.JSONDecodeError, TypeError, AttributeError) as exc:
             # Counted rather than raised, for the reason on the class. One bad
             # row must not take the page down.
@@ -1661,6 +2219,9 @@ class DreamStore:
             symbols=symbols,
             asset_class_key=str(cls._col(row, "asset_class_key", "")),
             wisp=str(cls._col(row, "wisp", "")),
+            parents=parents,
+            shared_hops=shared,
+            verification_ceiling=_verification(cls._col(row, "verification_ceiling", "")),
         )
 
     # ------------------------------------------------------------- the vaults
@@ -1856,6 +2417,244 @@ class DreamStore:
             at=at,
             caps=caps,
         )
+
+    # ------------------------------------------------------------- symbiosis
+
+    def fuse(
+        self,
+        parent_ids: Sequence[int],
+        *,
+        by: str,
+        title: str = "",
+        seed: str = "",
+        thought: str = "",
+        symbols: Sequence[str] | None = None,
+        origin: str = "",
+        at: datetime | None = None,
+        caps: VaultCaps | None = None,
+    ) -> FusionResult:
+        """Combine two or three dreams into a child. **The parents survive.**
+
+        Nothing is consumed and nothing is deleted. The child carries
+        `parents`, the parents keep everything they had, and the shared hops are
+        named on the child because the overlap is the reason the fusion exists.
+        A fused dream that ate its sources would destroy the ability to attack
+        either of them, which is the activity this whole module is for.
+
+        The rules, and every refusal is typed and collected rather than raised:
+
+        - **Only the dreamer.** Same actor table as `move`: the trading agent
+          has `adopt` and `return_to_vault` and nothing else, and an
+          unrecognised name is refused rather than waved through.
+        - **Two or three parents.** One is not a fusion; four is a hop so
+          general that the argument stops meaning anything.
+        - **No ADOPTED parent.** A live grant points at that row and the
+          trading agent is holding it — the same reason the dreamer may neither
+          move nor delete one. It comes back with `return_to_vault` first.
+        - **The workbench cap applies**, because a fusion is a dream on the
+          workbench like any other and the cap is about what a person can hold
+          in their head.
+        - **`symbols` may only NARROW the union.** The `adopt` lock in a second
+          place and for the same reason: the child must not be able to claim a
+          symbol no parent did, or a fusion becomes a route round the class
+          hard-block. `plan_fusion` resolves the class only when the parents
+          agree, so a mixed-class fusion grants nothing.
+
+        The merge itself is `plan_fusion`, which is pure and testable without a
+        database. This is the half that needs a connection, the caps and a
+        clock — the same split as `promotion_for` and `promote`.
+
+        **One transaction.** The child, its opening thought and the note in each
+        parent's transcript are one event; a child written without the parents'
+        record of it would be a dream whose reason nobody could find.
+        """
+        stamp = _as_utc(at or datetime.now(UTC))
+        limits = caps or DEFAULT_CAPS
+        wanted = _ids(list(parent_ids))
+
+        refusals: list[MoveRefusal] = []
+        details: list[str] = []
+
+        if by == TRADER:
+            refusals.append(MoveRefusal.FORBIDDEN_ACTOR)
+            details.append(
+                "The trading agent does not fuse dreams. It may adopt one out "
+                "of the vault and hand it back with a reason; combining chains "
+                "is the dreamer's work."
+            )
+        elif by != DREAMER:
+            refusals.append(MoveRefusal.FORBIDDEN_ACTOR)
+            details.append(f"'{by}' is not allowed to fuse dreams.")
+
+        if len(wanted) < MIN_FUSION_PARENTS:
+            refusals.append(MoveRefusal.NEEDS_PARENTS)
+            details.append(
+                f"A fusion needs {MIN_FUSION_PARENTS} or {MAX_FUSION_PARENTS} "
+                f"distinct dreams and was given {len(wanted)}. One dream is not "
+                "a fusion; it is the dream you already have."
+            )
+        elif len(wanted) > MAX_FUSION_PARENTS:
+            refusals.append(MoveRefusal.TOO_MANY_PARENTS)
+            details.append(
+                f"{len(wanted)} parents is more than {MAX_FUSION_PARENTS}. A hop "
+                "that many separate chains reach is a truism rather than a "
+                "mechanism, and the shared-hop argument stops meaning anything."
+            )
+
+        parents: list[Dream] = []
+        missing: list[int] = []
+        adopted: list[int] = []
+        for dream_id in wanted:
+            dream = self.get(dream_id)
+            if dream is None:
+                missing.append(dream_id)
+                continue
+            if dream.vault is Vault.ADOPTED:
+                adopted.append(dream_id)
+            parents.append(dream)
+
+        if missing:
+            refusals.append(MoveRefusal.NOT_FOUND)
+            details.append(
+                f"No dream with id {', '.join(str(i) for i in missing)}."
+            )
+        if adopted:
+            refusals.append(MoveRefusal.PARENT_ADOPTED)
+            details.append(
+                f"Dream {', '.join(str(i) for i in adopted)} is on the adopted "
+                "shelf, so a live grant points at it. Hand it back with "
+                "return_to_vault() before fusing it into anything."
+            )
+
+        plan = plan_fusion(parents) if parents else Fusion()
+        granted = tuple(_symbols(list(symbols))) if symbols is not None else plan.symbols
+        overreach = [s for s in granted if s not in plan.symbols]
+        if overreach:
+            refusals.append(MoveRefusal.SYMBOLS_NOT_OFFERED)
+            details.append(
+                f"The parents do not claim {', '.join(overreach)}. A fusion "
+                "unions what its parents already claimed, or narrows it; a "
+                "symbol arriving here from nowhere would be a permission with "
+                "no argument behind it."
+            )
+
+        with self._connect() as conn:
+            full = self._is_full(Vault.WORKBENCH, limits, now=stamp, conn=conn)
+            if full is not None:
+                refusals.append(MoveRefusal.FULL)
+                details.append(full)
+
+            if refusals:
+                return _refused_fusion(tuple(wanted), refusals, details)
+
+            child = Dream(
+                title=_trim(title) or _fusion_title(parents),
+                seed=_trim(seed) or _fusion_seed(plan),
+                # EXPLORE rather than SEED: the chain exists from the first
+                # moment. And no verdict, so `promotion_for` keeps it on the
+                # workbench until the dreamer has actually worked it — a fusion
+                # must be harder to promote than either parent, not easier.
+                stage=DreamStage.EXPLORE,
+                chain=list(plan.chain),
+                conditions=list(plan.conditions),
+                symbols=list(granted),
+                asset_class_key=plan.asset_class_key,
+                instruments=list(plan.instruments),
+                origin=_trim(origin) or "fused from " + _fusion_title(parents),
+                parents=list(plan.parents),
+                shared_hops=list(plan.shared_hops),
+                verification_ceiling=plan.verification_ceiling,
+                created_at=stamp,
+                updated_at=stamp,
+                vault_entered_at=stamp,
+                # Deliberately NOT carried across from either parent. Nobody has
+                # attacked the fusion yet, and inheriting a parent's weakest hop
+                # would claim the combined chain had been examined when it has
+                # not. `DreamLedger.unattacked` counting it is the honest result.
+                weakest_hop="",
+            )
+            child.thoughts = [
+                Thought(
+                    stage=DreamStage.EXPLORE,
+                    text=_trim(thought) or _fusion_seed(plan),
+                    at=stamp,
+                    by=DREAMER,
+                )
+            ]
+            child.id = self._insert_dream(conn, child)
+
+            for parent in parents:
+                self._insert_message(
+                    conn,
+                    int(parent.id or 0),
+                    speaker=FUSION,
+                    kind="fusion",
+                    text=(
+                        f"Fused into dream {child.id} — {child.title} — with "
+                        f"{', '.join(str(i) for i in plan.parents if i != parent.id)}. "
+                        "This dream is unchanged and still yours; the fusion is "
+                        "a new chain that carries both."
+                    ),
+                    at=stamp,
+                )
+
+        log.info(
+            "dreams_fused",
+            dream_id=child.id,
+            parents=list(plan.parents),
+            shared_hops=len(plan.shared_hops),
+            hops=len(plan.chain),
+            symbols=list(granted),
+            # Named rather than left to be read off the chain, because "the
+            # child is no better evidenced than its worst parent" is the
+            # property a reader has to be able to check.
+            verification=str(child.verification),
+            verification_ceiling=str(plan.verification_ceiling),
+        )
+        return FusionResult(
+            ok=True,
+            dream_id=child.id,
+            parents=plan.parents,
+            shared_hops=plan.shared_hops,
+            detail=(
+                f"Fused {len(parents)} dreams into {child.id}: "
+                f"{len(plan.chain)} hop(s), {len(plan.shared_hops)} shared, "
+                f"verification {child.verification} (no better than the weakest "
+                "parent)."
+            ),
+        )
+
+    def children_of(self, dream_id: int) -> list[int]:
+        """Which fusions this dream is a parent of. Derived, never stored.
+
+        A back-reference written on the parent would be a second copy of one
+        fact, and two copies of a fact eventually disagree — the reasoning that
+        keeps `Adoption.is_live` computed rather than flagged, and that a second
+        SQL answer to "is this grant live" already cost once. `parents` on the
+        child is the single stored half; this is the query that reads it the
+        other way round.
+
+        Scans, because `parents` is JSON in a TEXT column and a LIKE over it
+        would match id 1 inside id 12. The store holds tens of dreams, not
+        millions, and a correct scan beats a fast wrong answer.
+        """
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT id, parents FROM dreams ORDER BY id"
+            ).fetchall()
+        out: list[int] = []
+        for row in rows:
+            try:
+                parents = _ids(json.loads(str(row["parents"] or "[]")))
+            except (json.JSONDecodeError, TypeError):
+                # Counted nowhere and skipped, like every other unreadable row
+                # here: one bad `parents` column must not take down the page
+                # that renders the family.
+                log.warning("dream_parents_unreadable", dream_id=row["id"])
+                continue
+            if dream_id in parents:
+                out.append(int(row["id"]))
+        return out
 
     def grade(
         self,
@@ -2723,6 +3522,12 @@ class DreamSummary:
     # caller that had built one positionally.
     by_vault: dict[Vault, int] = field(default_factory=dict)
 
+    # How many of these dreams were fused from others. A count rather than a
+    # rate, because the interesting question is "has anything been combined
+    # yet", and a percentage over a handful of dreams is noise wearing a
+    # decimal point — the `sample_is_thin` reasoning, arriving early.
+    fusions: int = 0
+
     @property
     def workbench(self) -> int:
         return self.by_vault.get(Vault.WORKBENCH, 0)
@@ -2759,4 +3564,5 @@ class DreamSummary:
                 1 for d in dreams if d.verification is Verification.UNVERIFIED
             ),
             by_vault=by_vault,
+            fusions=sum(1 for d in dreams if d.is_fusion),
         )

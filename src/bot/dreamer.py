@@ -72,15 +72,21 @@ from pydantic import BaseModel, Field
 from .claude_client import CallUsage, ClaudeClient
 from .config import CLAUDE_PRICING_USD_PER_MTOK, ClaudeTier, Env, Rules
 from .dreaming import (
+    DREAMER,
+    MAX_FUSION_PARENTS,
+    MIN_FUSION_PARENTS,
     Dream,
     DreamCondition,
     DreamStage,
     DreamStore,
     DreamVerdict,
+    FusionCandidate,
+    FusionResult,
     Hop,
     Vault,
     VaultCaps,
     carry_forward_grading,
+    fusion_candidates,
 )
 from .journal import Journal
 from .models import TriggerField, TriggerOp
@@ -97,6 +103,18 @@ CARRY_FORWARD = 4
 # How much journal history to describe as events. Enough to notice a pattern,
 # short enough that it cannot become a performance narrative.
 RECENT_CLOSURES = 8
+
+# How many stored dreams to scan for shared hops. Matched to the workbench cap
+# rather than to `CARRY_FORWARD`: a fusion candidate is not something to advance,
+# so the pool it comes from is "what the dreamer is holding" rather than "what it
+# is working on this week". Scanning is arithmetic over chains already in memory,
+# so the cost is a read rather than a model call.
+FUSION_POOL = 24
+
+# How many candidate fusions to offer. Small for the reason `CARRY_FORWARD` is
+# small: the model picks at most one, and a long list turns a choice into a
+# survey.
+FUSION_OFFERS = 3
 
 # Who a scoping note is from, in the dream's transcript. Deliberately neither
 # `DREAMER` nor `TRADER`: it is a fact about the plumbing rather than a turn of
@@ -340,6 +358,19 @@ class DreamStep(BaseModel):
     verdict: DreamVerdict | None = Field(
         default=None, description="Set only when stage is verdict."
     )
+    fuse_ids: list[int] = Field(
+        default_factory=list,
+        description=(
+            "Two or three dream ids to COMBINE into one, chosen from the shared-hop "
+            "candidates you were shown, or empty to combine nothing. When you set "
+            "this, `title`, `seed` and `thought` describe the COMBINED dream and no "
+            "separate dream is written. The parents are not consumed: they survive "
+            "untouched and the new dream records which ones it came from. Empty is "
+            "the normal answer — fuse when the shared hop is genuinely the same "
+            "mechanism reached by two routes, not because two ideas are both about "
+            "energy."
+        ),
+    )
 
 
 SYSTEM_PROMPT = """\
@@ -466,6 +497,36 @@ before this is worth putting in front of the trading agent.
   to be checkable. What is NOT acceptable is inventing a number so the field
   looks filled.
 
+## symbiosis: two chains that meet at the same hop
+
+Sometimes two of your dreams share a link. A chain about drought cutting hydro
+output in one region and a chain about smelters chasing cheap power are
+separately interesting; the hop they have in common — that region's power gets
+scarce and dear — is the mechanism, and a mechanism two independent routes
+arrive at is better evidenced than either route alone.
+
+When that is genuinely the case, set `fuse_ids` to two or three of the ids you
+were offered and write `title`, `seed` and `thought` about the COMBINED dream.
+
+What fusing does and does not do, because it is easy to overrate:
+
+- **The parents survive.** Nothing is consumed. The new dream records where it
+  came from and both originals stay exactly as they were, so either can still
+  be attacked on its own.
+- **It does not make anything more verified.** The badge on the fusion can
+  never read better than the WORSE of its parents, and a hop one parent sourced
+  and the other did not comes across UNCHECKED. Two unverified chains do not
+  make a sourced one. Combining is an argument, not evidence.
+- **It is harder to promote, not easier.** The fusion carries every condition
+  both parents pre-registered and needs all of them met.
+- **It cannot reach a symbol neither parent claimed**, and if the parents
+  disagree about the instrument class the fusion claims none.
+
+Fuse when the shared hop is the same physical claim reached two ways. Do NOT
+fuse because two dreams are both about energy, or both about shipping — a link
+that four chains reach is a truism, and a truism dressed as a mechanism is
+worse than either dream on its own.
+
 You do not mark your own conditions fulfilled. Code checks them against the
 figures the decision loop recorded, and moves the dream when they fire.
 
@@ -527,6 +588,43 @@ def render_class_fence(rules: Rules) -> list[str]:
     return out
 
 
+def render_fusion_candidates(candidates: Sequence[FusionCandidate]) -> list[str]:
+    """The dreams that share a hop, offered for the dreamer to confirm or ignore.
+
+    **Arithmetic proposes and the dreamer decides.** `fusion_candidates` finds
+    the overlap by comparing stored claims — a fact — and this is where that
+    fact is put in front of the one thing that can judge whether the two chains
+    are really the same mechanism. Nothing fuses unattended, which is the same
+    posture as `stop_watch` reporting a breach rather than closing a position:
+    a machine that combined hypotheses on its own would be generating confident
+    new claims out of arithmetic over old ones.
+
+    The shared hop is rendered VERBATIM rather than summarised, because it is
+    the thing being asked about. A paraphrase would ask the model to confirm a
+    match it cannot see.
+    """
+    if not candidates:
+        return []
+    out = [
+        "Dreams that share a hop. Set `fuse_ids` to combine two or three of "
+        "them, or leave it empty:"
+    ]
+    for candidate in candidates:
+        named = " + ".join(
+            f"[id {i}] {t or 'untitled'}"
+            for i, t in zip(candidate.dream_ids, candidate.titles, strict=False)
+        )
+        out.append(f"  {named}")
+        for hop in candidate.shared_hops:
+            out.append(f"      shared hop: {hop}")
+    out.append(
+        "  Fusing keeps both parents, cannot improve either one's verification, "
+        "and inherits every condition both of them pre-registered."
+    )
+    out.append("")
+    return out
+
+
 def build_prompt(
     rules: Rules,
     journal: Journal,
@@ -534,6 +632,7 @@ def build_prompt(
     *,
     headlines: list[str] | None = None,
     posts: list[str] | None = None,
+    fusions: Sequence[FusionCandidate] = (),
     now: datetime | None = None,
 ) -> str:
     """Everything the dreamer is shown, and nothing else.
@@ -603,6 +702,12 @@ def build_prompt(
                 )
                 out.append(f"      condition ({mark}): {condition.text}{shape}")
         out.append("")
+
+    # AFTER the open dreams, so a shared hop is read against the chains it was
+    # found in rather than from a list of ids with no context — the same
+    # ordering reason `build_market_context` puts last cycle's watches after
+    # the indicators they are checked against.
+    out.extend(render_fusion_candidates(fusions))
 
     out.append(
         "Produce one step. Advance one of the dreams above if any is worth "
@@ -757,6 +862,15 @@ class DreamerResult:
     # `cycle_complete` line.
     scope: SymbolScope = field(default_factory=SymbolScope)
 
+    # What happened when a step asked for a fusion, INCLUDING a refusal. `None`
+    # means none was asked for, which is most runs.
+    #
+    # A refusal travels rather than being swallowed, for the `scope` reason
+    # above: a dreamer that keeps proposing fusions the store keeps refusing —
+    # a full workbench, an adopted parent — is a fact worth having, and a silent
+    # refusal is indistinguishable from a model that stopped suggesting them.
+    fusion: FusionResult | None = None
+
 
 # Where the timer unit lives once bootstrap has installed it, and the repo copy
 # it was installed from.
@@ -891,13 +1005,16 @@ class Dreamer:
         and restart into the same failure. A dream that could not be had must
         not be recorded as one that decided nothing.
         """
-        existing = [d for d in self._store.recent(limit=CARRY_FORWARD * 3) if d.is_open]
+        pool = self._store.recent(limit=FUSION_POOL)
+        existing = [d for d in pool if d.is_open][: CARRY_FORWARD * 3]
+        candidates = fusion_candidates(pool, limit=FUSION_OFFERS)
         prompt = build_prompt(
             self._rules,
             self._journal,
             existing[:CARRY_FORWARD],
             headlines=headlines,
             posts=posts,
+            fusions=candidates,
             now=now,
         )
 
@@ -913,6 +1030,10 @@ class Dreamer:
             # worst.
             log.warning("dream_call_failed_unexpectedly", error=repr(exc))
             return None
+
+        fused, refusal = self._fuse_if_asked(step, candidates, usage=usage, now=now)
+        if fused is not None:
+            return fused
 
         dream, advanced, scope = self._apply(step, existing, now=now)
         self._store.save(dream)
@@ -943,7 +1064,131 @@ class Dreamer:
             symbols=list(scope.kept),
             symbols_dropped=len(scope.dropped),
         )
-        return DreamerResult(dream=dream, usage=usage, advanced=advanced, scope=scope)
+        return DreamerResult(
+            dream=dream,
+            usage=usage,
+            advanced=advanced,
+            scope=scope,
+            # Only ever a refusal here: a fusion that succeeded returned above.
+            fusion=refusal,
+        )
+
+    def _fuse_if_asked(
+        self,
+        step: DreamStep,
+        candidates: Sequence[FusionCandidate],
+        *,
+        usage: CallUsage | None,
+        now: datetime | None,
+    ) -> tuple[DreamerResult | None, FusionResult | None]:
+        """Combine dreams if the step asked to, within what was actually offered.
+
+        **The ids are looked up in what we offered, never trusted**, exactly as
+        `advance_id` is. A model returning ids for rows it was never shown would
+        otherwise combine two unrelated chains, and the result would carry both
+        their symbols — which is a permission assembled out of a hallucinated
+        number.
+
+        When a fusion is written, this run produced the FUSION and no separate
+        dream: the step's title, seed and thought describe the child, so folding
+        the same text into a second row would put the same idea on the workbench
+        twice.
+
+        Two failure directions, and both keep the run's work:
+
+        - **A refusal is returned rather than raised**, and the caller carries on
+          with the ordinary step. A full workbench or an adopted parent must not
+          cost the thought the model just had.
+        - **Nothing is guessed.** Fewer than `MIN_FUSION_PARENTS` surviving ids
+          is not silently topped up from the candidate list; it is logged and
+          the run continues as an ordinary step.
+
+        The union of the parents' symbols goes through `scope_symbols` first, so
+        a class the operator has disabled SINCE those dreams were written is
+        dropped here rather than inherited. `DreamStore.fuse` then refuses
+        anything wider than the union, which is the lock that does not depend on
+        this having been got right — the same two-lock arrangement as `adopt`
+        and `granted_symbols`.
+        """
+        if not step.fuse_ids:
+            return None, None
+
+        offered = {i for c in candidates for i in c.dream_ids}
+        wanted = [i for i in dict.fromkeys(step.fuse_ids) if i in offered]
+        unknown = [i for i in dict.fromkeys(step.fuse_ids) if i not in offered]
+        if unknown:
+            log.warning("dream_fusion_ids_unknown", requested=unknown, offered=sorted(offered))
+        if len(wanted) < MIN_FUSION_PARENTS or len(wanted) > MAX_FUSION_PARENTS:
+            log.warning(
+                "dream_fusion_not_attempted",
+                requested=list(step.fuse_ids),
+                usable=wanted,
+                detail=(
+                    f"A fusion needs {MIN_FUSION_PARENTS} to {MAX_FUSION_PARENTS} "
+                    "ids from the candidates offered. Continuing as an ordinary "
+                    "step; nothing was combined."
+                ),
+            )
+            return None, None
+
+        parents = [d for d in (self._store.get(i) for i in wanted) if d is not None]
+        scope = scope_symbols([s for p in parents for s in p.symbols], self._rules)
+        result = self._store.fuse(
+            wanted,
+            by=DREAMER,
+            title=step.title,
+            seed=step.seed,
+            thought=step.thought,
+            symbols=list(scope.kept),
+            origin=step.origin,
+            at=now,
+            # From the rules file rather than the dataclass default, so the cap
+            # an operator can read is the one that applies. Same miss as
+            # `Conference._caps` was written for.
+            caps=self._rules.dreaming.vault_caps(),
+        )
+        if not result.ok:
+            log.warning(
+                "dream_fusion_refused",
+                parents=wanted,
+                refusals=[str(r) for r in result.refusals],
+                detail=result.detail,
+            )
+            return None, result
+
+        child = self._store.get(int(result.dream_id or 0))
+        if child is None:  # pragma: no cover - fuse has just written the row
+            return None, result
+
+        if scope.dropped:
+            log.warning(
+                "dream_symbols_dropped",
+                dream_id=child.id,
+                dropped=[s for s, _ in scope.dropped],
+                kept=list(scope.kept),
+            )
+            self._store.add_message(
+                int(child.id or 0), speaker=SCOPE, kind="note", text=scope.summary
+            )
+
+        log.info(
+            "dream_step",
+            dream_id=child.id,
+            stage=str(child.stage),
+            advanced=False,
+            fused_from=list(result.parents),
+            shared_hops=len(result.shared_hops),
+            hops=len(child.chain),
+            unchecked=len(child.unverified_hops),
+            symbols=list(child.symbols),
+            symbols_dropped=len(scope.dropped),
+        )
+        return (
+            DreamerResult(
+                dream=child, usage=usage, advanced=False, scope=scope, fusion=result
+            ),
+            result,
+        )
 
     def _apply(
         self, step: DreamStep, existing: list[Dream], *, now: datetime | None = None
