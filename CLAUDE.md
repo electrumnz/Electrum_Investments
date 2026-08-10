@@ -43,6 +43,27 @@ rejection is final. If a rejection looks wrong, the fix is to change
 
 ---
 
+## Who decides what
+
+**The agent has full control of the trade. The gate controls only the
+consequence.**
+
+Direction, symbol, entry, where the stop goes, whether the exit is a hard
+target or a trail — all the agent's. Nothing in `risk.py` second-guesses any of
+it. `_stops_on_correct_side` checks only that a stop is on the LOSING side of
+entry, because a stop below entry on a short is not a stop, it is a target;
+that is a correctness check, not a view on placement.
+
+What the gate measures is what the choice COSTS: `|entry − stop| × qty` against
+the per-trade cap, the total, the concentration limit and buying power. Put the
+stop wherever the thesis says; the size follows from it, and a wider stop buys
+a smaller position rather than more risk.
+
+So the honest answer to "is this stop any good" is **not the gate's to give and
+not this file's either**. The useful answer is arithmetic: this stop implies
+this size, and it fits or it does not. Offering an opinion on placement dressed
+up as a limit is how a rule nobody agreed to gets added.
+
 ## The operator's four rules
 
 These are the point of the project. Everything else is scaffolding. Do not
