@@ -17,6 +17,8 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
+import pytest
+
 from bot.audit import AuditLog, DecisionEntry
 from bot.journal import Journal
 from bot.models import (
@@ -375,12 +377,85 @@ def test_a_window_reaching_past_the_marker_is_reported_as_a_total():
 
 
 def test_silence_over_a_long_window_is_named_without_guessing_the_cause():
-    """A shut market and a stopped loop look identical from here."""
-    summary = seen.summarise(seen.Marker(seen.MarkerState.MARKED, at(hours=-6)), now=MONDAY)
+    """A shut market and a stopped loop look identical from here.
+
+    Note the explicit empty list: that is "I read the audit log and it held
+    nothing", which is the finding this caveat reports. See the test below for
+    the case that must NOT produce it.
+    """
+    summary = seen.summarise(
+        seen.Marker(seen.MarkerState.MARKED, at(hours=-6)), decisions=[], now=MONDAY
+    )
 
     caveat = " ".join(summary.caveats())
     assert "may have been shut" in caveat
     assert "may have stopped" in caveat
+
+
+def test_a_caller_that_never_read_the_log_is_not_told_the_loop_may_have_stopped():
+    """"I was handed nothing" is not "nothing was recorded".
+
+    A page that renders trades and never opens the audit log used to get an
+    unprompted alarm about the trading loop. Same rule as `has_cycles` in
+    `news_history` and `can_grade_anything` in `triggers`: a caller handed only
+    empty lists reaches for the wrong reading every time.
+    """
+    summary = seen.summarise(
+        seen.Marker(seen.MarkerState.MARKED, at(hours=-6)), now=MONDAY
+    )
+
+    assert summary.new_decisions is None
+    assert summary.new_rejections is None
+    assert not summary.decisions_were_read
+    assert "may have stopped" not in " ".join(summary.caveats())
+
+
+def test_a_long_sitting_still_gets_a_marker():
+    """A gap ends a sitting that STOPPED. Nothing ended one that never stops.
+
+    A browser on a refresh timer, or an EventSource reconnecting on a flaky
+    link, requests more often than VISIT_GAP forever — so without a ceiling the
+    first sitting never establishes a marker at all and the delta stays empty
+    for as long as the tab lives.
+    """
+    raw: str | None = None
+    moment = MONDAY
+    # Ten hours of a page touching the server every twenty minutes.
+    for _ in range(30):
+        visit = seen.observe(raw, now=moment)
+        raw = visit.cookie_value
+        moment += timedelta(minutes=20)
+
+    final = seen.observe(raw, now=moment)
+
+    assert final.marker.known, "a permanently-connected browser never got a marker"
+    assert final.marker.at is not None
+
+
+def test_a_sitting_inside_the_ceiling_still_holds_its_marker():
+    """The ceiling must not break the thing the gap is for: paging around the
+    deck within one visit has to keep reporting the same delta."""
+    first = seen.observe(None, now=MONDAY)
+    second = seen.observe(first.cookie_value, now=MONDAY + timedelta(hours=3))
+    third = seen.observe(second.cookie_value, now=MONDAY + timedelta(hours=3, minutes=2))
+
+    assert second.marker.state is third.marker.state
+    assert second.marker.at == third.marker.at
+
+
+def test_a_version_one_cookie_degrades_rather_than_being_misread():
+    """The old three-part encoding must not be read as a four-part one."""
+    stale = seen.observe("1:1746370800:1746370800", now=MONDAY)
+
+    assert stale.marker.state is seen.MarkerState.UNUSABLE
+    assert stale.marker.at is None
+
+
+@pytest.mark.parametrize("raw", ["1:\u0663\u0664:\u0665\u0666", "2:\uff11\uff12:\uff13\uff14:\uff11\uff12"])
+def test_non_ascii_digits_are_refused(raw):
+    """`str.isdigit()` alone is True for Arabic-Indic and fullwidth digits, and
+    `int()` accepts them — so a crafted cookie decoded to a 1970 marker."""
+    assert seen.observe(raw, now=MONDAY).marker.at is None
 
 
 def test_a_short_quiet_window_does_not_cry_wolf():

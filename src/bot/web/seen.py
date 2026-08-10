@@ -100,7 +100,7 @@ COOKIE_NAME = "mudhorn_seen"
 # Bumped if the encoding below ever changes shape. An old value then fails to
 # parse and degrades to "no marker" rather than being misread as a new one —
 # the failure that a version-less format invites is silent and wrong.
-COOKIE_VERSION = "1"
+COOKIE_VERSION = "2"
 
 # A year, so an absence never silently turns a returning operator into a first
 # visitor. Nothing bounds it from the other side: a marker older than the
@@ -114,6 +114,20 @@ COOKIE_MAX_AGE_SECONDS = 365 * 24 * 3600
 # tying it to the loop's cadence would make the marker's behaviour change
 # whenever that cadence did.
 VISIT_GAP = timedelta(minutes=30)
+
+# And a ceiling on the sitting itself, which the gap alone cannot provide.
+#
+# A gap ends a sitting only when the requests STOP. Anything asking more often
+# than every thirty minutes therefore holds one open indefinitely: a browser on
+# a refresh timer, a phone left on the Board overnight, or — since this branch
+# added it — an `EventSource` on a flaky link, because every reconnect is a
+# cookie-bearing request. On a first sitting that is worse than a frozen
+# marker: none is ever established, so the delta stays empty for as long as the
+# tab lives.
+#
+# Six hours is longer than any real sitting and short enough that an
+# always-connected browser still gets a marker within a working day.
+MAX_SITTING = timedelta(hours=6)
 
 # Below this, "no cycles were recorded" is the expected reading rather than a
 # symptom — the loop wakes every 15 minutes, so a ten-minute window holding
@@ -224,7 +238,15 @@ class SinceLastVisit:
     # The supplied history did not reach back to the marker, so every count is
     # a floor. Named rather than hidden: "3 cycles" and "at least 3 cycles" are
     # different claims.
+    # NOT "the history is short of your marker" — the code cannot establish
+    # that. All it knows is that nothing supplied predates the marker, and a
+    # complete-but-short history looks identical to a truncated one. Day one of
+    # any deployment is the first case, so the flag and its sentence both say
+    # "may".
     counts_are_lower_bounds: bool = False
+    # Whether the caller opened the audit log at all. False means "not asked",
+    # which is not "nothing was recorded".
+    decisions_were_read: bool = False
 
     @property
     def is_reportable(self) -> bool:
@@ -289,12 +311,22 @@ class SinceLastVisit:
         out: list[str] = []
         if self.counts_are_lower_bounds:
             out.append(
-                "The history on file does not reach back to your last visit, so "
+                "The history on file may not reach back to your last visit, so "
                 "these are floors rather than totals — more happened before the "
                 "oldest record shown."
             )
         window = self.checked_at - self.since if self.since else timedelta(0)
-        if self.new_decisions == 0 and window > NO_CYCLE_CAVEAT_AFTER:
+        # `decisions_were_read` is a SEPARATE question from "is the list empty",
+        # and conflating them put an unprompted "the loop may have stopped"
+        # alarm in front of any caller that renders trades and never opens the
+        # audit log. Same rule as `has_cycles` in `news_history` and
+        # `can_grade_anything` in `triggers`: a caller handed only empty lists
+        # reaches for the wrong reading every time.
+        if (
+            self.decisions_were_read
+            and self.new_decisions == 0
+            and window > NO_CYCLE_CAVEAT_AFTER
+        ):
             out.append(
                 "No cycle was recorded at all in that window. The market may have "
                 "been shut, or the loop may have stopped — this cannot tell which."
@@ -318,13 +350,17 @@ def observe(raw: str | None, *, now: datetime | None = None) -> Visit:
     moment = _floor(_aware(now or datetime.now(UTC)))
 
     if not raw:
-        return Visit(Marker(MarkerState.FIRST_VISIT), _encode(None, moment), True)
+        return Visit(
+            Marker(MarkerState.FIRST_VISIT), _encode(None, moment, moment), True
+        )
 
     decoded = _decode(raw)
     if decoded is None:
-        return Visit(Marker(MarkerState.UNUSABLE), _encode(None, moment), True)
+        return Visit(
+            Marker(MarkerState.UNUSABLE), _encode(None, moment, moment), True
+        )
 
-    marker_at, last_at = decoded
+    marker_at, last_at, started_at = decoded
 
     # A value stamped ahead of the clock, or an incoherent pair. We wrote this
     # cookie, so neither can be a browser's doing: either this box's clock moved
@@ -332,20 +368,35 @@ def observe(raw: str | None, *, now: datetime | None = None) -> Visit:
     # visitor with a marker in the future and therefore an empty delta on every
     # visit, for as long as the cookie lives, with nothing on screen to say so.
     incoherent = marker_at is not None and (marker_at > moment or marker_at > last_at)
-    if last_at > moment or incoherent:
-        return Visit(Marker(MarkerState.UNUSABLE), _encode(None, moment), True)
+    if last_at > moment or started_at > moment or incoherent:
+        return Visit(
+            Marker(MarkerState.UNUSABLE), _encode(None, moment, moment), True
+        )
 
-    if moment - last_at > VISIT_GAP:
-        # A new sitting. The marker becomes the previous request's time, which
-        # is the last moment this visitor was shown anything — never `moment`,
-        # which would swallow whatever arrived while they were away.
-        return Visit(Marker(MarkerState.MARKED, last_at), _encode(last_at, moment), True)
+    # Two ways a sitting ends, and BOTH are needed. The gap ends one that
+    # stopped; the ceiling ends one that never stops. Without the second, any
+    # browser requesting more often than VISIT_GAP holds a sitting open for as
+    # long as it lives — and on a first sitting that means no marker is ever
+    # established at all.
+    ended_by_gap = moment - last_at > VISIT_GAP
+    ended_by_length = moment - started_at > MAX_SITTING
+    if ended_by_gap or ended_by_length:
+        # The marker becomes the previous request's time, which is the last
+        # moment this visitor was shown anything — never `moment`, which would
+        # swallow whatever arrived while they were away.
+        return Visit(
+            Marker(MarkerState.MARKED, last_at),
+            _encode(last_at, moment, moment),
+            True,
+        )
 
     # Same sitting: the marker holds still and only the activity stamp moves.
-    # A cookie written on the first visit has no marker yet, so the whole of
-    # that first sitting keeps reading as a first visit, which is what it is.
+    # A cookie written on the first visit has no marker yet, so that first
+    # sitting keeps reading as a first visit — for at most MAX_SITTING.
     state = MarkerState.MARKED if marker_at is not None else MarkerState.FIRST_VISIT
-    return Visit(Marker(state, marker_at), _encode(marker_at, moment), False)
+    return Visit(
+        Marker(state, marker_at), _encode(marker_at, moment, started_at), False
+    )
 
 
 def from_cookies(cookies: Mapping[str, str], *, now: datetime | None = None) -> Visit:
@@ -430,7 +481,7 @@ def partition_trades(trades: Sequence[Trade], *, since: datetime) -> Split[Trade
 def summarise(
     marker: Marker,
     *,
-    decisions: Sequence[DecisionEntry] = (),
+    decisions: Sequence[DecisionEntry] | None = None,
     closed_trades: Sequence[Trade] = (),
     now: datetime | None = None,
 ) -> SinceLastVisit:
@@ -446,17 +497,25 @@ def summarise(
         # count — and a zero here would be read as a measurement.
         return SinceLastVisit(state=marker.state, checked_at=moment)
 
-    cycles = partition_decisions(decisions, since=marker.at)
+    cycles = partition_decisions(decisions or (), since=marker.at)
     trades = partition_trades(closed_trades, since=marker.at)
 
     return SinceLastVisit(
         state=MarkerState.MARKED,
         since=marker.at,
         checked_at=moment,
-        new_decisions=len(cycles.new),
+        # None when the caller never opened the audit log, so a page that does
+        # not read decisions reports "not asked" rather than "none happened".
+        new_decisions=None if decisions is None else len(cycles.new),
         new_trades_closed=len(trades.new),
-        new_rejections=sum(entry.rejected for entry in cycles.new),
-        # Either list running out before the marker makes every figure a floor.
+        new_rejections=None if decisions is None else sum(
+            entry.rejected for entry in cycles.new
+        ),
+        decisions_were_read=decisions is not None,
+        # Neither list reaching past the marker means the counts MIGHT be
+        # floors. It does not mean they are: a complete history younger than
+        # the marker looks exactly the same from here, which is day one of any
+        # deployment. Hence "may" in the sentence this sets.
         counts_are_lower_bounds=(
             (bool(cycles.new) and not cycles.reaches_past_marker)
             or (bool(trades.new) and not trades.reaches_past_marker)
@@ -467,8 +526,10 @@ def summarise(
 # --------------------------------------------------------------------- private
 
 
-def _encode(marker_at: datetime | None, last_at: datetime) -> str:
-    """`version:marker:last`, each timestamp whole epoch seconds, marker optional.
+def _encode(
+    marker_at: datetime | None, last_at: datetime, started_at: datetime
+) -> str:
+    """`version:marker:last:started`, whole epoch seconds, marker optional.
 
     Integers rather than ISO text: no timezone to get wrong, nothing in them a
     cookie has to quote, and a malformed one is obvious. `int()` truncates, so
@@ -476,32 +537,43 @@ def _encode(marker_at: datetime | None, last_at: datetime) -> str:
     direction is the safe one.
     """
     marker = "" if marker_at is None else str(int(marker_at.timestamp()))
-    return f"{COOKIE_VERSION}:{marker}:{int(last_at.timestamp())}"
+    return (
+        f"{COOKIE_VERSION}:{marker}:{int(last_at.timestamp())}"
+        f":{int(started_at.timestamp())}"
+    )
 
 
-def _decode(raw: str) -> tuple[datetime | None, datetime] | None:
-    """The pair, or `None` for anything that is not exactly the format above."""
+def _decode(raw: str) -> tuple[datetime | None, datetime, datetime] | None:
+    """The triple, or `None` for anything that is not exactly the format above.
+
+    A version-1 cookie has three parts rather than four and lands here as
+    unusable, which costs a returning visitor one marker and is the reason the
+    version prefix exists.
+    """
     parts = raw.split(":")
-    if len(parts) != 3 or parts[0] != COOKIE_VERSION:
+    if len(parts) != 4 or parts[0] != COOKIE_VERSION:
         return None
 
-    marker_raw, last_raw = parts[1], parts[2]
+    marker_raw, last_raw, started_raw = parts[1], parts[2], parts[3]
     last = _from_epoch(last_raw)
-    if last is None:
+    started = _from_epoch(started_raw)
+    if last is None or started is None:
         return None
     if marker_raw == "":
-        return None, last
+        return None, last, started
     marker = _from_epoch(marker_raw)
     if marker is None:
         return None
-    return marker, last
+    return marker, last, started
 
 
 def _from_epoch(raw: str) -> datetime | None:
-    # `isdigit` first, so a sign, a space or a float never reaches `int` — the
-    # only values this ever writes are non-negative integers, and anything else
-    # is a cookie somebody edited.
-    if not raw.isdigit():
+    # ASCII digits only. `str.isdigit()` alone is True for Arabic-Indic,
+    # Bengali and fullwidth digits, and `int()` accepts them — so `1:٣٤:٥٦`
+    # decoded to a 1970 marker rather than being rejected. It failed in the safe
+    # direction (everything reads as new) but it is still a value this module
+    # could not have written, and the old comment claimed it was unreachable.
+    if not (raw.isascii() and raw.isdigit()):
         return None
     try:
         return datetime.fromtimestamp(int(raw), UTC)
