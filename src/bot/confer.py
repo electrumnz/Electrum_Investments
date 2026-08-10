@@ -11,13 +11,19 @@ The shape of one exchange:
                        hop I would attack first
     trader   question  what would kill it? what does adopting it actually buy?
     dreamer  answer    ...
-    trader   note      accept / decline / park, with a reason
+    trader   note      accept / decline / defer, with a reason — and a defer
+                       carries the condition that would wake it
 
 The dreamer speaks on the even turns and the trading agent on the odd ones,
-dreamer first, and the trading agent is the one that reaches a verdict. That
-asymmetry is the same one `DreamStore.move` enforces: the agent with a route to
-the broker gets the smaller set of verbs, and here it gets the decision because
-the decision is about whether IT will take responsibility for a symbol.
+dreamer first, and the trading agent is the one that decides whether to TAKE the
+dream. That asymmetry is the same one `DreamStore.move` enforces: the agent with
+a route to the broker gets the smaller set of verbs, and here it gets that
+decision because it is about whether IT will take responsibility for a symbol.
+
+The dreamer's one decision is the mirror of it — **withdrawing its own dream**,
+which is the only thing in this module that archives anything and is a verb the
+dreamer already holds everywhere else. Either agent can therefore end an
+exchange, and each can only end it about its own side of the arrangement.
 
 ## Why this is its own module and its own command
 
@@ -1880,6 +1886,12 @@ class Conference:
 
     def _closing(self, result: ExchangeResult, *, now: datetime) -> ExchangeResult:
         """Say once, at the moment it becomes true, that a dream has parked.
+
+        **This is the CAP parking a dream and never the trading agent deferring
+        one**, and the two are worth keeping apart now that a deferral is a
+        verdict with a wake condition on it. What is said here is that the
+        exchange budget is spent; what would restart it is something changing
+        about the dream, not a threshold either agent named.
 
         Written here rather than on the next run's skip, because "this was the
         third exchange" is a fact with a moment attached and the skip path has

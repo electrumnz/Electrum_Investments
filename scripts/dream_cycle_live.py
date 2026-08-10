@@ -64,7 +64,7 @@ sys.path.insert(0, str(REPO / "src"))
 import anthropic  # noqa: E402
 
 from bot.config import CLAUDE_MODEL_IDS, Env, Rules  # noqa: E402
-from bot.dreamer import Dreamer, build_prompt, promote_dreams  # noqa: E402
+from bot.dreamer import Dreamer, DreamStep, build_prompt, promote_dreams  # noqa: E402
 from bot.dreaming import (  # noqa: E402
     Dream,
     DreamStore,
@@ -154,28 +154,140 @@ class Tripwire:
 # ------------------------------------------------------------- the model seam
 
 
-class RecordingClient:
-    """Wraps the dreamer's own client so the exact prompt and step are kept.
+JSON_INSTRUCTION = """\
 
-    The prompt is not rebuilt here. `Dreamer.run_once` composes it and hands it
-    over; this records the string that was actually sent, which is the only
-    version worth quoting in a report.
+---
+
+Return your answer as a single JSON object and nothing else — no prose before
+it, no code fence around it. It must validate against this JSON Schema, whose
+field descriptions are part of your instructions:
+
+{schema}
+
+Use only the enum values the schema lists. Omit a field rather than inventing a
+value for it.
+"""
+
+
+class RecordingClient:
+    """Wraps the dreamer's own client, keeps the prompt, and survives the 400.
+
+    Two jobs, and the second one is not tidiness.
+
+    **Recording.** The prompt is not rebuilt here — `Dreamer.run_once` composes
+    it and hands it over, so this records the string that was actually sent,
+    which is the only version worth quoting in a report. The raw `DreamStep` is
+    kept too, so what the model returned can be compared against what the store
+    ended up holding.
+
+    **A fallback transport.** The shipped call is
+    `messages.parse(output_format=DreamStep)`, and against the live API that
+    request is refused: `DreamStep` has eleven optional top-level fields plus
+    two nested models with optional fields of their own, and the structured-
+    output grammar compiler either times out or answers "Schema is too complex".
+    Measured on a synthetic model of N optional strings and nothing else: 8
+    compiles (in 18 seconds), 10 does not. So the failure is the NUMBER of
+    optional properties rather than anything about dreaming, and it makes
+    `electrum-bot dream` unable to complete a single call.
+
+    Rather than abandon the audit, the shipped request is PROBED once — same
+    model, same schema, bounded to ninety seconds with retries off — and its
+    failure recorded; every real step then goes out with the same system prompt
+    and the same user prompt, with the schema in the message and the JSON parsed
+    back. Every other thing being audited — the prompt, the class fence,
+    `_apply`, `scope_symbols`, the store, `promote_dreams` — is untouched and
+    real. What is NOT real is the constraint: without the grammar the model is
+    free to return a value outside an enum, so the transport travels on every
+    step and a parse failure is recorded rather than retried into silence.
+
+    The probe is bounded deliberately. `ClaudeClient.dream` sets a 900-second
+    timeout and the SDK retries twice, so letting the shipped path fail on its
+    own terms is up to forty-five minutes per step for an answer already known —
+    and that same arithmetic is what an operator would see on the box: a dream
+    timer that hangs for three quarters of an hour and then logs
+    `dream_call_failed`.
     """
 
-    def __init__(self, inner: Any) -> None:
+    def __init__(self, inner: Any, *, api_key: str, model: str) -> None:
         self.inner = inner
         self.system_prompt = str(getattr(inner, "_system_prompt", ""))
         self.prompts: list[str] = []
         self.steps: list[dict[str, Any]] = []
+        self.transports: list[dict[str, Any]] = []
+        self._client = anthropic.Anthropic(api_key=api_key)
+        self._raw = self._client.with_options(timeout=900.0)
+        self._probe = self._client.with_options(timeout=90.0, max_retries=0)
+        self._model = model
+        self.shipped_probe: dict[str, Any] = {}
+
+    def probe_shipped_transport(self) -> dict[str, Any]:
+        """Does `messages.parse(output_format=DreamStep)` work at all right now?
+
+        The same request the dreamer makes, with a small budget and a short
+        timeout so the answer arrives in under two minutes either way. Recorded
+        on the transcript whichever way it goes — a version of the API that
+        compiles this schema would make the fallback below unnecessary, and the
+        record has to be able to say which world it ran in.
+        """
+        from bot.dreamer import DreamStep
+
+        started = time.monotonic()
+        try:
+            self._probe.messages.parse(
+                model=self._model,
+                max_tokens=1024,
+                system=[{"type": "text", "text": self.system_prompt}],
+                messages=[{"role": "user", "content": "Produce one seed step about anything."}],
+                output_format=DreamStep,
+            )
+            self.shipped_probe = {"ok": True, "seconds": round(time.monotonic() - started, 1)}
+        except Exception as exc:
+            self.shipped_probe = {
+                "ok": False,
+                "seconds": round(time.monotonic() - started, 1),
+                "error": f"{type(exc).__name__}: {str(exc)[:400]}",
+            }
+        return self.shipped_probe
 
     def dream(self, prompt: str) -> tuple[Any, Any]:
+        from bot.dreamer import DreamStep
+
         self.prompts.append(prompt)
-        step, usage = self.inner.dream(prompt)
+        # Appended BEFORE the call and mutated afterwards, so a step that raised
+        # still leaves a record of which transport was being tried. A note only
+        # written on success would be missing exactly when it mattered.
+        note: dict[str, Any] = {"shipped_probe": self.shipped_probe}
+        self.transports.append(note)
+
+        if self.shipped_probe.get("ok"):
+            note["transport"] = "messages.parse(output_format=DreamStep)"
+            step, usage = self.inner.dream(prompt)
+            self._record(step)
+            return step, usage
+
+        note["transport"] = "messages.create + schema in the message + model_validate"
+        schema = json.dumps(DreamStep.model_json_schema(), indent=2)
+        response = self._raw.messages.create(
+            model=self._model,
+            max_tokens=16000,
+            system=[{"type": "text", "text": self.system_prompt}],
+            messages=[
+                {"role": "user", "content": prompt + JSON_INSTRUCTION.format(schema=schema)}
+            ],
+            thinking={"type": "adaptive"},
+            output_config={"effort": "high"},
+        )
+        text = _text(response)
+        payload = text[text.find("{") : text.rfind("}") + 1]
+        step = DreamStep.model_validate(json.loads(payload))
+        self._record(step)
+        return step, self.inner._usage_from(response)
+
+    def _record(self, step: Any) -> None:
         try:
             self.steps.append(json.loads(step.model_dump_json()))
         except Exception as exc:  # pragma: no cover - a shape change, recorded
             self.steps.append({"unserialisable": repr(exc)})
-        return step, usage
 
 
 # ------------------------------------------------------------------ judging
@@ -499,14 +611,21 @@ def main() -> int:
     journal = Journal(work / "journal.db")
 
     dreamer = Dreamer(env, rules, store, journal)
-    recorder = RecordingClient(dreamer._client)
+    model_id = CLAUDE_MODEL_IDS[env.dream_tier]
+    recorder = RecordingClient(dreamer._client, api_key=key, model=model_id)
     dreamer._client = recorder
 
     judge_client = anthropic.Anthropic(api_key=key)
 
+    import bot
+
     record: dict[str, Any] = {
         "recorded_at": datetime.now(UTC).isoformat(),
         "repo": str(REPO),
+        "bot_package": bot.__file__,
+        "head": (REPO / "HEAD.txt").read_text().strip()
+        if (REPO / "HEAD.txt").exists()
+        else "unknown",
         "work_dir": str(work),
         "harness": (
             "bot.dreamer.Dreamer.run_once + bot.dreamer.promote_dreams, the "
@@ -514,7 +633,7 @@ def main() -> int:
             "posts are empty: no Marketaux or X credentials here, which is the "
             "degraded-but-supported path cmd_dream takes without them."
         ),
-        "dream_model": CLAUDE_MODEL_IDS[env.dream_tier],
+        "dream_model": model_id,
         "judge_model": JUDGE_MODEL,
         "rules": {
             "enabled_classes": sorted(rules.enabled_instruments),
@@ -531,6 +650,19 @@ def main() -> int:
         "steps": [],
     }
 
+    print("[probe] messages.parse(output_format=DreamStep) ...", flush=True)
+    record["shipped_transport_probe"] = recorder.probe_shipped_transport()
+    record["dream_step_schema"] = {
+        "optional_top_level_fields": sorted(
+            n for n, f in DreamStep.model_fields.items() if not f.is_required()
+        ),
+        "required_top_level_fields": sorted(
+            n for n, f in DreamStep.model_fields.items() if f.is_required()
+        ),
+        "schema_chars": len(json.dumps(DreamStep.model_json_schema())),
+    }
+    print(f"    -> {record['shipped_transport_probe']}", flush=True)
+
     for n in range(1, args.steps + 1):
         print(f"[step {n}/{args.steps}] dreaming ...", flush=True)
         started = time.monotonic()
@@ -539,8 +671,13 @@ def main() -> int:
 
         if result is None:
             record["steps"].append(
-                {"n": n, "elapsed_s": elapsed, "failed": True,
-                 "detail": "run_once returned None; nothing was written"}
+                {
+                    "n": n,
+                    "elapsed_s": elapsed,
+                    "failed": True,
+                    "transport": recorder.transports[-1] if recorder.transports else None,
+                    "detail": "run_once returned None; nothing was written",
+                }
             )
             print("    -> FAILED (nothing written)", flush=True)
             continue
@@ -548,6 +685,7 @@ def main() -> int:
         dream = result.dream
         raw = recorder.steps[-1]
         prompt = recorder.prompts[-1]
+        transport = recorder.transports[-1]
 
         reported = str(dream.verification)
         recomputed = recompute_verification(dream)
@@ -556,6 +694,7 @@ def main() -> int:
             "n": n,
             "elapsed_s": elapsed,
             "advanced": result.advanced,
+            "transport": transport,
             "prompt_chars": len(prompt),
             "prompt": prompt if n == 1 else "(see step 1; same builder, evolving state)",
             "model_returned": raw,
