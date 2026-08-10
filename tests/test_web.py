@@ -1417,13 +1417,19 @@ def test_the_tape_marks_which_symbols_the_gate_would_actually_allow():
         [_quote("SPY", last=580.0, prev=574.0, tradeable=True), _quote("NVDA", last=9.0)],
     )
 
+    # Membership rather than an exact string. The class list gained the venue
+    # state, and an assertion pinned to the exact spelling of the whole
+    # attribute fails on any addition to it — which says nothing about whether
+    # the tradeable marker still works.
+    def classes_of(symbol: str) -> set[str]:
+        cell = body.split(f'data-tick="{symbol}"')[0].rsplit('<span class="', 1)[-1]
+        return set(cell.split('"')[0].split())
+
     # SPY: on the watchlist AND in an enabled instrument class.
-    assert 'class="cell can up"' in body
+    assert {"cell", "can", "up"} <= classes_of("SPY")
     # NVDA: on the tape, not tradeable, and not marked as if it were.
     assert 'data-tick="NVDA"' in body
-    assert 'class="cell can"' not in body.split('data-tick="NVDA"')[0].rsplit(
-        "<span", 1
-    )[-1]
+    assert "can" not in classes_of("NVDA")
 
 
 def test_a_shut_market_greys_out_but_crypto_never_does():
@@ -1595,7 +1601,12 @@ def test_the_clocks_tick_regardless_of_the_motion_preference():
 
     bail = SCRIPT.index("if (reduced && reduced.matches) return;")
     assert SCRIPT.index("})();", bail) < SCRIPT.index("var bar = document.querySelector")
-    assert ".tape .clk.turning .t,.tape.turning{animation:none}" in STYLES
+    # Membership rather than the exact rule text: the selector list grew
+    # when the spin gained directions, and pinning the whole rule fails on
+    # any addition to it without saying anything about the preference.
+    reduced_block = STYLES[STYLES.index("prefers-reduced-motion") :]
+    assert ".tape .clk.turning .t" in reduced_block
+    assert ".tape.turning" in reduced_block
 
 
 def test_a_clock_that_is_not_ticking_says_so(client):
@@ -1774,3 +1785,116 @@ def test_the_calendar_card_does_not_guess_why_it_is_unloaded():
 
     assert "returned no calendar" in read_but_empty
     assert "has not read yet" not in read_but_empty
+
+
+# ------------------------------------------- the tape's three venue states
+
+
+def test_a_pre_market_cell_is_neither_live_nor_greyed():
+    """The state the tape did not have, and the reason it needed one.
+
+    A pre-market quote is REAL — greying it like a Sunday close says the figure
+    is stale, which is false. But an order against it rests until the open, so
+    rendering it identically to a regular-session cell is false the other way.
+    Three states because there are three claims.
+    """
+    from bot.market_clock import market_state
+
+    pre = render.ticker_tape(
+        market_state(datetime(2026, 8, 10, 12, 0, tzinfo=UTC)),   # 08:00 ET
+        [_quote("SPY", last=580.0, prev=574.0, tradeable=True)],
+    )
+    session = render.ticker_tape(
+        market_state(datetime(2026, 8, 10, 15, 0, tzinfo=UTC)),   # 11:00 ET
+        [_quote("SPY", last=580.0, prev=574.0, tradeable=True)],
+    )
+
+    assert "v-ooh" in pre
+    assert "shut" not in pre          # the price is current, not last week's
+    assert "v-live" in session
+    assert "v-ooh" not in session
+    # And the tooltip makes the distinction in words, not only in styling.
+    assert "an order placed now rests" in pre
+
+
+def test_the_venue_states_are_styled_apart_rather_than_by_degree():
+    """`.v-ooh` must not just be a dimmer `.shut`. They make opposite claims
+    about whether the FIGURE is current."""
+    from bot.web.render import STYLES
+
+    assert ".tape .cell.v-ooh::before" in STYLES
+    assert ".tape .cell.shut .sym,.tape .cell.shut .px" in STYLES
+
+
+def test_the_clock_transition_carries_a_direction():
+    """The operator's idea, and it earns its keep: a blur alone says something
+    changed and makes the reader hunt for what. Up into the regular session,
+    down into a shut market, sideways into out of hours."""
+    from bot.web.render import SCRIPT, STYLES
+
+    for name in ("tape-spin-up", "tape-spin-down", "tape-spin-side"):
+        assert f"@keyframes {name}" in STYLES
+    for cls in ("turn-up", "turn-down", "turn-side"):
+        assert f".tape .clk.{cls} .t" in STYLES
+        assert cls in SCRIPT
+
+    # An unknown phase must fall back to sideways rather than pick a direction.
+    # A wrong direction is worse than a neutral one — it reads as information.
+    assert "'up'" in SCRIPT and "'down'" in SCRIPT and "'side'" in SCRIPT
+
+
+def test_reduced_motion_switches_off_the_directional_spins_too():
+    """A preference honoured for the old animation and silently ignored for its
+    replacements is not honoured."""
+    from bot.web.render import STYLES
+
+    block = STYLES[STYLES.index("prefers-reduced-motion") :]
+    for cls in ("turn-up", "turn-down", "turn-side"):
+        assert f".tape .clk.{cls} .t" in block
+
+
+# ------------------------------------------------------- the watchlist mix
+
+
+def test_the_watchlist_is_interleaved_so_neighbours_differ_in_kind():
+    """Sixteen large caps scroll past as sixteen of the same thing. Rendering
+    the kinds in declaration order would put the equities in a block and then
+    the metals, which is the same monotony one scroll later."""
+    w = load_rules().watchlist
+    kinds = [w.kind_of(s) for s in w.symbols]
+
+    assert len(w.symbols) == 16
+    assert len(set(kinds)) >= 8
+    # No two neighbours share a kind anywhere in the first pass.
+    first_pass = kinds[: len(w.kinds)]
+    assert len(set(first_pass)) == len(first_pass)
+
+
+def test_a_symbol_under_no_kind_is_unclassified_rather_than_guessed():
+    """Never inferred from the ticker. Same rule as an indicator with too few
+    bars reporting unavailable instead of a shorter average mislabelled."""
+    w = load_rules().watchlist
+
+    assert w.kind_of("ZZZZ") == "unclassified"
+
+
+def test_every_kind_has_its_own_colour_and_none_are_the_direction_colours():
+    """Direction owns green and red on the price, the move and the rail. A kind
+    hue that collided with either would make a bond look like a loss."""
+    from bot.web.render import KIND_HUES
+
+    w = load_rules().watchlist
+    for kind in w.kinds:
+        assert kind in KIND_HUES, f"{kind} would render in the fallback grey"
+    assert len(set(KIND_HUES.values())) == len(KIND_HUES)
+    for hue in KIND_HUES.values():
+        assert "--gain" not in hue and "--loss" not in hue
+
+
+def test_the_kind_rules_are_generated_from_the_palette():
+    """A hand-maintained second list is how a kind gets added to the config and
+    silently renders grey."""
+    from bot.web.render import KIND_HUES, STYLES
+
+    for kind in KIND_HUES:
+        assert f'.tape .cell[data-kind="{kind}"] .sym' in STYLES

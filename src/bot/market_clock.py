@@ -43,10 +43,12 @@ __all__ = [
     "MarketPhase",
     "MarketState",
     "TradingDay",
+    "VenueState",
     "clock_faces",
     "is_continuous",
     "market_state",
     "render_sessions",
+    "venue_state",
 ]
 
 NY = ZoneInfo("America/New_York")
@@ -232,6 +234,49 @@ def market_state(
         bot_window_open=open_now,
         bot_window_next=next_open,
     )
+
+
+class VenueState(StrEnum):
+    """What a price on the tape actually IS, which is three things not two.
+
+    The tape used to have two: live, or greyed on the weekend. That made a
+    pre-market cell identical to a regular-session one, and those are not the
+    same claim — the quote is real in both, but an order against the first
+    rests until the open and fills at a price nobody has seen.
+
+    `CLOSED` is the only one where the FIGURE is stale. `OUT_OF_HOURS` is a
+    current price with a caveat about what you can do with it, so dimming it to
+    the same degree would say the wrong thing in the other direction.
+    """
+
+    LIVE = "live"                  # regular session, or a continuous market
+    OUT_OF_HOURS = "ooh"           # quoting now; an order would rest
+    CLOSED = "closed"              # not quoting; this is last session's close
+
+
+def venue_state(
+    *,
+    continuous: bool,
+    phase: MarketPhase,
+    trades_today: bool | None = None,
+    past_close: bool = False,
+) -> VenueState:
+    """Which of the three a cell is in.
+
+    `trades_today` is three-valued on purpose: `None` means the calendar could
+    not say, and that must NOT read as a holiday. An unknown calendar falls back
+    to the computed phase, which is the answer the tape had before the calendar
+    existed — degraded, not wrong.
+    """
+    if continuous:
+        return VenueState.LIVE
+    if trades_today is False or past_close:
+        return VenueState.CLOSED
+    if phase is MarketPhase.WEEKEND:
+        return VenueState.CLOSED
+    if phase is MarketPhase.OPEN:
+        return VenueState.LIVE
+    return VenueState.OUT_OF_HOURS
 
 
 @dataclass(frozen=True)

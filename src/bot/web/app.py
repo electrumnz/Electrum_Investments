@@ -205,6 +205,11 @@ def build_app(
                 )
                 for sym in watchlist.symbols
             ],
+            # The kinds, so the strip reads as a mix rather than as sixteen of
+            # the same thing, and the calendar, so a holiday greys out instead
+            # of showing yesterday's close at full strength.
+            watchlist=watchlist,
+            calendar=resolved_poller.calendar,
         )
 
     def _page(title: str, active: str, body: str) -> str:

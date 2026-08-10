@@ -579,6 +579,17 @@ class LivePoller:
         """
         return self._state
 
+    @property
+    def calendar(self) -> SessionCalendar:
+        """The trading calendar this poller maintains.
+
+        Exposed so the ticker tape can grey a holiday out. Safe to read before
+        any poll: an unloaded calendar answers `None` to every question, which
+        the tape treats as "fall back to the computed phase" rather than as a
+        holiday.
+        """
+        return self._calendar
+
     def latest(self) -> LiveSnapshot | None:
         """The most recent successful read, or `None` if there has never been one.
 
