@@ -47,7 +47,13 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Resp
 from .. import news_history
 from ..audit import AuditLog
 from ..config import DEFAULT_RULES_PATH, Env, Rules, load_rules
-from ..dreaming import Adoption, DreamMessage, DreamStore, DreamSummary
+from ..dreaming import (
+    Adoption,
+    ConferenceDecision,
+    DreamMessage,
+    DreamStore,
+    DreamSummary,
+)
 from ..journal import Journal
 from ..market_clock import market_state
 from ..metrics import build_report
@@ -89,6 +95,15 @@ DECISION_WINDOW = 200
 #: the failure mode that matters here, because a truncated read would report
 #: "no failed fetch" over a span it never looked at.
 NEWS_WINDOW_CYCLES = 400
+
+#: How many conference verdicts the cross-dream feed shows.
+#:
+#: The two agents confer once a day, so thirty is about a month of exchanges —
+#: long enough to see a pattern, short enough that the page does not become a
+#: log. It bounds the FEED only: each card's own verdict is looked up per dream,
+#: so a dream whose last exchange predates this window still renders it rather
+#: than reading as never conferred.
+CONFERENCE_FEED_ROWS = 30
 
 
 def build_app(
@@ -645,6 +660,35 @@ def build_app(
             # trimmings and keeps the dreams, rather than becoming a 500.
             pass
 
+        # Its own try, rather than inside the one above, because a failure here
+        # has to be REPORTED rather than absorbed. Every other trimming degrades
+        # to an absence that reads correctly as an absence; an empty verdict
+        # mapping reads as "the two agents have never conferred about any of
+        # these", which is an affirmative claim about the one thing on the card
+        # that nothing else can establish. So the flag travels to the renderer
+        # and the page says which of the two it is.
+        verdicts: dict[int, ConferenceDecision] = {}
+        conference: list[ConferenceDecision] = []
+        conference_readable = True
+        try:
+            conference = resolved_dreams.conference_decisions(
+                limit=CONFERENCE_FEED_ROWS
+            )
+            # Per dream rather than sliced out of the feed above. The feed is a
+            # window and a dream whose last exchange predates it would come back
+            # as never conferred — a wrong page bought by saving forty indexed
+            # lookups on a table with a handful of rows.
+            for dream in recent:
+                if dream.id is None:
+                    continue
+                latest = resolved_dreams.latest_conference_decision(dream.id)
+                if latest is not None:
+                    verdicts[dream.id] = latest
+        except sqlite3.Error:
+            conference_readable = False
+            verdicts = {}
+            conference = []
+
         return _page(
             "Dreaming",
             "/dreaming",
@@ -663,6 +707,9 @@ def build_app(
                 fused_into=children,
                 transcripts=transcripts,
                 adoptions=grants,
+                verdicts=verdicts,
+                conference=conference,
+                conference_readable=conference_readable,
                 marker=seen.from_cookies(request.cookies).marker,
             ),
         )

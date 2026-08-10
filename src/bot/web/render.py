@@ -40,6 +40,8 @@ from ..dreaming import (
     FUSION,
     THIN_LEDGER_THRESHOLD,
     Adoption,
+    ConferenceDecision,
+    ConferenceVerdict,
     Dream,
     DreamCondition,
     DreamLedger,
@@ -47,6 +49,7 @@ from ..dreaming import (
     DreamSummary,
     DreamVerdict,
     Hop,
+    NoDecision,
     Vault,
     promotion_for,
 )
@@ -1351,6 +1354,81 @@ article.fused{border-color:var(--patina)}
 .talk .said[data-who=fusion]{border-left-color:var(--amber);
   border-left-style:dashed}
 .talk .said[data-who=fusion] .hdr .name{color:var(--amber)}
+
+/* ============================================ what the two agents settled on ==
+   The verdict one exchange reached, on the card of the dream it was about. The
+   transcript above it is the evidence and is collapsed; this is the conclusion,
+   and it is the only part a reader who opens nothing will see.
+
+   Every verdict identity is a `data-verdict` ATTRIBUTE rather than a class, and
+   that is the shelves' `data-vault` reasoning in a second place. `promote`,
+   `defer`, `decline` and `archive` are all words that name a state, and a
+   `.conclave.archive` rule would put four more of them into the modifier
+   vocabulary -- where the next bare `.archive{padding:...}` written for
+   something else silently restyles them. An attribute selector cannot collide
+   with a class at all. */
+.conclave{margin:1rem 0 0;padding:.7rem .85rem;border-radius:2px;
+  border:1px solid var(--slate);border-left-width:3px;
+  background:rgba(22,27,34,.6)}
+.conclave > b{display:block;font-family:var(--mono);font-size:.625rem;
+  letter-spacing:.14em;text-transform:uppercase;color:var(--pewter);
+  margin-bottom:.25rem}
+.conclave .what{margin:0;font-size:.8125rem;color:var(--bone)}
+.conclave .words{margin:.5rem 0 0;padding-left:.7rem;
+  border-left:1px solid var(--slate);font-family:var(--serif);
+  font-size:.875rem;color:var(--bone)}
+.conclave .meta{margin:.5rem 0 0;font-family:var(--mono);font-size:.625rem;
+  letter-spacing:.12em;text-transform:uppercase;color:var(--pewter)}
+.conclave .did{margin:.5rem 0 0;font-size:.8125rem;color:var(--patina)}
+.conclave .undone{margin:.5rem 0 0;font-size:.8125rem;color:var(--bone)}
+.conclave .undone b{color:var(--amber);font-weight:400}
+/* The wake condition a deferral is parked against: the difference between a
+   real deferral and running out of things to say. Same monospace threshold the
+   prophecy conditions use, because it is the same kind of claim -- prose for a
+   person and a number for code. */
+.conclave .wake{margin:.5rem 0 0;font-size:.8125rem;color:var(--bone)}
+.conclave .wake b{display:block;font-family:var(--mono);font-size:.625rem;
+  letter-spacing:.14em;text-transform:uppercase;color:var(--holo);
+  margin-bottom:.2rem}
+.conclave .thr{font-family:var(--mono);font-size:.6875rem;color:var(--pewter);
+  display:block;margin-top:.2rem}
+.conclave[data-verdict=promote]{border-left-color:var(--patina)}
+.conclave[data-verdict=defer]{border-left-color:var(--holo)}
+.conclave[data-verdict=decline]{border-left-color:var(--pewter)}
+.conclave[data-verdict=archive]{border-left-color:var(--slate)}
+.conclave[data-verdict=no_decision]{border-left-color:var(--amber)}
+/* A failed call is the one no-decision that is a FAULT; a turn cap and an
+   unconditioned deferral are facts about the two agents. Written with both
+   attributes deliberately, so it outranks the rule above on specificity rather
+   than on which of the two happens to be declared last -- the tie this
+   stylesheet has lost three times. */
+.conclave[data-verdict=no_decision][data-cause=call_failed]{
+  border-left-color:var(--rust)}
+/* Never conferred: a third state, drawn as one. Dashed, so it cannot be read at
+   a glance as a verdict that happens to be quiet. */
+.conclave[data-unconferred]{border-left-style:dashed;
+  border-left-color:var(--slate);background:rgba(22,27,34,.35)}
+
+/* The same verdicts across every dream, newest first, so "what have those two
+   been doing" is answerable without opening a card. */
+.confeed{list-style:none;margin:1rem 0 0;padding:0}
+.confeed li{padding:.7rem 0;border-bottom:1px dashed var(--slate)}
+.confeed li:last-child{border-bottom:0}
+.confeed .hdr{display:flex;gap:.6rem;align-items:baseline;flex-wrap:wrap}
+.confeed .hdr a{color:var(--bone);text-decoration:none;
+  border-bottom:1px solid var(--slate)}
+.confeed .hdr a:hover{border-bottom-color:var(--patina)}
+.confeed .subject{color:var(--bone)}
+.confeed .at{margin-left:auto;font-family:var(--mono);font-size:.625rem;
+  letter-spacing:.12em;color:var(--pewter)}
+.confeed .why{margin:.35rem 0 0;font-size:.8125rem;color:var(--bone)}
+.confeed .meta{margin:.35rem 0 0;font-family:var(--mono);font-size:.625rem;
+  letter-spacing:.12em;text-transform:uppercase;color:var(--pewter)}
+.pill[data-verdict=promote]{color:var(--patina)}
+.pill[data-verdict=defer]{color:var(--holo)}
+.pill[data-verdict=decline]{color:var(--bone)}
+.pill[data-verdict=archive]{color:var(--pewter)}
+.pill[data-verdict=no_decision]{color:var(--amber)}
 
 /* A trade that came from a dream. `.wisped` and `.from-dream` are styled in
    `dream_fx.CSS`; this is the one thing that file cannot know — that the mote
@@ -7158,6 +7236,479 @@ def _transcript(messages: Sequence[DreamMessage]) -> str:
     )
 
 
+# ----------------------------------------------------- what they settled on
+
+
+#: What each verdict is CALLED on the page, and what being it MEANS.
+#:
+#: **The word in the badge is the act, never the machine value**, because a badge
+#: is a heading and a heading is a claim. A pill reading `archive` says the
+#: conference archived the dream; it did not, and it could not — no verdict here
+#: is the trading agent's route to one, and the party with a route to the broker
+#: recommending that a chain be destroyed would be pressure rather than an
+#: opinion. The raw value travels in `data-verdict`, where the stylesheet and the
+#: tests read it and no reader mistakes it for a sentence.
+#:
+#: **The word names the DECISION and never the outcome**, which is the same
+#: separation `ConferenceDecision` is built around: a promote whose adoption the
+#: store refused was badged `adopted` in the first draft, over a row that said
+#: two lines lower that the shelf was full and nothing had moved. So it reads
+#: `agreed to adopt`, which is true whether or not the shelf had room, and
+#: `effected` is what says which — see `_conference_effect`. Found by looking at
+#: the page, which is the fourth time that has been the only way.
+#:
+#: `NO_DECISION` is deliberately absent. It is not a decision, so it does not get
+#: a decision's sentence — `_conference_undecided` renders it, and the cause is
+#: what carries the meaning there.
+CONFERENCE_WORDS: dict[ConferenceVerdict, tuple[str, str]] = {
+    ConferenceVerdict.PROMOTE: (
+        "agreed to adopt",
+        "The trading agent took it out of the vault. What that buys is small: "
+        "permission to consider its symbols for a while, under the resolved "
+        "class's own limits, with every gate in <code>risk.py</code> still "
+        "running on anything traded under it.",
+    ),
+    ConferenceVerdict.DEFER: (
+        "deferred",
+        # Deliberately does NOT promise the condition below. It used to end
+        # "and what would restart the conversation is written below with a
+        # number in it", which on an incomplete row was a sentence contradicted
+        # four lines under it by the card's own alert. `_conference_wake` heads
+        # the condition itself, so the promise is made by the thing that keeps
+        # it.
+        "The trading agent parked it against a named condition rather than "
+        "putting it down. It stays in the vault.",
+    ),
+    ConferenceVerdict.DECLINE: (
+        "declined",
+        "The trading agent will not take it, and said why. A judgement on the "
+        "merits rather than a wait, so nothing is pending: the dream stays in "
+        "the vault and the dreamer may rework the chain and offer it again.",
+    ),
+    ConferenceVerdict.ARCHIVE: (
+        "the dreamer withdrew it",
+        "Grogu took its own dream off the table. This was not done TO the dream "
+        "by the conference: the trading agent has no archive verb, may only "
+        "adopt out of the vault and hand back with a reason, and cannot so much "
+        "as recommend one — a recommendation to destroy a chain, from the party "
+        "with a route to the broker, would be pressure rather than an opinion.",
+    ),
+}
+
+
+#: Which of the three ways nobody decided, and whether it is anybody's fault.
+#:
+#: A bare "no decision" hides the distinction, and the distinction is the whole
+#: value: a turn cap and an unconditioned deferral are facts about the two
+#: agents, and a failed call is a fact about the machinery that says nothing
+#: about either of them.
+NO_DECISION_CAUSES: dict[NoDecision, str] = {
+    NoDecision.TURNS_EXHAUSTED: (
+        "They talked and did not converge. The exchange reached its turn cap "
+        "with nothing settled, which is a fact about the two of them rather "
+        "than a fault in anything."
+    ),
+    NoDecision.CALL_FAILED: (
+        "The model call failed part-way through, so the machinery broke rather "
+        "than the two of them weighing it up. Nothing about either agent can be "
+        "read off this — not that the dream is weak, and not that the trading "
+        "agent was cautious. This is the one of the three that is a fault."
+    ),
+    NoDecision.DEFER_WITHOUT_WAKE: (
+        "The trading agent reached for a deferral and could not name what would "
+        "end the wait. Recorded as nobody deciding rather than as a deferral, "
+        "because a park with nothing to wake it is &ldquo;we ran out of things "
+        "to say&rdquo; wearing a decision's clothes."
+    ),
+}
+
+
+#: Who decided, in words. Falls back through the transcript's own names and then
+#: to the raw string, for the reason `DreamMessage.speaker` is an open string:
+#: the intended direction is several dreamers arguing a topic out, and a record
+#: that cannot say who said what is not a record.
+DECIDER_NAMES = {**SPEAKER_NAMES, "conference": "The conference"}
+
+
+def _unworded(value: object) -> str:
+    """A stored value this version of the page has no sentence for.
+
+    Reached when a verdict or a cause is added to `dreaming.py` and nobody adds
+    the copy here. Naming it is the honest answer: it is a real recorded state,
+    and neither dropping it nor taking the page down with a `KeyError` says so.
+    Same failure direction as the store's own tolerant readers, and the same
+    reason the badge text is separate from the machine value in the first place.
+    """
+    return (
+        f'<span class="alert">Recorded as <b>{_e(str(value))}</b>, which this '
+        "page has no wording for. The record is real; the sentence describing "
+        "it has not been written.</span>"
+    )
+
+
+def _conference_meta(decision: ConferenceDecision) -> str:
+    """Who, over how many turns, and when — on one monospace line.
+
+    **Zero turns is a fact rather than a blank.** A call that failed before the
+    opening offer produced no turn at all, and `0 turns` reads like a counter
+    that was never wired up, so it is said in words.
+    """
+    who = DECIDER_NAMES.get(decision.decided_by.lower(), decision.decided_by)
+    turns = (
+        "no turn taken"
+        if decision.turns == 0
+        else _count(decision.turns, "turn")
+    )
+    lead = who or "unattributed"
+    if not decision.decided:
+        # Nobody decided, so nobody may be named as having. `decided_by` on one
+        # of these is the conference narrating itself.
+        lead = f"recorded by {lead}"
+    return (
+        f'<p class="meta">{_e(lead)} &middot; {_e(turns)} &middot; '
+        f"{_e(_when(decision.at))}</p>"
+    )
+
+
+def _conference_effect(decision: ConferenceDecision) -> str:
+    """Whether the store did the thing the verdict implies. **Three states.**
+
+    `None` is not a failure and must never be drawn as one: a decline, a
+    deferral and a no-decision all leave every shelf exactly where it was, so
+    there was nothing to attempt. `False` is the real failure — the two of them
+    agreed and the shelf had no room — and the agreement is the half that says
+    something about the agents, so it is kept rather than collapsed into
+    "nothing happened". `True` is the effect landing.
+    """
+    if decision.effected is None:
+        # **`None` means two different things and only one of them is "nothing".**
+        # On a deferral, a decline or a no-decision it is a stated fact: those
+        # leave every shelf where it was, so there was nothing to attempt. On a
+        # promote or an archive it cannot be — both ask something of a shelf —
+        # so it is an UNKNOWN, and saying "asks nothing of any shelf" over one
+        # would be a wrong claim about the verdict itself. Not reachable from
+        # `Conference`, which always records the store's answer; reachable by
+        # anything else that writes a row, which is why it is answered here.
+        asks = {
+            ConferenceVerdict.DEFER: "A deferral moves nothing: the dream stays "
+            "exactly where it was.",
+            ConferenceVerdict.DECLINE: "A decline moves nothing: the dream stays "
+            "in the vault.",
+            ConferenceVerdict.NO_DECISION: "Nothing was decided, so nothing was "
+            "asked of any shelf.",
+        }.get(decision.verdict)
+        if asks is None:
+            return (
+                '<p class="note"><span class="alert">Whether the store carried '
+                "this out was not recorded. This verdict does ask something of a "
+                "shelf, so that is an unknown rather than a nothing, and the "
+                "shelf itself is the only place to find out.</span></p>"
+            )
+        return (
+            f'<p class="note">{asks} Nothing was attempted, which is a '
+            "different answer from something being attempted and refused.</p>"
+        )
+    if decision.effected:
+        detail = decision.effect_detail or "The store carried it out."
+        return f'<p class="did">Carried out &mdash; {_e(detail)}</p>'
+    return (
+        '<p class="undone"><b>Decided, and the store refused to carry it '
+        "out.</b>"
+        + (f" {_e(decision.effect_detail)}" if decision.effect_detail else "")
+        + " The decision stands: what they agreed and what the shelf allowed are "
+        "two facts, and this row keeps both.</p>"
+    )
+
+
+def _conference_wake(decision: ConferenceDecision) -> str:
+    """The condition that would restart the conversation, with its number.
+
+    **A stored `DEFER` always carries a gradeable one.** `is_coherent` refuses
+    the row on write and `_to_conference_decision` drops it on read, so a
+    deferral rendering without a wake here is a record that was skipped rather
+    than shown — and that is said loudly instead of drawing an empty deferral,
+    which is the exact shape the wake condition exists to make impossible.
+    """
+    wake = decision.wake
+    if wake is None:
+        return (
+            '<p class="note"><span class="alert">This deferral is rendering '
+            "with no wake condition, and a stored one cannot be in that state: "
+            "the store refuses an incoherent row on write and skips one it "
+            "cannot parse on read. Treat this as an incomplete record rather "
+            "than as a deferral that named nothing.</span></p>"
+        )
+
+    if wake.is_checkable:
+        # The missing subject is coloured rather than written into the sentence.
+        # `no symbol close below 641.2` read as one phrase on screen, which is a
+        # comparison that looks like it has a subject and does not.
+        subject = (
+            _e(wake.symbol)
+            if wake.symbol.strip()
+            else '<span class="alert">no symbol</span>'
+        )
+        threshold = (
+            f'<span class="thr">{subject} '
+            f"{_e(str(wake.field))} {_e(str(wake.op))} {wake.value:g}</span>"
+        )
+    else:
+        threshold = '<span class="thr">No number in this one.</span>'
+
+    ungradeable = (
+        ""
+        if wake.is_gradeable
+        else '<p class="note"><span class="alert">Nothing can settle this: a '
+        "wake condition needs a symbol, a field, an operator and a number, and "
+        "this one is short of at least one of them. A stored deferral is "
+        "refused without all four, so this record is incomplete.</span></p>"
+    )
+    return (
+        f'<p class="wake"><b>What would wake it</b>{_e(wake.text)}'
+        f"{threshold}</p>{ungradeable}"
+    )
+
+
+def _conference_undecided(decision: ConferenceDecision) -> str:
+    """Nobody decided, and WHICH of the three ways.
+
+    Rendered apart from the four real verdicts rather than as the mildest of
+    them, and reached because `decided` is read before `verdict`. Reporting the
+    absence of a decision as a decision is how a silent failure starts looking
+    healthy — the rule `news_history.has_cycles` and `seen.py`'s first visit
+    already carry, arriving at the conference.
+    """
+    cause = decision.undecided
+    if cause is None:
+        why = (
+            '<p class="what"><span class="alert">No cause is recorded. A stored '
+            "no-decision always carries one — the store refuses a row without it "
+            "— so this is an incomplete record rather than a conversation that "
+            "ended for no reason.</span></p>"
+        )
+        attr = ""
+    else:
+        # `.get` rather than `[]`. `_to_conference_decision` skips a cause it
+        # cannot parse, so nothing unknown reaches here from the store today —
+        # but a value added to `NoDecision` later would parse, and a `KeyError`
+        # on the page an operator opened to browse is the wrong failure. It
+        # names the raw word instead, which is at least the fact.
+        why = (
+            f'<p class="what">{NO_DECISION_CAUSES.get(cause) or _unworded(cause)}'
+            "</p>"
+        )
+        attr = f' data-cause="{_e(str(cause))}"'
+
+    return (
+        f'<div class="conclave" data-verdict="no_decision"{attr}>'
+        '<b><span class="pill" data-verdict="no_decision">no decision</span> '
+        "Nobody decided</b>"
+        + why
+        + (
+            f'<p class="words">{_e(decision.reason)}</p>'
+            if decision.reason
+            else ""
+        )
+        + _conference_meta(decision)
+        + _conference_effect(decision)
+        + "</div>"
+    )
+
+
+#: Why a dream has no verdict on it, said per shelf rather than as one sentence.
+#:
+#: A workbench dream has never been offered because the trading agent cannot see
+#: that shelf, which is the machine working; a vault dream not yet conferred is a
+#: queue; and a dream that reached ADOPTED or ARCHIVE with no exchange got there
+#: some other way, which is worth knowing. One sentence for all four would make
+#: the first read like the third.
+UNCONFERRED: dict[Vault, str] = {
+    Vault.WORKBENCH: "It has never been offered. The trading agent only sees "
+    "the dream vault, so a chain on the workbench is out of its sight by "
+    "design — that is the shelf, not a decision about the idea.",
+    Vault.PROPHECY: "It has never been offered. The prophecy shelf is the "
+    "dreamer's, and the trading agent only sees the dream vault.",
+    Vault.VAULT: "It is on the one shelf the trading agent can see, and no "
+    "exchange about it has been recorded yet. The two confer once a day, and a "
+    "run that skips because nothing has changed writes no row at all.",
+    Vault.ADOPTED: "It reached the adopted shelf without a recorded exchange, "
+    "so something other than a conference adopted it — an operator, or the "
+    "tool.",
+    Vault.ARCHIVE: "It reached the archive without a recorded exchange.",
+}
+
+
+def _conference(
+    dream: Dream,
+    decision: ConferenceDecision | None,
+    *,
+    readable: bool = True,
+) -> str:
+    """What the two agents decided about this one, at a glance.
+
+    **`decision is None` is a third state and never the mildest verdict.** It
+    means they have never conferred about this dream at all, and rendering it as
+    a `NO_DECISION` would report a conversation that never happened as one that
+    happened and settled nothing. Same rule as `seen.py`'s first visit and
+    `news_history.has_cycles`.
+
+    `readable=False` is a fourth: the store could not be asked. A page that
+    answered "never conferred" on the strength of a failed read would be a
+    confident wrong claim about every card at once, so it says which it is.
+
+    `decided` is read BEFORE `verdict`, so a sixth verdict added later is
+    classified once, in `DECIDED_VERDICTS`, rather than falling through this
+    branch into a decision's wording.
+    """
+    if not readable:
+        return (
+            '<div class="conclave" data-unconferred=""><b>Verdict not '
+            'read</b><p class="what"><span class="alert">The conference record '
+            "could not be read from <code>data/dreams.db</code>, so this card "
+            "cannot say whether the two agents have decided anything about "
+            "this dream. That is not the same as their never having "
+            "met.</span></p></div>"
+        )
+
+    if decision is None:
+        return (
+            '<div class="conclave" data-unconferred=""><b>Never '
+            f'conferred</b><p class="what">{UNCONFERRED[dream.vault]} Nobody '
+            "has met about it, which is a different thing from meeting and "
+            "settling nothing.</p></div>"
+        )
+
+    if not decision.decided:
+        return _conference_undecided(decision)
+
+    badge, lede = CONFERENCE_WORDS.get(
+        decision.verdict, (str(decision.verdict), _unworded(decision.verdict))
+    )
+    # The archive is the one verdict that is a letting-go, and the motes are
+    # already this page's mark for exactly that — they sit on the wisp and
+    # nowhere else. Decoration, and `dream_fx.CSS` takes them away under
+    # `prefers-reduced-motion`: everything they say is said in the words beside
+    # them.
+    letting_go = decision.verdict is ConferenceVerdict.ARCHIVE
+    motes = (
+        '<span class="wisps"><b></b><b></b><b></b><b></b></span>'
+        if letting_go
+        else ""
+    )
+    out = (
+        f'<div class="conclave{" wisped" if letting_go else ""}" '
+        f'data-verdict="{_e(str(decision.verdict))}">{motes}'
+        # "The verdict" rather than "what THEY decided": an archive is the
+        # dreamer's alone and a promote is the trading agent's, so a heading
+        # asserting a joint decision would be wrong on three of the four. The
+        # meta line names who, from the row.
+        f'<b><span class="pill" data-verdict="{_e(str(decision.verdict))}">'
+        f"{_e(badge)}</span> The verdict</b>"
+        f'<p class="what">{lede}</p>'
+    )
+    if decision.reason:
+        # The deciding agent's own words, never a sentence this repository wrote
+        # about them.
+        out += f'<p class="words">{_e(decision.reason)}</p>'
+    if decision.verdict is ConferenceVerdict.DEFER:
+        out += _conference_wake(decision)
+    out += _conference_meta(decision)
+    out += _conference_effect(decision)
+    return out + "</div>"
+
+
+def _conference_feed(
+    decisions: Sequence[ConferenceDecision],
+    titles: Mapping[int, str],
+    *,
+    readable: bool = True,
+) -> str:
+    """Every recent verdict across every dream, newest first.
+
+    The cards answer "what did they decide about this one"; this answers "what
+    have those two been doing", which an operator should not have to open eleven
+    cards to find out. Newest first because that is the question asked of a feed
+    — the transcript inside a card is oldest-first for the opposite reason, since
+    a negotiation read backwards is a negotiation read backwards.
+
+    **An empty feed is not "they agreed on nothing".** An exchange skipped
+    because nothing changed, because the epoch's budget is spent or because the
+    dream is at its lifetime ceiling writes no row at all, so an empty list is
+    most often the change gate doing its job. The sentence says so rather than
+    letting the silence be read.
+    """
+    head = (
+        '<section class="block" id="conference"><h2>What the two agents have '
+        "been deciding</h2>"
+    )
+    if not readable:
+        return head + (
+            '<div class="banner warn"><b>The conference record could not be '
+            "read</b>Something went wrong opening <code>data/dreams.db</code>, "
+            "so this list is not empty — it is unknown. The shelves below are "
+            "rendered from whatever the same store did return.</div></section>"
+        )
+    lede = (
+        '<p class="note" style="max-width:74ch">One row per exchange that '
+        "reached the model, including the ones that ended in nothing. They "
+        "confer once a day, on the dream timer, never on the trading loop's "
+        "fifteen-minute pulse.</p>"
+    )
+    if not decisions:
+        return head + lede + (
+            '<p class="note">No exchange has been recorded. That is not the '
+            "same as their having met and settled nothing: a run skipped "
+            "because nothing about a dream has changed since the last exchange "
+            "writes no row at all, and neither does an empty vault.</p></section>"
+        )
+
+    rows = ""
+    for d in decisions:
+        badge = (
+            CONFERENCE_WORDS.get(d.verdict, (str(d.verdict), ""))[0]
+            if d.decided
+            else "no decision"
+        )
+        title = titles.get(d.dream_id)
+        subject = (
+            f'<a href="#dream-{d.dream_id}">{_e(title)}</a>'
+            if title is not None
+            else f'<span class="subject">Dream #{d.dream_id}</span> '
+            '<span class="muted">(not in the window below)</span>'
+        )
+        cause = (
+            f' &middot; {_e(str(d.undecided).replace("_", " "))}'
+            if d.undecided is not None
+            else ""
+        )
+        effect = (
+            " &middot; nothing to carry out"
+            if d.effected is None
+            else (
+                " &middot; carried out"
+                if d.effected
+                else " &middot; the store refused it"
+            )
+        )
+        who = DECIDER_NAMES.get(d.decided_by.lower(), d.decided_by) or "unattributed"
+        turns = "no turn taken" if d.turns == 0 else _count(d.turns, "turn")
+        rows += (
+            f'<li data-verdict="{_e(str(d.verdict))}"><div class="hdr">'
+            f'<span class="pill" data-verdict="{_e(str(d.verdict))}">'
+            f"{_e(badge)}</span>{subject}"
+            f'<span class="at">{_e(_when(d.at))}</span></div>'
+            + (f'<p class="why">{_e(d.reason)}</p>' if d.reason else "")
+            + (
+                f'<p class="why">Would wake on {_e(d.wake.text)}</p>'
+                if d.verdict is ConferenceVerdict.DEFER and d.wake is not None
+                else ""
+            )
+            + f'<p class="meta">{_e(who)} &middot; {_e(turns)}{cause}{effect}</p>'
+            "</li>"
+        )
+    return head + lede + f'<ol class="confeed">{rows}</ol></section>'
+
+
 def _dream(
     dream: Dream,
     *,
@@ -7165,6 +7716,8 @@ def _dream(
     fused_into: Sequence[int] = (),
     transcript: Sequence[DreamMessage] = (),
     adoptions: Sequence[Adoption] = (),
+    decision: ConferenceDecision | None = None,
+    decision_readable: bool = True,
     is_new_fusion: bool = False,
     now: datetime | None = None,
 ) -> str:
@@ -7174,6 +7727,13 @@ def _dream(
     decided. Ordering it that way is deliberate: a reader who stops after two
     sections has read the idea and the reason to doubt it, which is the right
     pair to have if you only read two.
+
+    **The conference verdict sits immediately above the transcript**, and that
+    pairing is the point: the verdict is the conclusion and is always visible,
+    the conversation that produced it is the evidence and is one click away. A
+    verdict with the six turns behind it collapsed underneath is readable; six
+    turns with the outcome buried in the last one is not, which is the whole
+    reason the verdict is stored rather than reconstructed.
 
     **A fusion is drawn already fused.** The `fused` class is in the markup the
     server sends; `is_new_fusion` only decides whether the client plays the
@@ -7335,6 +7895,7 @@ def _dream(
             f"{_count(len(dream.thoughts), 'step')}</summary><ol>{rows}</ol></details>"
         )
 
+    out += _conference(dream, decision, readable=decision_readable)
     out += _transcript(transcript)
 
     return out + "</div></article>"
@@ -7563,6 +8124,9 @@ def dreaming_page(
     fused_into: Mapping[int, Sequence[int]] | None = None,
     transcripts: Mapping[int, Sequence[DreamMessage]] | None = None,
     adoptions: Mapping[int, Sequence[Adoption]] | None = None,
+    verdicts: Mapping[int, ConferenceDecision] | None = None,
+    conference: Sequence[ConferenceDecision] = (),
+    conference_readable: bool = True,
     marker: Marker | None = None,
     now: datetime | None = None,
 ) -> str:
@@ -7585,6 +8149,18 @@ def dreaming_page(
     animation**: `Marker.is_new` answers `None` on a first visit rather than
     True, and a vault of dreams all animating at once on a first ever load is a
     fireworks display rather than a notification.
+
+    `verdicts` is the LATEST conference decision per dream and `conference` is
+    the cross-dream feed, and they are two reads rather than one filtered twice.
+    Taking each dream's latest out of the feed would silently answer "never
+    conferred" for any dream whose last exchange fell outside the feed's window
+    — a confident wrong claim, produced by an optimisation, about the one thing
+    on this card that nothing else can tell you.
+
+    `conference_readable=False` is the fourth state: the store could not be
+    asked at all. It is passed through to every card rather than collapsed into
+    an empty mapping, because an empty mapping and an unreadable store would
+    otherwise render identically as "never conferred".
     """
     names = dict(titles or {})
     for dream in dreams:
@@ -7593,6 +8169,7 @@ def dreaming_page(
     children = fused_into or {}
     talk = transcripts or {}
     grants = adoptions or {}
+    settled = verdicts or {}
     moment = now or datetime.now(UTC)
 
     body = (
@@ -7693,6 +8270,12 @@ def dreaming_page(
             "statement about evidence rather than about how likely they are.</p>"
         )
 
+    # Above the shelves, because it answers a question about the two AGENTS and
+    # the shelves answer one about the dreams. Below the early return on an empty
+    # store, because a deck with nothing on it is a teaching page and a feed of
+    # exchanges that cannot exist yet is furniture on it.
+    body += _conference_feed(conference, names, readable=conference_readable)
+
     by_vault: dict[Vault, list[Dream]] = {v: [] for v, *_ in SHELVES}
     for dream in dreams:
         by_vault.setdefault(dream.vault, []).append(dream)
@@ -7717,6 +8300,8 @@ def dreaming_page(
                 fused_into=children.get(dream.id or 0, ()),
                 transcript=talk.get(dream.id or 0, ()),
                 adoptions=grants.get(dream.id or 0, ()),
+                decision=settled.get(dream.id or 0),
+                decision_readable=conference_readable,
                 is_new_fusion=bool(
                     marker.is_new(dream.created_at) if marker else False
                 ),

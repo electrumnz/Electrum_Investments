@@ -20,7 +20,15 @@ import pytest
 
 from bot.audit import DecisionEntry
 from bot.config import Env, load_rules
-from bot.dreaming import DreamStore, DreamSummary
+from bot.dreaming import (
+    ConferenceDecision,
+    ConferenceVerdict,
+    Dream,
+    DreamCondition,
+    DreamStore,
+    DreamSummary,
+    Vault,
+)
 from bot.journal import Journal
 from bot.models import (
     AccountSnapshot,
@@ -37,6 +45,8 @@ from bot.models import (
     StandDownState,
     SymbolAssessment,
     Trade,
+    TriggerField,
+    TriggerOp,
     WorkingOrder,
 )
 from bot.souls import Soul
@@ -4471,6 +4481,549 @@ def test_a_dream_still_being_worked_is_not_told_off(dreams):
     )
 
     assert "Not a prophecy yet" not in body
+
+
+# ========================================== what the two agents settled on ==
+#
+# The storing half refuses an incoherent row and skips one it cannot parse, so
+# most of what follows is about the states a RENDERER can still get wrong: the
+# three that are absences rather than values, and a badge that states an outcome
+# the row does not claim.
+
+
+def _verdict_row(
+    verdict: ConferenceVerdict, **kw: object
+) -> ConferenceDecision:
+    kw.setdefault("decided_by", "trader")
+    kw.setdefault("at", ENTRY)
+    return ConferenceDecision(dream_id=1, verdict=verdict, **kw)  # type: ignore[arg-type]
+
+
+def _wake_cond(
+    text: str = "SPY closing below 641.20, roughly 1 ATR under the 20-day.",
+) -> DreamCondition:
+    return DreamCondition(
+        text=text,
+        symbol="SPY",
+        field=TriggerField.CLOSE,
+        op=TriggerOp.BELOW,
+        value=641.2,
+    )
+
+
+def _offered_dream(vault: Vault | None = None) -> Dream:
+    return Dream(title="Sesame after the brood", seed="s", vault=vault or Vault.VAULT)
+
+
+def test_a_dream_nobody_has_conferred_about_is_not_a_no_decision():
+    """`None` is a THIRD state, and the mildest verdict is not where it goes.
+
+    Rendering it as `NO_DECISION` would report a conversation that never
+    happened as one that happened and settled nothing — the same rule as
+    `seen.py`'s first visit and `news_history.has_cycles`, arriving at the
+    conference.
+    """
+    body = render._conference(_offered_dream(), None)
+
+    assert "Never conferred" in body
+    assert "Nobody has met about it" in body
+    assert "Nobody decided" not in body
+    assert "no decision" not in body
+    assert "data-verdict" not in body
+
+
+def test_why_a_dream_has_no_verdict_is_answered_per_shelf():
+    """A workbench dream has never been offered because the trading agent
+    cannot SEE that shelf, which is the machine working. A dream that reached
+    ADOPTED with no exchange got there some other way, which is worth knowing.
+    One sentence for both would make the first read like the second."""
+    from bot.dreaming import Vault
+
+    bench = render._conference(_offered_dream(Vault.WORKBENCH), None)
+    vault = render._conference(_offered_dream(Vault.VAULT), None)
+    adopted = render._conference(_offered_dream(Vault.ADOPTED), None)
+
+    assert "only sees the dream vault" in bench
+    assert "no exchange about it has been recorded yet" in vault
+    assert "without a recorded exchange" in adopted
+    for vault_enum in Vault:
+        assert vault_enum in render.UNCONFERRED
+
+
+def test_a_conference_record_that_could_not_be_read_says_so():
+    """A fourth state, and the one that would otherwise be the worst.
+
+    An unreadable store yields an empty mapping, and an empty mapping renders
+    as "never conferred" on every card at once — a confident wrong claim about
+    the one thing on the card nothing else can establish.
+    """
+    body = render._conference(_offered_dream(), None, readable=False)
+
+    assert "could not be read" in body
+    assert "not the same as their never having met" in body
+    assert "Never conferred" not in body
+
+
+def test_each_way_of_deciding_nothing_is_named_and_only_one_is_a_fault():
+    """A bare "no decision" hides which, and the distinction is the value.
+
+    A turn cap and an unconditioned deferral are facts about the two agents; a
+    failed call is a fact about the machinery and says nothing about either of
+    them. Only the last is anybody's fault, and the styling says so with BOTH
+    attributes rather than by winning a declaration-order tie.
+    """
+    from bot.dreaming import ConferenceVerdict, NoDecision
+
+    rendered = {
+        cause: render._conference(
+            _offered_dream(),
+            _verdict_row(
+                ConferenceVerdict.NO_DECISION, undecided=cause, decided_by="conference"
+            ),
+        )
+        for cause in NoDecision
+    }
+
+    assert "did not converge" in rendered[NoDecision.TURNS_EXHAUSTED]
+    assert "machinery broke" in rendered[NoDecision.CALL_FAILED]
+    assert "could not name what would end the wait" in rendered[
+        NoDecision.DEFER_WITHOUT_WAKE
+    ]
+    # Exactly one of the three claims a fault.
+    faults = [c for c, body in rendered.items() if "is a fault" in body]
+    assert faults == [NoDecision.CALL_FAILED]
+
+    for cause, body in rendered.items():
+        assert f'data-cause="{cause}"' in body
+        assert 'data-verdict="no_decision"' in body
+        assert "Nobody decided" in body
+
+    css = render.STYLES
+    assert (
+        ".conclave[data-verdict=no_decision][data-cause=call_failed]" in css
+    ), "the fault colour must outrank the no_decision rule on specificity"
+
+
+def test_nobody_deciding_never_reads_as_one_of_the_four_decisions():
+    """`decided` is read BEFORE `verdict`, which is what keeps this true.
+
+    A sixth verdict added later is classified once, in `DECIDED_VERDICTS`, and
+    an undecided one must not fall through into a decision's wording.
+    """
+    from bot.dreaming import ConferenceVerdict, NoDecision
+
+    body = render._conference(
+        _offered_dream(),
+        _verdict_row(
+            ConferenceVerdict.NO_DECISION,
+            undecided=NoDecision.TURNS_EXHAUSTED,
+            decided_by="conference",
+            turns=6,
+        ),
+    )
+
+    assert "The verdict" not in body
+    for _badge, _lede in render.CONFERENCE_WORDS.values():
+        assert _badge not in body
+    # And who is named as recording it, never as having decided it.
+    assert "recorded by The conference" in body
+
+
+def test_a_call_that_failed_before_the_first_turn_says_so_in_words():
+    """`0 turns` reads like a counter nobody wired up. A call that failed
+    before the opening offer produced no turn at all, and that is a fact."""
+    from bot.dreaming import ConferenceVerdict, NoDecision
+
+    body = render._conference(
+        _offered_dream(),
+        _verdict_row(
+            ConferenceVerdict.NO_DECISION,
+            undecided=NoDecision.CALL_FAILED,
+            decided_by="conference",
+            turns=0,
+        ),
+    )
+
+    assert "no turn taken" in body
+    assert "0 turns" not in body
+
+
+def test_a_deferral_renders_the_condition_that_would_wake_it():
+    """The difference between a real deferral and running out of things to say,
+    and the threshold is a NUMBER: a wake condition naming another figure would
+    test a level nobody ever saw."""
+    from bot.dreaming import ConferenceVerdict
+
+    body = render._conference(
+        _offered_dream(), _verdict_row(ConferenceVerdict.DEFER, wake=_wake_cond(), turns=6)
+    )
+
+    assert "What would wake it" in body
+    assert "roughly 1 ATR under the 20-day" in body
+    assert "SPY close below 641.2" in body
+    assert "incomplete record" not in body
+
+
+def test_a_deferral_with_no_wake_is_called_out_rather_than_drawn_empty():
+    """A stored `DEFER` always carries a gradeable one — `is_coherent` refuses
+    the row on write and the reader drops one it cannot parse. So a deferral
+    reaching this renderer without a wake means the row was SKIPPED rather than
+    shown, and saying so loudly is the only honest option: an empty deferral is
+    exactly the shape the wake condition exists to make impossible."""
+    from bot.dreaming import ConferenceVerdict
+
+    body = render._conference(_offered_dream(), _verdict_row(ConferenceVerdict.DEFER))
+
+    assert "incomplete record" in body
+    assert 'class="alert"' in body
+    # The alert colour on an INNER span, never beside `.note` on the `<p>`:
+    # `.note` is declared after `.alert`, so the two together resolve to pewter.
+    assert 'class="note alert"' not in body
+    assert 'class="alert note"' not in body
+
+
+def test_a_wake_nothing_can_look_up_is_not_presented_as_checkable():
+    """`is_gradeable` is strictly narrower than `is_checkable`: a threshold with
+    no symbol is a comparison with no subject."""
+    from bot.dreaming import ConferenceVerdict, DreamCondition
+    from bot.models import TriggerField, TriggerOp
+
+    body = render._conference(
+        _offered_dream(),
+        _verdict_row(
+            ConferenceVerdict.DEFER,
+            wake=DreamCondition(
+                text="a level, somewhere",
+                field=TriggerField.CLOSE,
+                op=TriggerOp.BELOW,
+                value=641.2,
+            ),
+        ),
+    )
+
+    assert "Nothing can settle this" in body
+    assert "no symbol" in body
+
+
+def test_an_effect_that_was_never_attempted_is_not_a_failure():
+    """`effected` is three-valued and `None` is the one that gets misread.
+
+    A decline, a deferral and a no-decision all leave every shelf where it was,
+    so there was nothing to attempt — which is a different answer from
+    something being attempted and refused.
+    """
+    from bot.dreaming import ConferenceVerdict
+
+    body = render._conference(
+        _offered_dream(), _verdict_row(ConferenceVerdict.DECLINE, reason="Wrong instrument.")
+    )
+
+    assert "A decline moves nothing" in body
+    assert "Nothing was attempted" in body
+    assert "refused to carry it out" not in body
+    assert "Carried out" not in body
+
+
+def test_an_unrecorded_effect_on_a_verdict_that_asks_for_one_is_unknown():
+    """`None` means two things, and only one of them is "nothing".
+
+    On a deferral, a decline or a no-decision it is a stated fact: those leave
+    every shelf where they found it. A promote and an archive both ASK something
+    of a shelf, so "this verdict asks nothing of any shelf" over one of those is
+    a wrong claim about the verdict itself — which is what the page said until
+    somebody looked at it.
+    """
+    from bot.dreaming import ConferenceVerdict
+
+    for verdict in (ConferenceVerdict.PROMOTE, ConferenceVerdict.ARCHIVE):
+        body = render._conference(_offered_dream(), _verdict_row(verdict))
+        assert "was not recorded" in body, verdict
+        assert "unknown rather than a nothing" in body, verdict
+        assert "asks nothing of any shelf" not in body, verdict
+        assert 'class="alert"' in body, verdict
+
+
+def test_a_deferral_does_not_promise_a_condition_it_may_not_have():
+    """The lede used to end "…written below with a number in it", which on an
+    incomplete row was contradicted four lines under it by the card's own
+    alert. The condition's own heading makes the promise now, so the thing that
+    keeps it is the thing that makes it."""
+    from bot.dreaming import ConferenceVerdict
+
+    lede = render.CONFERENCE_WORDS[ConferenceVerdict.DEFER][1]
+    assert "written below" not in lede
+
+    empty = render._conference(_offered_dream(), _verdict_row(ConferenceVerdict.DEFER))
+    assert "What would wake it" not in empty
+    assert "incomplete record" in empty
+
+
+def test_an_agreement_the_store_refused_keeps_the_agreement():
+    """They agreed and the shelf had no room, and those are two facts.
+
+    The badge used to read `adopted` over a row that said two lines lower that
+    nothing had moved — a heading stating an outcome the record does not claim.
+    It names the DECISION now, which is true either way, and `effected` says
+    which happened. Found by looking at the page.
+    """
+    from bot.dreaming import ConferenceVerdict
+
+    refused = render._conference(
+        _offered_dream(),
+        _verdict_row(
+            ConferenceVerdict.PROMOTE,
+            reason="Yes. I want this one.",
+            effected=False,
+            effect_detail="The adopted vault is full: 3 of 3 slots are taken.",
+        ),
+    )
+    landed = render._conference(
+        _offered_dream(),
+        _verdict_row(
+            ConferenceVerdict.PROMOTE,
+            effected=True,
+            effect_detail="Adopted; the grant expires in 30 days.",
+        ),
+    )
+
+    assert "agreed to adopt" in refused
+    assert ">adopted<" not in refused
+    assert "the store refused to carry it out" in refused.lower()
+    assert "3 of 3 slots" in refused
+    assert "The decision stands" in refused
+
+    assert "Carried out" in landed
+    assert "the grant expires in 30 days" in landed
+    assert "refused" not in landed
+
+
+def test_the_archive_verdict_is_the_dreamer_withdrawing_its_own_dream():
+    """No verdict here is the trading agent's route to an archive.
+
+    It may adopt out of the vault and hand back with a reason, and nothing
+    else — and it cannot so much as recommend one, because a recommendation to
+    destroy a chain from the party with a route to the broker would be pressure
+    rather than an opinion. So this must never read as something done TO the
+    dream by the conference.
+    """
+    from bot.dreaming import ConferenceVerdict
+
+    body = render._conference(
+        _offered_dream(),
+        _verdict_row(
+            ConferenceVerdict.ARCHIVE,
+            decided_by="dreamer",
+            reason="I checked the second hop and it is not true.",
+            effected=True,
+            effect_detail="Moved to the archive.",
+        ),
+    )
+
+    assert "the dreamer withdrew it" in body
+    assert "no archive verb" in body
+    assert "cannot so much as recommend one" in body
+    assert "Grogu" in body
+
+
+def test_the_letting_go_treatment_says_nothing_the_words_do_not():
+    """The motes are `dream_fx`'s mark for something let go of, and an archive
+    verdict is the one that is. Decoration: `prefers-reduced-motion` takes them
+    away, and everything they say is said in the sentence beside them."""
+    from bot.dreaming import ConferenceVerdict
+    from bot.web import dream_fx
+
+    body = render._conference(
+        _offered_dream(), _verdict_row(ConferenceVerdict.ARCHIVE, decided_by="dreamer")
+    )
+
+    assert 'class="conclave wisped"' in body
+    assert '<span class="wisps">' in body
+    reduced = dream_fx.CSS[dream_fx.CSS.index("prefers-reduced-motion") :]
+    assert ".wisped .wisps{display:none}" in reduced
+    # And no other verdict borrows it: a decline is not a letting-go.
+    assert "wisps" not in render._conference(
+        _offered_dream(), _verdict_row(ConferenceVerdict.DECLINE)
+    )
+
+
+def test_every_verdict_and_cause_carries_its_own_sentence():
+    """The tables must cover the enums, and a gap must not take the page down.
+
+    `_to_conference_decision` skips a value it cannot parse, so nothing unknown
+    reaches the renderer from the store today — but a value added to
+    `ConferenceVerdict` or `NoDecision` later would parse, and a `KeyError` on a
+    page an operator opened to browse is the wrong failure. The first half of
+    this keeps the copy honest; the second keeps the page up while somebody
+    writes it.
+    """
+    from bot.dreaming import DECIDED_VERDICTS, ConferenceVerdict, NoDecision
+
+    assert set(render.CONFERENCE_WORDS) == set(DECIDED_VERDICTS)
+    assert ConferenceVerdict.NO_DECISION not in render.CONFERENCE_WORDS
+    assert set(render.NO_DECISION_CAUSES) == set(NoDecision)
+
+    unworded = render._unworded("some_future_verdict")
+    assert "some_future_verdict" in unworded
+    assert 'class="alert"' in unworded
+    assert "has not been written" in unworded
+
+
+def test_a_verdict_identity_never_depends_on_winning_a_tie():
+    """`promote`, `defer`, `decline` and `archive` are words that name states.
+
+    A `.conclave.archive` rule would put four more of them into the modifier
+    vocabulary, where the next bare `.archive{padding:...}` written for
+    something else silently restyles them. The shelves already answered this
+    with `data-vault`; verdicts use `data-verdict` for the same reason, and an
+    attribute selector cannot collide with a class at all.
+    """
+    import re
+
+    from bot.dreaming import ConferenceVerdict
+
+    css = re.sub(r"/\*.*?\*/", "", render.STYLES, flags=re.S)
+
+    for verdict in ConferenceVerdict:
+        assert f"[data-verdict={verdict}]" in css, verdict
+        assert f".{verdict}{{" not in css, verdict
+        assert f".{verdict} " not in css, verdict
+
+
+def test_the_cross_dream_feed_is_newest_first_and_reaches_the_card():
+    """The cards answer "what did they decide about this one"; the feed answers
+    "what have those two been doing", which should not need eleven cards opened.
+
+    Newest first, unlike the transcript inside a card — a feed is asked what
+    happened most recently and a negotiation read backwards is a negotiation
+    read backwards.
+    """
+    from datetime import timedelta
+
+    from bot.dreaming import ConferenceDecision, ConferenceVerdict
+
+    older = ConferenceDecision(
+        dream_id=1,
+        verdict=ConferenceVerdict.DECLINE,
+        decided_by="trader",
+        at=ENTRY,
+        reason="Wrong instrument.",
+    )
+    newer = ConferenceDecision(
+        dream_id=2,
+        verdict=ConferenceVerdict.DEFER,
+        decided_by="trader",
+        at=ENTRY + timedelta(hours=3),
+        reason="Park it.",
+        wake=_wake_cond(),
+    )
+
+    body = render._conference_feed([newer, older], {1: "Sesame", 2: "Aluminium"})
+
+    assert body.index("Aluminium") < body.index("Sesame")
+    assert '<a href="#dream-1">Sesame</a>' in body
+    assert "Would wake on" in body
+    # A dream outside the window below is named, not linked to nothing.
+    orphan = render._conference_feed([older], {})
+    assert "Dream #1" in orphan
+    assert 'href="#dream-1"' not in orphan
+
+
+def test_an_empty_conference_feed_is_not_read_as_having_settled_nothing():
+    """An exchange skipped because nothing changed writes no row at all, so an
+    empty list is most often the change gate doing its job. Same rule as
+    `news_history.has_cycles`: no cycles recorded is not "no news"."""
+    body = render._conference_feed([], {})
+
+    assert "No exchange has been recorded" in body
+    assert "writes no row at all" in body
+    assert "not the same as their having met and settled nothing" in body
+
+
+def test_a_feed_that_could_not_be_read_says_unknown_rather_than_empty():
+    body = render._conference_feed([], {}, readable=False)
+
+    assert "could not be read" in body
+    assert "not empty" in body
+    assert "No exchange has been recorded" not in body
+
+
+def test_everything_an_agent_wrote_reaches_the_page_escaped():
+    """The reason is the deciding agent's own words and the title is the
+    dreamer's. Server-side escaping, never `innerHTML`."""
+    from bot.dreaming import ConferenceDecision, ConferenceVerdict
+
+    hostile = ConferenceDecision(
+        dream_id=1,
+        verdict=ConferenceVerdict.DECLINE,
+        decided_by="trader",
+        at=ENTRY,
+        reason="<script>alert(1)</script>",
+    )
+
+    card = render._conference(_offered_dream(), hostile)
+    feed = render._conference_feed([hostile], {1: "<img onerror=x>"})
+
+    for body in (card, feed):
+        assert "<script>alert(1)</script>" not in body
+        assert "&lt;script&gt;" in body
+    assert "<img onerror=x>" not in feed
+    assert "&lt;img onerror=x&gt;" in feed
+
+
+def test_the_dreaming_route_carries_the_stored_verdict_onto_the_card(client, dreams):
+    """End to end, through the store and the route rather than the renderer."""
+    from bot.dreaming import (
+        DREAMER,
+        ConferenceDecision,
+        ConferenceVerdict,
+        Dream,
+        Vault,
+        VaultCaps,
+    )
+
+    caps = VaultCaps(workbench=50, prophecy=50, vault=50)
+    offered = dreams.save(Dream(title="Offered", seed="s"))
+    dreams.move(offered, Vault.PROPHECY, by=DREAMER, caps=caps)
+    dreams.move(offered, Vault.VAULT, by=DREAMER, caps=caps)
+    dreams.save(Dream(title="Untouched", seed="s"))
+    dreams.record_conference_decision(
+        ConferenceDecision(
+            dream_id=offered,
+            verdict=ConferenceVerdict.DEFER,
+            decided_by="trader",
+            at=ENTRY,
+            reason="Park it against the level.",
+            wake=_wake_cond(),
+            turns=6,
+        )
+    )
+
+    body = client.get("/dreaming").text
+
+    assert "What the two agents have been deciding" in body
+    assert "Park it against the level." in body
+    assert "What would wake it" in body
+    # And the one nobody has met about is a stated third state, on the same page.
+    assert "Never conferred" in body
+
+
+def test_the_verdict_sits_immediately_above_the_conversation_behind_it(dreams):
+    """The conclusion is always visible; the six turns that produced it are one
+    click away. A verdict buried in the last turn of a collapsed transcript is
+    the state this record was stored to replace."""
+    from bot.dreaming import ConferenceVerdict, DreamMessage
+
+    body = render._dream(
+        _offered_dream(),
+        transcript=[
+            DreamMessage(
+                dream_id=1, speaker="trader", kind="verdict", text="No.", at=ENTRY
+            )
+        ],
+        decision=_verdict_row(ConferenceVerdict.DECLINE, reason="Wrong instrument."),
+    )
+
+    assert body.index('class="conclave') < body.index('class="talk"')
 
 
 # ================================================================ touch targets
