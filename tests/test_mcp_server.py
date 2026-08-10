@@ -1504,7 +1504,7 @@ def test_a_chain_with_every_hop_checked_is_not_awaiting_anything() -> None:
     dream = Dream(
         title="Every link sourced",
         seed="s",
-        chain=(Hop(claim="a", checked=True), Hop(claim="b", checked=True)),
+        chain=[Hop(claim="a", checked=True), Hop(claim="b", checked=True)],
     )
 
     brief = _brief(dream)
@@ -1527,7 +1527,7 @@ def test_an_unresolvable_weakest_hop_is_not_reported_as_no_weak_link() -> None:
     dream = Dream(
         title="Named a hop that is not there",
         seed="s",
-        chain=(Hop(claim="a", checked=True), Hop(claim="b", checked=False)),
+        chain=[Hop(claim="a", checked=True), Hop(claim="b", checked=False)],
         weakest_hop_index=9,
     )
 
@@ -1547,23 +1547,24 @@ def test_a_condition_on_the_wrong_hop_does_not_read_as_pinned() -> None:
     that will never promote.
     """
     from bot.dreaming import DreamCondition, Hop
+    from bot.models import TriggerField, TriggerOp
 
-    chain = (Hop(claim="a", checked=True), Hop(claim="b", checked=False))
+    chain = [Hop(claim="a", checked=True), Hop(claim="b", checked=False)]
     on_the_settled_link = Dream(
         title="Pinned to the wrong hop",
         seed="s",
         chain=chain,
         weakest_hop_index=2,
-        conditions=(
+        conditions=[
             DreamCondition(
                 text="SPY closes above 600",
                 symbol="SPY",
-                field="close",
-                op=">",
+                field=TriggerField.CLOSE,
+                op=TriggerOp.ABOVE,
                 value=600.0,
                 settles_hops=(1,),
             ),
-        ),
+        ],
     )
 
     assert _brief(on_the_settled_link)["weakest_hop_pinned"] is False
@@ -1573,16 +1574,16 @@ def test_a_condition_on_the_wrong_hop_does_not_read_as_pinned() -> None:
         seed="s",
         chain=chain,
         weakest_hop_index=2,
-        conditions=(
+        conditions=[
             DreamCondition(
                 text="SPY closes above 600",
                 symbol="SPY",
-                field="close",
-                op=">",
+                field=TriggerField.CLOSE,
+                op=TriggerOp.ABOVE,
                 value=600.0,
                 settles_hops=(2,),
             ),
-        ),
+        ],
     )
 
     assert _brief(on_the_weak_link)["weakest_hop_pinned"] is True
