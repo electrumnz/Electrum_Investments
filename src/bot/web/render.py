@@ -29,6 +29,7 @@ from datetime import UTC, datetime
 from zoneinfo import ZoneInfo
 
 from ..audit import AuditView, DecisionEntry
+from ..broker import is_crypto_symbol
 from ..config import DAY_NAMES, Env, Rules
 from ..dreamer import estimated_cost_usd, read_schedule
 from ..dreaming import (
@@ -39,10 +40,12 @@ from ..dreaming import (
     DreamVerdict,
     Hop,
 )
+from ..market_clock import ClockFace, MarketPhase, MarketState, clock_faces
 from ..metrics import JournalReport, render_excursions, render_summary
 from ..models import AccountSnapshot, StandDownState, Trade, WorkingOrder
 from ..options import ExpiryAlert
 from ..tailnet import TailnetStatus
+from .live import TickerQuote
 from .seen import SinceLastVisit
 
 STYLES = """
@@ -115,6 +118,251 @@ main{padding:2rem 0 4rem}
   color:var(--pewter)}
 section.block{margin-top:2.5rem}
 section.block>h2{margin-bottom:.75rem}
+
+/* ============================================================ ticker tape ==
+   One strip under the header: the session phase pinned at the left, then a
+   scrolling run of one clock per four instruments.
+
+   ## Height, and why it is fixed
+
+   The header measures 57px. This is 3.15rem, about 50px — a tenth shorter,
+   which reads as subordinate to the header rather than competing with it.
+   Measured in a browser rather than derived from the padding, because the
+   mark, the nav and the mode badge all contribute and the tallest wins.
+   The height is FIXED rather than
+   content-derived because the track inside is absolutely positioned while it
+   scrolls: a strip that grew with its contents would shove the page down a
+   few pixels on every repaint.
+
+   It sits in normal flow directly after the header, NOT sticky. Stacking a
+   second sticky element under a sticky header means hard-coding the header's
+   height as an offset, and that height changes the moment the nav wraps on a
+   narrow screen — at which point the tape either overlaps the nav or floats
+   below it with a gap. Normal flow cannot get that wrong.
+
+   ## Not the command console
+
+   Shares the deck's HUD vocabulary and shares no CSS with `.fx-console`, which
+   is a modal overlay at z-index 70. This is a strip in the document at z-index
+   0. They never appear in the same place and neither can style the other. */
+/* z-index 19: under the sticky header (20) so it tucks beneath on scroll,
+   and ABOVE the projection layer's grid, vignette and scanline planes,
+   which are fixed full-screen at z 1-3. Without it the strip renders at
+   `auto` — below all three — and the cells come out dimmed to near
+   invisibility while the header beside them, at z 20, looks fine. Nothing
+   warns: the elements are present, opaque and hit-testable, and
+   `elementFromPoint` returns them. It is only visible in a screenshot. */
+.tape{height:3.15rem;border-bottom:1px solid var(--slate);background:var(--ink);
+  display:flex;align-items:stretch;overflow:hidden;position:relative;z-index:19}
+.tape .fixed{display:flex;align-items:center;gap:.45rem;padding:0 .875rem;
+  white-space:nowrap;border-right:1px solid var(--slate);background:var(--graphite);
+  font-family:var(--mono);font-size:.625rem;letter-spacing:.12em;
+  text-transform:uppercase;color:var(--pewter);position:relative;z-index:1}
+.tape .fixed .name{color:var(--bone)}
+.tape .fixed .sep{color:var(--slate)}
+.tape .fixed .dot{width:6px;height:6px;border-radius:50%;background:var(--pewter);
+  display:inline-block;flex:none}
+.tape .view{flex:1;overflow:hidden;position:relative}
+.tape .track{display:flex;align-items:center;gap:0;height:100%;width:max-content;
+  animation:tape-run 90s linear infinite;will-change:transform}
+@keyframes tape-run{from{transform:translate3d(0,0,0)}
+  to{transform:translate3d(-50%,0,0)}}
+/* Hovering is the gesture for "let me read that one". */
+.tape:hover .track{animation-play-state:paused}
+
+.tape .cell{display:flex;align-items:baseline;gap:.4rem;padding:0 .9rem;
+  white-space:nowrap;font-family:var(--mono);font-size:.75rem;
+  border-right:1px solid rgba(42,52,65,.5);height:100%;
+  align-items:center;position:relative}
+/* The power rail: a HUD gauge rather than an arrow. Colour carries direction,
+   and `--mag` (0..1, set per cell by the server) carries SIZE — so a 0.1% drift
+   and a 3% move do not look identical, which a bare triangle cannot express. */
+.tape .cell::before{content:"";position:absolute;left:0;top:50%;
+  transform:translateY(-50%);width:2px;height:calc(28% + var(--mag,0) * 52%);
+  background:var(--pewter);opacity:.5;border-radius:1px}
+.tape .cell.up::before{background:var(--gain);opacity:calc(.45 + var(--mag,0) * .55);
+  box-shadow:0 0 calc(var(--mag,0) * 7px) var(--gain)}
+.tape .cell.down::before{background:var(--loss);opacity:calc(.45 + var(--mag,0) * .55);
+  box-shadow:0 0 calc(var(--mag,0) * 7px) var(--loss)}
+.tape .cell .sym{color:var(--pewter);letter-spacing:.08em}
+/* Tradeable names read brighter than watch-only ones. `watchlist.symbols` is a
+   view and `allowed_symbols` is a permission, and the tape is the one place
+   they sit side by side — so the difference is visible rather than implied. */
+.tape .cell.can .sym{color:var(--bone)}
+.tape .cell .px{color:var(--bone);font-variant-numeric:tabular-nums}
+.tape .cell .mv{font-variant-numeric:tabular-nums;color:var(--pewter)}
+.tape .cell.up .mv{color:var(--gain)}
+.tape .cell.down .mv{color:var(--loss)}
+.tape .cell .none{color:var(--pewter);font-style:italic;font-size:.6875rem}
+
+/* Market shut for this instrument class: the figure is last session's close,
+   not a live price. Dimmed rather than hidden — the move is still true of the
+   day that traded, and withholding a correct figure teaches an operator the
+   tape is unreliable, where showing it at full strength teaches them a Sunday
+   price is current.
+
+   AFTER the up/down rules so it wins on source order at equal specificity, and
+   it must stay there: the live painter re-adds `up`/`down` on every frame and
+   only ever removes those two, so `shut` survives a repaint and has to keep
+   overriding what the repaint puts back.
+
+   Not colour alone. `.shut` also strikes the rail back to neutral and the cell
+   carries `title`, because a dimmed green and a dimmed red are exactly the
+   pair that about one man in twelve cannot separate. */
+.tape .cell.shut .sym,.tape .cell.shut .px,.tape .cell.shut .mv{
+  color:var(--pewter);opacity:.65}
+.tape .cell.shut::before{background:var(--slate);opacity:.5;box-shadow:none}
+.tape .cell.shut::after{display:none}
+
+.tape .clk{display:flex;align-items:center;gap:.45rem;padding:0 .9rem;
+  white-space:nowrap;font-family:var(--mono);font-size:.75rem;height:100%;
+  border-right:1px solid rgba(42,52,65,.5);background:rgba(22,27,34,.55)}
+.tape .clk .city{font-size:.5625rem;letter-spacing:.14em;text-transform:uppercase;
+  color:var(--pewter)}
+.tape .clk .t{color:var(--bone);font-variant-numeric:tabular-nums}
+.tape .clk.home .city{color:var(--holo)}
+.tape .clk.home{background:rgba(111,211,232,.06)}
+/* Present only while SCRIPT has not run. A frozen clock is the one plausible
+   wrong figure a clock can be, so it says so rather than looking correct. */
+.tape .fixed .frozen{color:var(--amber);text-transform:none;letter-spacing:0}
+
+/* The tick pulse: a charge running through the cell in the direction the price
+   moved. Up rises, down falls — the motion carries the sign, so the meaning
+   survives for anyone who cannot separate the two colours, which about one man
+   in twelve cannot.
+
+   Painted on `::after` so it cannot disturb layout: absolutely positioned,
+   `pointer-events:none`, and gone when the animation ends. A strip that
+   reflowed on every tick would judder the whole run. */
+.tape .cell::after{content:"";position:absolute;inset:0;pointer-events:none;
+  opacity:0}
+@keyframes tape-charge-up{
+  0%{opacity:0;background:linear-gradient(0deg,rgba(126,201,166,.55),transparent 42%)}
+  22%{opacity:1}
+  100%{opacity:0;background:linear-gradient(0deg,rgba(126,201,166,.55),transparent 100%)}}
+@keyframes tape-charge-down{
+  0%{opacity:0;background:linear-gradient(180deg,rgba(192,112,123,.55),transparent 42%)}
+  22%{opacity:1}
+  100%{opacity:0;background:linear-gradient(180deg,rgba(192,112,123,.55),transparent 100%)}}
+.tape .cell.pulse-up::after{animation:tape-charge-up 900ms ease-out}
+.tape .cell.pulse-down::after{animation:tape-charge-down 900ms ease-out}
+/* The rail flares with it, so the gauge and the pulse read as one event. */
+@keyframes tape-rail-up{0%{box-shadow:0 0 10px var(--gain)}100%{box-shadow:none}}
+@keyframes tape-rail-down{0%{box-shadow:0 0 10px var(--loss)}100%{box-shadow:none}}
+.tape .cell.pulse-up::before{animation:tape-rail-up 900ms ease-out}
+.tape .cell.pulse-down::before{animation:tape-rail-down 900ms ease-out}
+
+/* The session boundary: digits spin up to a blur and settle into the new
+   state. The one moment this strip is worth watching. */
+@keyframes tape-spin{0%{filter:blur(0);opacity:1}
+  35%{filter:blur(3px);opacity:.75}
+  70%{filter:blur(5px);opacity:.55}
+  100%{filter:blur(0);opacity:1}}
+.tape .clk.turning .t{animation:tape-spin 1500ms ease-in-out}
+@keyframes tape-flash{0%{background:rgba(111,211,232,.20)}100%{background:transparent}}
+.tape.turning{animation:tape-flash 1800ms ease-out}
+.tape[data-phase=open] .fixed .dot{background:var(--patina)}
+.tape[data-phase=open] .fixed .name{color:var(--patina)}
+.tape[data-phase=pre] .fixed .dot{background:var(--amber)}
+.tape[data-phase=pre] .fixed .name{color:var(--amber)}
+.tape[data-phase=post] .fixed .dot{background:var(--amber)}
+.tape[data-phase=weekend] .fixed .dot{background:var(--slate)}
+@keyframes tape-warm{0%,100%{opacity:.35}50%{opacity:1}}
+.tape[data-phase=pre] .fixed .dot{animation:tape-warm 2.8s ease-in-out infinite}
+.tape[data-phase=open] .fixed .dot{animation:tape-warm 1.6s ease-in-out infinite}
+
+@media (prefers-reduced-motion:reduce){
+  /* Switched OFF, not slowed. A strip of text sliding sideways forever is a
+     worked example of what the preference is asking to be spared, so the
+     track stops and the strip becomes an ordinary horizontal scroller — the
+     content stays reachable rather than being withdrawn. */
+  .tape .track{animation:none;width:auto}
+  .tape .view{overflow-x:auto}
+  .tape .fixed .dot{animation:none}
+  .tape .clk.turning .t,.tape.turning{animation:none}
+  /* The pulse goes too, and the colour and the wedge carry the tick instead —
+     both of which are already there and neither of which moves. */
+  .tape .cell.pulse-up::after,.tape .cell.pulse-down::after,
+  .tape .cell.pulse-up::before,.tape .cell.pulse-down::before{animation:none}
+}
+@media (max-width:640px){
+  .tape .fixed{font-size:.5625rem;padding:0 .6rem}
+  .tape .fixed .until,.tape .fixed .sep{display:none}
+}
+
+/* ================================================================= clocks ==
+   Four cities and one session phase. It is here because three different clocks
+   were once in play at once — Alpaca's sessions, the gate's window, and an
+   operator in New Zealand — and confusing any two produces an order that rests
+   until the next open.
+
+   Deliberately small. This is orientation, not a figure: it must not compete
+   with equity for attention, so it sits above the tiles at roughly the size of
+   a caption. Fixed-width digits, because a clock whose columns shuffle every
+   second is a fidget rather than an instrument. */
+.clockbar{margin-bottom:1.25rem}
+.clockbar .phase{display:flex;align-items:baseline;gap:.6rem;flex-wrap:wrap;
+  font-family:var(--mono);font-size:.6875rem;letter-spacing:.12em;
+  text-transform:uppercase;color:var(--pewter);margin-bottom:.5rem}
+.clockbar .phase .name{color:var(--bone)}
+.clockbar .phase .sep{color:var(--slate)}
+.clockbar .phase .dot{width:6px;height:6px;border-radius:50%;
+  background:var(--pewter);display:inline-block}
+.clockbar .phase .trades{margin-left:auto;text-transform:none;letter-spacing:0;
+  font-size:.75rem}
+/* Visible only when SCRIPT has not run. It removes this before its first tick,
+   so its presence means the digits below are frozen at page-load time. */
+.clockbar .phase .frozen{color:var(--amber);text-transform:none;letter-spacing:0}
+.clockfaces{display:grid;gap:.5rem;
+  grid-template-columns:repeat(auto-fit,minmax(150px,1fr))}
+.clockface{background:var(--graphite);border:1px solid var(--slate);
+  border-radius:2px;padding:.6rem .75rem;position:relative;overflow:hidden}
+.clockface .city{font-family:var(--mono);font-size:.5625rem;letter-spacing:.14em;
+  text-transform:uppercase;color:var(--pewter)}
+.clockface .t{font-family:var(--mono);font-size:1.25rem;color:var(--bone);
+  margin-top:.2rem;font-variant-numeric:tabular-nums;letter-spacing:.02em}
+.clockface .t .s{color:var(--pewter);font-size:.875rem}
+.clockface .sub{font-family:var(--mono);font-size:.5625rem;letter-spacing:.08em;
+  color:var(--pewter);margin-top:.15rem}
+/* The zone every session boundary is defined in. Marked, because "16:00" means
+   something in New York that it does not mean in Auckland. */
+.clockface.home{border-color:rgba(111,211,232,.30)}
+.clockface.home .city{color:var(--holo)}
+
+/* Phase accents. Colour only — nothing here moves a box, so none of these can
+   collide with a layout rule the way `.gate` did. */
+.clockbar[data-phase=open] .phase .dot{background:var(--patina)}
+.clockbar[data-phase=open] .phase .name{color:var(--patina)}
+.clockbar[data-phase=pre] .phase .dot{background:var(--amber)}
+.clockbar[data-phase=pre] .phase .name{color:var(--amber)}
+.clockbar[data-phase=post] .phase .dot{background:var(--amber)}
+.clockbar[data-phase=overnight] .phase .dot{background:var(--pewter)}
+.clockbar[data-phase=weekend] .phase .dot{background:var(--slate)}
+
+/* Pre-market is a warm-up, so the marker breathes rather than sits. Slow on
+   purpose: a fast pulse beside an account reads as an alarm. */
+@keyframes clock-warm{0%,100%{opacity:.35}50%{opacity:1}}
+.clockbar[data-phase=pre] .phase .dot{animation:clock-warm 2.8s ease-in-out infinite}
+@keyframes clock-live{0%,100%{opacity:.55}50%{opacity:1}}
+.clockbar[data-phase=open] .phase .dot{animation:clock-live 1.6s ease-in-out infinite}
+
+/* The transition. On a phase change the seconds spin up to a blur and settle
+   into the new state, which is the one moment this thing is worth watching.
+   Driven by a class the script adds, so it cannot fire on a static page. */
+@keyframes clock-spin{
+  0%{filter:blur(0);opacity:1}
+  35%{filter:blur(3px);opacity:.75}
+  70%{filter:blur(5px);opacity:.55}
+  100%{filter:blur(0);opacity:1}}
+.clockface.turning .t{animation:clock-spin 1500ms ease-in-out}
+.clockbar.turning{transition:none}
+@keyframes clock-flash{0%{background:rgba(111,211,232,.16)}100%{background:var(--graphite)}}
+.clockface.turning{animation:clock-flash 1800ms ease-out}
+
+@media (prefers-reduced-motion:reduce){
+  .clockbar .phase .dot{animation:none}
+  .clockface.turning .t,.clockface.turning{animation:none}
+}
 
 .banner{border:1px solid var(--slate);border-left-width:3px;border-radius:2px;
   padding:.875rem 1.125rem;margin-bottom:.75rem;background:var(--graphite);
@@ -1401,6 +1649,69 @@ SCRIPT = """
     el.classList.toggle('stale', !!data.stale);
   }
 
+  /* The ticker tape, repainted from the same stream as the account.
+
+     Every cell appears TWICE — the track emits the run twice so the marquee
+     loops seamlessly — so this paints all matches for a symbol rather than the
+     first. Painting one would leave the duplicate showing the opening price
+     and the strip would contradict itself once a minute as it scrolled past.
+
+     `lastTick` holds the previous price per symbol so the pulse fires on a
+     CHANGE rather than on every frame. The stream re-sends the current state
+     on a heartbeat, so keying the animation off arrival would strobe the whole
+     strip every fifteen seconds with nothing having moved. */
+  var lastTick = {};
+
+  function tapePrice(v) {
+    /* Matches `render._tape_price`. Third formatter, same rule as the other
+       two: one figure formatted two ways eventually disagrees. */
+    return v < 10000
+      ? v.toLocaleString('en-GB', {minimumFractionDigits: 2, maximumFractionDigits: 2})
+      : v.toLocaleString('en-GB', {maximumFractionDigits: 0});
+  }
+
+  function paintTape(data) {
+    if (!data || !data.ticker || !data.ticker.length) return;
+    for (var i = 0; i < data.ticker.length; i++) {
+      var row = data.ticker[i];
+      var cells = document.querySelectorAll('[data-tick="' + row.symbol + '"]');
+      if (!cells.length) continue;
+
+      var before = lastTick[row.symbol];
+      var moved = row.last !== null && before !== undefined && row.last !== before;
+      if (row.last !== null) lastTick[row.symbol] = row.last;
+
+      for (var c = 0; c < cells.length; c++) {
+        var cell = cells[c];
+        var px = cell.querySelector('[data-tick-px]');
+        var mv = cell.querySelector('[data-tick-mv]');
+        /* A cell the server rendered as "no quote" has no price element to
+           paint into. Left alone rather than rebuilt: this layer may UPDATE a
+           figure the server rendered and must never be what reveals one. */
+        if (px && row.last !== null) px.textContent = tapePrice(row.last);
+        if (mv && row.change_pct !== null && row.change_pct !== undefined) {
+          mv.textContent = (row.change_pct >= 0 ? '▲' : '▼') +
+            Math.abs(row.change_pct).toFixed(2) + '%';
+          cell.classList.remove('up', 'down');
+          cell.classList.add(row.change_pct >= 0 ? 'up' : 'down');
+          var mag = Math.min(Math.abs(row.change_pct) / 3, 1);
+          cell.style.setProperty('--mag', mag.toFixed(3));
+        }
+        if (!moved) continue;
+        /* Direction from the SIGN OF THE DELTA, never from the day's change:
+           a stock down 2% on the day that just ticked up has moved up, and
+           flashing that red would say the opposite of what happened. */
+        var dir = row.last > before ? 'pulse-up' : 'pulse-down';
+        (function (el, cls) {
+          el.classList.remove('pulse-up', 'pulse-down');
+          void el.offsetWidth;          /* restart the animation */
+          el.classList.add(cls);
+          window.setTimeout(function () { el.classList.remove(cls); }, 950);
+        })(cell, dir);
+      }
+    }
+  }
+
   function paint(data) {
     if (!data) return;
 
@@ -1421,6 +1732,7 @@ SCRIPT = """
     }
 
     paintStamp(data);
+    paintTape(data);
 
     var account = data.account;
     if (!account) return;
@@ -1722,6 +2034,132 @@ SCRIPT = """
   var fx = window.MUDHORN_FX || (window.MUDHORN_FX = {});
   fx.console = openConsole;
 })();
+
+
+/* --------------------------------------------------------------------- clocks */
+
+/* Four cities and a session phase, ticking.
+
+   Its OWN closure, outside the reduced-motion bail-out, for the same reason as
+   the console: this is information, not decoration. Somebody asking for less
+   motion still needs to know what time it is in New York. The one genuinely
+   decorative part — the spin-to-blur on a phase change — is a CSS animation,
+   and the stylesheet's reduced-motion block switches that off while the digits
+   keep updating.
+
+   ## The honesty problem, which a clock has and a figure does not
+
+   Every other value on this page is a READING: taken at a moment, true of that
+   moment, and honestly labelled with when. A clock is not like that. A clock
+   showing 08:51 at 09:30 is not an old reading, it is a wrong one, and it is
+   wrong in the most plausible possible way — it looks exactly like a right one.
+
+   So the server renders the time it computed AND each face says "at page load"
+   underneath. This script's first act is to remove that label, before it starts
+   ticking. Script blocked, script threw, EventSource-less browser: the label
+   stays and the reader is told the clock has stopped. That is the same rule as
+   the Board's `taken_at` stamp arriving somewhere the word "reading" does not
+   obviously apply. */
+(function () {
+  'use strict';
+
+  var bar = document.querySelector('.tape');
+  if (!bar) return;
+
+  var faces = Array.prototype.slice.call(bar.querySelectorAll('.clk'));
+
+  /* The label the server rendered saying the clock is not ticking. Taking it
+     down is this script's proof of life, and it happens BEFORE the first tick
+     so a throw below cannot leave a live-looking clock that never moves. */
+  var stale = bar.querySelector('.frozen');
+  if (stale && stale.parentNode) stale.parentNode.removeChild(stale);
+
+  function two(n) { return n < 10 ? '0' + n : '' + n; }
+
+  function paintFace(face, now) {
+    var tz = face.getAttribute('data-tz');
+    var out = face.querySelector('.t');
+    if (!tz || !out) return;
+    /* Formatted through Intl with the zone name rather than by adding a fixed
+       offset. A page left open across a daylight-saving change is right
+       afterwards instead of an hour out until somebody reloads — and this deck
+       is meant to be left open. */
+    var parts;
+    try {
+      parts = new Intl.DateTimeFormat('en-GB', {
+        timeZone: tz, hour12: false,
+        hour: '2-digit', minute: '2-digit', second: '2-digit'
+      }).formatToParts(now);
+    } catch (e) { return; }
+
+    var got = {};
+    for (var i = 0; i < parts.length; i++) got[parts[i].type] = parts[i].value;
+    /* Intl renders midnight as 24 in some engines. 00 is what a clock says. */
+    var hh = got.hour === '24' ? '00' : got.hour;
+    out.textContent = hh + ':' + got.minute + ':' + got.second;
+  }
+
+  function countdown(ms) {
+    if (!(ms > 0)) return 'any moment';
+    var mins = Math.floor(ms / 60000);
+    var hours = Math.floor(mins / 60);
+    if (hours >= 24) return Math.floor(hours / 24) + 'd ' + (hours % 24) + 'h';
+    if (hours) return hours + 'h ' + two(mins % 60) + 'm';
+    if (mins) return mins + 'm';
+    return 'under a minute';
+  }
+
+  var until = bar.querySelector('.until');
+  var turned = 0;
+
+  function tick() {
+    var now = new Date();
+    for (var i = 0; i < faces.length; i++) paintFace(faces[i], now);
+    if (!until) return;
+
+    /* Re-read rather than cached at startup. The attribute is what the SERVER
+       said, and the server is the authority on where the boundary is — this
+       loop only counts down to it. A value parsed once at page load means a
+       boundary that changes underneath is silently ignored, which is the
+       client quietly disagreeing with the server about the session. */
+    var changeAt = Date.parse(bar.getAttribute('data-change-at') || '');
+    var nextPhase = bar.getAttribute('data-next-phase') || '';
+    if (!changeAt) return;
+
+    var left = changeAt - now.getTime();
+    until.textContent = nextPhase + ' in ' + countdown(left);
+
+    /* The moment worth watching. The digits spin up to a blur and settle into
+       the new state, once — `turned` latches, because an animation that
+       retriggered every second past the boundary would be a strobe.
+
+       The phase attribute is updated so the accent colours follow, but the
+       page is NOT re-fetched: this script may repaint a clock and must not be
+       what decides the session. `market_clock.py` on the server owns that, and
+       the next render is what confirms it. Same rule as the live stream — the
+       client updates a value the server already rendered, never reveals one. */
+    /* Latched on the BOUNDARY, not on a boolean. A bare flag would fire once
+       and never again, so a page left open across two sessions would animate
+       the first and sit through the second; latching on the timestamp lets a
+       new boundary arm it again while still refusing to strobe on this one. */
+    if (left <= 0 && turned !== changeAt) {
+      turned = changeAt;
+      bar.setAttribute('data-phase', nextPhase);
+      until.textContent = nextPhase + ' now — reload for the next boundary';
+      bar.classList.add('turning');
+      window.setTimeout(function () { bar.classList.remove('turning'); }, 1900);
+      for (var j = 0; j < faces.length; j++) {
+        (function (el) {
+          el.classList.add('turning');
+          window.setTimeout(function () { el.classList.remove('turning'); }, 1900);
+        })(faces[j]);
+      }
+    }
+  }
+
+  tick();
+  window.setInterval(tick, 1000);
+})();
 """
 
 MARK = (
@@ -1850,8 +2288,16 @@ def pips(lit: int, total: int) -> str:
 
 
 def shell(
-    title: str, active: str, body: str, *, env: Env, exposed: bool = False
+    title: str, active: str, body: str, *, env: Env, exposed: bool = False,
+    tape: str = "",
 ) -> str:
+    """`tape` is the ticker strip, rendered by the caller because it needs
+    the poller and the rules and this function has neither.
+
+    Empty is a supported state and renders no strip at all — a deployment
+    with the watchlist switched off, or any page built without one, gets the
+    header sitting straight on the content exactly as before.
+    """
     nav = "".join(
         f'<a href="{path}"{" aria-current=page" if path == active else ""}>{label}</a>'
         for path, label in PAGES
@@ -1871,6 +2317,7 @@ def shell(
   <nav>{nav}</nav>
   <span class="live paper" id="link"><i></i>{_e(mode)}<span class="link-label"></span></span>
 </div></header>
+{tape}
 <main><div class="wrap">{body}</div></main>
 <footer class="wrap">Live operator view{
     " behind a shared password" if exposed else ", bound to the loopback interface"
@@ -2084,6 +2531,204 @@ def since_last_visit(summary: SinceLastVisit) -> str:
         f'<div class="banner {tone} fresh" style="margin-bottom:1rem">'
         f"<b>Since you were last here</b>{_e(summary.headline())}{counts}"
         f"{caveats}</div>"
+    )
+
+
+def _countdown(seconds: float) -> str:
+    """A duration a person can act on. Never negative, never bare seconds.
+
+    Clamped at zero because the server renders one moment and the reader sees a
+    later one; a countdown that has run out says "any moment" rather than
+    showing a minus sign, which reads as a fault.
+    """
+    if seconds <= 0:
+        return "any moment"
+    total = int(seconds)
+    hours, rem = divmod(total, 3600)
+    minutes = rem // 60
+    if hours >= 24:
+        days, hours = divmod(hours, 24)
+        return f"{days}d {hours}h"
+    if hours:
+        return f"{hours}h {minutes:02d}m"
+    if minutes:
+        return f"{minutes}m"
+    return "under a minute"
+
+
+def _gmt_offset(local: datetime) -> str:
+    """`GMT+12`, matching what `Intl.DateTimeFormat` renders in the browser.
+
+    The offset rather than the abbreviation, and the two halves agreeing
+    matters more than which is chosen. The server used to print `NZST` and the
+    script replaced it with `GMT+12` on the first tick, so the label visibly
+    changed a second after load for no reason a reader could see.
+
+    The offset also happens to be the more useful of the two here: the point of
+    four clocks side by side is the arithmetic between them, and `GMT-4` next
+    to `GMT+12` states the sixteen-hour gap that `EDT` next to `NZST` leaves as
+    an exercise.
+    """
+    offset = local.utcoffset()
+    if offset is None:
+        return ""
+    minutes = int(offset.total_seconds() // 60)
+    sign = "+" if minutes >= 0 else "-"
+    hours, mins = divmod(abs(minutes), 60)
+    return f"GMT{sign}{hours}" + (f":{mins:02d}" if mins else "")
+
+
+def _tape_price(value: float) -> str:
+    """No currency sign and no thousands separator, deliberately.
+
+    The tape carries mixed instruments — equities in dollars, `BTC/USD` in the
+    tens of thousands — and a strip this narrow cannot afford four extra
+    characters per cell. Two decimals throughout so the columns stay even, and
+    the browser's formatter matches this exactly for the same reason `money`
+    matches `_money`: one figure formatted two ways eventually disagrees.
+    """
+    return f"{value:,.2f}" if value < 10_000 else f"{value:,.0f}"
+
+
+#: The move, in percent, at which the power rail is full. Beyond it the rail
+#: simply stays full rather than growing — the gauge is for telling a drift from
+#: a move, and a scale that ran to the day's worst case would render every
+#: ordinary session as a flat line.
+FULL_SCALE_PCT = 3.0
+
+#: Instruments between one clock and the next. Four clocks against a watchlist
+#: that is a multiple of four, so the pattern repeats cleanly; a remainder would
+#: leave one clock trailing a short group and the loop would visibly limp.
+PER_GROUP = 4
+
+
+def _tape_cell(quote: TickerQuote, *, live_venue: bool) -> str:
+    """One instrument on the tape.
+
+    **A quote that could not be read renders as unavailable, never as flat.**
+    On a strip of sixteen this is the least conspicuous place in the whole
+    interface to put a plausible wrong figure, which is precisely why it must
+    not happen here.
+    """
+    pct = quote.change_pct
+    classes = ["cell"]
+    if quote.tradeable:
+        classes.append("can")
+    if not live_venue:
+        # Greyed, because the figure is last session's close and not a live
+        # price. The move beside it is still TRUE — it is what happened on the
+        # last day that traded — so it is dimmed rather than withheld: hiding a
+        # correct figure teaches an operator the tape is unreliable, while
+        # showing it at full strength teaches them a Sunday price is current.
+        classes.append("shut")
+
+    if quote.last is None:
+        body = '<span class="none">no quote</span>'
+        mag = 0.0
+    else:
+        body = f'<span class="px" data-tick-px>{_tape_price(quote.last)}</span>'
+        if pct is None:
+            # A price with no previous close: real, and its move is unknown.
+            # Saying so beats implying the day is flat.
+            body += '<span class="mv" data-tick-mv>no prior close</span>'
+            mag = 0.0
+        else:
+            classes.append("up" if pct >= 0 else "down")
+            wedge = "▲" if pct >= 0 else "▼"
+            body += f'<span class="mv" data-tick-mv>{wedge}{abs(pct):.2f}%</span>'
+            mag = min(abs(pct) / FULL_SCALE_PCT, 1.0)
+
+    # A title, not only a dimmer colour. A dimmed green and a dimmed red are
+    # the pair about one man in twelve cannot separate, and "why is this one
+    # grey" is a question the tape should answer without being asked twice.
+    title = "" if live_venue else ' title="market shut - last session close"'
+    return (
+        f'<span class="{" ".join(classes)}" style="--mag:{mag:.3f}" '
+        f'data-tick="{_e(quote.symbol)}"{title}>'
+        f'<span class="sym">{_e(quote.symbol)}</span>{body}</span>'
+    )
+
+
+def _tape_clock(face: ClockFace, local: datetime) -> str:
+    return (
+        f'<span class="clk{" home" if face.is_market else ""}" '
+        f'data-tz="{_e(face.zone)}">'
+        f'<span class="city">{_e(face.label)}</span>'
+        f'<span class="t">{local:%H:%M:%S}</span></span>'
+    )
+
+
+def ticker_tape(state: MarketState, quotes: list[TickerQuote]) -> str:
+    """The strip under the header: session phase, four clocks, the watchlist.
+
+    One clock per four instruments, so the four zones are spread through the
+    run rather than bunched at the front — a reader glancing at any part of the
+    strip sees a clock.
+
+    The run is emitted TWICE and the track scrolls to -50%. That is what makes
+    the loop seamless: at -50% the second copy sits exactly where the first
+    began, so the animation restarting is invisible. One copy would snap back.
+
+    The phase block is pinned outside the scroller, because the one thing on
+    this strip that must never scroll out of view is whether the market is
+    open.
+    """
+    faces = clock_faces(state.now)
+
+    def live_venue(symbol: str) -> bool:
+        """Whether THIS symbol's market is trading, per instrument class.
+
+        Crypto never greys out. It runs continuously, so a Sunday BTC price
+        is a live one — and dimming it alongside the equities would be the
+        single global session all over again, which is the bug
+        `config/rules.yaml` grew an `instruments:` block to fix. Equities
+        grey only on the weekend: pre-market, regular and after-hours all
+        quote, so a price during any of them is current even when the bot
+        will not act on it.
+        """
+        if is_crypto_symbol(symbol):
+            return True
+        return state.phase is not MarketPhase.WEEKEND
+
+    groups: list[str] = []
+    for index, (face, local) in enumerate(faces):
+        groups.append(_tape_clock(face, local))
+        chunk = quotes[index * PER_GROUP : (index + 1) * PER_GROUP]
+        groups.extend(
+            _tape_cell(q, live_venue=live_venue(q.symbol)) for q in chunk
+        )
+    # Anything past the last group still gets shown rather than silently
+    # dropped: a watchlist that is not a multiple of four is a config choice,
+    # not a reason to hide symbols the operator asked for.
+    groups.extend(
+        _tape_cell(q, live_venue=live_venue(q.symbol))
+        for q in quotes[len(faces) * PER_GROUP :]
+    )
+
+    run = "".join(groups)
+    if state.is_tradeable_by_bot:
+        verdict = "gate open"
+    elif state.bot_window_open:
+        verdict = "gate open, session shut"
+    else:
+        verdict = "bot idle"
+
+    return (
+        f'<div class="tape" data-phase="{_e(state.phase.value)}" '
+        f'data-change-at="{state.next_change.isoformat()}" '
+        f'data-next-phase="{_e(state.next_phase.value)}">'
+        '<div class="fixed"><span class="dot"></span>'
+        f'<span class="name">{_e(state.label)}</span>'
+        '<span class="sep">/</span>'
+        f'<span class="until">{_e(state.next_label.lower())} in '
+        f'{_e(_countdown(state.seconds_to_change))}</span>'
+        f'<span class="sep">/</span><span class="verdict">{_e(verdict)}</span>'
+        # Removed by SCRIPT before its first tick, so its presence means the
+        # clocks below are frozen at page-load time.
+        '<span class="frozen">not ticking</span>'
+        "</div>"
+        f'<div class="view"><div class="track">{run}{run}</div></div>'
+        "</div>"
     )
 
 

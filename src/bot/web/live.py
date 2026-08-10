@@ -76,10 +76,10 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import AsyncGenerator, Callable
+from collections.abc import AsyncGenerator, Callable, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, replace
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from enum import StrEnum
 from typing import Any
 
@@ -184,6 +184,42 @@ class LiveStatus(StrEnum):
     FAILING = "failing"    # the last read raised; `error` names it
 
 
+class TickerQuote(BaseModel):
+    """One symbol on the tape.
+
+    **Every price-derived field is optional and stays `None` when unknown.** A
+    quote that could not be fetched renders as unavailable rather than as
+    unchanged: a symbol silently showing 0.00% is the plausible wrong figure
+    this repository exists to refuse, and on a tape of fifteen it would be the
+    least conspicuous place in the whole interface to put one.
+
+    `tradeable` is not decoration either. The tape is drawn from
+    `watchlist.symbols`, which is a VIEW, while `RiskGate` refuses anything
+    outside `allowed_symbols`, which is a PERMISSION. Marking which is which on
+    the page is what stops a name scrolling past from reading as an instrument
+    the bot may open a position in.
+    """
+
+    symbol: str
+    last: float | None = None
+    previous_close: float | None = None
+    tradeable: bool = False
+
+    @property
+    def change_usd(self) -> float | None:
+        if self.last is None or self.previous_close is None:
+            return None
+        return self.last - self.previous_close
+
+    @property
+    def change_pct(self) -> float | None:
+        """`None` rather than 0.0 when either side is missing, and when the
+        previous close is zero — which is a corrupt bar, not a flat day."""
+        if self.last is None or not self.previous_close:
+            return None
+        return (self.last - self.previous_close) / self.previous_close * 100
+
+
 class LiveSnapshot(BaseModel):
     """One successful read of the account, dated.
 
@@ -211,6 +247,14 @@ class LiveSnapshot(BaseModel):
     # no quote the distance-to-fill on that order is unknown, and a row silently
     # missing one reads as an order needing no move at all.
     quotes_unavailable: list[str] = Field(default_factory=list)
+
+    # The ticker tape. Its own list because it is on its own cadence — fifteen
+    # quotes every five seconds would be 180 requests a minute against a
+    # per-minute limit, and a tape is orientation rather than a figure anyone
+    # trades off, so a minute-old price is fine where a minute-old equity
+    # reading would not be.
+    ticker: list[TickerQuote] = Field(default_factory=list)
+    ticker_taken_at: datetime | None = None
 
     @property
     def unrealised_pnl_usd(self) -> float:
@@ -353,7 +397,36 @@ class LiveState:
             "orders": None if snapshot is None else _orders_json(snapshot),
             "orders_unavailable": None if snapshot is None else snapshot.orders_unavailable,
             "quotes_unavailable": None if snapshot is None else snapshot.quotes_unavailable,
+            # The tape. `null` rather than `[]` with no reading, for the same
+            # reason every other field is: an empty list is what a configured
+            # watchlist with no quotes looks like, and only one of those means
+            # "nothing to show".
+            "ticker": None if snapshot is None else _ticker_json(snapshot),
+            "ticker_as_of": (
+                snapshot.ticker_taken_at.isoformat()
+                if snapshot and snapshot.ticker_taken_at
+                else None
+            ),
         }
+
+
+def _ticker_json(snapshot: LiveSnapshot) -> list[dict[str, Any]]:
+    """The tape, with the derived move computed HERE rather than in the browser.
+
+    Same rule as `_account_json`: the page renders a percentage server-side and
+    the stream repaints the same field, so both must come from one formula. Two
+    implementations of "percent change" would eventually disagree, and the one
+    that drifted would be the copy nobody was watching.
+    """
+    return [
+        {
+            "symbol": q.symbol,
+            "last": q.last,
+            "change_pct": q.change_pct,
+            "tradeable": q.tradeable,
+        }
+        for q in snapshot.ticker
+    ]
 
 
 def _account_json(snapshot: LiveSnapshot) -> dict[str, Any]:
@@ -427,6 +500,9 @@ class LivePoller:
         stale_after_seconds: float = STALE_AFTER_SECONDS,
         idle_stop_after_seconds: float | None = IDLE_STOP_AFTER_SECONDS,
         clock: Callable[[], datetime] = _now,
+        watchlist: Sequence[str] = (),
+        tradeable: Sequence[str] = (),
+        ticker_refresh_seconds: float = 60.0,
     ) -> None:
         """`open_risk_usd` has no default, and that is the point.
 
@@ -454,6 +530,18 @@ class LivePoller:
         # restarting one would mean re-authenticating during shutdown, and the
         # application that owned it is going away.
         self._closed = False
+
+        # The tape. `tradeable` is a separate list rather than derived here,
+        # because the difference between "on the watchlist" and "the gate would
+        # allow it" is a fact about `config/rules.yaml` and this class must not
+        # be the place that decides it.
+        self._watchlist = list(watchlist)
+        self._tradeable = frozenset(tradeable)
+        self._ticker_refresh_seconds = ticker_refresh_seconds
+        self._ticker: list[TickerQuote] = []
+        self._ticker_at: datetime | None = None
+        self._closes: dict[str, float] = {}
+        self._closes_day: date | None = None
 
     # ------------------------------------------------------------- reading
 
@@ -603,6 +691,8 @@ class LivePoller:
             except Exception:
                 quotes_unavailable.append(symbol)
 
+        ticker, ticker_at = self._read_ticker(broker)
+
         return LiveSnapshot(
             taken_at=self._clock(),
             account=account,
@@ -610,7 +700,73 @@ class LivePoller:
             prices=prices,
             orders_unavailable=orders_unavailable,
             quotes_unavailable=quotes_unavailable,
+            ticker=ticker,
+            ticker_taken_at=ticker_at,
         )
+
+    def _read_ticker(
+        self, broker: Broker
+    ) -> tuple[list[TickerQuote], datetime | None]:
+        """The tape, on its own slower clock, degrading per symbol.
+
+        **Not due yet means the previous answer, unchanged.** Refetching fifteen
+        quotes on every five-second account poll would be 180 requests a minute
+        against a per-minute limit, and the first thing to break would be the
+        account read — the tape starving the figure it sits above.
+
+        A failure here can never fail the whole read. Equity is what this page
+        exists for and a tape is orientation; the reverse priority would let a
+        decorative row take the account down with it. Each symbol degrades
+        alone, and a symbol that failed is carried with `last=None` rather than
+        dropped, so it renders as unavailable instead of vanishing.
+        """
+        if not self._watchlist:
+            return [], None
+
+        now = self._clock()
+        due = (
+            self._ticker_at is None
+            or (now - self._ticker_at).total_seconds() >= self._ticker_refresh_seconds
+        )
+        if not due:
+            return self._ticker, self._ticker_at
+
+        # Yesterday's close moves once a day, so it is fetched once a day. A
+        # daily-bar call per symbol per minute would be the rate-limit problem
+        # this whole cadence exists to avoid.
+        if self._closes_day != now.date():
+            self._closes = {}
+            self._closes_day = now.date()
+
+        quotes: list[TickerQuote] = []
+        for symbol in self._watchlist:
+            if symbol not in self._closes:
+                try:
+                    bars = broker.get_daily_bars(symbol, 2)
+                except Exception:
+                    bars = []
+                # The LAST COMPLETE session, not the newest bar. Alpaca returns
+                # today's partial bar once the session opens, so taking `[-1]`
+                # would compare the price against itself and report every symbol
+                # as flat all day.
+                if len(bars) >= 2:
+                    self._closes[symbol] = bars[-2].close
+            try:
+                last: float | None = broker.get_tick(symbol).mid
+            except Exception:
+                last = None
+            quotes.append(
+                TickerQuote(
+                    symbol=symbol,
+                    last=last,
+                    previous_close=self._closes.get(symbol),
+                    tradeable=symbol in self._tradeable,
+                )
+            )
+
+        self._ticker = quotes
+        self._ticker_at = now
+        return quotes, now
 
     def _connected_broker(self) -> Broker:
         """One broker for the life of the poller, rebuilt after a failure.
@@ -835,6 +991,7 @@ def build_poller(
     force_mock: bool = False,
     interval_seconds: float = POLL_INTERVAL_SECONDS,
     clock: Callable[[], datetime] = _now,
+    rules: Any = None,
 ) -> LivePoller:
     """The wiring `build_app` uses. The journal is not optional here either.
 
@@ -850,11 +1007,21 @@ def build_poller(
 
         return build_broker(env, force_mock=force_mock)
 
+    # The tape's two lists come from two DIFFERENT places on purpose:
+    # `watchlist.symbols` is a view and `allowed_symbols` is a permission. See
+    # `WatchlistRules`. No rules means no tape rather than a guessed one.
+    watch = getattr(getattr(rules, "watchlist", None), "symbols", []) or []
+    enabled = getattr(getattr(rules, "watchlist", None), "enabled", False)
     return LivePoller(
         broker_factory=factory,
         open_risk_usd=journal.open_risk_usd,
         interval_seconds=interval_seconds,
         clock=clock,
+        watchlist=watch if enabled else [],
+        tradeable=getattr(rules, "allowed_symbols", []) or [],
+        ticker_refresh_seconds=getattr(
+            getattr(rules, "watchlist", None), "refresh_seconds", 60.0
+        ),
     )
 
 

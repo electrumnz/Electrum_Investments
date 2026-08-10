@@ -46,6 +46,7 @@ from ..audit import AuditLog
 from ..config import Env, Rules, load_rules
 from ..dreaming import DreamStore, DreamSummary
 from ..journal import Journal
+from ..market_clock import market_state
 from ..metrics import build_report
 from ..models import AccountSnapshot, WorkingOrder
 from ..options import alerts_for_positions
@@ -111,7 +112,8 @@ def build_app(
     # with one synchronous `poll_once()` and assert on a rendered Board without
     # standing up an event loop.
     resolved_poller = poller or live.build_poller(
-        journal=resolved_journal, env=resolved_env, force_mock=force_mock
+        journal=resolved_journal, env=resolved_env, force_mock=force_mock,
+        rules=resolved_rules,
     )
     live.install(app, resolved_poller)
 
@@ -169,9 +171,46 @@ def build_app(
             resolved_poller.reading_is_stale(),
         )
 
+    def _tape() -> str:
+        """The ticker strip, on EVERY page rather than only the Board.
+
+        That is a deliberate change to a property this module used to have: a
+        session that never opened the Board never talked to Alpaca at all,
+        because only the Board carried `data-live` targets and only a page with
+        those opens the stream. The tape carries them too, so any page now
+        keeps the poller warm.
+
+        The trade is small and the reasoning is that the old property was about
+        an UNATTENDED box, not an attended one. Somebody reading the Settings
+        page is watching; the poller's idle stop is what protects the overnight
+        case, and it still does. What has not changed is that a render costs no
+        network — this reads the poller's last snapshot and returns.
+        """
+        watchlist = resolved_rules.watchlist
+        if not watchlist.enabled or not watchlist.symbols:
+            return ""
+        equities = resolved_rules.instruments.get("us_equity")
+        snapshot = resolved_poller.latest()
+        return render.ticker_tape(
+            market_state(
+                datetime.now(UTC),
+                windows_by_day=equities.windows_by_day if equities else None,
+            ),
+            # No reading yet renders the symbols with no quote rather than an
+            # empty strip: a cold start should look like a tape waiting for
+            # prices, not like a watchlist nobody configured.
+            snapshot.ticker if snapshot else [
+                live.TickerQuote(
+                    symbol=sym, tradeable=sym in resolved_rules.allowed_symbols
+                )
+                for sym in watchlist.symbols
+            ],
+        )
+
     def _page(title: str, active: str, body: str) -> str:
         return render.shell(
-            title, active, body, env=resolved_env, exposed=sessions.required
+            title, active, body, env=resolved_env, exposed=sessions.required,
+            tape=_tape(),
         )
 
     @app.get("/login", response_class=HTMLResponse)

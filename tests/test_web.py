@@ -1376,6 +1376,143 @@ def test_the_four_live_states_do_not_collapse_into_two():
         assert f"data.status === {state}" in render.SCRIPT
 
 
+def _quote(
+    symbol: str,
+    last: float | None = None,
+    prev: float | None = None,
+    tradeable: bool = False,
+) -> live.TickerQuote:
+    return live.TickerQuote(
+        symbol=symbol, last=last, previous_close=prev, tradeable=tradeable
+    )
+
+
+def test_a_quote_that_could_not_be_read_never_renders_as_flat():
+    """On a strip of sixteen this is the least conspicuous place in the whole
+    interface to put a plausible wrong figure, which is exactly why it must not
+    happen here. No quote says so; a quote with no prior close says that."""
+    from bot.market_clock import market_state
+
+    state = market_state(datetime(2026, 8, 10, 15, 0, tzinfo=UTC))
+    body = render.ticker_tape(
+        state,
+        [_quote("GLD"), _quote("TLT", last=91.2), _quote("SPY", last=580.0, prev=574.0)],
+    )
+
+    assert "no quote" in body            # nothing came back at all
+    assert "no prior close" in body      # a price, but no yesterday to compare
+    assert "0.00%" not in body           # neither may borrow a flat day
+    assert "▲1.05%" in body
+
+
+def test_the_tape_marks_which_symbols_the_gate_would_actually_allow():
+    """`watchlist.symbols` is a view; `allowed_symbols` is a permission. The
+    tape is the one surface where they sit side by side, so the difference is
+    rendered rather than left to be assumed from a name scrolling past."""
+    from bot.market_clock import market_state
+
+    body = render.ticker_tape(
+        market_state(datetime(2026, 8, 10, 15, 0, tzinfo=UTC)),
+        [_quote("SPY", last=580.0, prev=574.0, tradeable=True), _quote("NVDA", last=9.0)],
+    )
+
+    # SPY: on the watchlist AND in an enabled instrument class.
+    assert 'class="cell can up"' in body
+    # NVDA: on the tape, not tradeable, and not marked as if it were.
+    assert 'data-tick="NVDA"' in body
+    assert 'class="cell can"' not in body.split('data-tick="NVDA"')[0].rsplit(
+        "<span", 1
+    )[-1]
+
+
+def test_a_shut_market_greys_out_but_crypto_never_does():
+    """A Saturday SPY price is last Friday's close, and must not read as live.
+
+    Crypto is the half that matters. It trades continuously, so a Sunday BTC
+    price IS current — dimming it alongside the equities would be the single
+    global session all over again, which is the bug `config/rules.yaml` grew an
+    `instruments:` block to fix, arriving through the interface instead.
+    """
+    from bot.market_clock import market_state
+
+    quotes = [
+        _quote("SPY", last=580.0, prev=574.0, tradeable=True),
+        _quote("BTC/USD", last=61000.0, prev=60000.0),
+    ]
+
+    def greyed(body: str, symbol: str) -> bool:
+        head = body.split(f'data-tick="{symbol}"')[0]
+        return "shut" in head.rsplit("<span class=", 1)[-1]
+
+    weekend = render.ticker_tape(
+        market_state(datetime(2026, 8, 15, 12, 0, tzinfo=UTC)), quotes
+    )
+    assert greyed(weekend, "SPY")
+    assert not greyed(weekend, "BTC/USD")
+    assert "market shut" in weekend
+
+    session = render.ticker_tape(
+        market_state(datetime(2026, 8, 10, 15, 0, tzinfo=UTC)), quotes
+    )
+    assert not greyed(session, "SPY")
+    assert not greyed(session, "BTC/USD")
+
+
+def test_the_grey_override_outranks_what_the_live_painter_puts_back():
+    """The painter re-adds `up`/`down` on every frame and removes only those
+    two, so `shut` survives a repaint — and therefore has to keep winning. At
+    equal specificity that is source order, so the rule must stay below."""
+    styles = render.STYLES
+    assert styles.index(".tape .cell.up .mv") < styles.index(".tape .cell.shut .sym")
+
+
+def test_the_run_is_emitted_twice_so_the_marquee_does_not_snap():
+    """The track scrolls to -50%, where the second copy sits exactly where the
+    first began. One copy would jump back to the start every cycle."""
+    from bot.market_clock import market_state
+
+    body = render.ticker_tape(
+        market_state(datetime(2026, 8, 10, 15, 0, tzinfo=UTC)),
+        [_quote("SPY", last=580.0, prev=574.0)],
+    )
+
+    assert body.count('data-tick="SPY"') == 2
+    assert "translate3d(-50%,0,0)" in render.STYLES
+
+
+def test_the_tape_sits_above_the_projection_planes():
+    """The grid, vignette and scanline are fixed full-screen at z 1-3. A strip
+    left at `auto` renders beneath all three and its cells come out dimmed to
+    near invisibility — while the header beside them, at z 20, looks fine.
+
+    Nothing warns: the elements are present, opaque, and `elementFromPoint`
+    returns them. It took a screenshot to see."""
+    assert "z-index:19}" in render.STYLES
+
+
+def test_the_watchlist_is_not_a_trading_permission():
+    """Growing the tape by extending `allowed_symbols` would quietly grant the
+    bot nine new instruments to open positions in — a change to what may be
+    traded, wearing the costume of a display tweak."""
+    from bot.config import load_rules
+
+    rules = load_rules()
+    watch_only = set(rules.watchlist.symbols) - set(rules.allowed_symbols)
+
+    assert watch_only, "the two lists have converged; the distinction is gone"
+    assert "NVDA" in watch_only
+
+    # And the reverse, which is the half that actually matters: the gate's list
+    # is exactly the union of the enabled instrument classes, so nothing can
+    # reach it by being added to the tape.
+    from_instruments = {
+        symbol
+        for instrument in rules.enabled_instruments.values()
+        for symbol in instrument.allowed_symbols
+    }
+    assert set(rules.allowed_symbols) == from_instruments
+
+
 def test_the_command_console_survives_the_reduced_motion_bail_out():
     """Cmd+K is navigation, and navigation is not decoration.
 
@@ -1392,11 +1529,70 @@ def test_the_command_console_survives_the_reduced_motion_bail_out():
     """
     from bot.web.render import SCRIPT
 
+    assert SCRIPT.count("if (reduced && reduced.matches) return;") == 1
     bail = SCRIPT.index("if (reduced && reduced.matches) return;")
-    # Only two closures in the file, so the first `})();` after the bail-out is
-    # unambiguously the end of the one that carries it.
-    assert SCRIPT.count("})();") == 2
-    assert SCRIPT.index("})();", bail) < SCRIPT.index("function openConsole")
+    close = SCRIPT.index("})();", bail)
+    # Anchored on the projection closure's own last statement rather than on a
+    # count of closures, so adding a fourth does not make this pass or fail for
+    # a reason that has nothing to do with what it guards.
+    assert "api.settle = settleAll;" in SCRIPT[bail:close]
+    assert close < SCRIPT.index("function openConsole")
+
+
+def test_the_clocks_tick_regardless_of_the_motion_preference():
+    """Same rule as the console, one layer out: a clock is information.
+
+    Somebody asking for less motion still needs to know what time it is in New
+    York. The spin-to-blur on a session boundary IS decoration, so it lives in
+    the stylesheet where the reduced-motion block switches it off while the
+    digits carry on."""
+    from bot.web.render import SCRIPT, STYLES
+
+    bail = SCRIPT.index("if (reduced && reduced.matches) return;")
+    assert SCRIPT.index("})();", bail) < SCRIPT.index("var bar = document.querySelector")
+    assert ".clockface.turning .t,.clockface.turning{animation:none}" in STYLES
+
+
+def test_a_clock_that_is_not_ticking_says_so(client):
+    """A frozen clock is the one plausible wrong figure a clock can be.
+
+    Every other value here is a reading — true of a moment, labelled with that
+    moment. A clock showing 08:51 at 09:30 is not an old reading, it is a wrong
+    one, and it looks exactly like a right one. So the server renders the label
+    and SCRIPT removes it before its first tick: present means stopped.
+    """
+    assert "not ticking" in client.get("/").text
+    assert "if (stale && stale.parentNode) stale.parentNode.removeChild(stale);" in (
+        render.SCRIPT
+    )
+
+
+def test_the_clock_states_the_venue_and_the_gate_separately(client):
+    """"The market is open" and "this bot will trade" are different claims.
+
+    They were confused once already, at 04:49 New York time on a Monday:
+    Alpaca's pre-market genuinely was running, four and a half hours before the
+    window `config/rules.yaml` permits. Merging them into one green light is
+    how that happens again.
+    """
+    from datetime import datetime
+
+    from bot.config import load_rules
+    from bot.market_clock import MarketPhase, market_state
+
+    windows = load_rules().instruments["us_equity"].windows_by_day
+
+    # 20:30 UTC in August: the regular session shut at 20:00, the configured
+    # window runs to 21:00. Both facts are true and the display must not pick.
+    state = market_state(
+        datetime(2026, 8, 10, 20, 30, tzinfo=UTC), windows_by_day=windows
+    )
+    assert state.phase is MarketPhase.POST
+    assert state.bot_window_open is True
+    assert state.is_tradeable_by_bot is False
+
+    body = render.ticker_tape(state, [])
+    assert "gate open, session shut" in body
 
 
 def test_the_console_returns_focus_somewhere_reachable():

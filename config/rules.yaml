@@ -276,3 +276,58 @@ instruments:
   #     4: [[0, 21]]               # Friday, closes 16:00 CT
   #     6: [[22, 24]]              # Sunday, evening open
   #   capital_cap_pct: 10.0
+
+# ---------------------------------------------------------------------------
+# Ticker tape. DISPLAY ONLY.
+#
+# These are the symbols that scroll across the top of the dashboard. They are
+# deliberately NOT `instruments.*.allowed_symbols`, and that separation is the
+# point rather than an oversight.
+#
+# `allowed_symbols` is a PERMISSION: `RiskGate._symbol_allowed` refuses anything
+# not on it, so every name added there is a new instrument the bot may open a
+# position in. This list is a VIEW. Adding a name here changes what an operator
+# sees and nothing about what may be traded, which is what makes it safe to keep
+# long.
+#
+# A symbol on the tape that is not in an enabled instrument class is marked as
+# watch-only on the page, so the two lists cannot be confused by looking at it.
+watchlist:
+  enabled: true
+
+  # The six tradeable names first, then what moves them. Starting from
+  # `allowed_symbols` is deliberate: the tape should lead with what the bot
+  # can actually act on, and the rest is context. Fifteen is long enough to
+  # be worth scrolling and short enough that one refresh is sixteen quotes
+  # rather than a rate-limit problem.
+  #
+  # SIXTEEN rather than fifteen, and the number is load-bearing: the tape
+  # interleaves one clock per four instruments, so four clocks want a
+  # multiple of four. A remainder would leave one clock trailing a short
+  # group and the repeat would visibly limp.
+  symbols:
+    - SPY      # tradeable
+    - QQQ      # tradeable
+    - AAPL     # tradeable
+    - MSFT     # tradeable
+    - JNJ      # tradeable
+    - KO       # tradeable
+    - NVDA
+    - AMZN
+    - GOOGL
+    - META
+    - TSLA
+    - AMD
+    - IWM
+    - BTC/USD  # crypto is a disabled instrument class, so this is
+               # watch-only — which is exactly the case the tape's
+               # tradeable marker exists to make visible.
+    - TLT
+    - GLD
+
+  # Its own cadence, deliberately slower than the five-second account poll.
+  # Fifteen quotes every five seconds is 180 requests a minute against a
+  # per-minute limit; once a minute is nowhere near it. A tape is orientation,
+  # not a figure anyone trades off, so a minute-old price is fine and a
+  # rate-limit stall on the account read would not be.
+  refresh_seconds: 60.0

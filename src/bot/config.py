@@ -483,6 +483,38 @@ class SocialRules(BaseModel):
         return self
 
 
+class WatchlistRules(BaseModel):
+    """Symbols the ticker tape shows. **Display only, never a permission.**
+
+    Deliberately NOT `instruments.*.allowed_symbols`, and the distinction is
+    the whole reason this block exists. That list is what `RiskGate` will let
+    the bot trade; this one is what an operator wants to see scrolling past.
+    Growing the tape to fifteen names by extending `allowed_symbols` would
+    quietly grant the bot nine new instruments to open positions in, which is
+    a change to what may be traded wearing the costume of a display tweak.
+
+    So: nothing here reaches the gate, and a symbol on the tape is not
+    tradeable unless it is also in an enabled instrument class. The renderer
+    marks the ones that are.
+    """
+
+    enabled: bool = True
+    symbols: list[str] = Field(default_factory=list)
+    # Its own cadence, slower than the account poll. Fifteen quotes every five
+    # seconds is 180 requests a minute against a per-minute limit; once a
+    # minute is nowhere near it, and a tape is not a figure anyone trades off.
+    refresh_seconds: float = Field(default=60.0, gt=0)
+
+    @model_validator(mode="after")
+    def _enabled_needs_symbols(self) -> WatchlistRules:
+        if self.enabled and not self.symbols:
+            raise ValueError(
+                "watchlist.enabled is true but symbols is empty, so the tape "
+                "would render nothing and look broken rather than switched off."
+            )
+        return self
+
+
 class LoopRules(BaseModel):
     """How the decision loop spends its time and money.
 
@@ -513,6 +545,7 @@ class Rules(BaseModel):
 
     social: SocialRules = Field(default_factory=SocialRules)
     loop: LoopRules = Field(default_factory=LoopRules)
+    watchlist: WatchlistRules = Field(default_factory=WatchlistRules)
 
     # Keyed by AssetClass value: "us_equity", "crypto".
     instruments: dict[str, InstrumentRules] = Field(default_factory=dict)
