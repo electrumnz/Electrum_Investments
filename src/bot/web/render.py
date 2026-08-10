@@ -1429,11 +1429,12 @@ def chat_page(*, enabled: bool, token: str, hermes_available: bool) -> str:
     return body + f"""
 <div class="chat" style="margin-top:1.5rem">
   <div class="log" id="log" aria-live="polite" aria-label="Conversation">
+    <!-- Deliberately one line. What this message used to say is already said
+         twice on the page: the note above states what Hermes reaches and that
+         it cannot route around the gate, and the buttons below are a better
+         list of what to ask than a sentence describing one. -->
     <div class="turn agent"><span class="who">Hermes</span>
-      <div class="msg">Ask about the account, the journal, open risk, a
-particular decision, or the news the bot has read. I reach the same journal and
-audit log this dashboard renders, through the MCP tools, and every order path
-behind me runs the risk gate first.</div></div>
+      <div class="msg">Active. Ask away.</div></div>
   </div>
   <div class="prompts">{chips}</div>
   <div class="composer">
