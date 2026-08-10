@@ -18,10 +18,75 @@ from dataclasses import dataclass
 from typing import Any
 
 import anthropic
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from .config import CLAUDE_MODEL_IDS, CLAUDE_PRICING_USD_PER_MTOK, DAY_NAMES, ClaudeTier, Env, Rules
 from .models import OrderProposal, PositionPlan, SymbolAssessment
+
+
+def _require_every_property(schema: dict[str, Any]) -> None:
+    """Declare every property of this model REQUIRED in its JSON schema.
+
+    Python keeps its defaults — this touches the schema only — so every caller
+    that constructs one of these models by hand is unaffected. What changes is
+    the contract sent to the API: the model must emit every field, using the
+    empty value where it has nothing to say, instead of omitting it.
+    """
+    schema["required"] = list(schema.get("properties", ()))
+
+
+# Attach to any Pydantic model handed to `messages.parse` as an `output_format`.
+#
+# **The count of PROPERTIES on a schema is cheap. The count of OPTIONAL
+# properties is not, and it is what killed the dreamer.** A property the schema
+# does not require may be present or absent, so the grammar the API compiles has
+# to accept every subset of the optional set, in any order — one more optional
+# field doubles that space. Nothing warns on the way in, because the request is
+# perfectly valid; the compiler simply runs out of time.
+#
+# Measured against `claude-sonnet-5` on 2026-08-10, on synthetic models of N
+# fields and nothing else:
+#
+#     8 optional                           compiles, 18s cold — already slow
+#     10 optional                          compiles, borderline
+#     12 optional                          TIMES OUT at 150s
+#     11 required-nullable                 compiles in 5.3s
+#     15 required-nullable                 compiles in 10.5s
+#     15 optional, declared required here  compiles in 10.7s
+#
+# Two things follow, and the second is the one that is easy to get wrong:
+#
+# - **A nullable field is free; an ABSENT field is what costs.** Fifteen fields
+#   that must each be stated — as a value, an empty list or a null — compile in
+#   ten seconds, where twelve that may simply be missing do not compile at all.
+# - **It compounds across nested models, so read the schema whole.** `DreamStep`
+#   minus `conditions` compiled and `StepCondition` on its own compiled; the two
+#   together did not. Eleven optional fields at the top plus seven more across
+#   two nested models put `electrum-bot dream` past the line, and every call it
+#   made came back 400 "Schema is too complex", 400 "Grammar compilation timed
+#   out", or a plain timeout.
+#
+# What is NOT the rule is a budget on the total. `ClaudeDecision` carries twelve
+# optional properties across four models, never more than five on any one of
+# them, and it compiles — concentration is what bites, not the sum.
+#
+# It is worth knowing WHICH schema has the least room, though, and it is not the
+# dreamer's any more. Measured the same day, same model, one call each:
+#
+#     DreamStep, fixed    3.1s      DreamerTurn   3.4s
+#     TraderTurn          5.3s      ClaudeDecision  14.7s
+#
+# `ClaudeDecision` is now the slowest thing this repository sends, at five
+# optional properties on `PositionPlan`. That is inside the cap
+# `tests/test_claude_client.py` enforces and it is the one to watch: the next
+# optional field added to a position plan or an assessment is the one to
+# measure rather than assume.
+#
+# The alternative was to drop `output_format` and validate the JSON on this
+# side, which hands back to the model the freedom to return a value the schema
+# forbids — a number this repository would then have to trust. This keeps the
+# guarantee and costs a handful of `null`s on the wire.
+EVERY_FIELD_REQUIRED = ConfigDict(json_schema_extra=_require_every_property)
 
 
 class ClaudeDecision(BaseModel):
@@ -64,7 +129,30 @@ class ClaudeDecision(BaseModel):
 # max_tokens, so a proposal-sized budget would truncate the chain that the
 # thinking was spent producing.
 DREAM_MAX_TOKENS = 16000
-DREAM_TIMEOUT_SECONDS = 900.0
+
+# **"Nothing waits on it" is a reason to be patient, not a reason to be
+# unbounded.** This was 900 seconds against an SDK that retries twice by
+# default, so a call that could not succeed occupied the dream timer for up to
+# FORTY-FIVE MINUTES and then logged `dream_call_failed`. That is not a slow
+# dream, it is an invisible one: the timer is still running, the process looks
+# alive, and nothing on any surface says the dreamer has stopped working. A
+# failure that takes three quarters of an hour to admit itself is the
+# confident-partial-answer problem wearing a stopwatch.
+#
+# Measured against `claude-sonnet-5` on 2026-08-10, running the shipped
+# `Dreamer.run_once` end to end: 109.3s on the first call of the day, which
+# carries the one-time grammar compile, then 33.1s and 39.6s. So 240 seconds is
+# a little over twice the worst observed call, and a call still running at four
+# minutes is not a deep one, it is a stuck one.
+#
+# **The retry count is set here rather than left to the SDK, because the bound
+# is the product of the two and a default nobody wrote down is not a bound.**
+# One retry buys back a dropped connection on a job that only gets one attempt a
+# day; it caps the worst case at roughly eight minutes. Note the failure this
+# whole change is about — a 400 from the grammar compiler — is not retried by
+# the SDK at all, so retries never multiply a schema problem.
+DREAM_TIMEOUT_SECONDS = 240.0
+DREAM_MAX_RETRIES = 1
 
 
 @dataclass(frozen=True)
@@ -472,10 +560,14 @@ class ClaudeClient:
             kwargs["thinking"] = {"type": "adaptive"}
             kwargs["output_config"] = {"effort": "high"}
 
-        # Nothing is waiting on this call. The default timeout is tuned for
-        # interactive use and a long thinking pass can outrun it, which would
-        # surface as a failed dream rather than a slow one.
-        client = self._client.with_options(timeout=DREAM_TIMEOUT_SECONDS)
+        # Long enough for a full thinking pass, short enough that a call which
+        # is never going to answer says so while somebody could still act on it.
+        # The retry count travels with it: the bound is the product of the two,
+        # and an SDK default nobody wrote down is not a bound. See
+        # `DREAM_TIMEOUT_SECONDS`.
+        client = self._client.with_options(
+            timeout=DREAM_TIMEOUT_SECONDS, max_retries=DREAM_MAX_RETRIES
+        )
         response = client.messages.parse(**kwargs)
         step = response.parsed_output
         if step is None:
@@ -504,9 +596,13 @@ class ClaudeClient:
         instruction, and paying a dream's budget six times to produce them would
         be spending on depth that the prompt explicitly asks not to be used.
 
-        The generous timeout is kept: nothing is waiting on this either, and a
-        timeout surfaces as an exchange that failed rather than one that was
-        slow.
+        It takes the dreamer's bound as well, and that is now a ceiling rather
+        than a licence: nothing waits on an exchange either, but an exchange is
+        up to twelve calls, so the old 900-second timeout times three attempts
+        times twelve calls was most of a working day of hanging. The bound here
+        is generous for a turn that is a few sentences long, deliberately —
+        being wrong in the direction of patience costs one slow run, and being
+        wrong in the other direction costs the exchange.
 
         Lives here rather than in `confer.py` so there is ONE piece of cost
         arithmetic in the repository. `_usage_from` is what turns a response
@@ -524,7 +620,9 @@ class ClaudeClient:
             kwargs["thinking"] = {"type": "adaptive"}
             kwargs["output_config"] = {"effort": "medium"}
 
-        client = self._client.with_options(timeout=DREAM_TIMEOUT_SECONDS)
+        client = self._client.with_options(
+            timeout=DREAM_TIMEOUT_SECONDS, max_retries=DREAM_MAX_RETRIES
+        )
         response = client.messages.parse(**kwargs)
         turn = response.parsed_output
         if turn is None:

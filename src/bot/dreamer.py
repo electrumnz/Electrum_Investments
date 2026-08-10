@@ -86,7 +86,7 @@ import structlog
 from pydantic import BaseModel, Field
 
 from .audit import AuditLog
-from .claude_client import CallUsage, ClaudeClient
+from .claude_client import EVERY_FIELD_REQUIRED, CallUsage, ClaudeClient
 from .config import CLAUDE_PRICING_USD_PER_MTOK, ClaudeTier, Env, Rules
 from .dreaming import (
     DREAMER,
@@ -257,6 +257,12 @@ def scope_symbols(symbols: Sequence[str], rules: Rules) -> SymbolScope:
 class DreamHop(BaseModel):
     """One link, as the model returns it."""
 
+    # Every field below is OPTIONAL in Python and REQUIRED on the wire. See
+    # `claude_client.EVERY_FIELD_REQUIRED`: an optional property doubles the
+    # grammar the API has to compile, the cost multiplies across nested models,
+    # and this schema was over the line — the dreamer could not make its call.
+    model_config = EVERY_FIELD_REQUIRED
+
     claim: str = Field(description="One checkable claim. A physical or public fact.")
     checked: bool = Field(
         default=False,
@@ -282,7 +288,15 @@ class StepCondition(BaseModel):
     push the dreamer towards inventing a number to satisfy a validator, and an
     invented threshold is worse than an honest sentence saying it cannot be
     checked yet.
+
+    The triple stays optional in the sense that matters — `field`, `op` and
+    `value` may all come back null and a condition with prose and no triple is
+    still legal. What `EVERY_FIELD_REQUIRED` changes is that the model has to
+    SAY null rather than leave the key out, which is a wire format and not a
+    change to what a condition may be.
     """
+
+    model_config = EVERY_FIELD_REQUIRED
 
     text: str = Field(
         description="The condition in one sentence, as a person would read it."
@@ -336,7 +350,17 @@ class DreamStep(BaseModel):
     `advance_id` is what makes this a mini-project rather than a stream of
     unrelated notions: the model may pick up a dream it already started instead
     of beginning a new one, and iterate on it.
+
+    **Every field here is REQUIRED on the wire and optional in Python**, which
+    is what makes this schema compilable at all — see
+    `claude_client.EVERY_FIELD_REQUIRED` for the measurements. Nothing about
+    what a step may contain has changed: an empty list, an empty string and a
+    null are all still answers. A field added with a default and no entry in
+    `required` is what made `electrum-bot dream` unable to call the model at
+    all, and `tests/test_claude_client.py` fails the build if it happens again.
     """
+
+    model_config = EVERY_FIELD_REQUIRED
 
     advance_id: int | None = Field(
         default=None,

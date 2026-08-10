@@ -674,8 +674,19 @@ def test_the_dream_call_is_bought_deep_rather_than_fast(monkeypatch):
     High effort, a large budget that the thinking pass counts against, and a
     timeout that outlasts it. A proposal-sized budget would truncate the chain
     the thinking was spent producing.
+
+    **Bought deep is not bought unbounded**, which is why the retry count is
+    asserted beside the timeout. The pair is the real ceiling: 900 seconds
+    against the SDK's default of two retries was forty-five minutes of a dream
+    timer occupied by a call that had already failed, with nothing on any
+    surface saying so.
     """
-    from bot.claude_client import DREAM_MAX_TOKENS, DREAM_TIMEOUT_SECONDS, ClaudeClient
+    from bot.claude_client import (
+        DREAM_MAX_RETRIES,
+        DREAM_MAX_TOKENS,
+        DREAM_TIMEOUT_SECONDS,
+        ClaudeClient,
+    )
     from bot.config import ClaudeTier
 
     captured: dict[str, object] = {}
@@ -701,7 +712,17 @@ def test_the_dream_call_is_bought_deep_rather_than_fast(monkeypatch):
     assert captured["max_tokens"] == DREAM_MAX_TOKENS
     assert captured["output_config"] == {"effort": "high"}
     assert captured["thinking"] == {"type": "adaptive"}
-    assert captured["options"] == {"timeout": DREAM_TIMEOUT_SECONDS}
+    assert captured["options"] == {
+        "timeout": DREAM_TIMEOUT_SECONDS,
+        "max_retries": DREAM_MAX_RETRIES,
+    }
+    # The worst case an operator can be left waiting, stated as arithmetic
+    # rather than trusted to a constant nobody multiplies out.
+    worst_case_seconds = DREAM_TIMEOUT_SECONDS * (DREAM_MAX_RETRIES + 1)
+    assert worst_case_seconds <= 600, (
+        f"a dream step that cannot complete would occupy the timer for "
+        f"{worst_case_seconds:.0f}s; it must fail fast and loudly"
+    )
 
 
 def test_the_dreamer_does_not_inherit_a_tier_that_cannot_think():
