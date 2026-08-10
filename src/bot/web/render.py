@@ -44,6 +44,7 @@ from ..dreaming import (
 from ..market_clock import (
     NY,
     ClockFace,
+    MarketPhase,
     MarketState,
     VenueState,
     clock_faces,
@@ -273,26 +274,49 @@ section.block>h2{margin-bottom:.75rem}
 .tape .cell.shut::after{display:none}
 .tape .cell.shut .sym{border-bottom:none}
 
-.tape .clk{display:flex;align-items:center;gap:.4rem;padding:0 .75rem;
+.tape .clk{display:flex;align-items:center;gap:.5rem;padding:0 .7rem;
   white-space:nowrap;font-family:var(--mono);font-size:.75rem;height:100%;
   border-left:1px solid var(--slate);border-right:1px solid var(--slate);
   background:var(--ink);box-shadow:inset 0 1px 3px rgba(0,0,0,.45)}
-.tape .clk .city{font-size:.625rem;letter-spacing:.12em;text-transform:uppercase;
-  color:var(--bone);opacity:.7}
+.tape .clk .city{font-size:.625rem;letter-spacing:.1em;text-transform:uppercase;
+  color:var(--bone);opacity:.7;line-height:1}
 /* Larger than the instrument prices, deliberately. The hour in four zones
    is what an operator wants at a glance; a price they will read off the Board.
    The city abbreviates to three letters to buy the time that width. */
+/* Negative tracking on the digits. A monospace face at this size sets very
+   loose, so the width the larger type costs is bought straight back from the
+   gaps between numerals rather than from the strip. */
 .tape .clk .t{color:var(--bone);font-variant-numeric:tabular-nums;
-  font-size:.9375rem;letter-spacing:.02em}
-.tape .clk .mkt{font-size:.5625rem;letter-spacing:.1em;padding:.1rem .3rem;
-  border:1px solid currentColor;border-radius:2px;opacity:.9}
-/* Open and shut, per exchange. Not the gain/loss pair: this is a state, not a
-   direction, and reusing the P&L colours here would make a shut market look
-   like a losing one. */
-.tape .clk .mkt.on{color:var(--patina)}
-.tape .clk .mkt.off{color:var(--pewter);opacity:.55}
-.tape .clk.home .city{color:var(--holo)}
-.tape .clk.home{background:rgba(111,211,232,.06)}
+  font-size:1rem;letter-spacing:-.045em}
+/* City over exchange, so a clock is two short lines rather than one long one.
+   Inline, each clock ran as wide as three instrument cells. */
+.tape .clk .who{display:flex;flex-direction:column;align-items:flex-start;
+  gap:.1rem;line-height:1.15}
+.tape .clk .mkt{font-size:.5rem;letter-spacing:.08em}
+/* ONE visual channel per meaning. Every clock panel is identical now, and the
+   only thing that varies is the exchange label's colour — which is the fact
+   worth reading. New York used to get a lighter panel marking it as "the"
+   market clock; that stopped meaning anything the moment each clock carried
+   its own exchange, and a difference that looks deliberate while signifying
+   nothing is worse than no difference at all.
+   Not the gain/loss pair: this is a state, not a direction, and borrowing the
+   P&L colours would make a shut market read as a losing one. */
+/* Colour AND glow, so the state survives being read by someone who cannot
+   separate the two hues — the glow is a second channel, not decoration.
+   Not the gain/loss pair: this is a state, not a direction, and borrowing the
+   P&L colours would make a shut exchange read as a losing one. */
+.tape .clk .mkt{font-size:.625rem;letter-spacing:.1em;font-weight:600}
+.tape .clk .mkt-live{color:var(--patina);
+  text-shadow:0 0 8px rgba(78,140,125,.75),0 0 16px rgba(78,140,125,.35)}
+.tape .clk .mkt-ooh{color:var(--amber);
+  text-shadow:0 0 7px rgba(192,138,62,.55)}
+.tape .clk .mkt-closed{color:var(--pewter);opacity:.55;text-shadow:none}
+/* No exchange in this zone. Dimmer than shut, because "there is nothing here"
+   is a weaker statement than "this is closed right now". */
+.tape .clk .mkt-bare{color:var(--slate);text-shadow:none}
+.tape .fixed .verdict-on{color:var(--patina)}
+.tape .fixed .verdict-wait{color:var(--amber)}
+.tape .fixed .verdict-off{color:var(--pewter)}
 /* Present only while SCRIPT has not run. A frozen clock is the one plausible
    wrong figure a clock can be, so it says so rather than looking correct. */
 .tape .fixed .frozen{color:var(--amber);text-transform:none;letter-spacing:0}
@@ -2750,32 +2774,43 @@ def _tape_cell(quote: TickerQuote, *, venue: VenueState, kind: str) -> str:
     )
 
 
-def _tape_clock(face: ClockFace, local: datetime, now: datetime) -> str:
-    """One city's clock, carrying the state of the exchange that trades there.
+def _tape_clock(
+    face: ClockFace, local: datetime, now: datetime, phase: MarketPhase | None
+) -> str:
+    """One clock: the EXCHANGE symbol, its state, and the time.
 
-    Each clock answers for ITS OWN market. The strip used to pin one global
-    "PRE-MARKET" over everything, which was a claim about every cell under it
-    and false for crypto — the single-global-session bug `config/rules.yaml`
-    grew an `instruments:` block to fix, arriving through the interface.
+    The exchange symbol is the label — not the city and the exchange stacked,
+    which made each clock as wide as three instrument cells. NYSE already tells
+    you it is New York.
 
-    A zone with no exchange says nothing about a market rather than borrowing
-    New York's. Los Angeles is that case: it is here because the operator asked
-    for US east and west, and there is no exchange on the west coast.
+    State is carried by colour and glow on that symbol, so there is exactly one
+    visual channel for it. Every panel is identical now; New York used to get a
+    lighter background marking it as "the" market clock, and that stopped
+    meaning anything once each clock carried its own exchange. A difference
+    that looks deliberate while signifying nothing is worse than none.
+
+    A zone with no exchange shows the city and no state. Los Angeles is that
+    case — the operator asked for US east and west, and there is no exchange on
+    the west coast, so it makes no claim rather than borrowing New York's.
     """
-    open_now = face.is_open(now)
-    state = ""
-    if open_now is not None:
-        state = (
-            f'<span class="mkt {"on" if open_now else "off"}">'
-            f'{_e(face.exchange)}</span>'
-        )
-    return (
-        f'<span class="clk{" home" if face.is_market else ""}" '
-        f'data-tz="{_e(face.zone)}">'
-        f'<span class="city" title="{_e(face.label)}">{_e(face.code or face.label)}</span>'
-        f'<span class="t">{local:%H:%M:%S}</span>{state}</span>'
+    state = face.state(now, phase if face.is_market else None)
+    label = face.exchange or face.code or face.label
+    # `mkt-live`, never `mkt live`. A bare state word as a modifier is what
+    # the stylesheet collision guard exists to catch, and it caught this twice
+    # in one sitting — `none` (already "no quote" on a cell) and `live`. A
+    # compound class cannot be restyled by an unrelated rule that happens to
+    # use the same word.
+    cls = f"mkt mkt-{state.value}" if state is not None else "mkt mkt-bare"
+    title = (
+        f"{face.label} — {VENUE_TITLES[state]}"
+        if state is not None
+        else f"{face.label} — no exchange in this zone"
     )
-
+    return (
+        f'<span class="clk" data-tz="{_e(face.zone)}" title="{_e(title)}">'
+        f'<span class="{cls}">{_e(label)}</span>'
+        f'<span class="t">{local:%H:%M:%S}</span></span>'
+    )
 
 def ticker_tape(
     state: MarketState,
@@ -2837,7 +2872,7 @@ def ticker_tape(
 
     groups: list[str] = []
     for index, (face, local) in enumerate(faces):
-        groups.append(_tape_clock(face, local, state.now))
+        groups.append(_tape_clock(face, local, state.now, state.phase))
         chunk = quotes[index * PER_GROUP : (index + 1) * PER_GROUP]
         groups.extend(
             cell(q) for q in chunk
@@ -2850,12 +2885,20 @@ def ticker_tape(
     )
 
     run = "".join(groups)
+    # Plain words. "gate open, session shut" was accurate and told an operator
+    # nothing they could act on — it named two internal mechanisms and left the
+    # reader to work out what the bot would actually DO. The question this
+    # answers is "will it trade right now", so it answers that.
+    #
+    # The middle state is the one worth spelling out, and it is the whole point
+    # of the session work: the bot will propose, the gate will approve, and the
+    # order will REST until the next regular open rather than filling now.
     if state.is_tradeable_by_bot:
-        verdict = "gate open"
+        verdict, verdict_class = "trading", "verdict-on"
     elif state.bot_window_open:
-        verdict = "gate open, session shut"
+        verdict, verdict_class = "armed · orders rest until open", "verdict-wait"
     else:
-        verdict = "bot idle"
+        verdict, verdict_class = "idle", "verdict-off"
 
     return (
         f'<div class="tape" data-phase="{_e(state.phase.value)}" '
@@ -2871,7 +2914,7 @@ def ticker_tape(
         # open, session shut" is true of the bot whichever instrument you are
         # looking at.
         '<div class="fixed"><span class="dot"></span>'
-        f'<span class="verdict">{_e(verdict)}</span>'
+        f'<span class="verdict {verdict_class}">{_e(verdict)}</span>'
         # Removed by SCRIPT before its first tick, so its presence means the
         # clocks below are frozen at page-load time.
         '<span class="frozen">not ticking</span>'

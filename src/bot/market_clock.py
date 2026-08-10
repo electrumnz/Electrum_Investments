@@ -539,6 +539,27 @@ class ClockFace:
     def at(self, now: datetime) -> datetime:
         return now.astimezone(ZoneInfo(self.zone))
 
+    def state(self, now: datetime, phase: MarketPhase | None = None) -> VenueState | None:
+        """Open, out of hours, or shut — for THIS exchange.
+
+        `phase` is supplied only for the market clock, where Alpaca's five US
+        sessions are actually modelled. ASX and NZX get two states rather than
+        three, and that asymmetry is deliberate: this module knows their
+        regular hours and does NOT know their pre-open or closing auctions, so
+        painting them amber at 09:50 Sydney would be a state nobody computed.
+        Reporting the coarser truth beats inventing the finer one.
+        """
+        if phase is not None:
+            if phase is MarketPhase.OPEN:
+                return VenueState.LIVE
+            if phase is MarketPhase.WEEKEND:
+                return VenueState.CLOSED
+            return VenueState.OUT_OF_HOURS
+        open_now = self.is_open(now)
+        if open_now is None:
+            return None
+        return VenueState.LIVE if open_now else VenueState.CLOSED
+
     def is_open(self, now: datetime) -> bool | None:
         """Is that exchange in its regular session? `None` if there is none.
 

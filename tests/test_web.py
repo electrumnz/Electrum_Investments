@@ -1648,7 +1648,7 @@ def test_the_clock_states_the_venue_and_the_gate_separately(client):
     assert state.is_tradeable_by_bot is False
 
     body = render.ticker_tape(state, [])
-    assert "gate open, session shut" in body
+    assert "armed · orders rest until open" in body
 
 
 def test_the_console_returns_focus_somewhere_reachable():
@@ -1809,10 +1809,16 @@ def test_a_pre_market_cell_is_neither_live_nor_greyed():
         [_quote("SPY", last=580.0, prev=574.0, tradeable=True)],
     )
 
-    assert "v-ooh" in pre
-    assert "shut" not in pre          # the price is current, not last week's
-    assert "v-live" in session
-    assert "v-ooh" not in session
+    def spy_cell(markup: str) -> str:
+        # Scoped to the cell. "shut" is now legitimately in the ASX and NZX
+        # clock tooltips on the same strip, so searching the whole tape
+        # tested something other than what this is about.
+        return markup.split('data-tick="SPY"')[0].rsplit("<span", 1)[-1]
+
+    assert "v-ooh" in spy_cell(pre)
+    assert "shut" not in spy_cell(pre)   # the price is current, not last week's
+    assert "v-live" in spy_cell(session)
+    assert "v-ooh" not in spy_cell(session)
     # And the tooltip makes the distinction in words, not only in styling.
     assert "an order placed now rests" in pre
 
@@ -1960,8 +1966,9 @@ def test_the_global_session_banner_is_gone_from_the_tape():
 
     assert "Pre-market" not in fixed
     # The gate verdict stays: RiskGate IS account-wide, so it is true of the
-    # bot whichever instrument you are looking at.
-    assert "gate open" in fixed
+    # bot whichever instrument you are looking at. In plain words now — the
+    # middle state is exactly the session work's point, so it says it.
+    assert "armed · orders rest until open" in fixed
 
 
 def test_the_tape_is_a_band_rather_than_the_same_colour_as_the_page():
