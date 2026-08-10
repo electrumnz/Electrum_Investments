@@ -566,18 +566,72 @@ class AlpacaBroker:
         if not self._connected:
             return OrderResult(accepted=False, error="not connected")
 
-        from alpaca.trading.enums import OrderSide, TimeInForce
-        from alpaca.trading.requests import LimitOrderRequest
+        from alpaca.trading.enums import OrderClass, OrderSide, TimeInForce
+        from alpaca.trading.requests import (
+            LimitOrderRequest,
+            StopLossRequest,
+            TakeProfitRequest,
+        )
 
         crypto = is_crypto_symbol(proposal.symbol)
-        request = LimitOrderRequest(
-            symbol=proposal.symbol,
-            qty=proposal.qty,
-            side=OrderSide.BUY if proposal.direction == Direction.BUY else OrderSide.SELL,
-            # Crypto trades around the clock and rejects DAY.
-            time_in_force=TimeInForce.GTC if crypto else TimeInForce.DAY,
-            limit_price=proposal.limit_price,
+        side = OrderSide.BUY if proposal.direction == Direction.BUY else OrderSide.SELL
+
+        if crypto:
+            # Crypto trades around the clock and rejects DAY. Alpaca does not
+            # accept bracket orders on crypto either, so the stop stays a
+            # journal figure here and the loop's monitor is what watches it.
+            return self._submit(
+                LimitOrderRequest(
+                    symbol=proposal.symbol,
+                    qty=proposal.qty,
+                    side=side,
+                    time_in_force=TimeInForce.GTC,
+                    limit_price=proposal.limit_price,
+                )
+            )
+
+        # A BRACKET, so the stop actually rests at the broker.
+        #
+        # Before this, `stop_loss_price` was validated by the gate, used to size
+        # the position, written to the journal — and never sent to Alpaca. The
+        # operator's third rule is "hard stops on every trade", and it was true
+        # at sizing time and false at the broker: nothing would have closed a
+        # losing position, ever, because nothing was resting there to do it.
+        #
+        # **GTC rather than DAY, and that is the whole point.** A DAY bracket's
+        # legs expire with the session, so a position held overnight would sit
+        # unprotected from 16:00 until somebody noticed. GTC legs stay active in
+        # the system across days, so the stop survives the close, the overnight
+        # session, the pre-market and the weekend.
+        #
+        # What GTC does NOT buy is an out-of-hours exit, and no order type from
+        # any broker does. A stop is a trigger that becomes a MARKET order, and
+        # extended-hours venues accept limit orders only — so the leg rests
+        # through the night and becomes eligible again when the regular session
+        # reopens. A gap through the stop therefore fills at the open rather
+        # than at the stop price. That is how every retail stop behaves and it
+        # is worth knowing rather than being surprised by.
+        #
+        # The cost of GTC is at the other end: an unfilled ENTRY also rests
+        # rather than expiring with the day. That is deliberately visible — an
+        # order resting at the broker shows in `get_open_orders` and on the
+        # Board's pending panel — rather than silently cancelled.
+        return self._submit(
+            LimitOrderRequest(
+                symbol=proposal.symbol,
+                qty=proposal.qty,
+                side=side,
+                time_in_force=TimeInForce.GTC,
+                limit_price=proposal.limit_price,
+                order_class=OrderClass.BRACKET,
+                stop_loss=StopLossRequest(stop_price=proposal.stop_loss_price),
+                take_profit=TakeProfitRequest(limit_price=proposal.take_profit_price),
+            )
         )
+
+    def _submit(self, request: Any) -> OrderResult:
+        """One place that talks to `submit_order`, so entry and bracket paths
+        cannot drift in how they report a failure."""
 
         try:
             order: Any = self._trading.submit_order(request)

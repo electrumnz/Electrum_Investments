@@ -15,6 +15,7 @@ from pathlib import Path
 
 import structlog
 
+from . import stop_watch
 from .audit import AuditLog
 from .broker import AlpacaBroker, Broker, MockBroker
 from .claude_client import ClaudeClient, build_system_prompt
@@ -278,6 +279,40 @@ def cmd_loop(
                         detail=alert.message,
                     )
 
+            # Is anything already through the stop it was sized against?
+            #
+            # The bracket at the broker is the primary protection and covers the
+            # regular session completely. This covers what it structurally
+            # cannot: a stop leg cannot fire outside regular hours, because a
+            # stop becomes a MARKET order and extended-hours venues take limit
+            # orders only; Alpaca does not accept brackets on crypto at all; and
+            # a position adopted from the broker has a journalled stop with no
+            # order behind it.
+            #
+            # Reported, never acted on. Closing out of hours needs a marketable
+            # limit order, which is a new execution path, and one that fires
+            # unattended at 3am is a different proposition from one somebody
+            # watches. Making the breach loud is the honest intermediate.
+            breaches = stop_watch.check(journal.open_trades(), ticks)
+            for breach in breaches:
+                log.warning(
+                    "stop_breached",
+                    symbol=breach.trade.symbol,
+                    direction=breach.trade.direction.value,
+                    price=round(breach.price, 4),
+                    planned_stop=round(breach.trade.planned_stop, 4),
+                    through_by=round(breach.distance_usd, 4),
+                    loss_if_closed_now=round(breach.loss_if_closed_now_usd, 2),
+                    detail=breach.describe(),
+                )
+                audit.record_event("stop_breached", {"detail": breach.describe()})
+            # Named separately, never folded into "no breaches". A symbol whose
+            # quote failed is one this cycle could not check, which is not the
+            # same as one it checked and found fine.
+            unchecked_stops = stop_watch.unchecked(journal.open_trades(), ticks)
+            if unchecked_stops:
+                log.warning("stops_unchecked", symbols=unchecked_stops)
+
             # Nothing enabled is open, so a proposal cannot be approved whatever
             # it says. Skipping the model call here is a cost control, not a
             # risk one: everything above this line has already run, so the
@@ -501,6 +536,12 @@ def cmd_loop(
                 if stand_down_state.is_active(datetime.now(UTC))
                 else 0,
                 risk_understated=recon.risk_is_understated,
+                # On the cycle line rather than only in a warning, so a reader
+                # scanning the log sees it without grepping — and so "0" is a
+                # stated fact each cycle rather than the absence of a warning,
+                # which is what an outage also looks like.
+                stops_breached=len(breaches),
+                stops_unchecked=unchecked_stops,
                 news_windows=len(news_windows),
                 calendar_degraded=getattr(calendar, "is_degraded", False),
                 # Same reasoning as calendar_degraded: an empty post list from a

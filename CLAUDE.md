@@ -262,6 +262,51 @@ inside a gate that has to stay deterministic and must not fail open. The guard
 is weekday-shaped, not market-open-shaped, and should not be described as more
 than that.
 
+### The stop is a real order now, and it still cannot fire out of hours
+
+`place_order` used to submit the entry limit order and nothing else.
+`stop_loss_price` was validated by the gate, used to size the position, written
+to the journal — and **never sent to Alpaca**. The operator's third rule is
+"hard stops on every trade", and it was true at sizing time and false at the
+broker: nothing was resting there that would have closed a losing position.
+
+It is a **GTC bracket** now, and GTC rather than DAY is the whole point: a DAY
+bracket's legs expire with the session, so a position held overnight would sit
+unprotected from 16:00 until somebody noticed. GTC legs stay active across days,
+surviving the close, the overnight session, the pre-market and the weekend.
+
+**What no order type from any broker buys is an out-of-hours exit.** A stop is a
+trigger that becomes a MARKET order, and extended-hours venues accept limit
+orders only, so the leg rests through the night and is eligible again when the
+regular session reopens. A gap through the stop fills at the open rather than at
+the stop price. That is how every retail stop behaves; it is not an Alpaca
+limitation and it cannot be configured away.
+
+Three things the bracket structurally cannot cover, which is why
+`stop_watch.py` runs on the loop's fifteen-minute pulse:
+
+- out-of-hours, for the reason above
+- **crypto, which Alpaca does not accept brackets on at all**
+- a position adopted from the broker, or one whose bracket was cancelled by
+  hand: a journalled stop with no order behind it
+
+**`stop_watch` reports and never closes.** Closing out of hours needs a
+marketable limit order, which is a new execution path, and one that fires
+unattended at 3am is a different proposition from one an operator watches.
+Making the breach loud — the log line, an audit event, the cycle summary — is
+the honest intermediate, and automating it is its own decision.
+
+A symbol with no quote is **skipped rather than assumed safe** and named in
+`stops_unchecked`. `fetch_market_ticks` drops a symbol whose fetch failed, so an
+absent tick means "not checked", never "fine" — the `calendar_degraded` lesson
+again. The breach count is on the `cycle_complete` line so that a zero is a
+stated fact each cycle rather than the absence of a warning, which is also what
+an outage looks like.
+
+Compared against the **mid**, not the touch: a wide out-of-hours spread would
+otherwise trip a long on the bid and a short on the ask, reporting a breach the
+traded price never reached.
+
 ### The journal must be wired in or the caps count nothing
 
 `AccountSnapshot.open_risk_usd` is what the total-risk cap counts against, and it
@@ -1451,6 +1496,10 @@ src/bot/
                         daily bars. Computed in Python so the model never derives them.
                         `snapshot()` records them as NUMBERS alongside the rendered
                         line, which is what a stored trigger is graded against.
+  stop_watch.py         Is an open position already through the stop it was
+                        sized against? The backstop for what a broker-side
+                        bracket cannot cover: out of hours, crypto, and adopted
+                        positions. Reports; never closes. Pure functions.
   triggers.py           Grades the watch list: did the named condition fire, and
                         did anything follow. Plan-following, never counterfactual
                         P&L. Operator surface only — it must not reach the prompt.
