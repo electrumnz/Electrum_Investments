@@ -582,6 +582,48 @@ ended the way it was designed to, never what it earned.
 
 ---
 
+## 4b. Three different SPY prices in ONE render, none of them wrong
+
+Found by cross-checking the live Board against itself, 2026-08-10 15:59 UTC.
+A single page render showed:
+
+    ticker tape        SPY 774.12
+    positions "Now"    774.0900
+    orders   "Market"  774.0800
+
+Traced, and every one is a different **measurement**, correctly obtained:
+
+- **"Now" is `Position.current_price`** — Alpaca's own mark on the position.
+- **"Market" is `broker.get_tick(symbol).mid`** — the midpoint the poller
+  computes from bid and ask. A cent away from the broker's mark is exactly
+  what you would expect.
+- **The tape is a third reading on its own clock** — `refresh_seconds: 60.0`,
+  deliberately slower than the five-second account poll, because a tape is
+  orientation and a minute-old price there is fine while a rate-limit stall on
+  the account read would not be.
+
+So nothing is broken and the page still misleads, because **three different
+facts are presented in three columns that all read as "the current price of
+SPY"** with nothing saying they are measured differently. An operator
+comparing them has no way to tell a stale tape from a bid-ask midpoint from a
+broker mark — and the natural reading of a disagreement is that something is
+wrong.
+
+This is the `market_clock` rule arriving in a new place: *"the venue's phase
+and the gate's window, stated separately and never merged into one green
+light"*. Same principle, same failure — two claims that are not the same claim.
+
+**The fix is labelling, not unification.** Do not collapse them onto one source:
+the position mark is what the broker will settle against, the midpoint is what
+an order's distance should be measured from, and the tape's whole point is that
+it is cheap and slightly behind. Name each in its column header or its caption,
+and give the tape its read time the way the Board's tiles already carry theirs.
+
+Worth noting the timestamp machinery *did* work correctly throughout: the page
+said `read 15:56` while `Rendered 15:59`, so the three-minute gap was disclosed
+rather than hidden. That is the reading-versus-render rule doing its job, and
+it is the reason this was checkable at all.
+
 ## 5. RESOLVED — the "pending order" IS the stop leg. Do not clear it.
 
 Read off the live Board through the Funnel, 2026-08-10 15:56 UTC. There is
