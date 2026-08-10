@@ -2581,9 +2581,22 @@ def test_an_inline_link_is_distinguishable_from_the_prose_around_it():
     WCAG 1.4.1 failing in the direction where there is no colour difference
     either, so there was nothing left to fall back on.
     """
-    rule = next(d for d in _css_blocks("\na") if "text-decoration-color" in d)
+    # The bare `a` rule specifically, not `a:hover` and not `nav a` — the
+    # selector has to END in a standalone `a` or this is measuring a different
+    # declaration and would keep passing after the one that matters regressed.
+    rules = [
+        decls
+        for chunk in render.STYLES.split("}")
+        if "{" in chunk
+        for selector, _, decls in [chunk.partition("{")]
+        if selector.rsplit("*/", 1)[-1].strip() == "a"
+    ]
+    assert len(rules) == 1, rules
+    rule = rules[0]
+
     assert "text-decoration-color:var(--pewter)" in rule
     assert "text-underline-offset" in rule
+    # 1.47:1 on ink. An underline nobody can see is not a second channel.
     assert "var(--slate)" not in rule
 
 

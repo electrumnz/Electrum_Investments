@@ -22,6 +22,7 @@ from mcp.server.mcpserver import MCPServer
 from .audit import AuditLog
 from .broker import Broker
 from .config import Env, Rules, load_rules
+from .data.calendar import CalendarFeed, build_calendar_feed
 from .dreaming import (
     DEFAULT_DREAMS_PATH,
     Adoption,
@@ -92,6 +93,7 @@ class _Session:
         self._insight_path = INSIGHT_DB_PATH
         self._dreams: DreamStore | None = None
         self._dreams_path = DEFAULT_DREAMS_PATH
+        self._calendar: CalendarFeed | None = None
 
     @property
     def env(self) -> Env:
@@ -121,6 +123,32 @@ class _Session:
         if self._journal is None:
             self._journal = Journal()
         return self._journal
+
+    @property
+    def calendar(self) -> CalendarFeed:
+        """The earnings calendar the news blackout gate reads.
+
+        **This path ran without one, so `_news_blackout` had never fired on an
+        order placed here.** The rule is in `config/rules.yaml`, the gate
+        implements it, and `evaluate` was simply never handed any windows —
+        which meant the loop held back around an announcement and an order
+        placed by the operator or through chat did not. A gate rule enforced on
+        one path and not another is worse than one nobody wrote, because the
+        limits page says it applies.
+
+        Built once per process and cached, exactly as the loop builds it once at
+        start: `FinnhubCalendar` keeps a TTL cache because the free tier allows
+        100 requests a day, and a fresh adapter per tool call would throw that
+        cache away and spend the loop's quota.
+
+        Failure is the feed's own to report. `FinnhubCalendar` catches its
+        errors and answers with no windows plus `is_degraded`, so a bad fetch
+        costs the blackout rather than the order path — the same direction as
+        everything else here.
+        """
+        if self._calendar is None:
+            self._calendar = build_calendar_feed(self.env, self.rules)
+        return self._calendar
 
     @property
     def gate(self) -> RiskGate:
@@ -279,6 +307,11 @@ def check_order(
         account=account,
         tick=tick,
         activity=activity,
+        # The same hour of lookahead the decision loop uses. Without this the
+        # earnings blackout in config/rules.yaml could not fire on an order
+        # placed by the operator or through chat, while firing on every order
+        # the loop proposed — one rule, enforced on one path.
+        news_windows=_session.calendar.upcoming_windows(lookahead_minutes=60),
         stand_down=_session.journal.get_stand_down(),
     )
     return {
@@ -1515,11 +1548,17 @@ def adopt_dream(
 
     Refused, with every reason at once, when the dream is not in the vault (the
     only shelf visible from here), when it names no symbols, when its instrument
-    class is unresolved, or when the adopted shelf is full. A full shelf is an
+    class is unresolved, when the adopted shelf is full, or when you ask for
+    symbols or a class the dream does not itself claim. A full shelf is an
     ordinary answer: the cap matches max_concurrent_positions, so a fourth
     adoption would be a promise the account has no slot to keep. A refusal comes
     back as `ok: false` with its reasons — it is not an error, and asking again
     will not change it.
+
+    **You cannot grant yourself a symbol here.** The store checks every adoption
+    against what the dream offers, so `symbols` may only ever narrow that list
+    and `asset_class` may only restate it. A dream is the argument the dreamer
+    won; adoption accepts it or takes less of it.
 
     The grant is time-boxed. Report `expires_at` and `expires_in_days` when
     describing what was taken, because a permission with no stated end is one
@@ -1527,12 +1566,13 @@ def adopt_dream(
 
     Args:
         dream_id: The id from list_dreams.
-        symbols: Override the symbols to grant. Omit to take the dream's own
-            claim, which is the offer as the dreamer made it.
+        symbols: Take only some of what the dream offers. Must be a subset of
+            its own symbols; anything else is refused. Omit to take the whole
+            offer as the dreamer made it.
         asset_class: The instruments key from config/rules.yaml — "us_equity",
-            "crypto". Omit to take the dream's own. An unresolved class grants
-            nothing, because a symbol whose class is unknown is a symbol whose
-            risk limits are unknown.
+            "crypto". It must match the dream's own; omit it and the dream's is
+            used. An unresolved class grants nothing, because a symbol whose
+            class is unknown is a symbol whose risk limits are unknown.
     """
     store, error = _store()
     if store is None:

@@ -147,10 +147,21 @@ journal to figures to a human to a commit, at human speed, with an audit trail.
 
 ## Why the store is its own file
 
-`data/dreams.db`, not `data/journal.db`. The journal is the only irreplaceable
-file on the box and `deploy/backup-journal.sh` snapshots it hourly; losing every
-dream ever recorded costs some speculative notes and nothing else. Keeping them
-apart also means no query can accidentally read a hypothesis as a position.
+`data/dreams.db`, not `data/journal.db`. Keeping them apart means no query can
+accidentally read a hypothesis as a position, and it means a bug in the
+speculative half cannot corrupt the trading record.
+
+**What losing this file costs is no longer "some speculative notes".** That was
+true when a dream reached nobody. The `adoptions` table is now a live trading
+PERMISSION — `granted_symbols` is what widens `allowed_symbols`, and
+`Trade.dream_id` on the journal points here for the provenance the Board
+renders. Losing it withdraws every grant, which is the safe direction and is
+why it is still not in `deploy/backup-journal.sh`: an adoption is recoverable by
+adopting again, a trade is not recoverable at all, and restoring a stale
+`dreams.db` over a current one would resurrect permissions somebody handed back.
+The journal stays the only irreplaceable file on the box. Dangling `dream_id`s
+are the visible cost, and a provenance that cannot be looked up is better than a
+permission that was reinstated by a restore.
 """
 
 from __future__ import annotations
@@ -442,6 +453,16 @@ class Adoption:
     of step with `returned_at` and `expires_at`; `is_live` is arithmetic over
     the two, given a `now` the caller supplies. A flag would be a third fact
     about the same thing and would eventually disagree with the other two.
+
+    **And it is the ONLY definition of live.** `granted_symbols` used to answer
+    the same question in SQL, comparing `expires_at > ?` as TEXT, which is
+    string ordering rather than instant ordering. `adopt` wrote whatever offset
+    the caller's `at` carried, so a grant stamped `+13:00` — Pacific/Auckland,
+    which the dream timer uses by design — read as LIVE from the permission path
+    six hours after `is_live` correctly called it expired. Two paths, two
+    answers, and the one that failed open was the one that decides what may be
+    traded. The SQL now filters only on facts a string can hold and every
+    liveness question comes back through here.
     """
 
     dream_id: int
@@ -457,10 +478,26 @@ class Adoption:
     id: int | None = None
 
     def is_live(self, now: datetime) -> bool:
-        """Whether this grant is in force at `now`. Pure."""
+        """Whether this grant is in force at `now`. Pure, and never raises.
+
+        **No expiry reads as EXPIRED, not as eternal.** `adopt` always writes
+        one, so a row without it is hand-edited, migrated from somewhere, or
+        written by something that is not this store — and "a permission nobody
+        set an end on" is exactly the state that should not quietly outlive
+        everyone who remembers it. The safe reading of a missing figure is the
+        one that grants nothing, the same rule as an absent indicator being
+        `None` rather than zero.
+
+        A naive `now` is read as UTC rather than raising. Everything in this
+        repository reasons in UTC deliberately, and a `TypeError` out of here
+        lands in the decision cycle — the shape `claude.propose` was wrapped
+        for after a `ValidationError` killed a live loop.
+        """
         if self.returned_at is not None:
             return False
-        return self.expires_at is None or self.expires_at > now
+        if self.expires_at is None:
+            return False
+        return _as_utc(self.expires_at) > _as_utc(now)
 
 
 @dataclass(frozen=True)
@@ -680,6 +717,33 @@ class Dream:
         self.updated_at = at or datetime.now(UTC)
 
 
+def _as_utc(moment: datetime) -> datetime:
+    """The same instant, in UTC. A naive stamp is read as UTC rather than local.
+
+    Everything in this repository reasons in UTC on purpose — `sessions_utc`,
+    every journal timestamp, every figure the dashboard renders — so a stamp
+    with no offset is a UTC stamp somebody forgot to label, and reading it as
+    the box's local time would silently reinterpret it. Attaching the zone is
+    also what keeps `is_live` from raising on a naive `now`.
+    """
+    if moment.tzinfo is None:
+        return moment.replace(tzinfo=UTC)
+    return moment.astimezone(UTC)
+
+
+def _iso_utc(moment: datetime) -> str:
+    """The stamp SQLite stores. Always UTC, so text ordering is instant ordering.
+
+    Every timestamp in this store is compared as text somewhere — `ORDER BY
+    adopted_at`, `expires_at > ?` before that comparison was moved into Python —
+    and ISO text only sorts by instant when every row carries the same offset. A
+    `+13:00` stamp sorts as though it were thirteen hours later than it is, which
+    is how a lapsed grant read as live. Normalise on write and the question never
+    arises again.
+    """
+    return _as_utc(moment).isoformat()
+
+
 def _trim(text: str) -> str:
     """Prose truncates. Nothing structural goes through here.
 
@@ -887,6 +951,12 @@ class MoveRefusal(StrEnum):
     NEEDS_REASON = "needs_reason"
     NEEDS_SYMBOLS = "needs_symbols"
     NEEDS_ASSET_CLASS = "needs_asset_class"
+    # The adoption asked for something the dream does not offer. Two refusals
+    # rather than one because they are fixed differently — narrow the symbol
+    # list, or take the class the dream actually claims — and `MoveResult`
+    # collects every reason so a caller is not told one at a time.
+    SYMBOLS_NOT_OFFERED = "symbols_not_offered"
+    CLASS_NOT_OFFERED = "class_not_offered"
     # The dream is not in the vault this operation moves out of — adopting
     # something that is not in the vault, returning something that was never
     # adopted.
@@ -1077,10 +1147,14 @@ def _add_vault_columns(conn: sqlite3.Connection) -> None:
             "clock from updated_at."
         ),
     )
-    # Backfilled unconditionally rather than only for the rows just migrated: a
-    # row inserted by an older binary against a migrated database would also
-    # carry the empty default, and it costs one UPDATE that matches nothing on
-    # a healthy file.
+    # Backfills the rows that were just migrated. It sits AFTER the `if not
+    # added: return` above, so it runs only on the open that adds the columns —
+    # the comment here used to describe an unconditional sweep that would also
+    # catch a row written by an older binary against an already-migrated file,
+    # and that case is unreachable from where the statement actually is. Left
+    # where it is rather than moved: an older binary writing to a newer database
+    # is not a state this deployment can reach, and a sweep on every open would
+    # be a write on a path that should be a read.
     conn.execute(
         "UPDATE dreams SET vault_entered_at = updated_at WHERE vault_entered_at = ''"
     )
@@ -1248,10 +1322,26 @@ class DreamStore:
     # ------------------------------------------------------------- the vaults
 
     def in_vault(self, vault: Vault, limit: int = 50) -> list[Dream]:
-        """Everything on one shelf, newest first."""
+        """Everything on one shelf, most recently ARRIVED first.
+
+        **`vault_entered_at`, not `updated_at`, and the difference is who gets
+        starved.** `confer.run` reverses this list to answer the longest-waiting
+        offer first, precisely so a productive dreamer cannot bury its own older
+        offers. Ordered by `updated_at` that reversal answered the least
+        recently EDITED first, which is a different dream: one vaulted 150 days
+        ago and touched this morning sorted as the newest thing on the shelf and
+        went to the back of the queue — the exact starvation the reversal exists
+        to prevent, with the code that prevents it still in place.
+
+        Two clocks, one meaning each: `vault_entered_at` is how long it has been
+        waiting here, `updated_at` is when it last changed. Waiting is the
+        question this answers. `id` breaks a tie, so two dreams shelved in the
+        same second have a stable order rather than SQLite's.
+        """
         with self._connect() as conn:
             rows = conn.execute(
-                "SELECT * FROM dreams WHERE vault=? ORDER BY updated_at DESC LIMIT ?",
+                "SELECT * FROM dreams WHERE vault=?"
+                " ORDER BY vault_entered_at DESC, id DESC LIMIT ?",
                 (str(vault), limit),
             ).fetchall()
         return [d for d in (self._to_dream(r) for r in rows) if d is not None]
@@ -1362,7 +1452,7 @@ class DreamStore:
                 "reset."
             )
 
-        full = self._is_full(to, limits, exclude=dream_id)
+        full = self._is_full(to, limits, now=stamp, exclude=dream_id)
         if full is not None:
             refusals.append(MoveRefusal.FULL)
             details.append(full)
@@ -1374,8 +1464,26 @@ class DreamStore:
 
         return self._commit_move(dream, to, at=stamp, reason=reason)
 
+    def has_room(
+        self, vault: Vault, *, now: datetime, caps: VaultCaps | None = None
+    ) -> bool:
+        """Whether one more dream would fit on `vault` right now.
+
+        The same arithmetic `move` and `adopt` refuse on, exposed so a caller
+        can ask BEFORE spending a model call — `confer` re-tests a dream whose
+        adoption the shelf refused, and asking that question a second way would
+        eventually give a second answer.
+        """
+        return self._is_full(vault, caps or DEFAULT_CAPS, now=now) is None
+
     def _is_full(
-        self, to: Vault, caps: VaultCaps, *, exclude: int | None = None
+        self,
+        to: Vault,
+        caps: VaultCaps,
+        *,
+        now: datetime,
+        exclude: int | None = None,
+        conn: sqlite3.Connection | None = None,
     ) -> str | None:
         """The sentence to report if `to` has no room, else `None`.
 
@@ -1383,16 +1491,29 @@ class DreamStore:
         into, which cannot happen through `move` — it refuses a move to the
         vault a dream is already in — but would be a nasty off-by-one if some
         later caller retried a partially-applied move.
+
+        **ADOPTED counts LIVE GRANTS, not rows on the shelf**, and the two stop
+        agreeing the moment a grant expires. The cap is there because
+        `caps.adopted` matches `account.max_concurrent_positions`: an adoption
+        is a promise the trading agent may act on it, so a fourth would be a
+        promise the account has no slot to keep. A dream whose grant lapsed is
+        no longer such a promise, and counting it bricked the shelf — three
+        expiries and nothing could be adopted again, with `delete` refusing an
+        ADOPTED dream, `move` refusing every actor, and `return_to_vault` the
+        only exit. `electrum-bot vault-expire` hands those back; until it runs,
+        they no longer occupy a slot they are not using.
+
+        `conn` lets a caller do this check inside its own transaction, which is
+        what closes the gap between reading the count and writing the row.
         """
         limit = caps.limit_for(to)
         if limit is None:
             return None
-        with self._connect() as conn:
-            row = conn.execute(
-                "SELECT COUNT(*) n FROM dreams WHERE vault=? AND id IS NOT ?",
-                (str(to), exclude),
-            ).fetchone()
-        held = int(row["n"])
+        if conn is not None:
+            held = self._count_toward(to, now=now, exclude=exclude, conn=conn)
+        else:
+            with self._connect() as owned:
+                held = self._count_toward(to, now=now, exclude=exclude, conn=owned)
         if held < limit:
             return None
         return (
@@ -1401,16 +1522,68 @@ class DreamStore:
             "head, not about risk."
         )
 
+    def _count_toward(
+        self,
+        to: Vault,
+        *,
+        now: datetime,
+        exclude: int | None,
+        conn: sqlite3.Connection,
+    ) -> int:
+        """How many dreams count against `to`'s cap. See `_is_full`."""
+        rows = conn.execute(
+            "SELECT id FROM dreams WHERE vault=? AND id IS NOT ?",
+            (str(to), exclude),
+        ).fetchall()
+        if to is not Vault.ADOPTED:
+            return len(rows)
+        held = 0
+        for row in rows:
+            if any(
+                a.is_live(now)
+                for a in self._adoptions_on(conn, int(row["id"]))
+            ):
+                held += 1
+        return held
+
+    def _adoptions_on(
+        self, conn: sqlite3.Connection, dream_id: int
+    ) -> list[Adoption]:
+        """Every adoption row for one dream, on a connection the caller owns."""
+        rows = conn.execute(
+            "SELECT * FROM adoptions WHERE dream_id=? ORDER BY adopted_at DESC, id DESC",
+            (dream_id,),
+        ).fetchall()
+        return [a for a in (_to_adoption(r) for r in rows) if a is not None]
+
     def _commit_move(
         self, dream: Dream, to: Vault, *, at: datetime, reason: str
     ) -> MoveResult:
-        """Write the move. No checking here; every caller has done its own."""
-        was = dream.vault
+        """Write the move on its own connection. No checking; callers have done it."""
         with self._connect() as conn:
-            conn.execute(
-                "UPDATE dreams SET vault=?, vault_entered_at=?, updated_at=? WHERE id=?",
-                (str(to), at.isoformat(), at.isoformat(), dream.id),
-            )
+            return self._apply_move(conn, dream, to, at=at, reason=reason)
+
+    def _apply_move(
+        self,
+        conn: sqlite3.Connection,
+        dream: Dream,
+        to: Vault,
+        *,
+        at: datetime,
+        reason: str,
+    ) -> MoveResult:
+        """The move itself, on a connection the caller owns.
+
+        Split out so `adopt` can put the grant, the transcript entry and the
+        move in one transaction. A grant that survived while the move did not
+        was a permission attached to a dream still sitting in the vault.
+        """
+        was = dream.vault
+        stamp = _iso_utc(at)
+        conn.execute(
+            "UPDATE dreams SET vault=?, vault_entered_at=?, updated_at=? WHERE id=?",
+            (str(to), stamp, stamp, dream.id),
+        )
         log.info(
             "dream_moved",
             dream_id=dream.id,
@@ -1436,8 +1609,18 @@ class DreamStore:
 
         Refused for an ADOPTED dream whoever asks, because a live grant whose
         dream has been deleted is a symbol permission nobody can explain.
-        `granted_symbols` joins back to `dreams` as a second lock on that, but
-        the first lock is not creating the state at all.
+        `granted_symbols` joins back to `dreams` and to the ADOPTED shelf as a
+        second lock on that, but the first lock is not creating the state at all.
+
+        **It stays refused once the grant has EXPIRED, and the refusal names the
+        way out.** An audit read this as a shelf that bricks itself — three
+        expired adoptions and nothing can be adopted again — and the cap was the
+        real fault there, not this: `_is_full` counts live grants now, so an
+        expired adoption occupies no slot. Deleting would still be the wrong
+        exit, because the adoption rows go with the dream and those rows are the
+        only record that a permission existed and what it covered. The exit is
+        `return_to_vault`, which closes the grant and keeps the history, and
+        `electrum-bot vault-expire` does it unprompted for anything lapsed.
 
         The messages and adoption rows go with it. An adoption row with no dream
         behind it is a record of a permission that cannot be read, which is
@@ -1471,9 +1654,11 @@ class DreamStore:
                 dream_id,
                 [MoveRefusal.FORBIDDEN_ACTOR],
                 [
-                    "This dream has been adopted, so a live symbol grant points "
-                    "at it. It has to come back to the vault before it can be "
-                    "retired."
+                    "This dream is on the adopted shelf, so an adoption row "
+                    "points at it. Hand it back with return_to_vault(), which "
+                    "closes the grant and keeps the record of what it covered — "
+                    "`electrum-bot vault-expire` does that for anything already "
+                    "lapsed. Then it can be retired."
                 ],
                 moved_from=dream.vault,
             )
@@ -1506,26 +1691,35 @@ class DreamStore:
         Not validated against `MESSAGE_KINDS` or the known speakers. An
         unfamiliar kind costs a page a badge; refusing it would lose the turn.
         """
-        stamp = at or datetime.now(UTC)
-        message = DreamMessage(
+        with self._connect() as conn:
+            return self._insert_message(
+                conn, dream_id, speaker=speaker, text=text, kind=kind, at=at
+            )
+
+    def _insert_message(
+        self,
+        conn: sqlite3.Connection,
+        dream_id: int,
+        *,
+        speaker: str,
+        text: str,
+        kind: str = "note",
+        at: datetime | None = None,
+    ) -> DreamMessage:
+        """One turn, on a connection the caller owns. See `add_message`."""
+        stamp = _as_utc(at or datetime.now(UTC))
+        trimmed = _trim(text)
+        cursor = conn.execute(
+            "INSERT INTO dream_messages (dream_id, at, speaker, kind, text)"
+            " VALUES (?,?,?,?,?)",
+            (dream_id, _iso_utc(stamp), speaker, kind, trimmed),
+        )
+        return DreamMessage(
             dream_id=dream_id,
             at=stamp,
             speaker=speaker,
-            text=_trim(text),
+            text=trimmed,
             kind=kind,
-        )
-        with self._connect() as conn:
-            cursor = conn.execute(
-                "INSERT INTO dream_messages (dream_id, at, speaker, kind, text)"
-                " VALUES (?,?,?,?,?)",
-                (dream_id, stamp.isoformat(), speaker, kind, message.text),
-            )
-        return DreamMessage(
-            dream_id=message.dream_id,
-            at=message.at,
-            speaker=message.speaker,
-            text=message.text,
-            kind=message.kind,
             id=int(cursor.lastrowid or 0),
         )
 
@@ -1580,6 +1774,18 @@ class DreamStore:
         Same reasoning as the journal recording the proposal rather than
         re-deriving it later.
 
+        **An override may only ever NARROW the offer, and that is the lock.**
+        Both arguments used to be taken as given, so a dream carrying no symbols
+        and no class could be adopted with invented ones: every dream in the
+        vault was a blank cheque, and `mcp_server.adopt_dream` exposes both
+        fields to a model. The check lives here rather than in the caller
+        precisely because there is more than one caller and there will be more
+        — a tool, a conference, an operator command — and a rule enforced in a
+        caller is a rule the next caller does not have. Asking for a symbol the
+        dream does not claim is `SYMBOLS_NOT_OFFERED`; asking for a different
+        class is `CLASS_NOT_OFFERED`. Taking two of the three symbols a dream
+        offers is fine: that is the trading agent being careful.
+
         Refused when the dream is not in VAULT — the only shelf the trading
         agent can see — when it names no symbols, when its class is unresolved,
         and when the adopted vault is full. The last of those matters more than
@@ -1591,8 +1797,17 @@ class DreamStore:
         second is the lock that matters — the same arrangement as `mode=ro` plus
         the statement guard in `insight.py`, where the first check is the useful
         error message and the second is the guarantee.
+
+        **All four writes go through ONE connection in ONE transaction**, which
+        is what makes the first paragraph true. They used to be three separate
+        connections, so an interruption between them left a live grant on a
+        dream still sitting in the vault — a permission no page describes,
+        which `return_to_vault` then refuses to close with `WRONG_VAULT`,
+        leaving deletion as the only exit. The full check moved inside the same
+        transaction with them, closing the gap between reading the count and
+        writing the row.
         """
-        stamp = at or datetime.now(UTC)
+        stamp = _as_utc(at or datetime.now(UTC))
         limits = caps or DEFAULT_CAPS
 
         dream = self.get(dream_id)
@@ -1615,7 +1830,17 @@ class DreamStore:
                 "can see."
             )
 
-        granted = _symbols(symbols if symbols is not None else dream.symbols)
+        offered = _symbols(dream.symbols)
+        granted = _symbols(symbols) if symbols is not None else offered
+        overreach = [s for s in granted if s not in offered]
+        if overreach:
+            refusals.append(MoveRefusal.SYMBOLS_NOT_OFFERED)
+            details.append(
+                f"This dream does not offer {', '.join(overreach)}. An adoption "
+                f"grants what the dream claims — {', '.join(offered) or 'nothing'}"
+                " — or some of it, never something else. A grant is the argument "
+                "the dreamer won, not a blank permission with a dream id on it."
+            )
         if not granted:
             refusals.append(MoveRefusal.NEEDS_SYMBOLS)
             details.append(
@@ -1624,27 +1849,24 @@ class DreamStore:
                 "symbols or leave the dream in the vault."
             )
 
-        resolved_class = (asset_class or dream.asset_class_key).strip()
+        claimed_class = dream.asset_class_key.strip()
+        asked_class = asset_class.strip()
+        if asked_class and asked_class != claimed_class:
+            refusals.append(MoveRefusal.CLASS_NOT_OFFERED)
+            details.append(
+                f"This dream claims the instrument class "
+                f"'{claimed_class or 'none'}', not '{asked_class}'. The class "
+                "decides which limits the granted symbols face, so choosing a "
+                "different one at adoption is choosing the caps rather than "
+                "accepting them."
+            )
+        resolved_class = claimed_class
         if not resolved_class:
             refusals.append(MoveRefusal.NEEDS_ASSET_CLASS)
             details.append(
                 "The instrument class is unresolved, so nothing can say which "
-                "limits apply to these symbols. Set it to a key from the "
-                "instruments block of config/rules.yaml."
-            )
-
-        full = self._is_full(Vault.ADOPTED, limits, exclude=dream_id)
-        if full is not None:
-            refusals.append(MoveRefusal.FULL)
-            details.append(full)
-
-        if refusals:
-            return _refused(
-                dream_id,
-                refusals,
-                details,
-                moved_from=dream.vault,
-                moved_to=Vault.ADOPTED,
+                "limits apply to these symbols. Set it on the dream, to a key "
+                "from the instruments block of config/rules.yaml."
             )
 
         days = ttl_days if ttl_days is not None else DEFAULT_TTLS.adopted
@@ -1652,41 +1874,62 @@ class DreamStore:
         trace = _trim(wisp) or _default_wisp(dream, granted, stamp)
 
         with self._connect() as conn:
+            full = self._is_full(
+                Vault.ADOPTED, limits, now=stamp, exclude=dream_id, conn=conn
+            )
+            if full is not None:
+                refusals.append(MoveRefusal.FULL)
+                details.append(full)
+
+            if refusals:
+                return _refused(
+                    dream_id,
+                    refusals,
+                    details,
+                    moved_from=dream.vault,
+                    moved_to=Vault.ADOPTED,
+                )
+
             conn.execute(
                 "INSERT INTO adoptions (dream_id, adopted_at, symbols_granted,"
                 " asset_class, expires_at) VALUES (?,?,?,?,?)",
                 (
                     dream_id,
-                    stamp.isoformat(),
+                    _iso_utc(stamp),
                     json.dumps(granted),
                     resolved_class,
-                    expires.isoformat(),
+                    _iso_utc(expires),
                 ),
             )
             conn.execute(
                 "UPDATE dreams SET wisp=? WHERE id=?",
                 (trace, dream_id),
             )
+            # Written by the store rather than left to the caller, so the
+            # transcript is complete even when neither agent thought to narrate
+            # the handover — and written on THIS connection, so a grant cannot
+            # exist without the move that makes it visible.
+            self._insert_message(
+                conn,
+                dream_id,
+                speaker=TRADER,
+                kind="accept",
+                text=(
+                    f"Adopted {', '.join(granted)} ({resolved_class}) until "
+                    f"{expires:%d %b %Y}."
+                ),
+                at=stamp,
+            )
+            result = self._apply_move(
+                conn, dream, Vault.ADOPTED, at=stamp, reason="adopted"
+            )
 
-        # Written by the store rather than left to the caller, so the transcript
-        # is complete even when neither agent thought to narrate the handover.
-        self.add_message(
-            dream_id,
-            speaker=TRADER,
-            kind="accept",
-            text=(
-                f"Adopted {', '.join(granted)} ({resolved_class}) until "
-                f"{expires:%d %b %Y}."
-            ),
-            at=stamp,
-        )
-        result = self._commit_move(dream, Vault.ADOPTED, at=stamp, reason="adopted")
         log.info(
             "dream_adopted",
             dream_id=dream_id,
             symbols=granted,
             asset_class=resolved_class,
-            expires_at=expires.isoformat(),
+            expires_at=_iso_utc(expires),
         )
         return result
 
@@ -1707,7 +1950,7 @@ class DreamStore:
         because the dream is the dreamer's again and a trace of something it now
         holds whole would be misleading.
         """
-        stamp = at or datetime.now(UTC)
+        stamp = _as_utc(at or datetime.now(UTC))
         clean = _trim(reason)
 
         dream = self.get(dream_id)
@@ -1739,19 +1982,25 @@ class DreamStore:
                 dream_id, refusals, details, moved_from=dream.vault, moved_to=Vault.VAULT
             )
 
+        # One transaction, for the mirror of `adopt`'s reason: closing the grant
+        # without moving the dream would leave a dream in ADOPTED that grants
+        # nothing, and moving it without closing the grant would leave a live
+        # permission on a dream sitting back in the vault.
         with self._connect() as conn:
             conn.execute(
                 "UPDATE adoptions SET returned_at=?, return_reason=? WHERE dream_id=?"
                 " AND returned_at IS NULL",
-                (stamp.isoformat(), clean, dream_id),
+                (_iso_utc(stamp), clean, dream_id),
             )
             conn.execute("UPDATE dreams SET wisp='' WHERE id=?", (dream_id,))
-
-        self.add_message(
-            dream_id, speaker=TRADER, kind="return", text=clean, at=stamp
-        )
+            self._insert_message(
+                conn, dream_id, speaker=TRADER, kind="return", text=clean, at=stamp
+            )
+            result = self._apply_move(
+                conn, dream, Vault.VAULT, at=stamp, reason=clean
+            )
         log.info("dream_returned", dream_id=dream_id, reason=clean)
-        return self._commit_move(dream, Vault.VAULT, at=stamp, reason=clean)
+        return result
 
     def adoptions(self, dream_id: int | None = None) -> list[Adoption]:
         """Every adoption, or every adoption of one dream. Newest first."""
@@ -1780,10 +2029,21 @@ class DreamStore:
           cache. Two calls with the same `now` over the same file return the
           same mapping — the same property `RiskGate` is built around, for the
           same reason.
-        - **Live only.** An adoption that has been handed back, or whose grant
-          has expired, is excluded. Both are computed from the row rather than
-          read from a stored flag, because a third fact about the same thing is
-          a third fact that can disagree with the other two.
+        - **Live only, and `Adoption.is_live` is what decides.** An adoption
+          handed back, expired, or carrying no expiry at all is excluded. This
+          used to be answered a second time in SQL, comparing ISO timestamps as
+          TEXT — so a grant written with a `+13:00` offset, which is what the
+          dream timer's Pacific/Auckland schedule produces, read as live here
+          for six hours after `is_live` correctly called it dead. Two answers to
+          one question, and the permission path had the lenient one. The query
+          now filters only on what a string can hold — returned, and the dream
+          still adopted — and liveness is arithmetic on datetimes, once.
+        - **The dream must still be ADOPTED.** The join used to check only that
+          the dream existed, so mutating `dream.vault` and calling `save()` —
+          which deliberately bypasses `move` — left an archived dream holding a
+          live grant, and an interrupted `adopt` left one on a dream still in
+          the vault. A permission that no shelf accounts for is a permission
+          nobody is watching.
         - **An unresolved class grants nothing.** An adoption with an empty
           `asset_class` is dropped, because a symbol whose class is unknown is a
           symbol whose limits are unknown, and defaulting it would be choosing
@@ -1809,37 +2069,32 @@ class DreamStore:
         try:
             with self._connect() as conn:
                 rows = conn.execute(
-                    "SELECT a.symbols_granted AS symbols_granted,"
-                    " a.asset_class AS asset_class, a.dream_id AS dream_id"
-                    " FROM adoptions a"
+                    "SELECT a.* FROM adoptions a"
                     # Joined to `dreams` so an adoption whose dream is gone can
-                    # never grant anything. `delete` already refuses an adopted
-                    # dream; this is the lock that does not depend on that
-                    # having been got right.
+                    # never grant anything, and constrained to the ADOPTED shelf
+                    # so one whose dream has been moved off it cannot either.
+                    # `delete` already refuses a dream with a live grant; this is
+                    # the lock that does not depend on that having been got right.
                     " JOIN dreams d ON d.id = a.dream_id"
-                    " WHERE a.returned_at IS NULL"
-                    "   AND (a.expires_at IS NULL OR a.expires_at > ?)",
-                    (now.isoformat(),),
+                    " WHERE a.returned_at IS NULL AND d.vault = ?",
+                    (str(Vault.ADOPTED),),
                 ).fetchall()
         except sqlite3.Error as exc:
             log.warning("granted_symbols_unavailable", error=str(exc))
             return {}
 
         for row in rows:
-            asset_class = str(row["asset_class"] or "").strip()
+            adoption = _to_adoption(row)
+            if adoption is None:
+                continue
+            # The one definition of live, rather than a second one in SQL.
+            if not adoption.is_live(now):
+                continue
+            asset_class = adoption.asset_class.strip()
             if not asset_class:
-                log.warning("adoption_without_asset_class", dream_id=row["dream_id"])
+                log.warning("adoption_without_asset_class", dream_id=adoption.dream_id)
                 continue
-            try:
-                symbols = _symbols(json.loads(row["symbols_granted"] or "[]"))
-            except (json.JSONDecodeError, TypeError) as exc:
-                log.warning(
-                    "adoption_symbols_unreadable",
-                    dream_id=row["dream_id"],
-                    error=str(exc),
-                )
-                continue
-            for symbol in symbols:
+            for symbol in adoption.symbols_granted:
                 held = granted.get(symbol)
                 if held is not None and held != asset_class:
                     conflicted.add(symbol)

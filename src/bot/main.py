@@ -26,13 +26,17 @@ from .context import (
     fetch_intraday,
     fetch_market_ticks,
 )
-from .data.calendar import CalendarFeed, EmptyCalendar
-from .data.finnhub import FinnhubCalendar
+
+# `build_calendar_feed` moved to `data.calendar` when the MCP order path
+# turned out to need it too: a gate rule enforced on the loop and not on the
+# operator's own order path is a rule with a hole in it.
+from .data.calendar import build_calendar_feed
 from .data.marketaux import MarketauxNews
 from .data.news import EmptyNews, NewsFeed
 from .data.xfeed import XFeed
 from .dreaming import Dream, DreamStore, Vault
-from .grants import resolve_grant_dream_ids, resolve_granted_symbols
+from .grants import NONE_LIVE as grants_none_live
+from .grants import resolve_grant_dream_ids, resolve_granted_symbols, resolve_grants
 from .indicators import snapshot as snapshot_indicators
 from .indicators import summarise as summarise_indicators
 from .intraday import summarise as summarise_intraday
@@ -72,26 +76,6 @@ def build_news_feed(env: Env) -> NewsFeed:
         log.info("no_marketaux_key_running_without_headlines")
         return EmptyNews()
     return MarketauxNews(api_key=env.marketaux_api_key)
-
-
-def build_calendar_feed(env: Env, rules: Rules) -> CalendarFeed:
-    """Finnhub's earnings calendar when a key is present, otherwise nothing.
-
-    Unlike headlines this one feeds a risk rule: with no calendar,
-    `RiskGate._news_blackout` has no windows and therefore never fires. That is
-    a real gap rather than a preference, so it warns.
-    """
-    if not env.finnhub_api_key:
-        log.warning(
-            "no_finnhub_key_news_blackout_inactive",
-            detail=(
-                "Without an earnings calendar the news blackout rule in "
-                "config/rules.yaml cannot fire. Trades will not be held back "
-                "around announcements."
-            ),
-        )
-        return EmptyCalendar()
-    return FinnhubCalendar(api_key=env.finnhub_api_key, symbols=list(rules.allowed_symbols))
 
 
 def build_social_feed(env: Env, rules: Rules) -> XFeed | None:
@@ -411,8 +395,16 @@ def cmd_loop(
             # as crypto being fully configured while disabled.
             granted_symbols: dict[str, str] = {}
             granted_dream_ids: dict[str, int] = {}
+            # `none_live` rather than a blank when there is no store at all:
+            # every state this can be in gets a word, so the heartbeat never
+            # carries an empty list whose cause a reader has to guess.
+            grant_state = grants_none_live
+            grants_degraded = False
             if dreams is not None:
-                granted_symbols = resolve_granted_symbols(dreams, rules, now=now)
+                resolution = resolve_grants(dreams, rules, now=now)
+                granted_symbols = resolution.symbols
+                grant_state = resolution.state
+                grants_degraded = resolution.degraded
                 if granted_symbols:
                     # Provenance for the journal, and a second read, so it is
                     # only paid for when something was actually granted.
@@ -655,6 +647,14 @@ def cmd_loop(
                 # fact, and a permission in force that is never stated is a
                 # permission nobody can audit.
                 granted_symbols=sorted(granted_symbols),
+                # And WHY the list above is empty when it is, because it has
+                # five causes and only two of them are ordinary. The
+                # `calendar_degraded` lesson in a fourth place: a switched-off
+                # feature, nothing adopted, a store that would not open, an
+                # unreadable row and a set over the cap all render as `[]`.
+                # `grants_degraded` is the flag; `grant_state` is which.
+                grants_degraded=grants_degraded,
+                grant_state=grant_state,
                 calendar_degraded=getattr(calendar, "is_degraded", False),
                 # Same reasoning as calendar_degraded: an empty post list from a
                 # dead token looks exactly like a quiet morning, and the

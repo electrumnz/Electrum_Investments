@@ -164,6 +164,18 @@ MAX_EXCHANGES_PER_DREAM = 3
 # own writing and the two agents would talk forever about nothing.
 CONFERENCE = "conference"
 
+# The `kind` on the note this module writes when the two agents agreed and the
+# STORE refused. Its own kind rather than a `note` so `_consider` can find it
+# without reading prose — the same reasoning as `main.EXPIRY_MARK_KIND`, and it
+# is load-bearing here: the change gate measures the DREAM, and the thing that
+# blocked this one was the shelf. Nothing about the dream will ever change to
+# clear it, so without this mark the dream is skipped `nothing_new` forever
+# while the adoption it was refused becomes possible again the moment a slot
+# frees. Not one of `dreaming.MESSAGE_KINDS`, which is allowed: the store does
+# not validate the field, and an unfamiliar kind costs a page a badge where
+# refusing it would lose the turn.
+REFUSAL_MARK_KIND = "adoption_refused"
+
 # The speakers whose turns mark an exchange as having happened. See
 # `last_agent_turn_at`.
 AGENT_SPEAKERS = frozenset({DREAMER, TRADER})
@@ -455,9 +467,17 @@ class TraderPowers:
         *,
         at: datetime,
         caps: VaultCaps | None = None,
+        ttl_days: int | None = None,
     ) -> MoveResult:
-        """Take a dream out of the vault. Refusals come back, never raised."""
-        return self._store.adopt(dream_id, at=at, caps=caps)
+        """Take a dream out of the vault. Refusals come back, never raised.
+
+        `ttl_days` exists because it was missing, and the miss was invisible:
+        without it every conference-made grant took `DEFAULT_TTLS.adopted` from
+        the dataclass and the `ttl_days.adopted` an operator can read in
+        `config/rules.yaml` applied to nothing. A limit in a file nobody reads
+        is worse than no limit, because the file is what an operator checks.
+        """
+        return self._store.adopt(dream_id, at=at, caps=caps, ttl_days=ttl_days)
 
     def hand_back(self, dream_id: int, *, reason: str, at: datetime) -> MoveResult:
         """Return an adopted dream to the vault, saying why.
@@ -715,6 +735,17 @@ class Conference:
         self._dreamer = dreamer_client or self._build(env, GROGU, DREAMER_SYSTEM_PROMPT)
         self._trader = trader_client or self._build(env, YODA, TRADER_SYSTEM_PROMPT)
 
+    def _caps(self, caps: VaultCaps | None) -> VaultCaps:
+        """The caller's caps, or the ones in `config/rules.yaml`.
+
+        Never `None` onward, so the store's dataclass defaults are unreachable
+        from this path. They were reachable: `caps` travelled all the way down
+        as an optional and `DreamingRules.vault_caps()` had exactly one caller,
+        so a `caps.vault: 1` in the file admitted three. A limit an operator can
+        read has to be the limit that applies, or the file is decoration.
+        """
+        return caps or self._rules.dreaming.vault_caps()
+
     @staticmethod
     def _build(env: Env, soul_name: str, system: str) -> TurnCaller:
         """One client per speaker, because they are two different characters.
@@ -757,6 +788,7 @@ class Conference:
         do it in the one place where the noise is permanent.
         """
         stamp = now or datetime.now(UTC)
+        limits = self._caps(caps)
         candidates = list(reversed(self._store.in_vault(Vault.VAULT)))
 
         results: list[ExchangeResult] = []
@@ -767,7 +799,7 @@ class Conference:
             if dream.id is None:  # pragma: no cover - in_vault only returns saved rows
                 continue
 
-            result = self._consider(dream, now=stamp, caps=caps)
+            result = self._consider(dream, now=stamp, caps=limits)
             results.append(result)
             if result.conferred:
                 conferred += 1
@@ -811,7 +843,9 @@ class Conference:
         change = has_something_changed(
             dream, last_agent_turn_at(messages), messages=messages
         )
-        if not change:
+        if not change and not self._blocked_by_a_full_shelf(
+            messages, now=now, caps=caps
+        ):
             log.info("confer_skipped", dream_id=dream_id, reason="nothing_new")
             return ExchangeResult(
                 dream_id=dream_id,
@@ -820,6 +854,39 @@ class Conference:
             )
 
         return self.confer_once(dream, now=now, caps=caps)
+
+    def _blocked_by_a_full_shelf(
+        self, messages: Sequence[DreamMessage], *, now: datetime, caps: VaultCaps | None
+    ) -> bool:
+        """Did the last exchange end in a refused adoption that could now succeed?
+
+        **The change gate measures the DREAM, and this blocker was the STORE.**
+        An exchange that ended `ADOPTION_REFUSED` — almost always a full adopted
+        shelf — leaves the dream in the vault with nothing about it altered, so
+        `has_something_changed` says no and says no again tomorrow. The two
+        agents agreed, the shelf was full, and the dream was then skipped
+        forever, including after a slot freed. It is the one blocker that clears
+        without anybody touching the dream.
+
+        Deliberately narrow. It re-qualifies only when the shelf actually has
+        room now, so a dream refused for a reason that has not changed — no
+        symbols, an unresolved class, symbols it does not offer — stays skipped
+        rather than buying a model call a day to be told the same thing. That is
+        the whole point of the fifth cap and this must not become a way round
+        it.
+        """
+        if not messages:
+            return False
+        marker = last_agent_turn_at(messages)
+        refused = [m for m in messages if m.kind == REFUSAL_MARK_KIND]
+        if not refused:
+            return False
+        # The mark is written at the end of the exchange it belongs to, so a
+        # later agent turn means a later exchange has happened since and this
+        # one is no longer the thing standing in the way.
+        if marker is not None and refused[-1].at < marker:
+            return False
+        return self._store.has_room(Vault.ADOPTED, now=now, caps=self._caps(caps))
 
     # -------------------------------------------------------- one exchange
 
@@ -960,7 +1027,14 @@ class Conference:
                 now=now,
             )
 
-        result = self._powers.adopt(dream_id, at=now, caps=caps)
+        result = self._powers.adopt(
+            dream_id,
+            at=now,
+            caps=self._caps(caps),
+            # From the rules file rather than the dataclass default, so the
+            # expiry an operator can read is the one that actually applies.
+            ttl_days=self._rules.dreaming.ttl_days.adopted,
+        )
         if not result.ok:
             # A refusal is an ordinary answer — a full adopted vault is a normal
             # Tuesday — so it is recorded and reported rather than raised, and
@@ -971,6 +1045,7 @@ class Conference:
                 "The trading agent accepted, and the store refused the "
                 f"adoption: {result.detail}",
                 at=now,
+                kind=REFUSAL_MARK_KIND,
             )
             log.info(
                 "confer_adoption_refused",
@@ -1093,15 +1168,22 @@ class Conference:
             raise _TurnFailed("the model returned no parsable turn")
         return turn, usage
 
-    def _note(self, dream_id: int, text: str, *, at: datetime) -> None:
+    def _note(
+        self, dream_id: int, text: str, *, at: datetime, kind: str = "note"
+    ) -> None:
         """This module narrating itself into the transcript.
 
         Speaker `CONFERENCE`, never `OPERATOR` and never one of the agents, so
         it cannot be mistaken for a turn and cannot move the change gate's
         marker. See `last_agent_turn_at`.
+
+        `kind` is how the refusal note stays findable. Matching on the prose
+        would break the moment somebody reworded the sentence, which is the same
+        reason `vault-expire` writes its own kind rather than looking for its
+        own wording.
         """
         self._store.add_message(
-            dream_id, speaker=CONFERENCE, kind="note", text=text, at=at
+            dream_id, speaker=CONFERENCE, kind=kind, text=text, at=at
         )
 
 
