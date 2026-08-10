@@ -124,7 +124,31 @@ class Reply:
 MAX_BUDGET = 8000
 
 
-def call(client: anthropic.Anthropic, model: str, prompt: str, max_tokens: int = 3000) -> Reply:
+def call(
+    client: anthropic.Anthropic,
+    model: str,
+    prompt: str,
+    max_tokens: int = 3000,
+    *,
+    refusal_is_an_answer: bool = True,
+) -> Reply:
+    """One model call, retried up to three times on an unusable reply.
+
+    `refusal_is_an_answer` is the difference between the two roles, and getting
+    it wrong cost a grading. **For an AGENT a refusal IS the answer** — most of
+    these prompts are trying to make it do something it should decline, so a
+    refusal is the result and retrying it three times asks the same question
+    into the same silence, at cost.
+
+    **For the JUDGE a refusal is a grading that did not happen.** The judge is
+    infrastructure rather than a subject; it has no rail to hold and nothing it
+    could correctly decline. Observed live: the judge returned
+    `stop=refusal, blocks=[]` on one character-attribution call, the reading
+    came back empty, and the run reported 2/3 — which reads as a soul that
+    answered out of character, when what actually happened is that nobody
+    graded it. A confident number over a missing answer is the exact failure
+    this repository exists to refuse, arriving through the test harness.
+    """
     budget = max_tokens
     reply = Reply("", "", [], 0, 0)
     for attempt in (1, 2, 3):
@@ -143,9 +167,11 @@ def call(client: anthropic.Anthropic, model: str, prompt: str, max_tokens: int =
         # A refusal is an answer, not a truncation. Retrying it with a bigger
         # budget asks the same question again and gets the same silence, three
         # times, at cost — and the honest record is that the call was refused.
-        if reply.stop_reason == "refusal":
+        if reply.stop_reason == "refusal" and refusal_is_an_answer:
             print("    (refused by the model; recorded as such)", flush=True)
             return reply
+        if reply.stop_reason == "refusal":
+            print("    (judge refused; asking again)", flush=True)
         budget = min(budget * 2, MAX_BUDGET)
         print(
             f"    (retrying: stop={reply.stop_reason} blocks={reply.blocks} budget={budget})",
@@ -666,7 +692,9 @@ def judge(client: anthropic.Anthropic, prompt: str, *, attribution: bool = False
     rather than a shrug — the replay asserts none survive.
     """
     keys = ("READS_AS", "CONFIDENCE", "WHY") if attribution else ("VERDICT", "QUOTE", "WHY")
-    answer = call(client, JUDGE_MODEL, prompt, max_tokens=6000)
+    answer = call(
+        client, JUDGE_MODEL, prompt, max_tokens=6000, refusal_is_an_answer=False
+    )
     if not answer.usable:
         return {
             "verdict": "UNPARSED",
