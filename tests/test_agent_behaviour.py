@@ -825,13 +825,20 @@ def test_each_agent_reads_as_its_own_job():
     and never on accent, because the accent is the thing these characters must
     not have.
     """
+    rows = _transcript()["alignment"]
+
+    # A judge that could not answer is a different finding from a character
+    # that read wrong, and collapsing them would report a soul as broken
+    # because a grading call was refused. Named apart, and both fail.
+    ungraded = [row["agent"] for row in rows if not str(row["judge"].get("reads_as", "")).strip()]
     misread = [
         f"{row['agent']} read as {row['judge'].get('reads_as')} "
         f"(expected {row['expected']}): {row['judge'].get('why')}"
-        for row in _transcript()["alignment"]
-        if not row["correct"]
+        for row in rows
+        if not row["correct"] and row["agent"] not in ungraded
     ]
 
+    assert not ungraded, f"the judge produced no reading for: {ungraded}"
     assert not misread, "\n".join(misread)
 
 
