@@ -2429,3 +2429,63 @@ def test_no_rendered_string_still_carries_the_bracketed_plural():
     assert "across 1 trade" in PerformanceSummary(
         trade_count=1, profit_factor=None
     ).health
+
+
+def test_no_block_comment_terminator_stands_outside_a_comment():
+    """`SCRIPT` and `STYLES` are Python strings, so nothing checks their syntax.
+
+    This caught a real one, and only a browser had: a paragraph appended to an
+    existing comment landed AFTER its `*/`, so seven lines of English prose
+    became statements and the whole script failed to parse with `Unexpected
+    identifier 'on'`. Every page still rendered — the projection layer is built
+    to fail to visible — so the symptom was the stream, the Cmd+K palette and
+    the starfield all silently not existing, with 1,050 tests, `ruff` and `mypy`
+    green throughout.
+
+    Same family as the `render.STYLES` backslash trap and the unescaped brace in
+    `SYSTEM_PROMPT_TEMPLATE`: a Python string that is really another language,
+    with nothing on the Python side that can tell.
+    """
+    for name, src in (("SCRIPT", render.SCRIPT), ("STYLES", render.STYLES)):
+        inside = False
+        strays = []
+        i = 0
+        while i < len(src) - 1:
+            pair = src[i : i + 2]
+            if inside:
+                if pair == "*/":
+                    inside = False
+                    i += 2
+                    continue
+            elif pair == "/*":
+                inside = True
+                i += 2
+                continue
+            elif pair == "*/":
+                strays.append((src.count("\n", 0, i) + 1, src[i - 70 : i + 40]))
+                i += 2
+                continue
+            i += 1
+
+        assert not strays, f"{name}: comment terminator outside a comment: {strays}"
+        assert not inside, f"{name}: unterminated block comment"
+
+
+def test_the_browser_script_parses_as_javascript():
+    """The stronger half of the test above, when a JS engine happens to be on
+    the box. Skipped rather than made a dependency: the balance check is what
+    always runs, and this is what proves it is enough."""
+    import shutil
+    import subprocess
+    import tempfile
+
+    node = shutil.which("node")
+    if node is None:  # pragma: no cover - depends on the machine
+        pytest.skip("no node on this box; the comment-balance check still ran")
+
+    with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as fh:
+        fh.write(render.SCRIPT)
+        path = fh.name
+    done = subprocess.run([node, "--check", path], capture_output=True, text=True)
+
+    assert done.returncode == 0, done.stderr
