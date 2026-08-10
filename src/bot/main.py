@@ -542,9 +542,24 @@ def cmd_dream(env: Env, rules: Rules) -> int:
         log.error("dream_no_api_key", detail="ANTHROPIC_API_KEY is not set")
         return 1
 
+    # The same feeds the decision loop reads, and for the opposite purpose: the
+    # loop wants to know what happened to its six symbols, and this wants
+    # something to pull on. A headline about crop insurance is useless to the
+    # loop and is exactly the kind of spark this is for.
+    #
+    # Both degrade to empty rather than failing, as everywhere else: a dreamer
+    # with no headlines has less to work with, which is a quieter run and not a
+    # broken one. `recent_headlines` and `recent_posts` already catch their own
+    # network failures.
+    news = build_news_feed(env)
+    social = build_social_feed(env, rules)
+
+    headlines = news.recent_headlines(rules.allowed_symbols)
+    posts = [p.render() for p in social.recent_posts()] if social else []
+
     journal = Journal()
     dreamer = Dreamer(env, rules, DreamStore(), journal)
-    result = dreamer.run_once()
+    result = dreamer.run_once(headlines=headlines, posts=posts)
 
     if result is None:
         # Already logged with its reason inside run_once. Nothing was written:
@@ -563,6 +578,13 @@ def cmd_dream(env: Env, rules: Rules) -> int:
         hops=len(dream.chain),
         unchecked_hops=len(dream.unverified_hops),
         verification=str(dream.verification),
+        # Named for the same reason the loop reports `calendar_degraded` and
+        # `symbols_without_history`: a run with no headlines is a different run
+        # from one where nothing was in the news, and only the log can tell them
+        # apart afterwards.
+        headlines_seen=len(headlines),
+        posts_seen=len(posts),
+        social_degraded=bool(social and social.is_degraded),
         cost_usd=round(result.usage.estimated_cost_usd, 4) if result.usage else None,
     )
     return 0

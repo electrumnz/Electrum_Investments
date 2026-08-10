@@ -302,3 +302,59 @@ def test_a_failure_leaves_an_existing_dream_untouched(rules, journal, store):
     assert survivor.title == "Existing"
     assert survivor.stage is DreamStage.EXPLORE
     assert survivor.thoughts == []
+
+
+# ------------------------------------------------------------ the CLI wiring
+
+
+def test_the_dream_command_feeds_it_headlines_and_posts(tmp_path, monkeypatch):
+    """The dreamer accepts headlines and posts; the CLI has to actually pass
+    them. It did not at first, so the module was wired to a feed that never
+    ran and "learns from news" was untrue in the only place it mattered.
+    """
+    import bot.main as main_mod
+
+    seen: dict[str, object] = {}
+
+    class _Feed:
+        is_degraded = False
+
+        def recent_headlines(self, symbols):
+            return ["Crop insurers raise premiums across the Midwest"]
+
+        def recent_posts(self):
+            return []
+
+    class _Dreamer:
+        def __init__(self, *a, **kw):
+            pass
+
+        def run_once(self, *, headlines=None, posts=None, now=None):
+            seen["headlines"] = headlines
+            seen["posts"] = posts
+            return None  # a failed call: writes nothing, exits non-zero
+
+    monkeypatch.setattr(main_mod, "build_news_feed", lambda env: _Feed())
+    monkeypatch.setattr(main_mod, "build_social_feed", lambda env, rules: None)
+    monkeypatch.setattr(main_mod, "Journal", lambda *a, **kw: object())
+    monkeypatch.setattr("bot.dreamer.Dreamer", _Dreamer)
+    monkeypatch.setattr("bot.dreaming.DreamStore", lambda *a, **kw: object())
+
+    env = _env()
+    rc = main_mod.cmd_dream(env, Rules.load(Path("config/rules.yaml")))
+
+    assert seen["headlines"] == ["Crop insurers raise premiums across the Midwest"]
+    assert seen["posts"] == []
+    # A failed call exits non-zero so a timer unit surfaces it in
+    # `systemctl --failed` rather than logging into the void.
+    assert rc == 1
+
+
+def test_the_dream_command_refuses_without_an_api_key(tmp_path):
+    """Fail closed and say why, rather than a stack trace from the SDK."""
+    import bot.main as main_mod
+
+    env = Env(_env_file=None)  # type: ignore[call-arg]
+    env.anthropic_api_key = ""
+
+    assert main_mod.cmd_dream(env, Rules.load(Path("config/rules.yaml"))) == 1
