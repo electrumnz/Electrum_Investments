@@ -1609,6 +1609,141 @@ A session-scoped autouse guard in `tests/conftest.py` fails the suite if either
 directory gains a file. `DreamStore` landing is exactly how that regressed: a
 new store, a new `build_app` default, and one call site nobody updated.
 
+### A dream can widen what may be traded, and every property below is load-bearing
+
+The dreamer's output used to reach nobody. A dream now moves between four
+places — **workbench**, **prophecy vault**, **dream vault**, **adopted** (plus
+an archive) — and an adopted dream **grants permission to trade a symbol that
+is not in `config/rules.yaml`**.
+
+That last clause widens what `RiskGate` permits, which is the one thing this
+repository is most careful about. Six properties hold it in place. None of them
+is decoration.
+
+- **The class hard-block comes from `Rules.enabled_instruments`, never from
+  `allowed_symbols`.** Crypto switched off means an adopted dream naming
+  BTC/USD grants nothing, whatever the dream says. The dreamer may look outside
+  the *symbol* list; it may never cross a *class* boundary the operator has
+  shut.
+- **The grant is resolved OUTSIDE the gate and passed in**, in the same shape
+  as `news_windows`. `src/bot/grants.py` does the resolving; `risk.py` reads no
+  database, opens no file and makes no network call. A gate that can fail is a
+  gate that can fail OPEN.
+- **Any failure yields an empty mapping, so it fails CLOSED.** A missing store,
+  a torn row, an exception — the answer is "nothing is granted" and the account
+  carries on trading exactly what `config/rules.yaml` already allows. There is
+  no partial mapping presented as complete.
+- **The grant dies with the adoption.** Handed back or expired, it is gone, and
+  both are computed from the adoption row rather than read from a stored flag —
+  a third fact about the same thing is a third fact that can disagree with the
+  other two.
+- **A symbol claimed by two live grants under different classes is DROPPED**,
+  not resolved. There is no correct answer to which cap applies, and choosing
+  one would be a plausible wrong figure.
+- **A granted symbol faces every other gate**, under its resolved class's own
+  limits. `RiskGate._class_symbols` unions the granted symbols into the class
+  set and hands it to the three gates that measure what a class already holds —
+  `_concurrent_positions`, `_class_total_risk`, `_instrument_capital_cap`.
+
+**That last one was a real bypass, found by audit and closed.** Those three
+gates identify a class's holdings by membership of `allowed_symbols`, and a
+granted symbol is in no such list — so a position held under a grant was
+invisible to its own class's concurrency cap, class total-risk cap and capital
+cap. The grant would have bought entry to the allowlist *and* a silent
+exemption from three limits, including the crypto 0.5% total. Do not "simplify"
+`_class_symbols` back to `instrument.allowed_symbols`.
+
+Consequence worth knowing rather than guarding against: a position still held
+under a **lapsed** grant drops back out of those counts. It was never in them
+before adoption either, and expiry must never force-close a position — closing
+sits outside the gated path deliberately.
+
+**`Dream` still carries no order fields**, and the guarantee is narrower than
+it used to be, so state it precisely: no qty, no entry, no stop, no side, and
+no `symbol` singular. It DOES carry `symbols` plural and `asset_class_key`, and
+those are a permission rather than an instruction. `instruments` remains free
+text naming what a dream is *about*, precisely so it cannot be read as a
+ticker. **Do not collapse `instruments` and `symbols` into one field.**
+
+**The feature is currently INERT and `TODO.md` item 2 says why.** The gate
+honours a grant; the prompt and every feed still run off
+`rules.allowed_symbols`, so the model is never told a granted symbol exists.
+Gate-first was the right order — a permission path that worked before it was
+safe would be backwards — but adoption grants nothing usable until that closes.
+
+### The two agents may talk, once a day, and the fifth cap is the one that works
+
+`src/bot/confer.py` runs a bounded exchange: the dreamer offers a dream from
+the vault, the trading agent asks about it and then adopts, declines or parks.
+The transcript is stored either way, **including exchanges that ended in
+nothing** — a dream the trader kept declining is a fact about the dreamer worth
+having.
+
+It runs on the **dream timer**, once a day, in its own module and its own
+command. Never on the trading loop's fifteen-minute pulse: ninety-six
+unattended negotiations a day on the process that proposes orders is the Alpha
+Arena failure shape with two models instead of one. A day is far slower than a
+price moves, which is the right speed for deciding whether a second-order
+hypothesis is worth acting on.
+
+Five caps. Six turns per exchange, two dreams per run (so twelve model calls at
+most), three exchanges per dream lifetime, and `TEXT_MAX_CHARS` per message.
+
+**The fifth is the one that actually stops them talking forever:** a dream may
+only be conferred again if **something changed** since the last exchange — a
+condition fulfilled, a hop added or checked, an operator note, a vault move.
+A turn limit bounds one conversation and says nothing whatever about having the
+same conversation again tomorrow, politely, at cost, with every other cap still
+holding while they do it. It is the cap most likely to look redundant to
+somebody tidying up, which is why `has_something_changed` says so in its own
+docstring.
+
+**The trading agent's side reaches no broker.** `TraderPowers` has exactly two
+public methods — adopt from the vault, hand back with a reason — and a test
+parses the module's AST to assert it imports none of `broker`, `risk`,
+`models`, `journal`, `mcp_server` or `reconcile`. A failed model call ends the
+exchange and is recorded as a failure, never as a completed exchange that
+decided nothing.
+
+### The stop is visible now, in both places it was missing
+
+Two different facts, deliberately reported separately, because the interesting
+case is when they disagree:
+
+- **`WorkingOrder.stop_price`** — what actually rests at the broker. It carries
+  `order_type` alongside it, and that is the half worth defending: without it
+  `stop_price is None` cannot be read. On a plain limit order that None is
+  correct and dull; on a stop leg it means nobody can say where the stop is.
+  `trigger_price_unknown` is therefore a separate question from "is there a
+  stop price", which is the missing-versus-absent rule arriving at the order
+  layer.
+- **`AccountSnapshot.planned_stop_by_symbol`** — what the journal planned,
+  rendered into the model's context. `claude_client` asks for a `position_plan`
+  on every open position with an action of hold, close or **tighten_stop**, and
+  the context block used to carry no stop at all. The agent was being asked
+  whether to tighten a level it had never been shown.
+
+A position with no journal row renders **STOP UNKNOWN in words** — never a
+blank that reads as "no stop needed", never a zero. The exposure is real and
+the protection is unknown, and those are different facts.
+
+### CI exists now, and it is the only place a green suite means anything
+
+`.github/workflows/ci.yml`: `ruff`, `mypy --strict`, `pytest`, cheapest first,
+and **each runs even when an earlier one is red** — the same reasoning
+`RiskGate.evaluate` uses for collecting every failure reason instead of
+short-circuiting. Running is not passing; any red step fails the job.
+
+It earned its keep on the first day, catching `grants.py` committed while the
+`config.py` it depends on was not, on a suite that had just passed locally.
+That is the `test_packaging.py` lesson in a new costume: a checkout holding
+only what was actually pushed is the one place that class of fault cannot hide.
+
+**No credentials, and none should ever be added.** Tests use `MockBroker`, may
+not touch the network, and a `conftest` fixture fails the suite if anything
+writes to `data/` or `audit/`. A job here needing a secret means something has
+been wired the wrong way round.
+
 ### Hermes ships a large surface, and both ways of trimming it fail quietly
 
 `deploy/hermes-config.yaml` disables 25 toolsets and all 77 bundled skills.
