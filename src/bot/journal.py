@@ -19,6 +19,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+import structlog
+
 from .models import (
     AssetClass,
     Direction,
@@ -27,6 +29,8 @@ from .models import (
     Trade,
     TradeOutcome,
 )
+
+log = structlog.get_logger()
 
 DEFAULT_DB_PATH = Path("data") / "journal.db"
 
@@ -89,12 +93,63 @@ def _dt(value: str | None) -> datetime | None:
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
 
 
+def _drop_planned_target_not_null(conn: sqlite3.Connection) -> None:
+    """Make `planned_target` nullable on a database that predates the change.
+
+    **`CREATE TABLE IF NOT EXISTS` is a no-op on a table that already exists**,
+    so editing `SCHEMA` changes what a FRESH database gets and nothing at all
+    about the one already on the box. That gap is invisible from the test suite,
+    which builds every journal from scratch in a `tmp_path` and therefore always
+    gets the new shape.
+
+    Found the expensive way. `take_profit_price` became optional, the model and
+    `SCHEMA` were both updated, 866 tests passed — and the first real
+    no-target order reached Alpaca, rested there, and then failed to journal on
+    `NOT NULL constraint failed: trades.planned_target`. The order was live and
+    unrecorded, which is precisely the `14b88c8` bug: `open_risk_usd` cannot
+    count a position the journal has never heard of, so the 2% total-risk cap
+    was blind to it.
+
+    SQLite cannot drop a NOT NULL with `ALTER`, so the table is rebuilt. The
+    whole thing runs in one transaction: either the new table replaces the old
+    with every row intact, or nothing changes. A half-migrated journal would be
+    worse than an unmigrated one.
+
+    Idempotent, and cheap to re-run: `PRAGMA table_info` is a lookup, so a
+    database that is already correct pays one query at startup and stops.
+    """
+    columns = conn.execute("PRAGMA table_info(trades)").fetchall()
+    target = next((c for c in columns if c["name"] == "planned_target"), None)
+    if target is None or not target["notnull"]:
+        return
+
+    log.warning(
+        "journal_migrating_planned_target_nullable",
+        detail=(
+            "This journal predates optional take-profit. Rebuilding the trades "
+            "table so a trade with no target can be recorded."
+        ),
+    )
+    names = ", ".join(c["name"] for c in columns)
+    conn.executescript(
+        "PRAGMA foreign_keys=OFF;\n"
+        "BEGIN;\n"
+        "ALTER TABLE trades RENAME TO trades_legacy;\n"
+        + SCHEMA
+        + f"INSERT INTO trades ({names}) SELECT {names} FROM trades_legacy;\n"
+        "DROP TABLE trades_legacy;\n"
+        "COMMIT;\n"
+        "PRAGMA foreign_keys=ON;\n"
+    )
+
+
 class Journal:
     def __init__(self, path: Path = DEFAULT_DB_PATH) -> None:
         self._path = path
         path.parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as conn:
             conn.executescript(SCHEMA)
+            _drop_planned_target_not_null(conn)
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:

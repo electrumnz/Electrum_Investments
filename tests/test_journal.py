@@ -281,3 +281,83 @@ def test_equity_is_one_row_per_day(journal):
     curve = journal.equity_curve()
     assert len(curve) == 2
     assert curve[0] == ("2026-05-04", 101_000.0)  # last write for the day wins
+
+
+def test_an_old_journal_is_migrated_to_allow_a_trade_with_no_target(tmp_path):
+    """`CREATE TABLE IF NOT EXISTS` does NOTHING to a table that already exists.
+
+    So editing `SCHEMA` changes what a fresh database gets and nothing about the
+    one on the box — and the suite cannot see the gap, because every test builds
+    its journal from scratch in a `tmp_path` and therefore always gets the new
+    shape.
+
+    This is the expensive one. `take_profit_price` became optional, the model
+    and `SCHEMA` were both updated, the suite was green, and the first real
+    no-target order reached Alpaca, rested there, and then failed to journal on
+    `NOT NULL constraint failed: trades.planned_target`. A live order the
+    journal had never heard of, which is the `14b88c8` bug exactly:
+    `open_risk_usd` cannot count it, so the 2% cap was blind to it.
+
+    So this test builds the OLD schema deliberately, which is the only way to
+    exercise a migration at all.
+    """
+    import sqlite3
+
+    from bot.journal import SCHEMA
+
+    path = tmp_path / "legacy.db"
+    old = SCHEMA.replace("planned_target    REAL,", "planned_target    REAL    NOT NULL,")
+    conn = sqlite3.connect(path)
+    conn.executescript(old)
+    conn.execute(
+        "INSERT INTO trades (symbol, asset_class, strategy, direction, qty, "
+        "entry_time, entry_price, planned_stop, planned_target) VALUES "
+        "('QQQ','us_equity','manual','buy',5,'2026-08-01T00:00:00+00:00',500,490,520)"
+    )
+    conn.commit()
+    conn.close()
+
+    journal = Journal(path)          # the migration runs on open
+
+    # The existing row survived. A migration that dropped history to fix a
+    # constraint would be a far worse trade than the constraint.
+    assert [t.symbol for t in journal.open_trades()] == ["QQQ"]
+
+    # And the write that used to fail now works.
+    journal.record_entry(
+        Trade(
+            symbol="SPY",
+            strategy="manual",
+            direction=Direction.SELL,
+            qty=21,
+            entry_time=datetime(2026, 8, 10, 13, 23, tzinfo=UTC),
+            entry_price=772.84,
+            planned_stop=820.0,
+            planned_target=None,
+            rationale="Short with a hard stop and no target, which is a normal trade.",
+        )
+    )
+    assert {t.symbol for t in journal.open_trades()} == {"QQQ", "SPY"}
+
+
+def test_the_migration_is_idempotent(tmp_path):
+    """It runs on every open. A database already in the right shape must pay one
+    PRAGMA and stop, not rebuild the table on every start."""
+    path = tmp_path / "fresh.db"
+    Journal(path)
+    journal = Journal(path)          # second open, already migrated
+
+    journal.record_entry(
+        Trade(
+            symbol="SPY",
+            strategy="manual",
+            direction=Direction.SELL,
+            qty=1,
+            entry_time=datetime(2026, 8, 10, 13, 23, tzinfo=UTC),
+            entry_price=772.84,
+            planned_stop=820.0,
+            planned_target=None,
+            rationale="Proves a repeated open leaves a working table behind.",
+        )
+    )
+    assert len(journal.open_trades()) == 1
