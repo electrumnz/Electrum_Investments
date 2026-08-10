@@ -20,6 +20,22 @@ reasons, and the second matters more:
 Shown: the symbols under watch, recent headlines, recent posts, what closed
 recently and what the gate refused. Enough to have something to pull on.
 
+Also shown: **considerations** — things a chat agent put up with
+`raise_consideration` while talking to the operator. They arrive as candidate
+sparks the model may ignore, with their age and the operator's own words beside
+them, and they are read out of the audit log by `news_history`. A consideration
+is a note and never a dream: nothing in `dreaming.py` reads the audit log, so
+there is no path from a conversation to a shelf row, and one becomes a seed only
+by this model choosing to make it one — exactly as it chooses the seeds it had
+by itself. **Do not add a path that promotes a consideration directly.** A dream
+is the first link of a chain that ends in a live trading permission, and the
+whole point of the tool being a note is that a conversation cannot insert at the
+top of it.
+
+Which run has seen which is recorded as its own audit event
+(`dream_considerations_seen`), carrying the exact keys that were rendered.
+Never a high-water stamp, never `now` — see `_mark_considerations_seen`.
+
 **Not shown: profit and loss.** Not the equity curve, not the win rate, not
 whether any of it made money. `souls/grogu.md` forbids learning from the track
 record and this is where that is enforced rather than requested: the figures
@@ -69,6 +85,7 @@ import anthropic
 import structlog
 from pydantic import BaseModel, Field
 
+from .audit import AuditLog
 from .claude_client import CallUsage, ClaudeClient
 from .config import CLAUDE_PRICING_USD_PER_MTOK, ClaudeTier, Env, Rules
 from .dreaming import (
@@ -91,6 +108,14 @@ from .dreaming import (
 from .journal import Journal
 from .models import TriggerField, TriggerOp
 from .models import class_key_for_symbol as _class_key_for_symbol
+from .news_history import (
+    CONSIDERATIONS_SEEN_EVENT,
+    DEFAULT_CONSIDERATION_HOURS,
+    SHOWN_FIELD,
+    ConsiderationRecall,
+    describe_age,
+    recall_considerations,
+)
 from .souls import GROGU, load_soul
 from .triggers import CycleReadings
 
@@ -121,6 +146,16 @@ FUSION_OFFERS = 3
 # anybody's conversation, and `confer.last_agent_turn_at` would otherwise read
 # it as one.
 SCOPE = "scope"
+
+# How much of the audit log to open when looking for considerations, and how
+# many dated files back.
+#
+# The read is bounded by entries rather than by time, so the bound has to
+# comfortably outrun the window: a 96-cycle day means 400 entries is a little
+# over four days, against a window of two. `AuditLog.read` stops as soon as it
+# has enough, so the ordinary cost is one or two files.
+CONSIDERATION_SCAN = 400
+CONSIDERATION_DAYS = 7
 
 
 # Which `instruments:` key a symbol's SHAPE says it belongs to. Re-exported from
@@ -562,6 +597,23 @@ fuse because two dreams are both about energy, or both about shipping — a link
 that four chains reach is a truism, and a truism dressed as a mechanism is
 worse than either dream on its own.
 
+## considerations: things put to you in conversation
+
+You may be shown notes raised by the chat agents — a place somebody thought it
+was worth you looking. They are notes and never dreams: nothing is on a shelf,
+nothing is offered to the trading agent, and none of them permits a symbol.
+
+**You may ignore any of them, and most of the time you should.** Nothing counts
+them, nothing follows from leaving one alone, and a chain written because you
+were asked for one is worth less than the chain you were already having. There
+is no credit for responsiveness here. If you do pick one up it is a spark like
+any other: you write the chain, every hop still has to be checkable, and being
+suggested by somebody else establishes nothing at all.
+
+Each carries the time it was raised, and where a person prompted it, their own
+words verbatim beside the agent's. Read the two together — a spark that is the
+operator's sentence given back is one nobody actually had.
+
 You do not mark your own conditions fulfilled. Code checks them against the
 figures the decision loop recorded, and moves the dream when they fire.
 
@@ -660,6 +712,135 @@ def render_fusion_candidates(candidates: Sequence[FusionCandidate]) -> list[str]
     return out
 
 
+def render_considerations(
+    recall: ConsiderationRecall | None, *, now: datetime
+) -> list[str]:
+    """What the chat agents put up, offered as sparks the dreamer may ignore.
+
+    **A consideration is not a dream and this is not a route to becoming one.**
+    `raise_consideration` writes one line to the audit log and never opens
+    `data/dreams.db`; this reads that line back into the prompt. Everything
+    downstream is unchanged: the model writes its own step, and a consideration
+    becomes a seed only by the model choosing to make one, exactly as it chooses
+    the seeds it had by itself. Nothing here can put a row on a shelf, and
+    nothing here names a symbol, because the record carries none.
+
+    Four properties, each an existing rule arriving somewhere new:
+
+    - **The age travels with the item.** A spark put up six hours ago, rendered
+      with no time on it, is being presented as something said just now — the
+      confident-partial-answer failure arriving through the prompt rather than
+      through a feed.
+    - **`prompted_by` is marked as the operator's own words**, verbatim and
+      apart from the agent's spark, so the model can tell what a person said
+      from what an agent said about it. A smoothed or merged quote takes that
+      judgement away from the reader, which is the same reason the tool refuses
+      to paraphrase it.
+    - **Nothing recorded is its own state.** An empty section says which kind of
+      empty it is, because "nobody put anything up", "the log was silent",
+      "you were already shown them" and "the record could not be read" are four
+      different findings that produce one empty list. Same rule as `has_cycles`
+      and `can_grade_anything`.
+    - **The prompt says the dreamer may ignore them.** A suggestion the model
+      feels obliged to honour is the operator steering the dreamer by accident,
+      and two brains was the point rather than agreement.
+
+    `None` means nobody looked — no audit log was wired in, or the read failed —
+    and renders nothing at all, which is a different claim from "the log was
+    read and held nothing". Do not collapse the two.
+    """
+    if recall is None:
+        return []
+
+    window = f"{recall.window_hours:g}h"
+    out: list[str] = []
+
+    if recall.considerations:
+        out.append(
+            "Raised in conversation and not yet put in front of you. These are "
+            "notes from the chat agents — not dreams, not shelved, not "
+            "instructions, and none of them permits a symbol:"
+        )
+        for item in recall.considerations:
+            who = item.speaker or "a chat agent"
+            out.append(
+                f"  [{describe_age(item.age_minutes(now))}] {who}: {item.spark}"
+            )
+            if item.why_now:
+                out.append(f"      why now ({who}'s words): {item.why_now}")
+            if item.prompted_by:
+                # Quoted and attributed to the OPERATOR, never folded into the
+                # agent's own sentence above.
+                #
+                # `prompt_echo` is deliberately NOT rendered beside it. The
+                # ratio exists so a reader can judge whether a spark is the
+                # operator's sentence given back, and the two texts sitting one
+                # line apart already let this reader do exactly that. Printing
+                # the number as well would invite a model to treat 0.4 as a
+                # threshold — a figure enforced by inference, which is the
+                # thing the tool refused to enforce in code.
+                out.append(
+                    f'      the operator said, verbatim: "{item.prompted_by}"'
+                )
+            else:
+                out.append(
+                    "      nobody prompted this one; it is the agent's own."
+                )
+        if recall.omitted_for_limit:
+            out.append(
+                f"  {recall.omitted_for_limit} older note(s) were not shown here "
+                "and are still waiting; you will be offered them next run."
+            )
+        out.append(
+            "  **You may ignore every one of these.** A consideration is "
+            "somebody saying it might be worth you looking, not a task and not "
+            "a seed. Nothing counts them, nothing follows from leaving one "
+            "alone, and a chain you write only because you were asked to is "
+            "worth less than the one you were already having. If you do take "
+            "one up, it earns no shortcut: it is a spark like any other and "
+            "every hop still has to be checkable."
+        )
+    else:
+        out.append(f"Nothing new has been put to you in conversation in the last {window}.")
+        out.append(
+            "  That is the ordinary state and it is NOT evidence that nobody "
+            "had anything. A note appears here only if somebody typed one, so "
+            "an empty list says nothing either way — carry on with your own "
+            "seeds."
+        )
+
+    # The four things an empty list can mean, said out loud rather than left for
+    # the model to guess at. Rendered under a populated list too: a partial read
+    # that returned two notes is still a partial read.
+    if recall.seen_previously:
+        out.append(
+            f"  {recall.seen_previously} other note(s) went up in this window "
+            "and were already in front of you on an earlier run. They are not "
+            "repeated — you have seen them, and being asked again daily until "
+            "you agreed would not be a suggestion."
+        )
+    if not recall.has_record:
+        out.append(
+            f"  The log holds no records at all for the last {window} — no "
+            "cycles, no events. That is a silence from this box rather than a "
+            "quiet week, so treat the line above as unknown rather than as no."
+        )
+    if recall.is_degraded:
+        out.append(
+            f"  The log could not be fully read ({recall.malformed_lines} "
+            f"unparseable line(s), {len(recall.unreadable_files)} unreadable "
+            "file(s)), so this list may be short by an unknown amount."
+        )
+    if recall.rows_without_a_spark:
+        out.append(
+            f"  {recall.rows_without_a_spark} recorded note(s) carried no spark "
+            "and could not be shown."
+        )
+
+    out.append("")
+    return out
+
+
 def build_prompt(
     rules: Rules,
     journal: Journal,
@@ -668,6 +849,7 @@ def build_prompt(
     headlines: list[str] | None = None,
     posts: list[str] | None = None,
     fusions: Sequence[FusionCandidate] = (),
+    considerations: ConsiderationRecall | None = None,
     now: datetime | None = None,
 ) -> str:
     """Everything the dreamer is shown, and nothing else.
@@ -761,6 +943,17 @@ def build_prompt(
     # ordering reason `build_market_context` puts last cycle's watches after
     # the indicators they are checked against.
     out.extend(render_fusion_candidates(fusions))
+
+    # LAST of the inputs, after the dreamer's own chains and after every feed.
+    #
+    # The ordering is the same argument the grant block is rendered last for: a
+    # section carrying somebody else's suggestion is the one thing here with a
+    # pull that is not evidence, and a model that reads it before its own open
+    # chains anchors on it. Reading it after them makes it what it is — one more
+    # spark, weighed against the work already in progress — which is exactly the
+    # posture "you may ignore it" describes. It sits before the closing
+    # instruction so the instruction still lands last.
+    out.extend(render_considerations(considerations, now=stamp))
 
     out.append(
         "Produce one step. Advance one of the dreams above if any is worth "
@@ -937,6 +1130,15 @@ class DreamerResult:
     # refusal is indistinguishable from a model that stopped suggesting them.
     fusion: FusionResult | None = None
 
+    # What the chat surface had put up and this run was shown, or `None` when
+    # nobody looked — no audit log wired in, or a read that failed.
+    #
+    # `None` and an empty recall are different findings and a caller must be
+    # able to tell them apart: one says the dreamer has no view of the chat
+    # surface at all, the other says it looked and nothing was waiting. The
+    # `has_cycles` rule, arriving on a result object.
+    considerations: ConsiderationRecall | None = None
+
 
 # Where the timer unit lives once bootstrap has installed it, and the repo copy
 # it was installed from.
@@ -1032,10 +1234,20 @@ class Dreamer:
         journal: Journal,
         *,
         client: Any | None = None,
+        audit: AuditLog | None = None,
     ) -> None:
         self._rules = rules
         self._store = store
         self._journal = journal
+        # Both directions of the consideration path, or neither. The log is
+        # where a chat agent's note is read FROM and where "this run was shown
+        # it" is written TO, so a dreamer holding one and not the other could
+        # offer the same note forever or mark one it never displayed.
+        #
+        # Injected with no default rather than constructed here, for the reason
+        # every store in this repository takes its path: a default would write
+        # to the real `audit/` from any test that built a `Dreamer`.
+        self._audit = audit
         # The soul is part of the system prompt here rather than prepended per
         # call, because unlike the chat bridge there is exactly one character
         # this process ever speaks in, and putting it in the cached system block
@@ -1070,10 +1282,16 @@ class Dreamer:
         `ValidationError` out of the SDK would kill whatever timer drives this
         and restart into the same failure. A dream that could not be had must
         not be recorded as one that decided nothing.
+
+        Anything the chat surface has put up is read into the prompt here as
+        candidate sparks — and nothing else happens to it. The model writes its
+        own step; a consideration becomes a seed only if it chooses to make one.
         """
+        moment = now or datetime.now(UTC)
         pool = self._store.recent(limit=FUSION_POOL)
         existing = [d for d in pool if d.is_open][: CARRY_FORWARD * 3]
         candidates = fusion_candidates(pool, limit=FUSION_OFFERS)
+        considerations = self._recall_considerations(moment)
         prompt = build_prompt(
             self._rules,
             self._journal,
@@ -1081,13 +1299,17 @@ class Dreamer:
             headlines=headlines,
             posts=posts,
             fusions=candidates,
-            now=now,
+            considerations=considerations,
+            now=moment,
         )
 
         try:
             step, usage = self._client.dream(prompt)
         except (anthropic.APIError, ValueError, RuntimeError) as exc:
             log.warning("dream_call_failed", error=str(exc))
+            # Nothing is marked seen. A run whose call failed never showed
+            # anybody anything, and the notes are offered again next time —
+            # the same direction as writing no dream at all.
             return None
         except Exception as exc:
             # Same reasoning as `fetch_market_ticks`: there is no exception from
@@ -1097,8 +1319,16 @@ class Dreamer:
             log.warning("dream_call_failed_unexpectedly", error=repr(exc))
             return None
 
+        # Marked HERE — after the model answered, before the branch below. What
+        # the marker records is that these reached the model, and a fusion step
+        # and an ordinary step are equally runs that saw them. Marking after the
+        # write would make "was it considered" depend on which kind of step came
+        # back, which is a different question.
+        self._mark_considerations_seen(considerations)
+
         fused, refusal = self._fuse_if_asked(step, candidates, usage=usage, now=now)
         if fused is not None:
+            fused.considerations = considerations
             return fused
 
         dream, advanced, scope = self._apply(step, existing, now=now)
@@ -1137,7 +1367,74 @@ class Dreamer:
             scope=scope,
             # Only ever a refusal here: a fusion that succeeded returned above.
             fusion=refusal,
+            considerations=considerations,
         )
+
+    def _recall_considerations(self, now: datetime) -> ConsiderationRecall | None:
+        """What the chat surface has put up that no run has been shown yet.
+
+        `None` on any failure, and on no audit log at all, so the section is
+        simply absent from the prompt. That is the honest shape: an empty recall
+        is a claim ("the log was read and nothing was waiting") and this cannot
+        make it. Costs the section and nothing else — same direction as
+        `dream_condition_readings_unavailable` costing the grading.
+        """
+        if self._audit is None:
+            return None
+        try:
+            view = self._audit.read(limit=CONSIDERATION_SCAN, days=CONSIDERATION_DAYS)
+        except Exception as exc:
+            log.warning(
+                "dream_considerations_unavailable",
+                error=f"{type(exc).__name__}: {exc}",
+                detail=(
+                    "Nothing raised in conversation reaches this run's prompt, "
+                    "and nothing is marked seen, so anything waiting is offered "
+                    "again next run."
+                ),
+            )
+            return None
+        return recall_considerations(
+            view, hours=DEFAULT_CONSIDERATION_HOURS, now=now
+        )
+
+    def _mark_considerations_seen(self, recall: ConsiderationRecall | None) -> None:
+        """Record which considerations this run was actually shown.
+
+        **The exact set that was rendered, never a high-water stamp and never
+        `now`.** `seen.py` established the rule in its own shape — a marker
+        stamped at the current moment marks as seen whatever arrived while the
+        page was being built — and the model call here takes long enough for
+        that to be a real window. Writing the keys that went into the prompt
+        cannot over-claim, whatever a limit trimmed or however long the call
+        took.
+
+        A new audit EVENT rather than a column: the log is append-only and must
+        never be migrated, and a run stating what it saw is a fact about the
+        run, in the same shape as `loop_start`.
+
+        Never raises. A failed write costs the marker, and the consequence is
+        one note offered twice — visibly, to a model that is told it may ignore
+        it. The other failure direction is a note marked seen that nobody read.
+        """
+        if self._audit is None or recall is None or not recall.considerations:
+            # Nothing rendered, nothing to mark. A run that was shown an empty
+            # list has not "considered" anything, and an event saying it had
+            # would put an empty claim on the record every single day.
+            return
+        keys = recall.shown_keys
+        try:
+            self._audit.record_event(
+                CONSIDERATIONS_SEEN_EVENT,
+                {SHOWN_FIELD: keys, "count": len(keys)},
+            )
+        except OSError as exc:
+            log.warning(
+                "dream_considerations_not_marked",
+                error=str(exc),
+                count=len(keys),
+                detail="They will be offered again on the next run.",
+            )
 
     def _fuse_if_asked(
         self,

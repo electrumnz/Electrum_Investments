@@ -44,6 +44,16 @@ carry it, and none is decoration:
 The degraded flags travel for the same reason, and they are **any** rather than
 latest: the claim being made is that this list is the complete set of what was
 seen over the window, and one failed fetch anywhere in it makes that false.
+
+## What else is in that log
+
+The second half of this module reads **considerations**: the notes a chat agent
+put to the dreamer with `raise_consideration`. Different subject, identical
+shape — a windowed, pure read over an `AuditView`, with the age travelling
+beside each item and an empty list that says which kind of empty it is. It lives
+here rather than in `dreaming.py` on purpose, because nothing in `dreaming.py`
+reads the audit log and that is what keeps a conversation from writing a shelf
+row. See the block comment above `CONSIDERATION_EVENT`.
 """
 
 from __future__ import annotations
@@ -362,7 +372,298 @@ def render(result: NewsRecall, *, now: datetime | None = None) -> list[str]:
     return lines
 
 
+# ------------------------------------------------------- raised in conversation
+#
+# The chat agents can put something to the dreamer with `raise_consideration`.
+# That tool writes ONE line to the audit log and never opens `data/dreams.db`,
+# which is the whole containment: a dream is the first link of a chain that ends
+# in a live trading permission, and a conversation must not be able to insert at
+# the top of it.
+#
+# So this is the other half of that arrangement, and it is deliberately a READER
+# in this module rather than anything in `dreaming.py`. Nothing there reads the
+# audit log, nothing here writes a shelf row, and a consideration therefore
+# becomes a dream only by the dreamer choosing to make one — exactly as it
+# chooses its own seeds. Keep it that way: a function here that returned a
+# `Dream`, or a call from `dreaming.py` into this module, would collapse the
+# separation into a matter of discipline.
+#
+# Same rules as the recall above, for the same reasons. The age travels with the
+# item, the record says when it is incomplete, and "nothing was put up" is a
+# different answer from "nothing could be read".
+
+#: The audit `kind` a consideration is stored under.
+#:
+#: The literal is duplicated from `mcp_server.CONSIDERATION_EVENT` rather than
+#: imported, and that is a trade rather than an oversight: importing the MCP
+#: server here would drag a whole tool surface and its module-level session into
+#: a module whose entire claim is that it is pure functions over an `AuditView`.
+#: Two places naming one string is two places that can disagree, so
+#: `tests/test_dreamer.py` fails the build if they ever do.
+CONSIDERATION_EVENT = "chat_consideration"
+
+#: The audit `kind` a dream run writes to say which considerations it was shown.
+#:
+#: A new event kind rather than a column, because the log is append-only and
+#: **must never be migrated** — a reader that rejected yesterday's format would
+#: throw away the history it exists to preserve. Nothing already written is
+#: touched; a run states what it saw, in the same way `loop_start` states that a
+#: loop began.
+CONSIDERATIONS_SEEN_EVENT = "dream_considerations_seen"
+
+#: The payload field on that event: the stamps of the considerations that were
+#: actually RENDERED into the prompt.
+#:
+#: The exact set, never a high-water mark. `seen.py` learned this the hard way in
+#: its own shape — a marker stamped at `now` marks as seen whatever arrived
+#: between the render and the write. Here the same trap has a second door: a
+#: limit that trimmed the list would leave older unseen notes below a high-water
+#: stamp, marked as considered by a run that never displayed them. A set of what
+#: was on the page cannot over-claim.
+SHOWN_FIELD = "shown"
+
+#: What "recent" means for a consideration, unless a caller says otherwise.
+#:
+#: Two days rather than one, because the dreamer runs daily: a single failed run
+#: must not lose a spark. Not much more than two, because anything older arriving
+#: under the heading "raised in conversation" is being presented as current when
+#: it is not — the confident-partial-answer failure arriving through the prompt.
+DEFAULT_CONSIDERATION_HOURS = 48.0
+
+#: How many to hand back. `raise_consideration` caps the surface at three a day,
+#: so inside a two-day window this cannot bind through the tool; it bounds a
+#: hand-written log rather than an ordinary one, and what it drops is reported.
+DEFAULT_CONSIDERATION_LIMIT = 12
+
+
+@dataclass(frozen=True)
+class Consideration:
+    """One thing a chat agent put to the dreamer, as it sits in the log.
+
+    Note what it does NOT carry: no symbol, no instrument class, no chain, no
+    verdict. That is not this reader being selective — those fields are not in
+    the record, because `raise_consideration` never writes them. A consideration
+    is a note, and the shape of the type says so.
+    """
+
+    at: datetime
+    speaker: str
+    spark: str
+    why_now: str = ""
+    origin: str = ""
+    #: The operator's own words, verbatim, when something they said led to this.
+    #: Empty when nobody prompted it — which is a real state, not a gap.
+    prompted_by: str = ""
+    #: What share of the operator's wording came straight back in the spark.
+    #: `None` rather than `0.0` when nothing was quoted: the flattering reading
+    #: must not be what an absence of evidence looks like.
+    prompt_echo: float | None = None
+
+    def age_minutes(self, now: datetime) -> float:
+        """How long ago this was put up. Never negative, never guessed."""
+        return max(0.0, (now - self.at).total_seconds() / 60.0)
+
+    @property
+    def key(self) -> str:
+        """How a run records that this one was on the page.
+
+        The log's own stamp. Two considerations cannot share it — they are
+        separate tool calls, each stamped by `record_event` — and it survives a
+        round trip through `isoformat`, which is what makes the seen set exact
+        rather than approximate.
+        """
+        return self.at.isoformat()
+
+
+@dataclass(frozen=True)
+class ConsiderationRecall:
+    """What is waiting for the dreamer, and what could not be established.
+
+    `considerations` is what has NOT been shown to a dream run yet. Everything
+    else on here exists so an empty list can be read correctly, because it has
+    four causes and only one of them is "nobody had anything":
+
+    - nobody put anything up — the ordinary state,
+    - somebody did and a previous run was already shown it (`seen_previously`),
+    - the log recorded nothing at all in the window, so the silence is the box's
+      rather than the operator's (`has_record`),
+    - the log could not be fully read (`is_degraded`).
+
+    Same rule as `has_cycles` above and `can_grade_anything` in `triggers`: a
+    caller handed only the list reaches for the first reading every time.
+    """
+
+    window_hours: float = DEFAULT_CONSIDERATION_HOURS
+
+    #: Not yet shown to a dream run, newest first.
+    considerations: list[Consideration] = field(default_factory=list)
+
+    #: Inside the window and already shown on an earlier run. Counted rather
+    #: than returned: re-offering one would be the dreamer nagged by the same
+    #: note every day until it gave in, which is the operator steering it by
+    #: accident.
+    seen_previously: int = 0
+
+    #: Dropped by `limit` after everything else. Named because they are unseen
+    #: and are NOT marked seen by this run, so they come back next time.
+    omitted_for_limit: int = 0
+
+    #: Rows carrying no spark. Impossible through `raise_consideration`, which
+    #: refuses a blank one deterministically, so this means a hand-edited log —
+    #: and a row dropped in silence is exactly how "nothing was raised" becomes
+    #: the wrong answer.
+    rows_without_a_spark: int = 0
+
+    #: Any audit record at all inside the window — a cycle, an event, anything.
+    entries_in_window: int = 0
+
+    malformed_lines: int = 0
+    unreadable_files: list[str] = field(default_factory=list)
+
+    @property
+    def has_record(self) -> bool:
+        """Whether the log has anything at all to say about this window.
+
+        False means nothing was written: the box was off, the loop was stopped,
+        or this is a fresh deployment. It does NOT mean the window was quiet,
+        and a renderer that let an empty list say so would be inventing the one
+        fact this cannot establish.
+        """
+        return self.entries_in_window > 0
+
+    @property
+    def is_degraded(self) -> bool:
+        """Whether this reading is known to be incomplete."""
+        return self.malformed_lines > 0 or bool(self.unreadable_files)
+
+    @property
+    def shown_keys(self) -> list[str]:
+        """The stamps a run should record once these have been rendered.
+
+        Exactly what is in `considerations` — so a caller that renders the list
+        and writes this back cannot mark anything that was not on the page.
+        """
+        return [item.key for item in self.considerations]
+
+
+def recall_considerations(
+    view: AuditView,
+    *,
+    hours: float = DEFAULT_CONSIDERATION_HOURS,
+    limit: int = DEFAULT_CONSIDERATION_LIMIT,
+    now: datetime | None = None,
+) -> ConsiderationRecall:
+    """What the chat surface has put up and no dream run has been shown yet.
+
+    Pure and offline, like everything else here: the only input is a view
+    somebody else already read off disk. Read it with `AuditLog.read()`, which
+    walks the dated files and reports what it could not parse — reading today's
+    file alone empties at UTC midnight and after every restart, which is the bug
+    `get_recent_decisions` shipped with.
+
+    Newest first, because that is the order a reader wants and the order the
+    ages then run in.
+    """
+    moment = now or datetime.now(UTC)
+    cutoff = moment - timedelta(hours=hours)
+
+    # Collected across the WHOLE view rather than the window. A run that marked
+    # something is always later than the note it marked, so window-filtering
+    # would be harmless — but "harmless because of an argument" is how a set that
+    # silently under-covers gets shipped, and the whole set is two lookups.
+    shown: set[str] = set()
+    for event in view.events:
+        if event.kind != CONSIDERATIONS_SEEN_EVENT:
+            continue
+        raw = event.payload.get(SHOWN_FIELD)
+        if isinstance(raw, list):
+            shown.update(str(key) for key in raw)
+
+    unseen: list[Consideration] = []
+    seen_previously = 0
+    blank = 0
+    entries = 0
+
+    for entry in view.decisions:
+        if _aware(entry.timestamp) >= cutoff:
+            entries += 1
+
+    for event in view.events:
+        stamp = _aware(event.timestamp)
+        if stamp < cutoff:
+            continue
+        entries += 1
+        if event.kind != CONSIDERATION_EVENT:
+            continue
+        item = _as_consideration(event.payload, stamp)
+        if item is None:
+            blank += 1
+            continue
+        if item.key in shown:
+            seen_previously += 1
+            continue
+        unseen.append(item)
+
+    unseen.sort(key=lambda c: c.at, reverse=True)
+    kept = unseen[: max(0, limit)]
+
+    return ConsiderationRecall(
+        window_hours=hours,
+        considerations=kept,
+        seen_previously=seen_previously,
+        omitted_for_limit=len(unseen) - len(kept),
+        rows_without_a_spark=blank,
+        entries_in_window=entries,
+        malformed_lines=view.malformed,
+        unreadable_files=list(view.unreadable_files),
+    )
+
+
+def describe_age(minutes: float) -> str:
+    """An age a reader can act on, in the largest unit that still says something.
+
+    Rendering every age in minutes is technically honest and practically
+    unreadable at two days; rounding everything to days loses the difference
+    between a spark from this morning and one from ten minutes ago, which is the
+    whole reason the age travels at all.
+    """
+    if minutes < 1:
+        return "just now"
+    if minutes < 90:
+        return f"{minutes:.0f} minutes ago"
+    hours = minutes / 60.0
+    if hours < 36:
+        return f"{hours:.0f} hours ago"
+    return f"{hours / 24.0:.0f} days ago"
+
+
 # --------------------------------------------------------------------- private
+
+
+def _as_consideration(payload: dict[str, object], stamp: datetime) -> Consideration | None:
+    """One log payload as a value, or None when it carries no spark to show."""
+    spark = str(payload.get("spark") or "").strip()
+    if not spark:
+        return None
+    return Consideration(
+        at=stamp,
+        speaker=str(payload.get("speaker") or "").strip(),
+        spark=spark,
+        why_now=str(payload.get("why_now") or "").strip(),
+        origin=str(payload.get("origin") or "").strip(),
+        # NOT stripped of anything but whitespace, and never reflowed. It is the
+        # operator's own sentence, and a tidied quote takes from the reader the
+        # judgement the quote exists to allow.
+        prompted_by=str(payload.get("prompted_by") or "").strip(),
+        prompt_echo=_echo(payload.get("prompt_echo")),
+    )
+
+
+def _echo(value: object) -> float | None:
+    """The echo ratio, or None. A bool is not a number here, whatever Python says."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value)
 
 
 @dataclass

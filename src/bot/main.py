@@ -34,7 +34,7 @@ from .data.calendar import build_calendar_feed
 from .data.marketaux import MarketauxNews
 from .data.news import EmptyNews, NewsFeed
 from .data.xfeed import XFeed
-from .dreaming import Dream, DreamStore, Vault
+from .dreaming import Dream, DreamStore, FusionResult, Vault
 from .grants import (
     DEGRADED_STATES as GRANTS_DEGRADED_STATES,
 )
@@ -915,6 +915,24 @@ def cmd_loop(
         broker.disconnect()
 
 
+def _describe_fusion(fusion: FusionResult | None) -> str | None:
+    """One field on the dream line for a fusion, including one that was refused.
+
+    Three states and they must not collapse into two. `None` is "the step asked
+    to fuse nothing", which is most runs and is the ordinary answer. A written
+    fusion names its parents and the child. A refusal names the refusals — and
+    that is the state worth surfacing, because a dreamer proposing fusions a
+    full workbench keeps turning down looks, from outside, exactly like a
+    dreamer that stopped proposing them.
+    """
+    if fusion is None:
+        return None
+    parents = "+".join(str(p) for p in fusion.parents) or "none"
+    if fusion.ok:
+        return f"{parents} -> {fusion.dream_id}"
+    return f"refused {parents}: {', '.join(str(r) for r in fusion.refusals) or 'no reason given'}"
+
+
 def cmd_dream(env: Env, rules: Rules) -> int:
     """One dream step.
 
@@ -954,7 +972,12 @@ def cmd_dream(env: Env, rules: Rules) -> int:
 
     journal = Journal()
     store = DreamStore()
-    dreamer = Dreamer(env, rules, store, journal)
+    # One log, read twice and written once. The dreamer reads the considerations
+    # the chat surface put up and records which of them this run was shown; the
+    # grading below reads the figures the decision loop recorded. Both are reads
+    # of the same append-only file, and neither is authoritative over anything.
+    audit = AuditLog()
+    dreamer = Dreamer(env, rules, store, journal, audit=audit)
     result = dreamer.run_once(headlines=headlines, posts=posts)
 
     if result is None:
@@ -985,7 +1008,7 @@ def cmd_dream(env: Env, rules: Rules) -> int:
     # this command needs no broker and no market data credentials.
     readings: list[CycleReadings] = []
     try:
-        readings = recent_readings(AuditLog().read(limit=CONDITION_CYCLES, days=14))
+        readings = recent_readings(audit.read(limit=CONDITION_CYCLES, days=14))
     except Exception as exc:
         # Costs the grading and nothing else. A prophecy that could not be
         # checked stays a prophecy, which is the direction to fail in: the
@@ -1018,6 +1041,25 @@ def cmd_dream(env: Env, rules: Rules) -> int:
         headlines_seen=len(headlines),
         posts_seen=len(posts),
         social_degraded=bool(social and social.is_degraded),
+        # What the chat surface put to the dreamer and this run was shown. On
+        # the line for the same reason `stops_breached` is on the cycle line: a
+        # zero every run is a stated fact, and the absence of a line is what an
+        # outage looks like too. `None` is a THIRD state and not a zero — the
+        # log could not be read at all, so nobody looked.
+        considerations_shown=(
+            len(result.considerations.considerations) if result.considerations else None
+        ),
+        # And whether that count can be believed. An unreadable log produces the
+        # same zero as a quiet week; the `calendar_degraded` lesson again.
+        considerations_record_incomplete=(
+            result.considerations.is_degraded if result.considerations else None
+        ),
+        # What happened when the step asked to combine two chains, INCLUDING a
+        # refusal. It reached `DreamerResult` and stopped there, so a dreamer
+        # repeatedly proposing fusions the store keeps refusing was a fact
+        # nothing surfaced — which is exactly the silence `scope` was given a
+        # log line to avoid.
+        fusion=_describe_fusion(result.fusion),
         cost_usd=round(result.usage.estimated_cost_usd, 4) if result.usage else None,
         # On the same line as the dream itself, so one log entry answers both
         # "did it think" and "did anything move". A zero here beside a healthy

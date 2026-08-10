@@ -7,11 +7,14 @@ the interesting case.
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 
+from bot import news_history
+from bot.audit import AuditLog
 from bot.claude_client import CallUsage
 from bot.config import Env, Rules
 from bot.dreamer import (
@@ -33,6 +36,7 @@ from bot.dreaming import (
     DreamStage,
     DreamStore,
     DreamVerdict,
+    FusionResult,
     Hop,
     MoveRefusal,
     Vault,
@@ -46,9 +50,20 @@ from bot.models import (
     TriggerField,
     TriggerOp,
 )
+from bot.news_history import (
+    Consideration,
+    ConsiderationRecall,
+    describe_age,
+    recall_considerations,
+)
 from bot.triggers import CycleReadings
 
 ENTRY = datetime(2026, 5, 4, 15, 0, tzinfo=UTC)
+# A second fixed moment, for the consideration tests at the bottom. Its own
+# constant rather than ENTRY because those turn on ages measured in hours across
+# a UTC midnight, and reusing the entry stamp would tie the two sets together
+# for no reason.
+NOW = datetime(2026, 8, 10, 15, 0, tzinfo=UTC)
 USAGE = CallUsage(
     input_tokens=10, output_tokens=10, cache_read_tokens=0,
     cache_write_tokens=0, estimated_cost_usd=0.001,
@@ -1364,3 +1379,654 @@ def test_the_system_prompt_says_fusing_does_not_improve_verification(rules):
     assert "**The parents survive.**" in SYSTEM_PROMPT
     assert "It is harder to promote, not easier." in SYSTEM_PROMPT
     assert "Combining is an argument, not evidence." in SYSTEM_PROMPT
+
+
+# ----------------------------------------------- raised in conversation
+#
+# `raise_consideration` writes ONE line to the audit log and never opens
+# `data/dreams.db`. This is the other half: the dreamer reads those lines into
+# its prompt as candidate sparks it may ignore.
+#
+# The reader itself lives in `news_history` — pure functions over an `AuditView`,
+# beside the recall that answers the same shape of question about headlines — and
+# is exercised from here because the property being defended is the dreamer's:
+# a conversation must not be able to insert at the top of the chain that ends in
+# a live trading permission.
+
+
+def _raise_consideration(
+    audit_dir: Path,
+    *,
+    minutes_ago: int,
+    speaker: str = "grogu",
+    spark: str = "Rare-earth refining sits in three plants.",
+    why_now: str = "The operator asked about magnet supply.",
+    prompted_by: str = "",
+    prompt_echo: float | None = None,
+    kind: str = "chat_consideration",
+    payload: dict[str, object] | None = None,
+) -> datetime:
+    """Write one consideration into a dated log file, at a chosen age.
+
+    Raw JSONL rather than `AuditLog.record_event`, because that stamps the line
+    with the wall clock and the age is the thing under test here. The file name
+    is the UTC date so `AuditLog.files()` orders it correctly.
+    """
+    at = NOW - timedelta(minutes=minutes_ago)
+    body = payload if payload is not None else {
+        "origin": f"chat:{speaker}",
+        "speaker": speaker,
+        "spark": spark,
+        "why_now": why_now,
+        "prompted_by": prompted_by,
+        "prompt_echo": prompt_echo,
+    }
+    path = audit_dir / f"{at.date().isoformat()}.jsonl"
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(
+            json.dumps({"kind": kind, "timestamp": at.isoformat(), "payload": body})
+            + "\n"
+        )
+    return at
+
+
+def _recall(audit_dir: Path, **kw) -> ConsiderationRecall:
+    return recall_considerations(AuditLog(audit_dir).read(), now=NOW, **kw)
+
+
+def test_the_reader_and_the_writer_agree_on_the_event_kind():
+    """One string named in two modules is two places that can disagree.
+
+    The literal is duplicated rather than imported so `news_history` stays pure
+    functions over an `AuditView` instead of importing a whole MCP tool surface.
+    That trade is only safe with this test under it — a renamed event on either
+    side would otherwise leave the dreamer reading a kind nobody writes, and the
+    symptom is a section that is quietly always empty.
+    """
+    from bot import mcp_server
+
+    assert news_history.CONSIDERATION_EVENT == mcp_server.CONSIDERATION_EVENT
+
+
+def test_a_consideration_is_read_back_out_of_the_audit_log(tmp_path):
+    _raise_consideration(tmp_path, minutes_ago=30, prompted_by="what about magnets?")
+
+    result = _recall(tmp_path)
+
+    assert len(result.considerations) == 1
+    item = result.considerations[0]
+    assert item.speaker == "grogu"
+    assert item.spark == "Rare-earth refining sits in three plants."
+    assert item.prompted_by == "what about magnets?"
+    assert item.age_minutes(NOW) == pytest.approx(30.0)
+
+
+def test_the_reader_walks_dated_files_rather_than_todays_only(tmp_path):
+    """`get_recent_decisions` shipped reading today's file alone, so its recall
+    emptied at UTC midnight and after every restart. The window here is two days
+    and crosses one midnight by construction."""
+    _raise_consideration(tmp_path, minutes_ago=20 * 60, spark="Yesterday's note")
+    _raise_consideration(tmp_path, minutes_ago=5, spark="This morning's note")
+
+    result = _recall(tmp_path)
+
+    assert [c.spark for c in result.considerations] == [
+        "This morning's note",
+        "Yesterday's note",
+    ]
+
+
+def test_a_consideration_outside_the_window_is_not_offered(tmp_path):
+    """Anything older arriving under the heading "raised in conversation" is
+    being presented as current when it is not."""
+    _raise_consideration(tmp_path, minutes_ago=5 * 24 * 60, spark="Ancient")
+
+    assert _recall(tmp_path).considerations == []
+
+
+def test_a_consideration_already_shown_is_not_offered_again(tmp_path):
+    """Once considered, a note must not be put up forever. A dreamer asked the
+    same thing daily until it agreed is the operator steering it by accident."""
+    at = _raise_consideration(tmp_path, minutes_ago=200, spark="Seen already")
+    _raise_consideration(tmp_path, minutes_ago=10, spark="Not seen yet")
+    _raise_consideration(
+        tmp_path,
+        minutes_ago=100,
+        kind="dream_considerations_seen",
+        payload={"shown": [at.isoformat()], "count": 1},
+    )
+
+    result = _recall(tmp_path)
+
+    assert [c.spark for c in result.considerations] == ["Not seen yet"]
+    # And the one already shown is COUNTED rather than forgotten: "nothing new"
+    # and "nobody said anything" are different findings.
+    assert result.seen_previously == 1
+
+
+def test_the_marker_names_what_was_shown_and_nothing_else(tmp_path):
+    """The seen record is the exact set that was rendered, never a high-water
+    stamp. A stamp would mark as seen anything that arrived while the model was
+    thinking, and anything a limit had trimmed off the bottom of the list —
+    `seen.py`'s rule with a second door."""
+    older = _raise_consideration(tmp_path, minutes_ago=300, spark="A")
+    newer = _raise_consideration(tmp_path, minutes_ago=60, spark="B")
+    # Only the newer one was ever displayed.
+    _raise_consideration(
+        tmp_path,
+        minutes_ago=30,
+        kind="dream_considerations_seen",
+        payload={"shown": [newer.isoformat()], "count": 1},
+    )
+
+    result = _recall(tmp_path)
+
+    assert [c.spark for c in result.considerations] == ["A"]
+    assert result.considerations[0].at == older
+
+
+def test_a_row_with_no_spark_is_counted_rather_than_dropped_in_silence(tmp_path):
+    """Impossible through the tool, which refuses a blank spark deterministically.
+    A hand-edited log is the case, and a row dropped in silence is exactly how
+    "nothing was raised" becomes the wrong answer."""
+    _raise_consideration(
+        tmp_path, minutes_ago=10, payload={"speaker": "grogu", "spark": "   "}
+    )
+
+    result = _recall(tmp_path)
+
+    assert result.considerations == []
+    assert result.rows_without_a_spark == 1
+
+
+def test_nothing_recorded_at_all_is_not_a_quiet_week(tmp_path):
+    """The `has_cycles` rule. An empty log means the box was off or this is a
+    fresh deployment; it says nothing whatever about whether anybody had an
+    idea."""
+    result = _recall(tmp_path)
+
+    assert result.considerations == []
+    assert result.has_record is False
+
+
+def test_a_window_with_other_records_but_no_considerations_is_a_real_answer(tmp_path):
+    """The other side of the same coin, and the reason `has_record` exists: the
+    log was being written and nobody put anything up. That IS a quiet week."""
+    AuditLog(tmp_path).record_event("loop_start", {})
+
+    result = _recall(tmp_path)
+
+    assert result.considerations == []
+    assert result.has_record is True
+    assert result.is_degraded is False
+
+
+def test_an_unreadable_line_makes_the_reading_degraded(tmp_path):
+    """A log that could not be fully read produces the same empty list as a quiet
+    week, and only one of them is a fact about the world."""
+    _raise_consideration(tmp_path, minutes_ago=10)
+    (tmp_path / f"{NOW.date().isoformat()}.jsonl").open("a").write("{not json\n")
+
+    result = _recall(tmp_path)
+
+    assert result.is_degraded is True
+    assert result.malformed_lines == 1
+
+
+def test_what_the_limit_drops_is_named_and_stays_unseen(tmp_path):
+    """A trimmed list must not be marked as considered. `shown_keys` is exactly
+    what was rendered, so what the limit dropped comes back next run."""
+    for minutes in (10, 20, 30):
+        _raise_consideration(tmp_path, minutes_ago=minutes, spark=f"note {minutes}")
+
+    result = _recall(tmp_path, limit=2)
+
+    assert [c.spark for c in result.considerations] == ["note 10", "note 20"]
+    assert result.omitted_for_limit == 1
+    assert len(result.shown_keys) == 2
+
+
+@pytest.mark.parametrize(
+    "minutes,expected",
+    [
+        (0.4, "just now"),
+        (25, "25 minutes ago"),
+        (240, "4 hours ago"),
+        (60 * 30, "30 hours ago"),
+        (60 * 40, "2 days ago"),
+    ],
+)
+def test_an_age_is_stated_in_a_unit_a_reader_can_act_on(minutes, expected):
+    assert describe_age(minutes) == expected
+
+
+# ------------------------------------------------------ the prompt section
+
+
+def _one(**kw) -> ConsiderationRecall:
+    base = dict(
+        considerations=[
+            Consideration(
+                at=NOW - timedelta(hours=6),
+                speaker="grogu",
+                spark="Rare-earth refining sits in three plants.",
+                why_now="A magnet maker just guided down.",
+                prompted_by="what happens to magnets if China restricts exports?",
+                prompt_echo=0.4,
+            )
+        ],
+        entries_in_window=4,
+    )
+    base.update(kw)
+    return ConsiderationRecall(**base)  # type: ignore[arg-type]
+
+
+def test_a_considerations_age_travels_with_it_into_the_prompt(rules, journal):
+    """A spark raised six hours ago rendered with no time on it is being
+    presented as something said just now — the confident-partial-answer failure
+    arriving through the prompt rather than through a feed."""
+    prompt = build_prompt(rules, journal, [], considerations=_one(), now=NOW)
+
+    assert "[6 hours ago] grogu: Rare-earth refining sits in three plants." in prompt
+
+
+def test_the_operators_own_words_are_marked_as_the_operators(rules, journal):
+    """So the model can tell what a person said from what an agent said about it.
+    Verbatim and on its own line: folded into the spark it would read as one
+    voice, which is the judgement the quote exists to allow."""
+    prompt = build_prompt(rules, journal, [], considerations=_one(), now=NOW)
+
+    assert (
+        'the operator said, verbatim: "what happens to magnets if China '
+        'restricts exports?"' in prompt
+    )
+    assert "why now (grogu's words): A magnet maker just guided down." in prompt
+
+
+def test_the_echo_ratio_is_not_shown_to_the_model(rules, journal):
+    """A deliberate omission, pinned so it stays deliberate.
+
+    `prompt_echo` exists so a READER can judge whether a spark is the operator's
+    sentence given back, and both texts are already one line apart here, so this
+    reader can do that directly. Printing the number as well invites a model to
+    treat 0.4 as a threshold — the figure enforced by inference, which is exactly
+    what `raise_consideration` refused to enforce in code.
+    """
+    prompt = build_prompt(rules, journal, [], considerations=_one(), now=NOW)
+
+    assert "0.4" not in prompt
+    assert "echo" not in prompt
+
+
+def test_an_unprompted_consideration_says_so_rather_than_leaving_a_gap(rules, journal):
+    """Nobody prompting it is a real state. A blank line there would read as a
+    quote that failed to render."""
+    recall = _one(
+        considerations=[
+            Consideration(
+                at=NOW - timedelta(minutes=20),
+                speaker="yoda",
+                spark="The stop on the SPY short is the only thing holding.",
+                why_now="Nothing prompted this; it came up reading the account.",
+            )
+        ]
+    )
+
+    prompt = build_prompt(rules, journal, [], considerations=recall, now=NOW)
+
+    assert "nobody prompted this one; it is the agent's own." in prompt
+    assert "the operator said" not in prompt
+
+
+def test_the_prompt_says_the_dreamer_may_ignore_them(rules, journal):
+    """The property the whole feature turns on. A suggestion the model feels
+    obliged to honour is the operator steering the dreamer by accident, and two
+    brains was the point rather than agreement."""
+    prompt = build_prompt(rules, journal, [], considerations=_one(), now=NOW)
+
+    assert "**You may ignore every one of these.**" in prompt
+    assert "not a task and not a seed" in prompt
+    # And no shortcut: a suggested chain is still a chain that has to be checked.
+    assert "every hop still has to be checkable" in prompt
+
+
+def test_a_consideration_is_never_described_as_a_dream(rules, journal):
+    """It is a note. The prompt must not let it read as something already on a
+    shelf, because a dream is the first link of a chain that ends in a live
+    trading permission."""
+    prompt = build_prompt(rules, journal, [], considerations=_one(), now=NOW)
+
+    assert "not dreams, not shelved, not instructions" in prompt
+    assert "none of them permits a symbol" in prompt
+
+
+def test_none_recorded_is_not_nobody_suggested_anything(rules, journal):
+    """`has_cycles` and `can_grade_anything` in a third place. An empty list is
+    the ordinary state and it is not evidence of anything."""
+    prompt = build_prompt(
+        rules,
+        journal,
+        [],
+        considerations=ConsiderationRecall(entries_in_window=9),
+        now=NOW,
+    )
+
+    assert "Nothing new has been put to you in conversation in the last 48h." in prompt
+    assert "NOT evidence that nobody had anything" in prompt
+
+
+def test_a_silent_log_is_reported_as_a_silence_rather_than_as_a_no(rules, journal):
+    """No records at all in the window is the box saying nothing, not the
+    operator. The two must not render identically."""
+    prompt = build_prompt(
+        rules, journal, [], considerations=ConsiderationRecall(), now=NOW
+    )
+
+    assert "The log holds no records at all for the last 48h" in prompt
+    assert "silence from this box rather than a quiet week" in prompt
+
+
+def test_a_degraded_read_is_said_out_loud_in_the_prompt(rules, journal):
+    prompt = build_prompt(
+        rules,
+        journal,
+        [],
+        considerations=_one(malformed_lines=3, unreadable_files=["2026-08-09.jsonl: x"]),
+        now=NOW,
+    )
+
+    assert "could not be fully read (3 unparseable line(s), 1 unreadable file(s))" in prompt
+
+
+def test_notes_already_seen_are_counted_in_the_prompt_rather_than_repeated(
+    rules, journal
+):
+    """Repeating them would be the same suggestion arriving daily until it was
+    taken up, which is not a suggestion."""
+    prompt = build_prompt(
+        rules,
+        journal,
+        [],
+        considerations=ConsiderationRecall(seen_previously=2, entries_in_window=5),
+        now=NOW,
+    )
+
+    assert "2 other note(s) went up in this window" in prompt
+    assert "already in front of you on an earlier run" in prompt
+
+
+def test_never_having_looked_renders_nothing_at_all(rules, journal):
+    """`None` and an empty recall are different claims. One says the dreamer has
+    no view of the chat surface; the other says it looked and nothing was
+    waiting. A prompt that stated the second when only the first was true would
+    be inventing the one fact it cannot establish."""
+    prompt = build_prompt(rules, journal, [], considerations=None, now=NOW)
+
+    assert "conversation" not in prompt
+    assert "put to you" not in prompt
+
+
+def test_the_considerations_come_after_the_dreamers_own_chains(rules, journal):
+    """The grant block's ordering rule, arriving here for the same reason: the
+    one section carrying somebody else's suggestion has a pull that is not
+    evidence, and a model that reads it before its own open chains anchors on
+    it."""
+    dream = Dream(id=3, title="Brood overlap", seed="a spark")
+
+    prompt = build_prompt(rules, journal, [dream], considerations=_one(), now=NOW)
+
+    assert prompt.index("[id 3] Brood overlap") < prompt.index("Raised in conversation")
+    # And the closing instruction still lands last.
+    assert prompt.index("Raised in conversation") < prompt.index("Produce one step.")
+
+
+# --------------------------------------------------- the run, end to end
+
+
+def test_a_run_shows_the_considerations_and_marks_exactly_those(rules, store, journal, tmp_path):
+    audit = AuditLog(tmp_path / "audit")
+    at = _raise_consideration(audit.base_dir, minutes_ago=45, spark="A live note")
+    client = _StubClient(_step())
+
+    result = Dreamer(
+        _env(), rules, store, journal, client=client, audit=audit
+    ).run_once(now=NOW)
+
+    assert result is not None
+    assert "A live note" in client.prompts[0]
+    marks = [e for e in audit.read().events if e.kind == "dream_considerations_seen"]
+    assert len(marks) == 1
+    assert marks[0].payload["shown"] == [at.isoformat()]
+    # And a second run is not offered it again.
+    second = _StubClient(_step())
+    Dreamer(_env(), rules, store, journal, client=second, audit=audit).run_once(now=NOW)
+    assert "A live note" not in second.prompts[0]
+
+
+def test_a_failed_call_marks_nothing_so_the_note_is_offered_again(
+    rules, store, journal, tmp_path
+):
+    """A run whose model call failed never showed anybody anything. Same
+    direction as writing no dream at all."""
+    audit = AuditLog(tmp_path / "audit")
+    _raise_consideration(audit.base_dir, minutes_ago=45, spark="A live note")
+
+    failed = Dreamer(
+        _env(), rules, store, journal,
+        client=_StubClient(raises=RuntimeError("boom")), audit=audit,
+    ).run_once(now=NOW)
+
+    assert failed is None
+    assert [e for e in audit.read().events if e.kind == "dream_considerations_seen"] == []
+    after = _StubClient(_step())
+    Dreamer(_env(), rules, store, journal, client=after, audit=audit).run_once(now=NOW)
+    assert "A live note" in after.prompts[0]
+
+
+def test_a_run_that_was_shown_nothing_writes_no_marker(rules, store, journal, tmp_path):
+    """An event saying "considered nothing" would put an empty claim on the
+    record every single day, and the log is the thing that has to stay
+    readable."""
+    audit = AuditLog(tmp_path / "audit")
+
+    Dreamer(
+        _env(), rules, store, journal, client=_StubClient(_step()), audit=audit
+    ).run_once(now=NOW)
+
+    assert [e for e in audit.read().events if e.kind == "dream_considerations_seen"] == []
+
+
+def test_a_dreamer_with_no_audit_log_still_dreams(rules, store, journal):
+    """The feature is both directions or neither, and its absence must not cost
+    a run. A dreamer without a log reads no considerations, marks none, and
+    reports `None` rather than an empty recall."""
+    result = Dreamer(
+        _env(), rules, store, journal, client=_StubClient(_step())
+    ).run_once(now=NOW)
+
+    assert result is not None
+    assert result.considerations is None
+
+
+def test_a_consideration_does_not_become_a_dream_by_any_route(
+    rules, store, journal, tmp_path
+):
+    """**The containment, stated as a test.**
+
+    A consideration reaches the prompt and nothing else. The only dream written
+    is the one the model returned; nothing promotes a note, nothing writes a
+    shelf row from one, and the store holds no trace of its text. If this ever
+    fails, a conversation has become able to insert at the top of the chain that
+    ends in a live trading permission.
+    """
+    audit = AuditLog(tmp_path / "audit")
+    _raise_consideration(
+        audit.base_dir, minutes_ago=15, spark="Cobalt smelters and the grid"
+    )
+
+    result = Dreamer(
+        _env(), rules, store, journal, client=_StubClient(_step()), audit=audit
+    ).run_once(now=NOW)
+
+    assert result is not None
+    dreams = store.recent()
+    assert len(dreams) == 1
+    assert dreams[0].title == "Cicada broods and sesame"  # the model's own step
+    assert "Cobalt" not in dreams[0].seed
+    assert dreams[0].symbols == []
+
+
+def test_dreaming_still_cannot_read_the_audit_log():
+    """The structural half of the guarantee above, and the reason it is
+    structural rather than a matter of discipline.
+
+    `raise_consideration` writes to the audit log and never to `data/dreams.db`;
+    the containment is that **nothing in `dreaming.py` reads the audit log**, so
+    no code path there can turn a consideration into a shelf row. This change
+    added a reader, and the reader deliberately lives in `news_history` and is
+    called by `dreamer.py`. A test rather than a paragraph, because a guarantee
+    written in prose is one that stops being checked.
+    """
+    import ast
+
+    source = Path("src/bot/dreaming.py").read_text(encoding="utf-8")
+    imported: set[str] = set()
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.ImportFrom) and node.module:
+            imported.add(node.module.lstrip("."))
+        elif isinstance(node, ast.Import):
+            imported.update(alias.name for alias in node.names)
+
+    assert not imported & {"audit", "news_history", "mcp_server", "dreamer"}
+
+
+# ------------------------------------------------------------ the log line
+
+
+def test_the_dream_line_states_the_consideration_count_and_the_fusion(
+    tmp_path, monkeypatch
+):
+    """A zero is a stated fact each run rather than the absence of a line — the
+    reason `stops_breached` is on the cycle line — and `result.fusion` reached
+    `DreamerResult` and stopped there until now."""
+    import structlog
+
+    import bot.main as main_mod
+    from bot.dreamer import DreamerResult
+
+    class _Feed:
+        is_degraded = False
+
+        def recent_headlines(self, symbols):
+            return []
+
+        def recent_posts(self):
+            return []
+
+    class _Dreamer:
+        def __init__(self, *a, **kw):
+            pass
+
+        def run_once(self, *, headlines=None, posts=None, now=None):
+            return DreamerResult(
+                dream=Dream(id=1, title="t", seed="s"),
+                usage=USAGE,
+                advanced=False,
+                considerations=ConsiderationRecall(
+                    considerations=[], entries_in_window=3
+                ),
+                fusion=FusionResult(ok=True, dream_id=9, parents=(4, 5)),
+            )
+
+    monkeypatch.setattr(main_mod, "build_news_feed", lambda env: _Feed())
+    monkeypatch.setattr(main_mod, "build_social_feed", lambda env, rules: None)
+    monkeypatch.setattr(main_mod, "Journal", lambda *a, **kw: object())
+    monkeypatch.setattr("bot.dreamer.Dreamer", _Dreamer)
+    monkeypatch.setattr(main_mod, "DreamStore", lambda *a, **kw: object())
+    monkeypatch.setattr(main_mod, "AuditLog", lambda *a, **kw: _NoAudit(tmp_path))
+    monkeypatch.setattr("bot.dreamer.promote_dreams", lambda *a, **kw: _NoPromotion())
+
+    with structlog.testing.capture_logs() as logs:
+        assert main_mod.cmd_dream(_env(), Rules.load(Path("config/rules.yaml"))) == 0
+
+    line = next(e for e in logs if e["event"] == "dream_complete")
+    assert line["considerations_shown"] == 0
+    assert line["considerations_record_incomplete"] is False
+    assert line["fusion"] == "4+5 -> 9"
+
+
+class _NoAudit:
+    """An audit log pointed at a tmp path, so no test writes to `audit/`."""
+
+    def __init__(self, path: Path) -> None:
+        self._log = AuditLog(path / "audit")
+
+    def read(self, **kw):
+        return self._log.read(**kw)
+
+    def record_event(self, kind, payload):
+        self._log.record_event(kind, payload)
+
+    @property
+    def base_dir(self) -> Path:
+        return self._log.base_dir
+
+
+class _NoPromotion:
+    considered = 0
+    promoted: tuple[tuple[int, str], ...] = ()
+    conditions_fulfilled = 0
+    cycles_available = 0
+
+
+def test_a_run_that_could_not_look_logs_none_rather_than_zero(tmp_path, monkeypatch):
+    """Three states, not two. `None` says nobody looked; `0` says the log was
+    read and nothing was waiting."""
+    import structlog
+
+    import bot.main as main_mod
+    from bot.dreamer import DreamerResult
+
+    class _Feed:
+        is_degraded = False
+
+        def recent_headlines(self, symbols):
+            return []
+
+        def recent_posts(self):
+            return []
+
+    class _Dreamer:
+        def __init__(self, *a, **kw):
+            pass
+
+        def run_once(self, *, headlines=None, posts=None, now=None):
+            return DreamerResult(
+                dream=Dream(id=1, title="t", seed="s"), usage=None, advanced=False
+            )
+
+    monkeypatch.setattr(main_mod, "build_news_feed", lambda env: _Feed())
+    monkeypatch.setattr(main_mod, "build_social_feed", lambda env, rules: None)
+    monkeypatch.setattr(main_mod, "Journal", lambda *a, **kw: object())
+    monkeypatch.setattr("bot.dreamer.Dreamer", _Dreamer)
+    monkeypatch.setattr(main_mod, "DreamStore", lambda *a, **kw: object())
+    monkeypatch.setattr(main_mod, "AuditLog", lambda *a, **kw: _NoAudit(tmp_path))
+    monkeypatch.setattr("bot.dreamer.promote_dreams", lambda *a, **kw: _NoPromotion())
+
+    with structlog.testing.capture_logs() as logs:
+        main_mod.cmd_dream(_env(), Rules.load(Path("config/rules.yaml")))
+
+    line = next(e for e in logs if e["event"] == "dream_complete")
+    assert line["considerations_shown"] is None
+    assert line["fusion"] is None
+
+
+def test_a_refused_fusion_is_named_on_the_line_rather_than_reading_as_none():
+    """A dreamer proposing fusions a full workbench keeps turning down looks,
+    from outside, exactly like a dreamer that stopped proposing them."""
+    from bot.main import _describe_fusion
+
+    refused = FusionResult(ok=False, parents=(4, 5), refusals=(MoveRefusal.FULL,))
+
+    assert _describe_fusion(None) is None
+    assert _describe_fusion(refused) == "refused 4+5: full"
