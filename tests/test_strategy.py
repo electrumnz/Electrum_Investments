@@ -171,3 +171,50 @@ def test_no_unescaped_brace_reaches_the_prompt_template():
     assert '{field: "close", op: "below", value: 641.20}' in rendered
     # And nothing else in the template is an accidental placeholder.
     assert SYSTEM_PROMPT_TEMPLATE.format(rules_summary="x")
+
+
+def test_the_prompt_states_that_an_out_of_hours_entry_rests():
+    """The operator opened the gate's window to pre-market and after hours, so
+    the model may now propose there. What it cannot discover for itself is that
+    the order does not TRADE there.
+
+    Every entry is a bracket or an OTO because the stop has to reach the broker
+    with it, and Alpaca refuses `extended_hours` on both. So the order rests and
+    fills at the next open, at a price that appears nowhere in its context. A
+    model that does not know this reads a thin one-sided pre-market quote as its
+    fill price, which is the confident-wrong-figure failure this repository is
+    built around.
+
+    The session block in the market context says this too, but only while a
+    session is shut. This belongs in the cached system prompt because it is a
+    permanent property of the order path.
+    """
+    # Collapsed, because the template is hard-wrapped and a phrase that happens
+    # to straddle a line break is still a phrase the model reads. Pinning the
+    # wording should not also pin where the newlines fall.
+    prompt = " ".join(build_system_prompt(load_rules()).split())
+
+    assert "does not fill out of hours" in prompt
+    assert "It rests" in prompt
+    assert "extended-hours venues accept limit orders only" in prompt
+    assert "not the quote you were shown" in prompt
+
+
+def test_the_prompt_does_not_offer_a_looser_stop_as_the_answer():
+    """The tempting wrong response to an uncertain fill. Size is computed from
+    the stop distance, so widening the stop to feel safer buys a bigger loss at
+    the same 1% — and the gate approves it, because it checks the arithmetic and
+    not the intent."""
+    prompt = " ".join(build_system_prompt(load_rules()).split())
+
+    assert "Widen nothing to compensate" in prompt
+    assert "smaller size or no trade" in prompt
+
+
+def test_the_prompt_exempts_crypto_from_the_session_mechanics():
+    """A 24/7 market has no out of hours, and Alpaca accepts no bracket on it,
+    so both halves of the warning are wrong there. Stated rather than left to
+    inference, because the model is told everything else in equity terms."""
+    prompt = " ".join(build_system_prompt(load_rules()).split())
+
+    assert "Crypto has no sessions" in prompt

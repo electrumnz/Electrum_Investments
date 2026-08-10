@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from types import EllipsisType
 from typing import Any
 
@@ -164,7 +165,7 @@ class _CapturingTrading:
         return _Order()
 
 
-def _alpaca_with(trading: _CapturingTrading) -> Any:
+def _alpaca_with(trading: Any) -> Any:
     """An AlpacaBroker with its SDK clients replaced. Built without __init__ so
     no credentials are needed and nothing reaches the network."""
     from bot.broker import AlpacaBroker
@@ -341,3 +342,62 @@ def test_a_target_still_produces_a_bracket():
     assert request.order_class == OrderClass.BRACKET
     assert request.take_profit.limit_price == 590.0
     assert request.stop_loss.stop_price == 575.0
+
+
+# ------------------------------------------------------------- the broker clock
+
+
+def test_a_mock_broker_reports_no_clock_rather_than_a_cheerful_open():
+    """`None` means "could not ask", and a broker with no calendar behind it
+    genuinely cannot answer. Defaulting to open would be an invented fact about
+    a market, which is the one thing this repository refuses."""
+    assert MockBroker().get_clock() is None
+
+
+def test_a_clock_that_cannot_be_read_returns_none_instead_of_raising():
+    """Same rule as `fetch_market_ticks`: this feeds a context block, and an SDK
+    error escaping it would end the decision loop over a nicety. The caller says
+    "not read this cycle" in the rendered text, so the failure is visible rather
+    than silent."""
+
+    class _Broken:
+        def get_clock(self) -> Any:
+            raise RuntimeError("alpaca is having a moment")
+
+    assert _alpaca_with(_Broken()).get_clock() is None
+
+
+def test_the_clock_comes_back_in_utc():
+    """Alpaca stamps these in New York time, and this is NOT about arithmetic.
+
+    An aware datetime compares and subtracts correctly whatever its offset, so
+    leaving Alpaca's own tzinfo on would give the right answer to every
+    comparison — the first version of this test asserted equality and passed
+    with the conversion deleted, which is the trap worth recording.
+
+    What the conversion buys is the rendered string. `_broker_disagreement`
+    prints the next open into the model's context with `.isoformat()`, and every
+    other timestamp in that document is UTC. One line reading `-04:00` among
+    them is a figure a reader has to convert in their head, which is how a
+    four-hour error gets made.
+    """
+    from datetime import timedelta, timezone
+
+    ny = timezone(timedelta(hours=-4))
+
+    class _Clock:
+        def get_clock(self) -> Any:
+            class _C:
+                is_open = True
+                next_open = datetime(2026, 8, 11, 9, 30, tzinfo=ny)
+                next_close = datetime(2026, 8, 10, 16, 0, tzinfo=ny)
+
+            return _C()
+
+    clock = _alpaca_with(_Clock()).get_clock()
+
+    assert clock is not None
+    assert clock.is_open is True
+    assert clock.next_open.utcoffset() == timedelta(0)
+    assert clock.next_close.utcoffset() == timedelta(0)
+    assert clock.next_open.isoformat(timespec="minutes") == "2026-08-11T13:30+00:00"

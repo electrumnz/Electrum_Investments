@@ -239,3 +239,60 @@ def test_a_degraded_social_feed_says_so_in_the_prompt(account):
 
     assert "FEED DEGRADED" in context
     assert "does NOT mean nothing was posted" in context
+
+
+# ---------------------------------------------------------------- the session
+
+
+def test_the_session_block_precedes_the_quotes_it_qualifies(account):
+    """Ordering is the point, not decoration. Every figure below the session
+    block is a reading; the block says what an order built on those readings
+    would actually become. A model that reads the snapshot first has anchored on
+    a fill price it will not get."""
+    from bot.config import load_rules
+
+    context = build_market_context(
+        account=account,
+        ticks={},
+        headlines=[],
+        news_windows=[],
+        instruments=load_rules().instruments,
+        now=datetime(2026, 8, 10, 8, 45, tzinfo=UTC),   # 04:45 ET, pre-market
+    )
+
+    assert "## Session" in context
+    assert context.index("## Session") < context.index("## Market snapshot")
+    assert "PRE-MARKET" in context
+    assert "RESTS" in context
+
+
+def test_a_disabled_class_is_not_described_as_shut(account):
+    """Crypto ships disabled. Listing it here would invite a proposal for a
+    class the gate refuses on membership, and `build_system_prompt` already
+    omits disabled classes for exactly that reason."""
+    from bot.config import load_rules
+
+    rules = load_rules()
+    assert rules.instruments["crypto"].enabled is False
+
+    context = build_market_context(
+        account=account,
+        ticks={},
+        headlines=[],
+        news_windows=[],
+        instruments=rules.instruments,
+        now=datetime(2026, 8, 10, 8, 45, tzinfo=UTC),
+    )
+
+    assert "crypto" not in context
+
+
+def test_no_instruments_means_no_session_block_rather_than_a_guessed_one(account):
+    """A caller that supplied no rules described no market. Computing a session
+    from nothing would be a confident statement about hours nobody configured —
+    the same reason `market_state` reports the gate window shut without them."""
+    context = build_market_context(
+        account=account, ticks={}, headlines=[], news_windows=[]
+    )
+
+    assert "## Session" not in context

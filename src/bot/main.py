@@ -156,6 +156,8 @@ def cmd_smoketest(env: Env, rules: Rules, *, force_mock: bool = False) -> int:
             activity=broker.get_activity(),
             indicators=indicators,
             symbols_without_history=no_history,
+            instruments=rules.instruments,
+            broker_clock=broker.get_clock(),
         )
         decision, usage = claude.propose(context)
         log.info(
@@ -365,6 +367,12 @@ def cmd_loop(
                 previous_verdicts=previous_verdicts,
                 social_posts=posts,
                 social_degraded=social_degraded,
+                instruments=rules.instruments,
+                # One extra call per cycle, and it buys the one thing
+                # `market_clock` structurally cannot compute: a market holiday.
+                # Returns None rather than raising, so a bad minute at Alpaca
+                # costs the holiday check and not the cycle.
+                broker_clock=broker.get_clock(),
             )
             # Catches broadly, and for the same reason `fetch_market_ticks`
             # does. This is a network call to a model that returns free text,

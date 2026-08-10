@@ -178,34 +178,54 @@ deciding what a crypto position should be allowed to risk. Its limits are set
 (half the per-trade risk, a third of the concentration, one position) with the
 market shut and nothing riding on the decision, so enabling is a one-word edit.
 
-### No pre-market. After hours is fine
+### Every hour Alpaca will take is permitted, and the model is told what it buys
 
-The operator's rule, and it needs its own gate check because `sessions_utc`
-**structurally cannot express it**.
+**The operator's decision, reversing an earlier one: pre-market and after hours
+are both acceptable now.** *"If the machine wants to trade it, let's let it."*
+`config/rules.yaml` carries `sessions_utc: [[8, 24]]` and
+`refuse_premarket: false`, so the window covers 04:00–20:00 New York in summer —
+Alpaca's whole tradeable day bar the overnight venue.
 
-Those are fixed UTC hours; the US session is defined in New York time and moves
-an hour twice a year. So `[[14, 21]]` is the *winter* window applied all year:
+`RiskGate._premarket` **stays**, switched off rather than deleted. It reads the
+phase from `market_clock`, which computes in New York time and so follows
+daylight saving with no diary entry; a per-class `refuse_premarket: true` still
+rejects, and a test pins that it does. Deleting the mechanism would make turning
+it back on a code change rather than a config one.
 
-- **summer (EDT)** — session 13:30–20:00 UTC, window runs to 21:00, so an hour
-  of after-hours is permitted every day
-- **winter (EST)** — session 14:30–21:00 UTC, window opens at 14:00, so half an
-  hour of **pre-market** is permitted every day
+The window is fixed UTC hours and the session is defined in New York, so
+`[[8, 24]]` is the *summer* shape and is an hour out all winter — opening at
+03:00 ET instead of 04:00. That is now harmless in the direction that used to
+hurt: the hour it wrongly admits is the overnight session, which Alpaca will
+also take.
 
-Wrong at one end in each half of the year, silently. That gap used to cost
-nothing, because an out-of-hours equity order was queued to the next open rather
-than filled. **It costs something now: Alpaca runs a pre-market session from
-04:00 ET**, plus an overnight venue, so an order placed into one *trades*, in a
-thinner book than anybody chose.
+**What replaced the refusal is telling the model what an out-of-hours order
+actually becomes**, because the gate approving it does not make it the trade the
+model thinks it is:
 
-`RiskGate._premarket` reads the phase from `market_clock`, which computes in New
-York time, so it follows daylight saving with no diary entry and stays
-deterministic and offline. It can only ever add a reason to refuse.
+- The entry is a **bracket or an OTO** — the stop has to reach the broker with
+  it — and Alpaca **refuses `extended_hours` on both**. So the order does not
+  trade in the pre-market. It **rests** and fills at the next regular open, at a
+  price that appears nowhere in the context it was proposed from.
+- An out-of-hours quote on the free IEX feed is thin and frequently one-sided.
+  That is the halved-mid bug's own habitat, and a limit read off it is a level
+  that may not exist by the time the order is live.
+- The stop rests at the broker but **cannot fire out of hours**, because a stop
+  becomes a market order and extended-hours venues take limits only.
 
-Scoped to 04:00–09:30 New York and nothing else — after hours was explicitly
-kept, and a test pins that the rule does not quietly grow into
-regular-session-only. Off for crypto: a 24/7 market has no pre-market, and the
-phases it reads are the US equity ones, so switched on there it would refuse
-every hour of every day.
+Those three live in `market_clock.OUT_OF_HOURS_MECHANICS`, rendered into the
+market context by `render_sessions`, and again in the cached system prompt —
+deliberately both. The context block is conditional on a session being shut; the
+prompt half is a permanent property of the order path and must be true on every
+cycle.
+
+The prompt also says **do not widen the stop to compensate**. Size is computed
+from stop distance, so loosening it to feel safer buys a bigger loss at the same
+1% — and the gate approves it, because the gate checks arithmetic and not intent.
+
+**"Out of hours" is a property of the moment AND the instrument**, so
+`render_sessions` answers per class. Crypto renders as continuous and gets none
+of the above: it trades through Sunday, and Alpaca accepts no bracket on it, so
+both halves of the warning would be false there.
 
 **`market_clock.py` states the venue's phase and the gate's window separately
 and never merges them into one green light.** "The market is open" and "this bot
@@ -215,8 +235,29 @@ at 04:49 New York on a Monday. Alpaca was open — pre-market — four and a hal
 hours before the session this bot trades. `is_tradeable_by_bot` requires both,
 which is what makes the discrepancy visible rather than hidden.
 
-Holidays are not covered here either. Thanksgiving reads as an ordinary Thursday
-to both checks.
+**Holidays are the one thing the arithmetic cannot see, and `Broker.get_clock`
+is what closes it.** Thanksgiving is a Thursday and Labor Day is a Monday;
+`_phase_at` reads both as ordinary trading days, and no amount of New York time
+zone care changes that. Alpaca's `GET /v2/clock` knows the calendar, so its
+reading is carried into the context beside the computed one.
+
+Four things about that, and they are the usual rules in a new place:
+
+- **It answers a coarser question, so it does not replace `market_clock`.**
+  `is_open` is the REGULAR session only — it cannot tell pre-market from
+  after-hours from overnight, which is the distinction the module exists for.
+- **A disagreement is named, not resolved.** Computed-open against
+  broker-closed is reported as a probable holiday with the broker called
+  authoritative; the reverse is reported too.
+- **It must never gate anything.** It is a network call, and `RiskGate` has to
+  stay deterministic and must not fail open. `get_clock` catches its own errors
+  and returns `None`, which means *could not ask* — and the renderer says so in
+  a sentence rather than letting silence read as "no holiday". Same rule as
+  `FinnhubCalendar.is_degraded`.
+- **The holiday case reads as OPEN to the phase computation**, so the
+  out-of-hours mechanics were withheld at exactly the moment they mattered most
+  the first time this was written. A broker `is_open: False` now forces them.
+  `tests/test_market_clock.py` pins it on Labor Day 2026.
 
 This exists because a single global `sessions_utc` is wrong the moment there is
 more than one class. Equities trade a fixed window, crypto trades continuously,
@@ -1512,6 +1553,11 @@ src/bot/
                         York time, so daylight saving needs no diary entry. States
                         the venue's phase and the gate's window SEPARATELY and
                         never merges them into one green light. Pure; no network.
+                        `render_sessions` tells the model, per instrument class,
+                        what an order placed right now would actually become —
+                        out of hours that is "rests until the open", never a fill.
+                        `BrokerClock` is the one reading it takes from Alpaca,
+                        for the one thing arithmetic cannot know: a holiday.
                         Feeds RiskGate._premarket and the ticker tape.
   indicators.py         Averages, ATR, volume ratio, swing levels. Pure functions over
                         daily bars. Computed in Python so the model never derives them.

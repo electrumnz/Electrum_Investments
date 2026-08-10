@@ -199,9 +199,28 @@ instruments:
     # US regular session is 09:30-16:00 ET = 13:30-20:00 UTC (14:30-21:00 EDT).
     # Deliberately skips the first 30 minutes of the open, the noisiest period.
     sessions_utc:
-      - [14, 21]
+      - [8, 24]
 
-    # Operator's rule: no pre-market. After hours is fine.
+    # Operator's decision: pre-market AND after-hours are both acceptable. If
+    # the agent wants to trade them, it may.
+    #
+    # 08:00-24:00 UTC is 04:00-20:00 New York in summer, which is Alpaca's
+    # whole tradeable day: pre-market from 04:00, the regular session, and
+    # after-hours to 20:00. In winter it shifts an hour and covers 03:00-19:00
+    # ET instead, so the last hour of after-hours falls outside. That is the
+    # daylight-saving problem described below, and it now costs an hour at the
+    # END of the day rather than admitting pre-market at the start.
+    #
+    # **An order placed outside the regular session does not fill there.**
+    # `place_order` sends a bracket or an OTO, and Alpaca does not accept
+    # either with `extended_hours`, so an out-of-hours order RESTS and becomes
+    # eligible at the next open. That is deliberate rather than a limitation
+    # to route around: it is what keeps the stop at the broker. Trading the
+    # thin book instead would mean a plain limit order and no broker-side stop.
+    #
+    # So what widening this buys is the ability to PLACE at any hour, with the
+    # fill arriving at the open. The old note follows, because the
+    # daylight-saving trap it describes is still real.
     #
     # This is NOT expressible in sessions_utc above, and the reason is daylight
     # saving: those are fixed UTC hours, while the US session is defined in New
@@ -217,7 +236,7 @@ instruments:
     # RiskGate._premarket reads the phase in New York time, so it follows
     # daylight saving with no diary entry, and it can only ever narrow what the
     # window above permits.
-    refuse_premarket: true
+    refuse_premarket: false
 
     # Monday to Friday. Monday is 0, Sunday is 6.
     #

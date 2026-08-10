@@ -40,7 +40,13 @@ from ..dreaming import (
     DreamVerdict,
     Hop,
 )
-from ..market_clock import ClockFace, MarketPhase, MarketState, clock_faces
+from ..market_clock import (
+    ClockFace,
+    MarketPhase,
+    MarketState,
+    clock_faces,
+    is_continuous,
+)
 from ..metrics import JournalReport, render_excursions, render_summary
 from ..models import AccountSnapshot, StandDownState, Trade, WorkingOrder
 from ..options import ExpiryAlert
@@ -2482,11 +2488,12 @@ def _limit_row(value: float | int | None, default: float | int, fmt: str) -> str
 
 
 def _is_continuous(inst: InstrumentRules) -> bool:
-    """A market with no closed hours at all: every day, midnight to midnight."""
-    by_day = inst.windows_by_day
-    return len(by_day) == 7 and all(
-        windows == [(0, 24)] for windows in by_day.values()
-    )
+    """A market with no closed hours at all: every day, midnight to midnight.
+
+    Delegates so the dashboard and the model's context cannot form different
+    opinions about which markets have a session at all.
+    """
+    return is_continuous(inst.windows_by_day)
 
 
 def _countdown(seconds: float) -> str:
@@ -3619,9 +3626,13 @@ def settings_page(rules: Rules, env: Env, *, chat_enabled: bool) -> str:
                 else ""
             )
             # This class's own limits, beside the portfolio ones rather than
-            # instead of them. A per-instrument limit may only tighten a
-            # portfolio limit — the config refuses a looser one at startup —
-            # so showing both is showing which is actually binding.
+            # instead of them. A per-instrument limit OVERRIDES the portfolio
+            # one in either direction — the validator that once refused a looser
+            # class limit at config load is gone, because refusing to start
+            # denies at the least useful moment and offers the operator no way
+            # to say "yes, I mean it". So showing both is the only way to read
+            # which figure is actually in force, and `_limit_row` says out loud
+            # when a class is looser than the default.
             #
             # "portfolio limit" rather than a blank where a class has no
             # opinion: an empty cell reads as "no limit", which is the exact

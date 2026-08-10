@@ -207,33 +207,54 @@ def test_a_class_position_cap_counts_only_that_class(rules, account, spy_tick, b
     assert not _reasons_mention(verdict, "already holding 1 positions")
 
 
-def test_rejects_the_pre_market_the_utc_window_would_have_let_through(
-    rules, account, spy_tick, buy_proposal
+def test_the_premarket_rule_still_rejects_when_a_class_switches_it_on(
+    account, spy_tick, buy_proposal
 ):
-    """The operator's rule: no pre-market. After hours is fine.
+    """The operator has switched this OFF for us_equity — pre-market and after
+    hours are both acceptable now, and if the agent wants to trade them it may.
 
-    This is the case `sessions_utc` structurally cannot catch. It is fixed UTC
-    hours; the US session is defined in New York time and moves an hour twice a
-    year. `[[14, 21]]` is the winter window applied all year, so in JANUARY
-    14:00 UTC is 09:00 New York — half an hour of pre-market, inside the
-    configured window, every day, with nothing in the window able to notice.
-
-    It used to cost nothing: an out-of-hours equity order was queued to the
-    next open rather than filled. It costs something now, because Alpaca runs a
-    pre-market session from 04:00 ET, so an order placed into it trades in a
-    thinner book than anybody chose.
+    The mechanism is still tested, with a class that enables it, because
+    switching it back on must not be the moment anybody discovers it stopped
+    working. It is also the one session rule `sessions_utc` structurally cannot
+    express: those are fixed UTC hours against a session defined in New York
+    time, so a fixed window is wrong at one end in each half of the year.
     """
+    rules = load_rules()
+    rules.instruments["us_equity"].refuse_premarket = True
+
     winter_premarket = datetime(2026, 1, 12, 14, 15, tzinfo=UTC)  # 09:15 EST
     gate = _gate(rules, now=winter_premarket)
 
-    # The UTC window is satisfied — this is the trap.
+    # The UTC window is satisfied — this is the trap the rule exists for.
     assert rules.instruments["us_equity"].is_in_session(winter_premarket)
 
     verdict = gate.evaluate(buy_proposal, account=account, tick=spy_tick)
 
     assert not verdict.approved
     assert _reasons_mention(verdict, "pre-market")
-    assert not _reasons_mention(verdict, "outside the trading sessions")
+
+
+def test_the_shipped_config_now_permits_pre_market_and_after_hours(
+    rules, account, spy_tick, buy_proposal
+):
+    """Operator's decision, pinned so it is a choice rather than a drift.
+
+    What widening the window buys is the ability to PLACE at any hour. It does
+    not buy an out-of-hours FILL: `place_order` sends a bracket or an OTO and
+    Alpaca accepts neither with `extended_hours`, so the order rests and
+    becomes eligible at the next open. That is the trade-off that keeps the
+    stop at the broker.
+    """
+    assert rules.instruments["us_equity"].refuse_premarket is False
+
+    premarket = datetime(2026, 8, 10, 12, 0, tzinfo=UTC)   # 08:00 New York
+    after_hours = datetime(2026, 8, 10, 21, 0, tzinfo=UTC)  # 17:00 New York
+
+    for moment in (premarket, after_hours):
+        verdict = _gate(rules, now=moment).evaluate(
+            buy_proposal, account=account, tick=spy_tick
+        )
+        assert verdict.approved, (moment, verdict.reasons)
 
 
 @pytest.mark.parametrize(
