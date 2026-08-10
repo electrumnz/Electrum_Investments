@@ -367,6 +367,84 @@ inside a gate that has to stay deterministic and must not fail open. The guard
 is weekday-shaped, not market-open-shaped, and should not be described as more
 than that.
 
+### A broker-side stop OR an out-of-hours fill. Never both.
+
+**This is the one to read before touching the order path.** It cost four hours
+of a session to learn, and the shape of the mistake was not technical: every
+individual statement was correct and the CONSEQUENCE was never put to the
+operator as a choice.
+
+`AlpacaBroker.place_order` attaches the stop, which makes every entry a bracket
+or an OTO. **Alpaca refuses `extended_hours` on both**, and refuses outright
+rather than downgrading. So:
+
+- An entry that carries a stop **cannot fill outside the regular session.** It
+  rests and becomes eligible at the next open.
+- An entry that **can** fill outside the regular session is a plain limit order
+  with `extended_hours=True` and **no stop at the broker at all**.
+
+There is no third option, at Alpaca or anywhere else.
+
+**So "place the trade now" and "get a position on now" are different
+instructions out of hours, and the code can only satisfy one of them.** An
+operator who asks for a position during the pre-market and gets a resting order
+has been given the other answer to the other question. Ask which they want
+BEFORE submitting — after the order is at the broker the choice has been made
+for them.
+
+Observed live: 21 SPY submitted 09:23:47 New York, `filled_qty=0.0`, resting
+until the open. Correct behaviour, correct explanation, and not what was asked
+for.
+
+**The unbracketed path is not new ground.** Crypto already takes it — Alpaca
+accepts no bracket there either — so the stop is a journal figure and
+`stop_watch` reports the breach on the loop's pulse. Extending that to
+out-of-hours equities is a new trigger for an existing arrangement rather than
+a new concept, and it is in `TODO.md` rather than built, because it trades away
+rule 3's broker-side guarantee and that is the operator's call to make
+deliberately.
+
+Worth knowing before deciding: on a short horizon it gives up less than it
+looks like. A resting stop could not have fired out of hours anyway — a stop
+becomes a MARKET order and extended-hours venues take limit orders only. What
+is actually surrendered is the leg being there when the regular session
+reopens.
+
+### A schema change does NOT reach a database that already exists
+
+`CREATE TABLE IF NOT EXISTS` is a no-op on a table that is already there. So
+editing `journal.SCHEMA` changes what a FRESH journal gets and nothing whatever
+about the one on the droplet.
+
+**The test suite is structurally blind to this.** Every test builds its journal
+from scratch in a `tmp_path`, so every test always gets the new shape. 866 tests
+were green over a database that could not store the row the models had just
+been changed to allow.
+
+Found by placing a real order. `take_profit_price` became optional; the model
+and `SCHEMA` were both updated; the first no-target order reached Alpaca, rested
+correctly — and then the journal write failed on `NOT NULL constraint failed:
+trades.planned_target`. **The broker call happens BEFORE the journal write**, so
+the result was a live order the journal had never heard of: `14b88c8` through a
+new door, with `open_risk_usd` unable to count a position it has no record of
+and the 2% cap blind to it.
+
+`_drop_planned_target_not_null` rebuilds the table, because SQLite cannot drop a
+NOT NULL with `ALTER`. Three properties are load-bearing:
+
+- **One transaction.** Either the new table replaces the old with every row
+  intact or nothing changes. A half-migrated journal is worse than an
+  unmigrated one.
+- **Idempotent and cheap.** It runs on every open; `PRAGMA table_info` is a
+  lookup, so a correct database pays one query and stops.
+- **The test builds the OLD schema deliberately**, which is the only way to
+  exercise a migration at all, and asserts the existing rows survive. A
+  migration that dropped history to fix a constraint would be a far worse trade
+  than the constraint.
+
+**Any future change to `SCHEMA` needs a migration beside it and a test that
+starts from the old shape.** The suite cannot tell you that you have forgotten.
+
 ### The stop is a real order now, and it still cannot fire out of hours
 
 `place_order` used to submit the entry limit order and nothing else.
@@ -1715,7 +1793,7 @@ reference/              Third-party projects we borrow from. See reference/STATU
 ## Running it
 
 ```sh
-.venv/bin/python -m pytest              # full suite (733 tests)
+.venv/bin/python -m pytest              # full suite (868 tests)
 electrum-bot smoketest --mock           # no credentials needed
 electrum-bot smoketest                  # needs Alpaca paper keys
 electrum-bot dream                      # one lateral-thinking step; places nothing
@@ -1728,6 +1806,15 @@ electrum-bot-web                        # command centre on http://127.0.0.1:878
 
 `--execute` is off by default. Leave it off until you have watched the proposals
 for a while and agree with them.
+
+## What is next
+
+`TODO.md` holds it, ordered by what is actually blocking. The top item is the
+one that cost this session: **an entry cannot both carry a broker-side stop and
+fill outside the regular session**, so "get a position on now" during the
+pre-market needs an unbracketed execution path that does not exist yet.
+
+The list below is the older deferred set and is duplicated there.
 
 ## Deferred, and noted so the shape is not lost
 
