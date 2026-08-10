@@ -1625,6 +1625,17 @@ for a while and agree with them.
   covering each limit: what it is, why it sits there, and the goal it serves.
   Settings has no edit control today and `tests/test_web.py` enforces that, so
   this is a deliberate change to that rule rather than an addition beside it.
+- **Let the agent choose its exit type.** `OrderProposal.take_profit_price` is
+  a single fixed price and it is REQUIRED, so the agent cannot express a
+  trailing stop even though that is often the right exit — it is forced to name
+  a level. Alpaca supports trailing stops natively, so this is a model and
+  adapter change rather than a strategy one. The exit is the agent's decision;
+  the model should be able to carry the decision it actually made.
+  Two things make this worth doing rather than leaving: a required field the
+  agent does not care about gets filled with something arbitrary, and since
+  entries became GTC brackets that arbitrary number is no longer a journal note
+  — **it is a live order resting at the broker.** An invented target is now an
+  exit somebody did not choose.
 - **An exit review, grading the PLAN and never the profit.** Nothing currently
   records *why* a position closed: `record_exit` takes a price, a time and a
   realised figure, and stop-hit, target-hit, closed-by-hand and expiry are
