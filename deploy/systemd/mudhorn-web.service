@@ -10,21 +10,46 @@ User=mudhorn
 Group=mudhorn
 WorkingDirectory=/opt/mudhorn
 
-# --host is not passed, so it binds to 127.0.0.1. That is the whole reason the
-# dashboard has no login. Reach it from a phone over Tailscale, never by binding
-# to 0.0.0.0 or putting a reverse proxy in front of it.
+# --host is not passed, so it binds to 127.0.0.1. Remote access is Tailscale —
+# either `tailscale serve` for tailnet-only, or `tailscale funnel` for a public
+# URL, in which case DASHBOARD_PASSWORD must be set. Never bind to 0.0.0.0.
 ExecStart=/opt/mudhorn/.venv/bin/electrum-bot-web --port 8787
 
 Restart=on-failure
 RestartSec=10s
 
-NoNewPrivileges=true
+# NoNewPrivileges and RestrictSUIDSGID are deliberately ABSENT, and this is the
+# most consequential line in the file.
+#
+# Both block `sudo`, which is setuid — NoNewPrivileges by refusing the
+# privilege gain outright, and RestrictSUIDSGID because systemd makes it imply
+# NoNewPrivileges. The chat panel needs `sudo -u hermes` to run one Hermes turn,
+# so with either set the panel renders and every question fails.
+#
+# The operator turned chat on knowing the trade: this process holds the broker
+# credentials and answers on a public URL, so it is now a process that can
+# escalate. Three things keep that bounded, and removing any of them makes this
+# a materially worse bet than it is:
+#
+#   1. The sudoers rule names ONE root-owned wrapper, /opt/mudhorn/deploy/
+#      run-chat.sh, with no arguments. Not the Hermes binary, which would
+#      accept any flag including --yolo.
+#   2. The prompt travels on stdin, so nothing a signed-in user types can be
+#      read as a flag.
+#   3. sudo goes mudhorn -> hermes, which is DOWNWARD: `hermes` holds no
+#      credentials of its own and reaches the broker only through the MCP
+#      server, which re-runs RiskGate.evaluate on every order.
+#
+# To put them back, set DASHBOARD_CHAT_TOKEN empty and restore both lines.
 PrivateTmp=true
 ProtectSystem=strict
+
+# Stays ON, and it can because the wrapper lives under /opt/mudhorn rather than
+# in /home/hermes. The web process never needs to see the agent's home.
 ProtectHome=true
+
 ProtectKernelTunables=true
 ProtectControlGroups=true
-RestrictSUIDSGID=true
 # The dashboard only reads, but SQLite still needs to write its journal and
 # temp files alongside the database.
 ReadWritePaths=/opt/mudhorn/data

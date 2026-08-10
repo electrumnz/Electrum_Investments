@@ -179,6 +179,43 @@ No wildcards, one exact binary path, and `/opt/mudhorn/.venv` is root-owned so
 `hermes` cannot swap the binary out from under the rule. Run `visudo -c` before
 trusting it; a malformed sudoers file can lock you out of `sudo` entirely.
 
+### 2b. The other direction, for the dashboard chat panel
+
+The rule above is `hermes → mudhorn`, so the agent can reach the broker tools.
+The Chat page needs the opposite, `mudhorn → hermes`, so the web process can
+run one Hermes turn. **It is a separate decision and it is off by default** —
+without `DASHBOARD_CHAT_TOKEN` the panel is hidden and `POST /chat` returns 404.
+
+```sh
+sudo tee /etc/sudoers.d/mudhorn-chat >/dev/null <<'EOF'
+mudhorn ALL=(hermes) NOPASSWD: /opt/mudhorn/deploy/run-chat.sh
+EOF
+sudo chmod 440 /etc/sudoers.d/mudhorn-chat
+sudo visudo -c
+```
+
+**The rule names the wrapper, never the Hermes binary**, and that distinction
+carries real weight. `NOPASSWD: /home/hermes/.local/bin/hermes` would permit
+*any* arguments — including `--yolo`, which disables the approval system this
+whole setup leans on, and whatever flag the next Hermes release adds. The web
+process takes its input from whoever is signed in to a dashboard that may be
+answering on a public URL, so "any arguments" is not a shape worth accepting.
+
+`deploy/run-chat.sh` fixes the flags in a root-owned file and takes the prompt
+on **stdin**, where nothing it contains can be read as a flag.
+
+Enabling chat also means `mudhorn-web.service` runs **without**
+`NoNewPrivileges` and `RestrictSUIDSGID`. Both block `sudo`, which is setuid,
+and systemd makes the second imply the first. That unit file explains the trade
+where someone changing it will read it. `ProtectHome` stays on, which is only
+possible because the wrapper lives under `/opt/mudhorn` rather than in the
+agent's home.
+
+What keeps it bounded: the sudo goes *downward*. `hermes` holds no credentials
+of its own and reaches the broker only through the MCP server, which re-runs
+`RiskGate.evaluate` on every order. Chat cannot become an order path that skips
+the gate, whatever anyone types into it.
+
 **This is the property worth having.** The agent reaches the broker *only*
 through the MCP tool surface, and every order-placing tool there runs
 `RiskGate.evaluate` first. Its shell is not an order path, because the shell

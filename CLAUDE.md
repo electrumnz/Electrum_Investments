@@ -674,6 +674,22 @@ Four things about it are load-bearing:
   driving an agent that can reach the broker are different privileges, and one
   secret must not grant both. Exposure used to risk disclosure; with chat it
   risks action.
+- **Chat working at all costs the web unit two sandbox settings**, and the
+  operator turned it on knowing that. `NoNewPrivileges` and `RestrictSUIDSGID`
+  both block `sudo` (systemd makes the second imply the first), so they are
+  absent from `mudhorn-web.service` and the unit explains why in place.
+  Three things keep the grant bounded and none may be removed casually:
+  the sudoers rule names **`deploy/run-chat.sh`**, a root-owned wrapper with no
+  arguments, rather than the Hermes binary — which would accept `--yolo` and
+  every flag a future release adds; the prompt travels on **stdin**, so nothing
+  a signed-in user types can be read as a flag; and the sudo runs **downward**,
+  `mudhorn → hermes`, to an account holding no credentials that reaches the
+  broker only through the MCP server, where `RiskGate.evaluate` runs on every
+  order. Chat cannot become an order path that skips the gate.
+  `ProtectHome` stays **on**, which is possible only because the wrapper lives
+  under `/opt/mudhorn` rather than in the agent's home — that placement also
+  fixed a 500 on the Chat page, since `Path.exists()` raises rather than
+  returning False on a directory it may not traverse.
 - **No password set still means no gate**, which is correct for the loopback
   deployment and is tested. What must not happen is exposing it *without* one,
   and the app cannot detect that case — a Funnel or a reverse proxy still
@@ -782,7 +798,7 @@ reference/              Third-party projects we borrow from. See reference/STATU
 ## Running it
 
 ```sh
-.venv/bin/python -m pytest              # full suite (476 tests)
+.venv/bin/python -m pytest              # full suite (477 tests)
 electrum-bot smoketest --mock           # no credentials needed
 electrum-bot smoketest                  # needs Alpaca paper keys
 electrum-bot loop                       # proposes and vets; places nothing

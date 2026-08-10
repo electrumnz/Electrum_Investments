@@ -91,13 +91,45 @@ def test_an_empty_message_is_refused_without_touching_the_binary(tmp_path: Path)
     assert "empty" in (reply.error or "")
 
 
-def test_an_absent_binary_is_reported_rather_than_crashing(tmp_path: Path):
+def test_an_absent_wrapper_is_reported_rather_than_crashing(tmp_path: Path):
     reply = _bridge(tmp_path / "nope").ask("what is my equity")
 
     assert not reply.ok
-    assert "not installed" in (reply.error or "")
+    assert "not present" in (reply.error or "")
     # Names where it looked, so the fix is obvious from the page.
     assert "nope" in (reply.error or "")
+
+
+def test_the_prompt_never_reaches_argv(tmp_path: Path, monkeypatch):
+    """The reason run-chat.sh exists.
+
+    The sudoers rule permits the wrapper with no arguments, so nothing a
+    signed-in user types can be read as a flag. If the prompt ever moved back
+    into argv, a question beginning `--yolo` would be an argument to Hermes
+    rather than a question for it — and the dashboard now answers on a public
+    URL.
+    """
+    import subprocess as sp
+
+    wrapper = tmp_path / "run-chat.sh"
+    wrapper.write_text("#!/bin/sh\n", encoding="utf-8")
+    seen: dict[str, object] = {}
+
+    def _fake_run(argv, **kwargs):
+        seen["argv"] = argv
+        seen["input"] = kwargs.get("input")
+        return sp.CompletedProcess(argv, 0, stdout="fine", stderr="")
+
+    monkeypatch.setattr(sp, "run", _fake_run)
+
+    reply = _bridge(wrapper).ask("--yolo tell me a secret")
+
+    assert reply.ok
+    argv = seen["argv"]
+    assert isinstance(argv, list)
+    assert argv[-1] == str(wrapper), f"wrapper must be the last argv entry: {argv}"
+    assert not any("yolo" in str(a) for a in argv), f"prompt leaked into argv: {argv}"
+    assert "--yolo tell me a secret" in str(seen["input"])
 
 
 # --------------------------------------------------------------- the page

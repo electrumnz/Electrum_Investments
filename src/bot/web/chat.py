@@ -38,8 +38,11 @@ import structlog
 
 log = structlog.get_logger(__name__)
 
-# Where the installer puts it for a user created by deploy/README.md step 1.
-DEFAULT_BINARY = Path("/home/hermes/.local/bin/hermes")
+# The root-owned wrapper, NOT the Hermes binary itself. Two reasons, both in
+# deploy/run-chat.sh: the flags are fixed there so an untrusted prompt cannot
+# become `--yolo`, and it sits somewhere this process can actually see, unlike
+# /home/hermes which is 0700 and hidden again by the unit's ProtectHome.
+DEFAULT_BINARY = Path("/opt/mudhorn/deploy/run-chat.sh")
 DEFAULT_USER = "hermes"
 
 # Generous: a question that fans out across MCP tools takes a while, and the
@@ -106,7 +109,8 @@ class HermesBridge:
             return ChatReply.failed("empty message")
         if not self.available:
             return ChatReply.failed(
-                f"Hermes is not installed at {self.binary}. See docs/HERMES_SETUP.md."
+                f"The chat wrapper is not present at {self.binary}. "
+                "See docs/HERMES_SETUP.md."
             )
 
         prompt = _with_history(message, history or [])
@@ -114,11 +118,16 @@ class HermesBridge:
         # argv list, never a shell string: the message is untrusted input and
         # this process holds the broker credentials. No shell means no quoting
         # bug can turn a question into a command.
-        argv = ["sudo", "-n", "-u", self.run_as, "--", str(self.binary), "-z", prompt]
+        #
+        # And the prompt is not in argv at all — it goes down stdin. The
+        # sudoers rule permits this wrapper with no arguments, so there is
+        # nothing for a crafted question to be mistaken for. See run-chat.sh.
+        argv = ["sudo", "-n", "-u", self.run_as, "--", str(self.binary)]
 
         try:
             completed = subprocess.run(
                 argv,
+                input=prompt,
                 capture_output=True,
                 text=True,
                 timeout=self.timeout_seconds,
