@@ -83,8 +83,17 @@ fi
 
 printf '\nTurning chat on\n'
 
-[[ -x "$WRAPPER" ]] || die "$WRAPPER is missing or not executable — run ./deploy/bootstrap.sh first"
 [[ -f "$ENV_FILE" ]] || die "$ENV_FILE not found"
+
+# Runs bootstrap itself rather than telling you to. Dying with "run
+# bootstrap.sh first" is one more thing to type, and the realistic place this
+# runs is a phone keyboard in a web console where every character costs.
+# bootstrap.sh is idempotent, so calling it here is free when it is not needed.
+if [[ ! -x "$WRAPPER" ]]; then
+  say "wrapper missing, running bootstrap.sh"
+  "$APP_DIR/deploy/bootstrap.sh" >/dev/null || die "bootstrap.sh failed"
+fi
+[[ -x "$WRAPPER" ]] || die "$WRAPPER still missing after bootstrap"
 
 # The wrapper is named in a sudoers rule, so if `mudhorn` can write it the rule
 # becomes arbitrary code execution as `hermes`. Checked rather than assumed.
