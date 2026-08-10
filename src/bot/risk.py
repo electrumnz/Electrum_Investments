@@ -341,15 +341,19 @@ class RiskGate:
         Shares and coin units are 1:1 with price, so this is exact — unlike the
         FX version this replaces, which had to approximate contract sizes.
 
-        The cap is the TIGHTER of the portfolio limit and this class's own, and
-        `min` is safe here rather than merely defensive: the config validator
-        already refuses a class limit looser than the portfolio one, so this
-        can only ever be picking up a genuine narrowing. Doing it with `min`
-        anyway means a bug in one guard cannot widen the other.
+        A class limit OVERRIDES the portfolio one, in either direction —
+        `account:` is the default rather than a ceiling. It is deliberately not
+        floored back with a `min`: a file saying 3% while the gate quietly
+        applied 1% would be a limit nobody could read off the config, which is
+        worse than either number on its own.
+
+        Pushing back on a limit getting looser is a job for the settings agent
+        (see docs), which argues and slows the operator down without denying
+        the change. It is not a job for a validator that refuses to start.
         """
         pct = self._rules.account.max_risk_per_trade_pct
         if instrument is not None and instrument.max_risk_per_trade_pct is not None:
-            pct = min(pct, instrument.max_risk_per_trade_pct)
+            pct = instrument.max_risk_per_trade_pct
 
         risk_usd = abs(proposal.limit_price - proposal.stop_loss_price) * proposal.qty
         cap_usd = account.equity_usd * pct / 100
@@ -371,7 +375,8 @@ class RiskGate:
         pct = proposal.notional_usd / account.equity_usd * 100
         cap = self._rules.account.max_position_pct
         if instrument is not None and instrument.max_position_pct is not None:
-            cap = min(cap, instrument.max_position_pct)
+            # Overrides rather than floors. See `_per_trade_risk`.
+            cap = instrument.max_position_pct
         if pct > cap:
             return (
                 f"position {proposal.notional_usd:,.2f} is {pct:.1f}% of equity "

@@ -234,11 +234,10 @@ instruments:
     # out, so the equity book states what it is working to instead of leaving
     # a reader to go and find `account:` and assume nothing overrides it.
     #
-    # A per-class limit may only ever TIGHTEN a portfolio one. A looser value
-    # fails the config at startup, naming both figures — see
-    # Rules._per_class_limits_only_tighten. That is what makes it safe for
-    # limits to live in two places: `account:` is the ceiling on the whole
-    # account and nothing further down this file can raise it.
+    # A value here OVERRIDES the portfolio one for this class, in either
+    # direction: `account:` is the default, not a ceiling. Nothing refuses a
+    # looser value. Arguing the case for one is the settings agent's job — it
+    # pushes back and makes the operator think, without denying the change.
     max_risk_per_trade_pct: 1.0
     max_position_pct: 50.0
     max_concurrent_positions: 3

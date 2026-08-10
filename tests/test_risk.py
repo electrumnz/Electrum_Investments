@@ -113,35 +113,74 @@ def test_a_class_limit_may_tighten_the_portfolio_limit(
     assert not _reasons_mention(verdict, "1.00%")
 
 
-def test_a_class_limit_can_never_loosen_the_portfolio_limit():
-    """This is what makes per-instrument limits safe to have at all.
+def test_a_class_limit_overrides_the_portfolio_limit_in_either_direction():
+    """`account:` is the default, not a ceiling.
 
-    The operator's four rules are a ceiling on the ACCOUNT. If an instrument
-    block could raise its own per-trade cap, then "max 1% of equity at risk per
-    trade" would mean "1%, unless a block further down the file disagrees" —
-    and a limit with an escape hatch in the same file is not a limit.
+    An earlier version refused a class limit looser than the portfolio one at
+    config load. That was the wrong mechanism: pushing back on a limit getting
+    looser belongs to the settings agent, which argues the case and slows the
+    operator down without denying the change. A validator that refuses to start
+    is a denial, and it denies at the least useful moment — boot, with no
+    explanation of the trade-off and no way to say "yes, I mean it".
 
-    It must RAISE rather than clamp. Silently clamping 3% back to 1% leaves
-    somebody believing they configured 3%, reading it off the settings page,
-    and being wrong about what the gate is doing.
+    What matters instead is that the file and the gate agree. A config saying
+    3% while the gate quietly applied 1% would be a limit nobody could read off
+    the config, which is worse than either number on its own.
     """
-    raw = load_rules().model_dump()
-    raw["instruments"]["us_equity"]["max_risk_per_trade_pct"] = 3.0
+    rules = load_rules()
+    rules.instruments["us_equity"].max_risk_per_trade_pct = 3.0
 
-    with pytest.raises(ValueError, match="looser than the portfolio limit"):
-        Rules.model_validate(raw)
+    account = AccountSnapshot(
+        equity_usd=100_000.0, cash_usd=100_000.0, buying_power_usd=100_000.0
+    )
+    tick = Tick(symbol="SPY", bid=579.98, ask=580.02, timestamp=INSIDE_SESSION)
+    # Risks $2,500 — over the portfolio's 1% but inside the class's 3%.
+    proposal = OrderProposal(
+        symbol="SPY",
+        direction=Direction.BUY,
+        qty=100,
+        limit_price=580.00,
+        stop_loss_price=555.00,
+        take_profit_price=620.00,
+        rationale="Sized to the class limit rather than the portfolio default.",
+    )
+
+    verdict = _gate(rules).evaluate(proposal, account=account, tick=tick)
+
+    # The per-trade gate does not object: the class said 3% and meant it.
+    assert not _reasons_mention(verdict, "per-trade cap")
 
 
-def test_the_tightening_guard_covers_disabled_classes_too():
-    """A limit edited while a class is switched off must not become a surprise
-    on the day somebody enables it — which, for crypto, is a weekend or the
-    small hours, the worst moment to discover a config error."""
-    raw = load_rules().model_dump()
-    assert raw["instruments"]["crypto"]["enabled"] is False
-    raw["instruments"]["crypto"]["max_concurrent_positions"] = 99
+def test_a_looser_class_limit_still_meets_the_portfolio_total_risk_cap():
+    """Worth knowing rather than guarded against.
 
-    with pytest.raises(ValueError, match="looser than the portfolio limit"):
-        Rules.model_validate(raw)
+    `max_total_risk_pct` is portfolio-wide and stays that way, so a per-trade
+    override above it can never actually fill — the total-risk gate refuses the
+    trade that would breach it. Raising a class limit past the total therefore
+    does nothing on its own, which is a fact about the interaction rather than
+    a rule stopping anybody.
+    """
+    rules = load_rules()
+    rules.instruments["us_equity"].max_risk_per_trade_pct = 3.0
+
+    account = AccountSnapshot(
+        equity_usd=100_000.0, cash_usd=100_000.0, buying_power_usd=100_000.0
+    )
+    tick = Tick(symbol="SPY", bid=579.98, ask=580.02, timestamp=INSIDE_SESSION)
+    proposal = OrderProposal(
+        symbol="SPY",
+        direction=Direction.BUY,
+        qty=100,
+        limit_price=580.00,
+        stop_loss_price=555.00,
+        take_profit_price=620.00,
+        rationale="Risks 2.5%, inside the class limit and past the 2% total.",
+    )
+
+    verdict = _gate(rules).evaluate(proposal, account=account, tick=tick)
+
+    assert not verdict.approved
+    assert _reasons_mention(verdict, "total risk")
 
 
 def test_a_class_position_cap_counts_only_that_class(rules, account, spy_tick, buy_proposal):

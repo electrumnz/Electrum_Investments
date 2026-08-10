@@ -2460,6 +2460,27 @@ def since_last_visit(summary: SinceLastVisit) -> str:
     )
 
 
+def _limit_row(value: float | int | None, default: float | int, fmt: str) -> str:
+    """One limit, and where it came from.
+
+    Three states rather than two, and the third is the one that earns its keep.
+    A class may set a limit LOOSER than the portfolio default — `account:` is a
+    default, not a ceiling, and nothing refuses one — so a looser value is said
+    out loud rather than rendered identically to a tighter one. That is
+    information, not a warning: the operator chose it, and the settings agent
+    is what argues the case when one is being changed.
+
+    An absent override shows the portfolio figure rather than a blank, because
+    an empty cell reads as "no limit", which is the opposite of what it means.
+    """
+    if value is None:
+        return fmt.format(default) + " (portfolio default)"
+    rendered = fmt.format(value) + " (this class)"
+    if value > default:
+        return rendered + f" — looser than the {fmt.format(default)} default"
+    return rendered
+
+
 def _is_continuous(inst: InstrumentRules) -> bool:
     """A market with no closed hours at all: every day, midnight to midnight."""
     by_day = inst.windows_by_day
@@ -3603,21 +3624,25 @@ def settings_page(rules: Rules, env: Env, *, chat_enabled: bool) -> str:
             # opposite of what an absent override means.
             + _row(
                 "Risk per trade",
-                f"{inst.max_risk_per_trade_pct:.2f}% (this class)"
-                if inst.max_risk_per_trade_pct is not None
-                else f"{rules.account.max_risk_per_trade_pct:.2f}% (portfolio limit)",
+                _limit_row(
+                    inst.max_risk_per_trade_pct,
+                    rules.account.max_risk_per_trade_pct,
+                    "{:.2f}%",
+                ),
             )
             + _row(
                 "Max position",
-                f"{inst.max_position_pct:.1f}% (this class)"
-                if inst.max_position_pct is not None
-                else f"{rules.account.max_position_pct:.1f}% (portfolio limit)",
+                _limit_row(
+                    inst.max_position_pct, rules.account.max_position_pct, "{:.1f}%"
+                ),
             )
             + _row(
                 "Concurrent positions",
-                f"{inst.max_concurrent_positions} (this class)"
-                if inst.max_concurrent_positions is not None
-                else f"{rules.account.max_concurrent_positions} (portfolio limit)",
+                _limit_row(
+                    inst.max_concurrent_positions,
+                    rules.account.max_concurrent_positions,
+                    "{}",
+                ),
             )
             + "</dl>"
             + (

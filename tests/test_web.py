@@ -1511,13 +1511,27 @@ def test_settings_shows_a_disabled_class_rather_than_omitting_it(client):
 
 
 def test_settings_names_which_limit_is_binding_per_class(client):
-    """A class with no opinion shows the portfolio limit rather than a blank.
+    """A class with no opinion shows the portfolio figure rather than a blank.
     An empty cell reads as "no limit", which is the opposite of what an absent
     override means."""
     body = client.get("/settings").text
 
-    assert "(portfolio limit)" in body or "(this class)" in body
     assert "1.00% (this class)" in body      # us_equity states its own
+
+
+def test_settings_says_when_a_class_limit_is_looser_than_the_default():
+    """`account:` is a default, not a ceiling — a class may set a looser limit
+    and nothing refuses it. So a looser value is said out loud rather than
+    rendered identically to a tighter one.
+
+    Information, not a warning. The operator chose it; the settings agent is
+    what argues the case at the moment one is being changed.
+    """
+    assert render._limit_row(3.0, 1.0, "{:.2f}%") == (
+        "3.00% (this class) — looser than the 1.00% default"
+    )
+    assert render._limit_row(0.5, 1.0, "{:.2f}%") == "0.50% (this class)"
+    assert render._limit_row(None, 1.0, "{:.2f}%") == "1.00% (portfolio default)"
 
 
 def test_the_watchlist_is_not_a_trading_permission():

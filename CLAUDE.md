@@ -121,18 +121,29 @@ windows, symbol lists, strategy and **that class's own risk limits** live there;
 the account-wide rules (2% total risk, stand-down, daily loss, margin) stay
 global.
 
-**A per-class limit may only ever TIGHTEN a portfolio limit, never loosen one,
-and `Rules._per_class_limits_only_tighten` enforces that at load.** This is the
-whole reason limits are allowed to live in two places. The operator's four rules
-are a ceiling on the *account*; if an instrument block could raise its own
-per-trade cap then "max 1% of equity at risk per trade" would mean "1%, unless a
-block further down the file disagrees", which is not a limit.
+**A per-class limit OVERRIDES the portfolio one, in either direction.**
+`account:` is the default, not a ceiling. Set a class to 3% and that class gets
+3%, and nothing refuses it.
 
-It **raises rather than clamps**. Silently clamping 3% back to 1% leaves
-somebody believing they configured 3%, reading it off the Settings page, and
-being wrong about what the gate is doing. The guard runs for disabled classes
-too — a limit edited while a class is off must not become a surprise on the day
-somebody enables it, which for crypto is a weekend or the small hours.
+There was briefly a validator that rejected a looser class limit at config
+load. **Do not reintroduce it.** Refusing to start is a denial, and it denies at
+the least useful moment — boot, with no explanation of the trade-off and no way
+for the operator to say "yes, I mean it". The friction belongs in the *settings
+agent* (see Deferred), which argues the case, makes the operator think about the
+consequence, and then does what they say. Pushing back is not the same as
+refusing, and only one of the two is this codebase's job.
+
+What still matters is that the file and the gate agree. An override is
+deliberately **not floored back with a `min`**: a config saying 3% while the
+gate quietly applied 1% would be a limit nobody could read off the file, which
+is worse than either number on its own. The Settings page names which figure is
+in force per class, and says out loud when one is looser than the default —
+information for the operator, not a warning at them.
+
+Worth knowing rather than guarded against: `max_total_risk_pct` is still
+portfolio-wide, so a per-trade override above it can never fill — the total-risk
+gate refuses the trade that would breach it. Raising a class limit past the
+total does nothing until the total moves too.
 
 `max_concurrent_positions` on a class counts **within** that class, so both caps
 apply and they measure different things: a class that gets loud cannot fill
@@ -1556,8 +1567,12 @@ for a while and agree with them.
 - **A settings agent.** "Open settings agent": a deliberately conservative,
   strict, stubborn character, the only route to changing `config/rules.yaml`
   from the interface. Asymmetric on purpose — it makes the operator argue for a
-  limit getting looser and encourages one getting tighter. It does NOT have to
-  run on Hermes. It needs read access to the settings and a written file
+  limit getting looser and encourages one getting tighter.
+  **It pushes back; it does not deny.** The job is to slow the operator down and
+  make the consequence explicit, then do what they decide. That distinction is
+  why the per-class limit validator was removed — a hard refusal at config load
+  is the same intent implemented as a wall, at the moment it helps least.
+  It does NOT have to run on Hermes. It needs read access to the settings and a written file
   covering each limit: what it is, why it sits there, and the goal it serves.
   Settings has no edit control today and `tests/test_web.py` enforces that, so
   this is a deliberate change to that rule rather than an addition beside it.
