@@ -1898,3 +1898,80 @@ def test_the_kind_rules_are_generated_from_the_palette():
 
     for kind in KIND_HUES:
         assert f'.tape .cell[data-kind="{kind}"] .sym' in STYLES
+
+
+def test_each_clock_reports_its_own_exchange_not_new_yorks():
+    """The single-global-session bug arriving through the interface.
+
+    One "PRE-MARKET" pinned over the strip was a claim about every cell under
+    it, and false for crypto trading right beside it. Each clock now answers
+    for the exchange in ITS zone, and a zone with no exchange makes no claim at
+    all rather than borrowing New York's.
+    """
+    from bot.market_clock import CLOCKS
+
+    by_label = {f.label: f for f in CLOCKS}
+
+    assert by_label["New York"].exchange == "NYSE"
+    assert by_label["Sydney"].exchange == "ASX"
+    assert by_label["Auckland"].exchange == "NZX"
+    # No exchange on the US west coast. It shows the time and nothing more.
+    assert by_label["Los Angeles"].exchange == ""
+    assert by_label["Los Angeles"].is_open(datetime(2026, 8, 10, 15, 0, tzinfo=UTC)) is None
+
+
+def test_the_exchanges_open_at_their_own_local_hours():
+    """Sydney at 10:00 Sydney time, not at 10:00 New York time. The whole point
+    of hanging the state off the clock is that the zones differ."""
+    from bot.market_clock import CLOCKS
+
+    by_label = {f.label: f for f in CLOCKS}
+    # 2026-08-11 01:00 UTC = 11:00 Sydney (ASX open), 21:00 Mon New York (shut).
+    moment = datetime(2026, 8, 11, 1, 0, tzinfo=UTC)
+
+    assert by_label["Sydney"].is_open(moment) is True
+    assert by_label["New York"].is_open(moment) is False
+
+
+def test_a_weekend_shuts_every_exchange():
+    from bot.market_clock import CLOCKS
+
+    saturday = datetime(2026, 8, 15, 3, 0, tzinfo=UTC)   # Sat 13:00 Sydney
+    for face in CLOCKS:
+        assert face.is_open(saturday) in (False, None)
+
+
+def test_the_global_session_banner_is_gone_from_the_tape():
+    """It said nothing the strip did not already say better, and what it did
+    say was wrong for crypto."""
+    from bot.market_clock import market_state
+
+    # With the real windows, so the gate genuinely IS open here — without them
+    # `market_state` reports the cautious reading and the verdict would be
+    # "bot idle" for a reason that has nothing to do with what is being tested.
+    windows = load_rules().instruments["us_equity"].windows_by_day
+    body = render.ticker_tape(
+        market_state(
+            datetime(2026, 8, 10, 12, 0, tzinfo=UTC), windows_by_day=windows
+        ),
+        [_quote("SPY", last=580.0, prev=574.0, tradeable=True)],
+    )
+    fixed = body.split('<div class="view">')[0]
+
+    assert "Pre-market" not in fixed
+    # The gate verdict stays: RiskGate IS account-wide, so it is true of the
+    # bot whichever instrument you are looking at.
+    assert "gate open" in fixed
+
+
+def test_the_tape_is_a_band_rather_than_the_same_colour_as_the_page():
+    """Three surfaces at the same value is one surface. The tape was `--ink`,
+    the body is `--ink`, and the header is within a hair of it — so the strip
+    dissolved into the dark field and took the clocks with it."""
+    from bot.web.render import STYLES
+
+    tape_rule = STYLES[STYLES.index(".tape{") : STYLES.index(".tape .fixed{")]
+
+    assert "background:var(--graphite)" in tape_rule
+    assert "background:var(--ink)" not in tape_rule
+    assert "border-top" in tape_rule and "border-bottom" in tape_rule

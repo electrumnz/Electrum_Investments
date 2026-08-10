@@ -193,10 +193,18 @@ section.block>h2{margin-bottom:.75rem}
    invisibility while the header beside them, at z 20, looks fine. Nothing
    warns: the elements are present, opaque and hit-testable, and
    `elementFromPoint` returns them. It is only visible in a screenshot. */
-.tape{height:3.15rem;border-bottom:1px solid var(--slate);background:var(--ink);
+/* The tape is a BAND, and it has to read as one. It used to be `--ink` — the
+   same colour as the page body and as good as the same as the header — so it
+   dissolved into the dark field between them and the clocks dissolved into it.
+   Three surfaces at the same value is one surface.
+   Lifted to graphite with a rule top and bottom, so the order down the page is
+   header / band / body rather than one continuous dark. */
+.tape{height:3.15rem;border-top:1px solid var(--slate);
+  border-bottom:1px solid var(--slate);background:var(--graphite);
+  box-shadow:inset 0 1px 0 rgba(233,236,239,.04),0 1px 0 rgba(0,0,0,.5);
   display:flex;align-items:stretch;overflow:hidden;position:relative;z-index:19}
 .tape .fixed{display:flex;align-items:center;gap:.45rem;padding:0 .875rem;
-  white-space:nowrap;border-right:1px solid var(--slate);background:var(--graphite);
+  white-space:nowrap;border-right:1px solid var(--slate);background:var(--ink);
   font-family:var(--mono);font-size:.625rem;letter-spacing:.12em;
   text-transform:uppercase;color:var(--pewter);position:relative;z-index:1}
 .tape .fixed .name{color:var(--bone)}
@@ -267,10 +275,18 @@ section.block>h2{margin-bottom:.75rem}
 
 .tape .clk{display:flex;align-items:center;gap:.45rem;padding:0 .9rem;
   white-space:nowrap;font-family:var(--mono);font-size:.75rem;height:100%;
-  border-right:1px solid rgba(42,52,65,.5);background:rgba(22,27,34,.55)}
+  border-left:1px solid var(--slate);border-right:1px solid var(--slate);
+  background:var(--ink);box-shadow:inset 0 1px 3px rgba(0,0,0,.45)}
 .tape .clk .city{font-size:.5625rem;letter-spacing:.14em;text-transform:uppercase;
-  color:var(--pewter)}
+  color:var(--bone);opacity:.75}
 .tape .clk .t{color:var(--bone);font-variant-numeric:tabular-nums}
+.tape .clk .mkt{font-size:.5625rem;letter-spacing:.1em;padding:.1rem .3rem;
+  border:1px solid currentColor;border-radius:2px;opacity:.9}
+/* Open and shut, per exchange. Not the gain/loss pair: this is a state, not a
+   direction, and reusing the P&L colours here would make a shut market look
+   like a losing one. */
+.tape .clk .mkt.on{color:var(--patina)}
+.tape .clk .mkt.off{color:var(--pewter);opacity:.55}
 .tape .clk.home .city{color:var(--holo)}
 .tape .clk.home{background:rgba(111,211,232,.06)}
 /* Present only while SCRIPT has not run. A frozen clock is the one plausible
@@ -2730,12 +2746,30 @@ def _tape_cell(quote: TickerQuote, *, venue: VenueState, kind: str) -> str:
     )
 
 
-def _tape_clock(face: ClockFace, local: datetime) -> str:
+def _tape_clock(face: ClockFace, local: datetime, now: datetime) -> str:
+    """One city's clock, carrying the state of the exchange that trades there.
+
+    Each clock answers for ITS OWN market. The strip used to pin one global
+    "PRE-MARKET" over everything, which was a claim about every cell under it
+    and false for crypto — the single-global-session bug `config/rules.yaml`
+    grew an `instruments:` block to fix, arriving through the interface.
+
+    A zone with no exchange says nothing about a market rather than borrowing
+    New York's. Los Angeles is that case: it is here because the operator asked
+    for US east and west, and there is no exchange on the west coast.
+    """
+    open_now = face.is_open(now)
+    state = ""
+    if open_now is not None:
+        state = (
+            f'<span class="mkt {"on" if open_now else "off"}">'
+            f'{_e(face.exchange)}</span>'
+        )
     return (
         f'<span class="clk{" home" if face.is_market else ""}" '
         f'data-tz="{_e(face.zone)}">'
         f'<span class="city">{_e(face.label)}</span>'
-        f'<span class="t">{local:%H:%M:%S}</span></span>'
+        f'<span class="t">{local:%H:%M:%S}</span>{state}</span>'
     )
 
 
@@ -2799,7 +2833,7 @@ def ticker_tape(
 
     groups: list[str] = []
     for index, (face, local) in enumerate(faces):
-        groups.append(_tape_clock(face, local))
+        groups.append(_tape_clock(face, local, state.now))
         chunk = quotes[index * PER_GROUP : (index + 1) * PER_GROUP]
         groups.extend(
             cell(q) for q in chunk
@@ -2823,12 +2857,17 @@ def ticker_tape(
         f'<div class="tape" data-phase="{_e(state.phase.value)}" '
         f'data-change-at="{state.next_change.isoformat()}" '
         f'data-next-phase="{_e(state.next_phase.value)}">'
+        # The session phase used to sit here, and it was a claim about every
+        # cell under it — false for crypto, which trades while it read
+        # PRE-MARKET. The clocks already say what time it is where, and each
+        # cell now carries its own venue state, so the global label said
+        # nothing the strip did not already say better.
+        #
+        # The gate verdict stays, because `RiskGate` IS account-wide: "gate
+        # open, session shut" is true of the bot whichever instrument you are
+        # looking at.
         '<div class="fixed"><span class="dot"></span>'
-        f'<span class="name">{_e(state.label)}</span>'
-        '<span class="sep">/</span>'
-        f'<span class="until">{_e(state.next_label.lower())} in '
-        f'{_e(_countdown(state.seconds_to_change))}</span>'
-        f'<span class="sep">/</span><span class="verdict">{_e(verdict)}</span>'
+        f'<span class="verdict">{_e(verdict)}</span>'
         # Removed by SCRIPT before its first tick, so its presence means the
         # clocks below are frozen at page-load time.
         '<span class="frozen">not ticking</span>'

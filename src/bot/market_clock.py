@@ -513,24 +513,64 @@ def render_sessions(
 
 @dataclass(frozen=True)
 class ClockFace:
-    """One city's clock. `is_market` marks the zone the session is defined in."""
+    """One city's clock, and the state of the exchange that trades there.
+
+    A clock on its own is decoration. A clock that says the market beside it is
+    open is orientation — and it must be that market's own state, not the US
+    one wearing a different time zone, which is the single-global-session bug
+    the tape carried until now.
+
+    `exchange` empty means no exchange in that zone. Los Angeles is the case:
+    it is on the tape because the operator asked for US east and west, and
+    there is no exchange there. It shows the time and makes no claim about a
+    market, rather than borrowing New York's.
+    """
 
     label: str
     zone: str
     is_market: bool = False
+    exchange: str = ""
+    opens: time | None = None
+    closes: time | None = None
 
     def at(self, now: datetime) -> datetime:
         return now.astimezone(ZoneInfo(self.zone))
+
+    def is_open(self, now: datetime) -> bool | None:
+        """Is that exchange in its regular session? `None` if there is none.
+
+        Weekday-shaped and holiday-blind, exactly like the gate's own check.
+        This is a clock on a display strip, not a gate, so being one public
+        holiday out is a cosmetic error rather than an order into a shut
+        market — and `session_calendar` covers the US case where it matters.
+        """
+        if self.opens is None or self.closes is None:
+            return None
+        local = self.at(now)
+        if local.weekday() >= 5:
+            return False
+        return self.opens <= local.timetz().replace(tzinfo=None) < self.closes
 
 
 #: The four the operator asked for, ordered west-to-east from the market out.
 #: New York first because it is the zone every session boundary is defined in;
 #: Auckland is where the operator is.
 CLOCKS: tuple[ClockFace, ...] = (
-    ClockFace("New York", "America/New_York", is_market=True),
+    ClockFace(
+        "New York", "America/New_York", is_market=True,
+        exchange="NYSE", opens=REGULAR_START, closes=REGULAR_END,
+    ),
+    # No exchange on the US west coast. It shows the time and says nothing
+    # about a market, rather than borrowing New York's state four hours early.
     ClockFace("Los Angeles", "America/Los_Angeles"),
-    ClockFace("Sydney", "Australia/Sydney"),
-    ClockFace("Auckland", "Pacific/Auckland"),
+    ClockFace(
+        "Sydney", "Australia/Sydney",
+        exchange="ASX", opens=time(10, 0), closes=time(16, 0),
+    ),
+    ClockFace(
+        "Auckland", "Pacific/Auckland",
+        exchange="NZX", opens=time(10, 0), closes=time(16, 45),
+    ),
 )
 
 
