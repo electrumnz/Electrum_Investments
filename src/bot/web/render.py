@@ -1439,8 +1439,20 @@ SCRIPT = """
 
   /* ------------------------------------------------- panel materialisation */
 
+  /* `.signin .panel` belongs here and was missing. It already carries the same
+     bracket-corner rules as every other member of this set, so it was plainly
+     meant to be one — and left out, it was the only content on any page that
+     the boot overlay crossfaded ON TOP OF rather than into. The overlay is
+     opaque, z-index 60, centred, and prints four status lines and a second
+     wordmark straight across "OPERATOR SIGN-IN", the password label and the
+     input for roughly 300ms. Self-resolving, and the first thing anyone sees
+     on the one page that is publicly reachable once DASHBOARD_PASSWORD is set.
+
+     Fail-to-visible is unaffected: hiding still needs BOTH `html.fx-ready` and
+     the per-element `fx-panel` class, added together in one synchronous block,
+     so a throw or a blocked script leaves a fully usable sign-in form. */
   var PANELS = '.page-head,.banner,.card,.curve,.scroll,.cycle,.readout,' +
-               '.chat .log,.empty,section.block > h2';
+               '.chat .log,.empty,section.block > h2,.signin .panel';
 
   function finish(el) {
     el.classList.remove('fx-in');
@@ -2396,6 +2408,32 @@ def _cls(value: float | None) -> str:
     return "pos" if value > 0 else "neg"
 
 
+def _word(count: float, singular: str, plural: str | None = None) -> str:
+    """The right form of a noun for a count, without the count.
+
+    For the cases where the figure is rendered separately from the word it
+    governs — a stat tile's value and its caption, say.
+    """
+    return singular if count == 1 else (plural or singular + "s")
+
+
+def _count(count: int, singular: str, plural: str | None = None) -> str:
+    """A count and its noun, agreeing: `1 trade`, `3 trades`.
+
+    Written once because it was written wrong sixteen times. "1 qualifying
+    loss(es) in a row", "only 1 trades so treat as noise", "no losing trades yet
+    across 1", "Median chain 1 — hops" — every one of them a template that never
+    considered the singular, and every one of them on a deck whose entire
+    argument is that its figures are careful. A reader who catches the deck
+    being sloppy about a word has no way to know it is not being sloppy about a
+    number.
+
+    `(s)` is not the fix. It is the same shrug written down, and it reads as a
+    form nobody finished.
+    """
+    return f"{count} {_word(count, singular, plural)}"
+
+
 def _when(stamp: datetime) -> str:
     return stamp.astimezone(UTC).strftime("%d %b %Y, %H:%M UTC")
 
@@ -2621,7 +2659,7 @@ def banners(
     if untracked:
         out.append(
             '<div class="banner warn"><b>Open risk is understated</b>'
-            f"{len(untracked)} held position(s) have no journal entry "
+            f"{_count(len(untracked), 'held position')} have no journal entry "
             f"({_e(', '.join(untracked))}), so their planned stop is unknown and "
             "their risk is not counted below. Actual risk is higher than shown.</div>"
         )
@@ -2634,16 +2672,16 @@ def banners(
     if stale:
         out.append(
             '<div class="banner warn"><b>Open risk may be overstated</b>'
-            f"The journal holds {len(stale)} open trade(s) the broker is not "
+            f"The journal holds {_count(len(stale), 'open trade')} the broker is not "
             f"reporting ({_e(', '.join(stale))}). Either they closed outside the "
             "bot, or reconciliation has not run since they did. Open risk below "
             "still counts them, so the real figure is lower.</div>"
         )
 
     if audit is not None and audit.is_degraded:
-        detail = f"{audit.malformed} unreadable line(s)"
+        detail = _count(audit.malformed, "unreadable line")
         if audit.unreadable_files:
-            detail += f", {len(audit.unreadable_files)} unreadable file(s)"
+            detail += ", " + _count(len(audit.unreadable_files), "unreadable file")
         out.append(
             '<div class="banner warn"><b>Decision log is incomplete</b>'
             f"{detail}. The trail below is missing entries rather than showing "
@@ -2680,9 +2718,9 @@ def since_last_visit(summary: SinceLastVisit) -> str:
     if summary.anything_new:
         bits = []
         if summary.new_decisions:
-            bits.append(f"{summary.new_decisions} cycle(s)")
+            bits.append(_count(summary.new_decisions, "cycle"))
         if summary.new_trades_closed:
-            bits.append(f"{summary.new_trades_closed} trade(s) closed")
+            bits.append(_count(summary.new_trades_closed, "trade") + " closed")
         if summary.new_rejections:
             bits.append(f"{summary.new_rejections} rejected")
         if bits:
@@ -3146,7 +3184,7 @@ def board(
         + stat(
             "Unrealised",
             _money(unrealised, sign=True),
-            f"across {len(account.open_positions)} position(s)",
+            f"across {_count(len(account.open_positions), 'position')}",
             _cls(unrealised),
             live="unrealised_pnl_usd",
         )
@@ -3182,8 +3220,9 @@ def board(
             f"is withheld for {stand_down.days_remaining(datetime.now(UTC)):.1f} "
             "more days.</p>"
             if stand_down.is_active(datetime.now(UTC))
-            else f'<p class="note">Clear. {consecutive_losses} qualifying loss(es) '
-            f"in a row against a trigger of "
+            else '<p class="note">Clear. '
+            + _count(consecutive_losses, "qualifying loss", "qualifying losses")
+            + f" in a row against a trigger of "
             f"{rules.stand_down.consecutive_losses_trigger}.</p>"
         )
         + pips(consecutive_losses, rules.stand_down.consecutive_losses_trigger)
@@ -3563,7 +3602,7 @@ def _considered(entry: DecisionEntry) -> str:
     watching = sum(1 for a in assessments if a.stance == "watch")
     return (
         f'<div class="step"><p class="eyebrow">Considered '
-        f"({len(assessments)} symbol(s)"
+        f"({_count(len(assessments), 'symbol')}"
         + (f", {watching} on watch" if watching else "")
         + f")</p>{rows}</div>"
     )
@@ -3715,7 +3754,7 @@ def _cycle(entry: DecisionEntry) -> str:
         '<article class="cycle"><div class="head">'
         f'<span class="when">{_e(_when(entry.timestamp))}</span>'
         f'<span class="pill {pill}">{entry.outcome}</span>'
-        f'<span class="note">{len(d.proposals)} proposal(s), '
+        f'<span class="note">{_count(len(d.proposals), "proposal")}, '
         f"{entry.approved} approved, {entry.rejected} rejected</span>"
         + (f'<span class="cost">{cost}</span>' if cost else "")
         + "</div>"
@@ -4753,7 +4792,7 @@ def _dream(dream: Dream) -> str:
         )
         out += (
             f'<details class="stream"><summary>The working, '
-            f"{len(dream.thoughts)} step(s)</summary><ol>{rows}</ol></details>"
+            f"{_count(len(dream.thoughts), 'step')}</summary><ol>{rows}</ol></details>"
         )
 
     return out + "</div></article>"
@@ -4778,7 +4817,7 @@ def _ledger(ledger: DreamLedger) -> str:
 
     thin = (
         '<p class="note" style="margin-top:.875rem">Computed over '
-        f"{ledger.resolved} resolved chain(s). Below "
+        f"{_count(ledger.resolved, 'resolved chain')}. Below "
         f"{THIN_LEDGER_THRESHOLD} this is a thin sample and every rate above is "
         "noise, which is stated here for the same reason the Analytics page "
         "states it: a rate without its sample count gets believed anyway.</p>"
@@ -4789,12 +4828,12 @@ def _ledger(ledger: DreamLedger) -> str:
     flags = ""
     if ledger.untriggered_keeps:
         flags += (
-            f'<p class="note">{ledger.untriggered_keeps} kept idea(s) name no '
+            f'<p class="note">{_count(ledger.untriggered_keeps, "kept idea")} name no '
             "trigger. Those are notes rather than watches.</p>"
         )
     if ledger.unattacked:
         flags += (
-            f'<p class="note">{ledger.unattacked} chain(s) have no stated weakest '
+            f'<p class="note">{_count(ledger.unattacked, "chain")} {_word(ledger.unattacked, "has", "have")} no stated weakest '
             "hop, so nobody has tried to break them yet.</p>"
         )
 
@@ -4816,7 +4855,15 @@ def _ledger(ledger: DreamLedger) -> str:
         + stat(
             "Median chain",
             "n/a" if ledger.median_hops is None else f"{ledger.median_hops:g}",
-            "hops. Two is the minimum it aims for",
+            # The word agrees with the figure above it, which is the one place
+            # a caption cannot just say "hops": a median of exactly 1 read as
+            # "Median chain 1 — hops".
+            (
+                "hops. Two is the minimum it aims for"
+                if ledger.median_hops is None
+                else f"{_word(ledger.median_hops, 'hop')}. "
+                "Two is the minimum it aims for"
+            ),
         )
         + stat("Resolved", str(ledger.resolved), f"of {ledger.dreams} recorded")
         + "</div>"

@@ -22,7 +22,10 @@ from mcp.server.mcpserver import MCPServer
 from .audit import AuditLog
 from .broker import Broker
 from .config import Env, Rules, load_rules
-from .dreaming import DEFAULT_DREAMS_PATH, DreamStore
+from .dreaming import (
+    DEFAULT_DREAMS_PATH,
+    DreamStore,
+)
 from .insight import DEFAULT_DB_PATH as INSIGHT_DB_PATH
 from .insight import InsightIndex, run_query
 from .journal import Journal
