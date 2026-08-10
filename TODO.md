@@ -171,7 +171,7 @@ Do not report these as done from a container that cannot see them.
 
 ---
 
-## 0. `electrum-bot dream` cannot make its model call — THE blocking one
+## 0. RESOLVED — the dreamer's model call, and why it never worked
 
 Found by running it for real against a pristine export of HEAD. Transcript:
 `tests/fixtures/dream_cycle_2026-08-10.json`, field `shipped_transport_probe`.
@@ -199,7 +199,36 @@ must never again be the only thing standing behind this call.
 Blast radius CHECKED rather than assumed: `ClaudeDecision` maxes at five
 optional (`PositionPlan`), the conference turns at one or two, and both compile
 in about four seconds. **The decision loop and the conference are fine. Only the
-dreamer is dead.**
+dreamer WAS dead.**
+
+### The cause, and the fix
+
+Sharper than "too complex": **a property not listed in `required` may be present
+or absent, so the grammar must accept every subset of the optional set in any
+order, and each optional field doubles that space.** The count of PROPERTIES is
+cheap; the count of OPTIONAL ones is not. Measured on synthetic models — **12
+optional times out at 150s, 15 required-nullable compile in 10.5s.** A null is
+free; an absence is what costs.
+
+The fix declares **every field required on the wire while keeping every Python
+default**, so the model must say `null`/`""`/`[]` rather than omit a key.
+Nothing about what a step may contain changed, no call site changed, and
+`messages.parse` keeps server-enforced validation. Compile: 133.5s failing →
+**3.1s**. `Dreamer.run_once` end to end: never completed → **109.3s** on the
+first call of the day, then 33.1s.
+
+Dropping `output_format` and parsing JSON back was rejected: without the grammar
+a verdict can return a word the enum does not contain and a threshold can return
+"above the 20-day" instead of a number, and validating afterwards costs a whole
+failed dream rather than a constrained token.
+
+`DREAM_TIMEOUT_SECONDS` is 240 with retries pinned at 1 — **a default nobody
+writes down is not a bound** — so the worst case is about 8 minutes rather than
+45, and `confer` inherits it.
+
+**`ClaudeDecision` is now the slowest schema the repo sends: 14.7s against 3.1s
+for the fixed `DreamStep`**, with five optional fields on `PositionPlan`.
+Measure before adding a sixth.
 
 ---
 
