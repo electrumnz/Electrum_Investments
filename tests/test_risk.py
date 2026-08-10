@@ -894,3 +894,67 @@ def test_frequency_rules_reject_weekly_below_daily():
             max_trades_per_week=5,
             min_seconds_between_trades_per_symbol=0,
         )
+
+
+def test_a_proposal_with_no_take_profit_is_approved(rules, account, spy_tick):
+    """The stop is required; the exit never was. A trade with no target must
+    pass the gate on its merits rather than being refused for a field the
+    operator's rules do not mention."""
+    proposal = OrderProposal(
+        symbol="SPY",
+        direction=Direction.BUY,
+        qty=3,
+        limit_price=580.00,
+        stop_loss_price=575.00,
+        take_profit_price=None,
+        rationale="No target; the exit is managed rather than pre-committed.",
+    )
+
+    verdict = _gate(rules).evaluate(proposal, account=account, tick=spy_tick)
+
+    assert verdict.approved, verdict.reasons
+
+
+def test_a_short_with_no_take_profit_is_approved(rules, account, spy_tick):
+    """The exact shape of the operator's first manual trade: SHORT, hard stop,
+    no target.
+
+    Split from the buy case rather than parametrised because the two directions
+    are separate branches in `_stops_on_correct_side`, and a mutation to the
+    sell branch survived the buy-only test. The configuration about to be
+    traded had no coverage at all.
+    """
+    proposal = OrderProposal(
+        symbol="SPY",
+        direction=Direction.SELL,
+        qty=3,
+        limit_price=580.00,
+        stop_loss_price=585.00,      # above entry: correct side for a short
+        take_profit_price=None,
+        rationale="Short with a hard stop and no target; the exit is managed.",
+    )
+
+    verdict = _gate(rules).evaluate(proposal, account=account, tick=spy_tick)
+
+    assert verdict.approved, verdict.reasons
+
+
+def test_a_stop_on_the_wrong_side_is_still_refused_without_a_target(
+    rules, account, spy_tick
+):
+    """Making the target optional must not weaken the check that remains. A
+    stop below entry on a short is not a stop, it is a target."""
+    proposal = OrderProposal(
+        symbol="SPY",
+        direction=Direction.SELL,
+        qty=3,
+        limit_price=580.00,
+        stop_loss_price=575.00,     # below entry on a SHORT — wrong side
+        take_profit_price=None,
+        rationale="Deliberately inverted stop, with no target to hide behind.",
+    )
+
+    verdict = _gate(rules).evaluate(proposal, account=account, tick=spy_tick)
+
+    assert not verdict.approved
+    assert _reasons_mention(verdict, "not above entry")

@@ -3290,6 +3290,10 @@ def _cycle(entry: DecisionEntry) -> str:
             f'<span class="note">limit {proposal.limit_price:,.4f}, stop '
             f"{proposal.stop_loss_price:,.4f}, target "
             f"{proposal.take_profit_price:,.4f}</span>"
+            if proposal.take_profit_price is not None
+            # Said out loud rather than left blank. An empty cell reads as a
+            # missing figure; "no target" is a decision.
+            else "no target</span>"
             f'<span class="note">risks {_money(proposal.risk_usd)}</span>'
             "</div>"
         )

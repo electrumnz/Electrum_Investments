@@ -162,8 +162,8 @@ def _build_proposal(
     qty: float,
     limit_price: float,
     stop_loss_price: float,
-    take_profit_price: float,
     rationale: str,
+    take_profit_price: float | None = None,
 ) -> OrderProposal:
     from .broker import is_crypto_symbol
 
@@ -186,8 +186,8 @@ def check_order(
     qty: float,
     limit_price: float,
     stop_loss_price: float,
-    take_profit_price: float,
     rationale: str,
+    take_profit_price: float | None = None,
 ) -> dict[str, Any]:
     """Vet a proposed order against config/rules.yaml WITHOUT placing it.
 
@@ -201,12 +201,22 @@ def check_order(
         qty: Number of shares or coin units. Fractional is allowed.
         limit_price: Limit price. Market orders are not supported.
         stop_loss_price: Must be below entry for a buy, above for a sell.
-        take_profit_price: Must be above entry for a buy, below for a sell.
+        take_profit_price: Optional. Above entry for a buy, below for a sell.
+            Omit it for no target: the order goes out as an entry plus a
+            stop rather than a bracket. A stop is required; an exit is not,
+            and a level invented to fill this field becomes a real resting
+            order at the broker.
         rationale: One sentence: the signal, and the level that invalidates it.
     """
     try:
         proposal = _build_proposal(
-            symbol, direction, qty, limit_price, stop_loss_price, take_profit_price, rationale
+            symbol,
+            direction,
+            qty,
+            limit_price,
+            stop_loss_price,
+            rationale,
+            take_profit_price=take_profit_price,
         )
     except Exception as e:  # malformed input is a rejection, not a crash
         return {"approved": False, "reasons": [f"invalid proposal: {e}"]}
@@ -247,8 +257,8 @@ def place_order(
     qty: float,
     limit_price: float,
     stop_loss_price: float,
-    take_profit_price: float,
     rationale: str,
+    take_profit_price: float | None = None,
 ) -> dict[str, Any]:
     """Vet an order and, only if it passes every rule, place it on the PAPER account.
 
@@ -258,13 +268,25 @@ def place_order(
     Args mirror check_order.
     """
     checked = check_order(
-        symbol, direction, qty, limit_price, stop_loss_price, take_profit_price, rationale
+        symbol,
+        direction,
+        qty,
+        limit_price,
+        stop_loss_price,
+        rationale,
+        take_profit_price=take_profit_price,
     )
     if not checked["approved"]:
         return {"placed": False, "reasons": checked["reasons"]}
 
     proposal = _build_proposal(
-        symbol, direction, qty, limit_price, stop_loss_price, take_profit_price, rationale
+        symbol,
+        direction,
+        qty,
+        limit_price,
+        stop_loss_price,
+        rationale,
+        take_profit_price=take_profit_price,
     )
     result = _session.broker.place_order(proposal)
 

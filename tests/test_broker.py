@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from types import EllipsisType
 from typing import Any
 
 import pytest
@@ -15,8 +16,15 @@ def _proposal(
     rationale: str = "Mock order used to exercise the broker interface.",
     limit_price: float = 580.00,
     stop_loss_price: float | None = None,
-    take_profit_price: float | None = None,
+    take_profit_price: float | EllipsisType | None = ...,
 ) -> OrderProposal:
+    """`take_profit_price=None` means NO TARGET; omitting it takes the default.
+
+    A sentinel rather than `None` for "unspecified", because the whole point of
+    the change under test is that `None` is now a meaningful value. A helper
+    that quietly substituted its default for it would make every no-target test
+    pass for the wrong reason — which is exactly what happened first time.
+    """
     if direction == Direction.BUY:
         sl, tp = 575.00, 590.00
     else:
@@ -27,7 +35,7 @@ def _proposal(
         qty=qty,
         limit_price=limit_price,
         stop_loss_price=stop_loss_price if stop_loss_price is not None else sl,
-        take_profit_price=take_profit_price if take_profit_price is not None else tp,
+        take_profit_price=tp if take_profit_price is ... else take_profit_price,
         rationale=rationale,
     )
 
@@ -287,3 +295,49 @@ def test_an_unusable_quote_reaches_callers_as_a_no_quote_runtime_error():
 
     with pytest.raises(RuntimeError, match="Unusable quote"):
         broker.get_tick("SPY")
+
+
+# --------------------------------------------------- no target is a normal trade
+
+
+def test_no_take_profit_sends_an_oto_with_the_stop_intact():
+    """A trade with no target is a normal trade.
+
+    The operator's rules require a hard stop and have never required an exit.
+    `take_profit_price` used to be mandatory, so whoever built a proposal had to
+    invent a level to satisfy the validator — survivable while the field was
+    only journalled, and not survivable once entries became GTC brackets, where
+    an invented target is a live OCO leg resting at the broker at a price
+    nobody chose.
+    """
+    from alpaca.trading.enums import OrderClass, TimeInForce
+
+    trading = _CapturingTrading()
+    result = _alpaca_with(trading).place_order(
+        _proposal(symbol="SPY", direction=Direction.SELL, limit_price=773.79,
+                  stop_loss_price=820.0, take_profit_price=None)
+    )
+
+    assert result.accepted
+    request = trading.requests[0]
+    assert request.order_class == OrderClass.OTO
+    assert request.take_profit is None
+    # The half that must never go missing.
+    assert request.stop_loss.stop_price == 820.0
+    assert request.time_in_force == TimeInForce.GTC
+
+
+def test_a_target_still_produces_a_bracket():
+    """The order class follows the proposal rather than the proposal being bent
+    to fit one order class."""
+    from alpaca.trading.enums import OrderClass
+
+    trading = _CapturingTrading()
+    _alpaca_with(trading).place_order(
+        _proposal(symbol="SPY", stop_loss_price=575.0, take_profit_price=590.0)
+    )
+
+    request = trading.requests[0]
+    assert request.order_class == OrderClass.BRACKET
+    assert request.take_profit.limit_price == 590.0
+    assert request.stop_loss.stop_price == 575.0

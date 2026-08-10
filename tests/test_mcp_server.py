@@ -217,7 +217,8 @@ def test_risk_status_flags_untracked_positions(wired_session):
     """A position the journal never saw makes reported open risk understated."""
     wired_session.broker.place_order(
         mcp_server._build_proposal(
-            "SPY", "buy", 3, 580.0, 575.0, 590.0, "Opened outside the journal."
+            "SPY", "buy", 3, 580.0, 575.0, "Opened outside the journal.",
+            take_profit_price=590.0,
         )
     )
     status = mcp_server.get_risk_status()
