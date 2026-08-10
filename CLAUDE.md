@@ -3,6 +3,19 @@
 An AI trading bot running against an **Alpaca paper-trading account**. Read this
 before touching orders, risk, or config.
 
+> ## Start here
+>
+> **`TODO.md` is the current work list.** It is ordered by what is actually
+> blocking, it carries the reasoning behind each item, and it opens with the
+> live account state. Read it before picking anything up — this file describes
+> how the system behaves, that one describes what is unfinished and why.
+>
+> **There is a live position right now:** short 21 SPY at 773.324285, stop 820,
+> $980.19 of open risk. Placed by hand as an operator test, journalled as row 1,
+> tagged `manual`. Its stop leg is resting at the broker and its trigger price
+> has never been read back — `WorkingOrder` carries no `stop_price`. Details in
+> `TODO.md` under CURRENT STATE.
+
 **Scope:** single operator, personal trading, paper money. Not a product, not
 multi-user. That assumption is why the dashboard has one shared password rather
 than accounts, why it binds to `127.0.0.1` and is reached over Tailscale or a
@@ -1704,6 +1717,9 @@ trades to appear useful.
 ## Layout
 
 ```
+TODO.md                 The work list. Ordered by what blocks, with the
+                        reasoning kept beside each item, and the live account
+                        state at the top. Read before starting anything.
 config/rules.yaml       Trading limits. Enforced in code. The only place to change behaviour.
                         `instruments:` carries each class's own limits, which may only
                         ever tighten the global ones. `watchlist:` is DISPLAY ONLY and
