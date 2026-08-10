@@ -14,6 +14,7 @@ and let `place_order` here be the only write path.
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 from mcp.server.mcpserver import MCPServer
@@ -21,6 +22,8 @@ from mcp.server.mcpserver import MCPServer
 from .audit import AuditLog
 from .broker import Broker
 from .config import Env, Rules, load_rules
+from .insight import DEFAULT_DB_PATH as INSIGHT_DB_PATH
+from .insight import InsightIndex, run_query
 from .journal import Journal
 from .metrics import build_report, render_excursions, render_summary
 from .models import AccountSnapshot, AssetClass, Direction, OrderProposal
@@ -44,7 +47,12 @@ server = MCPServer(
         "it saw each one. It is a recording rather than a live news search, so "
         "quote the ages and never present a six-hour-old headline as current — "
         "but do not answer 'I have no access to news' either, because this is "
-        "the news this bot trades on."
+        "the news this bot trades on.\n\n"
+        "For anything outside a recent window, the full history is searchable: "
+        "query_history runs read-only SQL over every decision, assessment, "
+        "rejection reason and news item ever recorded, and describe_history "
+        "returns the schema and the days covered. Prefer those over saying the "
+        "history is unavailable — it is on disk and indexed."
     ),
 )
 
@@ -59,6 +67,8 @@ class _Session:
         self._gate: RiskGate | None = None
         self._journal: Journal | None = None
         self._audit = AuditLog()
+        self._insight: InsightIndex | None = None
+        self._insight_path = INSIGHT_DB_PATH
 
     @property
     def env(self) -> Env:
@@ -103,6 +113,25 @@ class _Session:
     @property
     def audit(self) -> AuditLog:
         return self._audit
+
+    @property
+    def insight_path(self) -> Path:
+        return self._insight_path
+
+    @property
+    def insight(self) -> InsightIndex:
+        """The derived query index, built on first use.
+
+        Lazy because it is only needed by the query tools, and a first call on
+        a box with months of history does the full build. Every call after that
+        indexes the delta, which is why the tools can refresh on each request
+        rather than depending on a timer somebody has to remember to install.
+        """
+        if self._insight is None:
+            self._insight = InsightIndex(
+                self._insight_path, audit_dir=self._audit.base_dir
+            )
+        return self._insight
 
     def account(self) -> AccountSnapshot:
         """Broker state with open risk filled in from the journal.
@@ -674,6 +703,175 @@ def get_recent_decisions(limit: int = 20, days: int = 7) -> dict[str, Any]:
         "unreadable_files": view.unreadable_files,
         "record_is_incomplete": view.is_degraded,
     }
+
+
+@server.tool()
+def describe_history() -> dict[str, Any]:
+    """Schema and coverage of the searchable decision history.
+
+    Call this before writing a `query_history` query. It returns the live
+    tables and columns, how many rows are in each, and the range of days
+    covered, so a query can be written against what is actually there rather
+    than against a guess.
+
+    The index is derived from the audit log and rebuilt from it, so it is a
+    cache and never the source. If a row looks wrong, the audit log is right.
+    """
+    index = _session.insight
+    report = index.refresh()
+    payload = index.describe()
+    payload["freshly_indexed"] = {
+        "decisions": report.decisions_indexed,
+        "events": report.events_indexed,
+        "malformed_lines": report.malformed,
+        "unreadable_files": report.unreadable,
+    }
+    return payload
+
+
+@server.tool()
+def query_history(sql: str, limit: int = 50) -> dict[str, Any]:
+    """Run a read-only SQL SELECT over the full decision history.
+
+    This is the general-purpose way to ask something the other tools do not
+    cover: what was decided about a symbol months ago, which rejection reason
+    fires most often, how many watches named no trigger, what news was seen
+    around a date. The window-based tools answer "lately"; this answers
+    "ever".
+
+    Call `describe_history` first for the live schema. In short:
+
+      cycles(ts, day, outcome, proposal_count, approved_count, rejected_count,
+             acted, notes, has_inputs, calendar_degraded, social_degraded)
+      assessments(ts, symbol, stance, reasoning, waiting_for)
+      proposals(ts, idx, symbol, direction, qty, limit_price, stop_loss_price,
+                take_profit_price, risk_usd, notional_usd, rationale, approved)
+      rejections(ts, idx, reason_idx, symbol, reason)
+      position_plans(ts, symbol, action, thesis_intact, reasoning,
+                     waiting_for, invalidation)
+      readings(ts, symbol, kind, summary)      -- kind: 'daily' | 'intraday'
+      news(kind, text, first_seen, last_seen, cycles)  -- deduped view
+      events(ts, kind, payload)
+
+    `stance` is take/watch/pass/blocked. `outcome` is
+    held/executed/refused/approved/rejected. Timestamps are ISO-8601 UTC
+    strings, so ordinary string comparison sorts them and `day` is the cheap
+    way to group.
+
+    Two things to be careful about when reporting results:
+
+    - `readings.summary` is the rendered line the loop recorded, e.g.
+      "close 580.12, sma20 574.30, atr 6.41, ...". It is searchable text and
+      NOT parseable numbers. Do not extract a figure from it and present it as
+      a computed value.
+    - A `news` row's `first_seen` is when the bot first saw the item, which is
+      not when the story broke. Quote the timestamp rather than implying it is
+      current.
+
+    An empty result means nothing matched. It does not mean the loop saw
+    nothing — check `describe_history` for the days actually covered.
+
+    Args:
+        sql: One SELECT (or WITH ... SELECT) statement. Writes are refused.
+        limit: Maximum rows to return (default 50, capped at 200).
+    """
+    _session.insight.refresh()
+    result = run_query(_session.insight_path, sql, limit=limit)
+    if not result.ok:
+        return {
+            "ok": False,
+            "error": result.error,
+            "hint": "Call describe_history for the tables and columns available.",
+        }
+    return {
+        "ok": True,
+        "columns": result.columns,
+        "row_count": len(result.rows),
+        "rows": result.rows,
+        "truncated": result.truncated,
+        "note": (
+            "More rows matched than were returned; add LIMIT or narrow the "
+            "query." if result.truncated else ""
+        ),
+    }
+
+
+@server.tool()
+def search_news(text: str = "", kind: str = "", days: int = 0, limit: int = 40) -> dict[str, Any]:
+    """Search everything the bot has ever been shown, not just a recent window.
+
+    `get_recent_news` answers "what has it seen lately". This answers "has it
+    ever seen anything about X". Both read the recording rather than fetching:
+    the Marketaux quota belongs to the trading loop.
+
+    Every item carries when it was first and last seen. Quote those — an item
+    first seen in March is not news today.
+
+    Args:
+        text: Case-insensitive substring, e.g. a ticker or a company name.
+              Empty matches everything.
+        kind: 'headline', 'social' or 'window'. Empty matches all three.
+        days: Only items first seen in the last N days. 0 means all history.
+        limit: Maximum items (default 40).
+    """
+    _session.insight.refresh()
+
+    where: list[str] = []
+    params: list[Any] = []
+    if text.strip():
+        where.append("text LIKE ?")
+        params.append(f"%{text.strip()}%")
+    if kind.strip():
+        where.append("kind = ?")
+        params.append(kind.strip().lower())
+    if days > 0:
+        where.append("first_seen >= ?")
+        params.append((datetime.now(UTC) - timedelta(days=days)).isoformat())
+
+    clause = f"WHERE {' AND '.join(where)}" if where else ""
+    sql = (
+        f"SELECT kind, text, first_seen, last_seen, cycles FROM news {clause} "
+        f"ORDER BY first_seen DESC LIMIT {max(1, min(limit, 200))}"
+    )
+    result = run_query(_session.insight_path, sql, params=params, limit=limit)
+    if not result.ok:
+        return {"ok": False, "error": result.error}
+
+    now = datetime.now(UTC)
+    items = []
+    for row in result.rows:
+        first = _parse_ts(row.get("first_seen"))
+        items.append(
+            {
+                **row,
+                "age_hours": (
+                    round((now - first).total_seconds() / 3600, 1)
+                    if first
+                    else None
+                ),
+            }
+        )
+    return {
+        "ok": True,
+        "filters": {"text": text, "kind": kind or "all", "days": days or "all history"},
+        "item_count": len(items),
+        "items": items,
+        "source": (
+            "The audit log — items the trading loop was shown on some cycle. "
+            "Not a live news search. An empty result means nothing recorded "
+            "matched, not that nothing was published."
+        ),
+    }
+
+
+def _parse_ts(value: Any) -> datetime | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
 
 
 @server.tool()

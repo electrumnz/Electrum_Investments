@@ -56,6 +56,12 @@
 #
 # ## What this does and does not protect against
 #
+# `data/insight.db` is deliberately absent from all of this, and adding it
+# would be a mistake rather than an improvement. It is a derived index over the
+# audit log, rebuilt by `electrum-bot reindex` in well under a second, so it is
+# not irreplaceable — and restoring a stale copy of it over a current one is a
+# way to make queries quietly answer from last week.
+#
 # Everything here lands in $BACKUP_DIR on the same droplet, so it covers an
 # accidental delete, a bad deploy and a truncated file. It does NOT cover
 # losing the droplet. Copying backups/ off the box is deliberately not

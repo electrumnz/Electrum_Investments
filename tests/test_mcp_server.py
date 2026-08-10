@@ -46,6 +46,9 @@ def wired_session(monkeypatch, tmp_path):
     session._rules = rules
     session._journal = Journal(tmp_path / "journal.db")
     session._audit = AuditLog(tmp_path / "audit")
+    # The query index is derived from that audit directory, so it follows it
+    # into tmp_path rather than building data/insight.db in the repo.
+    session._insight_path = tmp_path / "insight.db"
     session._gate = RiskGate(
         rules, equity_at_session_start=PAPER_EQUITY, now=INSIDE_SESSION
     )
@@ -395,3 +398,132 @@ def test_get_recent_decisions_counts_what_it_could_not_parse(wired_session):
     assert result["malformed_lines"] == 1
     assert result["record_is_incomplete"] is True
     assert len(result["decisions"]) == 1
+
+
+# ------------------------------------------------------------ query history
+
+
+def test_query_history_answers_across_the_whole_log(wired_session):
+    """The window tools answer 'lately'; this has to answer 'ever'."""
+    from datetime import UTC, datetime, timedelta
+
+    from bot.models import Decision, Direction, OrderProposal, RiskVerdict
+
+    # Written straight into a dated file from three months ago.
+    stamp = datetime.now(UTC) - timedelta(days=90)
+    old = Decision(
+        timestamp=stamp,
+        proposals=[
+            OrderProposal(
+                symbol="AAPL",
+                direction=Direction.BUY,
+                qty=87,
+                limit_price=580.0,
+                stop_loss_price=567.0,
+                take_profit_price=600.0,
+                rationale="Reclaimed the prior day high; invalidated below 567.",
+            )
+        ],
+        verdicts=[RiskVerdict.reject("risk 1,131.00 exceeds the per-trade cap 1,000.00")],
+    )
+    path = wired_session.audit._base / f"{stamp.date().isoformat()}.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(old.model_dump_json() + "\n", encoding="utf-8")
+
+    result = mcp_server.query_history(
+        "SELECT symbol, reason FROM rejections ORDER BY ts DESC"
+    )
+
+    assert result["ok"], result
+    assert result["rows"][0]["symbol"] == "AAPL"
+    assert "per-trade cap" in result["rows"][0]["reason"]
+
+
+def test_query_history_refuses_to_write(wired_session):
+    from datetime import UTC, datetime
+
+    from bot.models import Decision
+
+    wired_session.audit.record(Decision(timestamp=datetime.now(UTC)))
+    mcp_server.describe_history()
+
+    result = mcp_server.query_history("DELETE FROM cycles")
+    assert result["ok"] is False
+    assert "allowed" in result["error"]
+
+    # Still there.
+    after = mcp_server.query_history("SELECT COUNT(*) c FROM cycles")
+    assert after["rows"][0]["c"] == 1
+
+
+def test_query_history_hints_at_the_schema_when_it_fails(wired_session):
+    result = mcp_server.query_history("SELECT * FROM nonexistent")
+    assert result["ok"] is False
+    assert "describe_history" in result["hint"]
+
+
+def test_describe_history_reports_the_live_schema(wired_session):
+    from datetime import UTC, datetime
+
+    from bot.models import Decision, MarketInputs
+
+    wired_session.audit.record(
+        Decision(timestamp=datetime.now(UTC), inputs=MarketInputs(headlines=["a story"]))
+    )
+
+    described = mcp_server.describe_history()
+
+    assert "cycles" in described["tables"]
+    assert "waiting_for" in described["tables"]["assessments"]
+    assert described["row_counts"]["cycles"] == 1
+    assert described["freshly_indexed"]["decisions"] == 1
+
+
+def test_search_news_finds_an_item_outside_any_recent_window(wired_session):
+    """get_recent_news covers a window; this has to reach further back."""
+    from datetime import UTC, datetime, timedelta
+
+    from bot.models import Decision, MarketInputs
+
+    stamp = datetime.now(UTC) - timedelta(days=45)
+    decision = Decision(
+        timestamp=stamp,
+        inputs=MarketInputs(headlines=["[MSFT] Something notable happened (2026-06-25)"]),
+    )
+    path = wired_session.audit._base / f"{stamp.date().isoformat()}.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(decision.model_dump_json() + "\n", encoding="utf-8")
+
+    # The window tool cannot see it...
+    assert mcp_server.get_recent_news(hours=24)["headlines"] == []
+
+    # ...and the search tool can, with the age attached.
+    found = mcp_server.search_news(text="MSFT")
+    assert found["ok"] is True
+    assert found["item_count"] == 1
+    assert found["items"][0]["age_hours"] > 24 * 40
+    assert "not a live news search" in found["source"].lower()
+
+
+def test_search_news_filters_by_kind(wired_session):
+    from datetime import UTC, datetime
+
+    from bot.models import Decision, MarketInputs
+
+    wired_session.audit.record(
+        Decision(
+            timestamp=datetime.now(UTC),
+            inputs=MarketInputs(
+                headlines=["a headline"], social_posts=["[@someone 14:20] a post"]
+            ),
+        )
+    )
+
+    posts = mcp_server.search_news(kind="social")
+    assert [i["text"] for i in posts["items"]] == ["[@someone 14:20] a post"]
+
+
+def test_search_news_empty_result_does_not_claim_nothing_happened(wired_session):
+    result = mcp_server.search_news(text="NOTHINGMATCHESTHIS")
+    assert result["item_count"] == 0
+    assert "not that nothing was published" in result["source"]

@@ -278,6 +278,13 @@ def test_chat_page_says_what_its_news_actually_is():
     # rather than only in a docstring somebody would have to go looking for.
     assert "100 requests a day" in body
 
+    # And the searchable history, which is a different claim from the window:
+    # the page has to say the index is derived or somebody will treat a stale
+    # index as the record.
+    assert "whole history is searchable" in body
+    assert "read-only SQL" in body
+    assert "rebuilt from it" in body
+
 
 def test_settings_shows_the_limits_without_offering_to_change_them(client):
     """A settings screen that could widen a limit would be used to widen one

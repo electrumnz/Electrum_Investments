@@ -35,6 +35,16 @@ class AuditLog:
         self._base = base_dir
         self._base.mkdir(parents=True, exist_ok=True)
 
+    @property
+    def base_dir(self) -> Path:
+        """Where the dated files live.
+
+        Public because the query index in `insight.py` derives itself from
+        these files and must point at the same directory this instance writes
+        to — including when a test redirects it to a temp path.
+        """
+        return self._base
+
     def _today_path(self) -> Path:
         return self._base / f"{datetime.now(UTC).date().isoformat()}.jsonl"
 

@@ -573,6 +573,75 @@ surface genuinely needs live news, the prerequisite is a paid tier with its own
 quota, kept separate from the loop's — not a second consumer of the same 100
 requests.
 
+### The query index is derived, and that is what makes open SQL safe
+
+`news_history.py` answers "what has it seen lately" by scanning dated files.
+That is right for a window and wrong for a question: "what did we decide about
+AAPL in March", "which rejection reason fires most often", "how many watches
+named no trigger" all mean walking every file and parsing every line, which the
+chat surface cannot do in a turn.
+
+`src/bot/insight.py` builds a SQLite index so those are one query, and
+`query_history` hands the agent read-only SQL over it.
+
+**Nothing in the trading path reads it and nothing in it is authoritative.**
+The JSONL is the record; `insight.db` is a cache of it that can be deleted at
+any moment and rebuilt with `electrum-bot reindex`. Three things follow, and
+they are the design rather than side effects:
+
+- **The schema can change freely.** `SCHEMA_VERSION` is checked on open and a
+  mismatch drops every table and replays the log. This is how you get an
+  evolvable schema without ever migrating the append-only log — which must
+  never be migrated, because a reader that rejected yesterday's format would
+  throw away the history it exists to preserve.
+- **A bug in the index cannot cost a trade.** The risk gate, the loop and the
+  journal neither read nor write it.
+- **It must never be backed up.** `deploy/backup-journal.sh` covers the journal
+  and the audit log because those are irreplaceable. Restoring a stale derived
+  index over a current one makes queries quietly answer from last week, and the
+  script says so where somebody would add it.
+
+**Open SQL is safe here for reasons that would not hold one directory across.**
+The database is derived, rebuildable, holds no credentials and is read by
+nothing that trades, so the worst a bad query does is return a bad answer. The
+connection is opened `mode=ro`, which is the actual guarantee — SQLite refuses
+the write at the file layer. The statement guard on top of it is the second
+lock, and the token it exists for is `ATTACH`: read-only on *this* database
+says nothing about a second one a query brings along. A progress handler bounds
+runtime so a cartesian join returns an error rather than hanging a chat turn.
+
+**Indexing is incremental, and idempotent so the increment cannot corrupt it.**
+
+- **The offset is taken after the last COMPLETE line, never after the last
+  byte.** The log is appended to by a running process, so its final line can be
+  a partial write. Recording the file size would skip the rest of that line
+  forever once the append completed it, and the record would be silently short
+  a cycle with nothing to say so.
+- **Every row uses a natural primary key with `INSERT OR REPLACE`**, so
+  indexing the same line twice changes nothing. That makes the offset an
+  optimisation rather than a correctness requirement. Correctness that depends
+  on bookkeeping being right is correctness waiting to break.
+- **News is stored as raw per-cycle sightings, not as a deduped table with a
+  running count.** A count incremented during indexing would double on a
+  re-read; the `news` view's `GROUP BY` cannot.
+
+Measured on 14 days of 96-cycle days: cold build 169 ms, a no-op refresh 0.9
+ms, a delta 2.5 ms, queries 1–3 ms. That is why the tools refresh on every call
+instead of depending on a timer somebody has to remember to install.
+
+**`readings.summary` is the rendered line, and is deliberately not parsed back
+into numbers.** `MarketInputs` stores what the loop recorded — `"close 580.12,
+sma20 574.30, atr 6.41"` — so it is indexed as searchable text and no figure is
+extracted from it. Reversing prose into numbers would produce a value nobody
+can check, which is the failure `indicators.py` exists to prevent arriving from
+the other direction. If numeric history is wanted, the fix is to record numbers
+in `MarketInputs`, which only starts paying from the day it ships.
+
+**None of this goes into the prompt.** It is an operator surface, reached
+through the dashboard and through chat. Feeding a queryable track record back
+to the model is the thing `metrics.py` is already kept away from, and a
+counterfactual one — "the trigger fired and we did not act" — is noisier still.
+
 ### A bare `.gitignore` directory pattern matches at every depth
 
 `.gitignore` once carried a bare `data/`, meant for the SQLite journal at the
@@ -846,7 +915,8 @@ src/bot/
                         through it, on what volume, and was it reclaimed. The
                         distinction trend_break turns on.
   mcp_server.py         MCP tools: check_order, place_order, get_risk_status,
-                        get_recent_news, get_recent_decisions, ...
+                        get_recent_news, get_recent_decisions, query_history,
+                        describe_history, search_news, ...
   models.py             Domain models. Quantities are shares/coin units, never "lots".
   config.py             Typed env + rules loader. Validators reject incoherent limits.
   claude_client.py      Anthropic SDK wrapper (1h prompt cache, structured output).
@@ -863,6 +933,11 @@ src/bot/
                         and deduped across cycles. Reads rather than fetches,
                         because the Marketaux quota belongs to the loop. Pure
                         functions; no network.
+  insight.py            Derived SQLite index over audit/*.jsonl, so the whole
+                        history is queryable rather than only a recent window.
+                        Rebuildable, never authoritative, never backed up, and
+                        read by nothing that trades — which is what makes
+                        handing an agent read-only SQL over it reasonable.
   metrics.py            Win rate, profit factor, expectancy, R, MAE/MFE. Pure functions.
   tailnet.py            Is the Tailscale link still going to be there next week.
                         Warns at ten days, and says "unknown" rather than "fine"
@@ -908,11 +983,12 @@ reference/              Third-party projects we borrow from. See reference/STATU
 ## Running it
 
 ```sh
-.venv/bin/python -m pytest              # full suite (501 tests)
+.venv/bin/python -m pytest              # full suite (540 tests)
 electrum-bot smoketest --mock           # no credentials needed
 electrum-bot smoketest                  # needs Alpaca paper keys
 electrum-bot loop                       # proposes and vets; places nothing
 electrum-bot loop --execute             # places approved orders on PAPER
+electrum-bot reindex                    # rebuild the searchable history from audit/
 electrum-bot-mcp                        # MCP server, usually launched by Claude Code
 electrum-bot-web                        # command centre on http://127.0.0.1:8787
 ```

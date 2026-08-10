@@ -519,13 +519,55 @@ def cmd_loop(
         broker.disconnect()
 
 
+def cmd_reindex() -> int:
+    """Rebuild the searchable history from the audit log.
+
+    The query tools index incrementally on every call, so this is not needed
+    for freshness. It exists for the case where the index is suspect — after a
+    schema change, or a half-written database — and the answer is always the
+    same: throw it away and replay the log, which is still the source of truth.
+    """
+    from .insight import DEFAULT_DB_PATH, InsightIndex
+
+    index = InsightIndex(DEFAULT_DB_PATH)
+    report = index.rebuild()
+    described = index.describe()
+
+    log.info(
+        "reindex_complete",
+        decisions=report.decisions_indexed,
+        events=report.events_indexed,
+        files=report.files_scanned,
+        malformed_lines=report.malformed,
+        unreadable_files=report.unreadable,
+        covers=described["covers_days"],
+    )
+    print(
+        f"Indexed {report.decisions_indexed} decisions and "
+        f"{report.events_indexed} events from {report.files_scanned} file(s)."
+    )
+    span = described["covers_days"]
+    if span["first"]:
+        print(f"Covers {span['first']} to {span['last']}.")
+    if report.malformed:
+        # Named rather than swallowed: an index quietly missing lines is worse
+        # than one that says how many it could not read.
+        print(f"{report.malformed} line(s) could not be parsed and were skipped.")
+    for problem in report.unreadable:
+        print(f"unreadable: {problem}")
+    return 0
+
+
 def main() -> int:
     structlog.configure(processors=[structlog.processors.JSONRenderer()])
     parser = argparse.ArgumentParser(prog="electrum-bot")
     parser.add_argument(
         "command",
-        choices=["smoketest", "loop"],
-        help="smoketest: one-shot connectivity check. loop: run the decision loop.",
+        choices=["smoketest", "loop", "reindex"],
+        help=(
+            "smoketest: one-shot connectivity check. loop: run the decision "
+            "loop. reindex: rebuild the searchable history from audit/."
+        ),
     )
     parser.add_argument(
         "--rules",
@@ -543,6 +585,12 @@ def main() -> int:
         help="Force the in-memory MockBroker, ignoring any Alpaca credentials.",
     )
     args = parser.parse_args()
+
+    # Before the credential check, deliberately. Rebuilding an index over files
+    # already on disk needs no broker and no keys, and refusing to run it
+    # because Alpaca is unconfigured would be a check protecting nothing.
+    if args.command == "reindex":
+        return cmd_reindex()
 
     env = Env()
     try:

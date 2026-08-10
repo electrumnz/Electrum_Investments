@@ -1417,6 +1417,8 @@ def chat_page(*, enabled: bool, token: str, hermes_available: bool) -> str:
         "What is my open risk right now, and how close is it to the cap?",
         "Why was the last proposal rejected?",
         "What news has the bot seen today, and how old is it?",
+        "Which rejection reason has fired most often, and on what?",
+        "How many times have we watched a symbol without naming a trigger?",
         "Summarise this week's trades and what closed them.",
         "Is anything expiring soon that needs action?",
     ]
@@ -1447,6 +1449,13 @@ behind me runs the risk gate first.</div></div>
   earnings windows &mdash; with the age of each attached. Asking does not fetch
   anything: the Marketaux free tier is 100 requests a day against a loop that
   wakes 96 times, so that quota belongs to the loop.</p>
+  <p class="note"><b>The whole history is searchable, not just recent days.</b>
+  Every cycle, assessment, rejection reason and headline is indexed into
+  <code>data/insight.db</code>, and Hermes queries it with read-only SQL. So
+  &ldquo;what did we decide about AAPL in March&rdquo; and &ldquo;which rule
+  refuses proposals most often&rdquo; are answerable. The index is derived from
+  <code>audit/</code> and rebuilt from it, so the log stays the record and the
+  index is only ever a faster way to read it.</p>
 </div>
 <script>
 (function () {{
