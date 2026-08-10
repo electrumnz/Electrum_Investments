@@ -1485,3 +1485,104 @@ def test_get_position_actions_says_the_loop_is_not_armed(wired_session):
 
     assert readback["loop_may_act_unattended"] is False
     assert "acts on none of them" in readback["loop_execution_note"]
+
+
+def _brief(dream: Dream) -> dict[str, Any]:
+    from bot.dreaming import VaultTTLs
+
+    return mcp_server._dream_brief(dream, INSIDE_SESSION, VaultTTLs())
+
+
+def test_a_chain_with_every_hop_checked_is_not_awaiting_anything() -> None:
+    """No weak link is a good state, not a missing one.
+
+    `awaits_settlement` False here means there is nothing left unverified. A
+    reader must not see that and conclude the weakest hop went unrecorded.
+    """
+    from bot.dreaming import Hop
+
+    dream = Dream(
+        title="Every link sourced",
+        seed="s",
+        chain=(Hop(claim="a", checked=True), Hop(claim="b", checked=True)),
+    )
+
+    brief = _brief(dream)
+
+    assert brief["awaits_settlement"] is False
+    assert brief["weakest_hop_pinned"] is False
+
+
+def test_an_unresolvable_weakest_hop_is_not_reported_as_no_weak_link() -> None:
+    """The missing-versus-absent rule, at the dream layer.
+
+    A model that answers 9 on a two-hop chain has named no hop, and that is
+    deliberately not clamped upstream. Here it must read as *which link is
+    weakest was never established* — a chain still carrying an assumption —
+    rather than as a chain with nothing left to settle. Those are opposite
+    findings and the difference is the whole reason both fields are reported.
+    """
+    from bot.dreaming import Hop
+
+    dream = Dream(
+        title="Named a hop that is not there",
+        seed="s",
+        chain=(Hop(claim="a", checked=True), Hop(claim="b", checked=False)),
+        weakest_hop_index=9,
+    )
+
+    brief = _brief(dream)
+
+    assert brief["awaits_settlement"] is True
+    assert brief["weakest_hop_resolved"] is False
+    assert brief["weakest_hop_index"] == 9
+
+
+def test_a_condition_on_the_wrong_hop_does_not_read_as_pinned() -> None:
+    """What actually decides whether a kept dream can leave the workbench.
+
+    A condition settling a link nobody doubted grades perfectly well and
+    settles nothing. Without this field a reader sees a checkable condition and
+    a kept verdict and cannot tell a dream one grading from the vault from one
+    that will never promote.
+    """
+    from bot.dreaming import DreamCondition, Hop
+
+    chain = (Hop(claim="a", checked=True), Hop(claim="b", checked=False))
+    on_the_settled_link = Dream(
+        title="Pinned to the wrong hop",
+        seed="s",
+        chain=chain,
+        weakest_hop_index=2,
+        conditions=(
+            DreamCondition(
+                text="SPY closes above 600",
+                symbol="SPY",
+                field="close",
+                op=">",
+                value=600.0,
+                settles_hops=(1,),
+            ),
+        ),
+    )
+
+    assert _brief(on_the_settled_link)["weakest_hop_pinned"] is False
+
+    on_the_weak_link = Dream(
+        title="Pinned to the weak hop",
+        seed="s",
+        chain=chain,
+        weakest_hop_index=2,
+        conditions=(
+            DreamCondition(
+                text="SPY closes above 600",
+                symbol="SPY",
+                field="close",
+                op=">",
+                value=600.0,
+                settles_hops=(2,),
+            ),
+        ),
+    )
+
+    assert _brief(on_the_weak_link)["weakest_hop_pinned"] is True

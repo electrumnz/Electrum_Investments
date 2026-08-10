@@ -1684,6 +1684,29 @@ def _dream_brief(dream: Dream, now: datetime, ttls: VaultTTLs) -> dict[str, Any]
         # own opinion of its sourcing.
         "verification": str(dream.verification),
         "weakest_hop": dream.weakest_hop,
+        # Three separate questions about the same link, and collapsing any two
+        # of them produces a plausible wrong answer.
+        #
+        # `awaits_settlement` is False when every hop is checked — there is no
+        # link waiting on anything, which is a good state and not a gap.
+        # `weakest_hop_resolved` False WHILE awaiting settlement is the
+        # different case: the model named a hop number out of range, or prose
+        # matching no claim, so which link is weakest was never established.
+        # That is deliberately not clamped upstream, so it must not be reported
+        # as "no weak link" here either — same missing-versus-absent rule as
+        # `calendar_degraded` and `stops_unchecked`.
+        #
+        # `weakest_hop_pinned` is what actually decides whether a kept dream
+        # can leave the workbench: a condition has to claim to settle that hop.
+        # A reader given only `all_conditions_met` cannot tell a dream that is
+        # one grading away from the vault from one that will never promote.
+        "weakest_hop_index": dream.weakest_hop_index,
+        "weakest_hop_resolved": dream.resolved_weakest_hop is not None,
+        "awaits_settlement": dream.awaits_settlement,
+        "weakest_hop_pinned": any(
+            condition.settles(dream.resolved_weakest_hop)
+            for condition in dream.conditions
+        ),
         "hops": len(dream.chain),
         "unchecked_hops": len(dream.unverified_hops),
         "symbols": list(dream.symbols),
