@@ -1901,6 +1901,31 @@ most), `TEXT_MAX_CHARS` per message, and three counts over a dream's life:
 `MAX_EXCHANGES_PER_EPOCH` (3), `MAX_EXCHANGES_LIFETIME` (12), and the change
 gate below.
 
+**Every conference ends in one recorded verdict, and one of the five is not a
+decision.** The outcome used to be spread across `ConferOutcome` values and side
+effects on the dream, so "what did they decide" had to be reconstructed.
+`ConferenceVerdict` carries the decision, the reason in the deciding agent's own
+words, and the moment.
+
+- **`NO_DECISION` must never collapse into `DEFER`.** A turn cap, a spent epoch
+  or a failed model call did not decide to wait — nobody decided anything.
+  Reporting that as the mildest real decision is how a silent failure starts
+  looking healthy, and it is the same rule as `has_cycles`,
+  `can_grade_anything` and first-visit being kept apart from empty.
+- **`ARCHIVE` belongs to the dreamer, about its own dream.** The trading agent
+  cannot reach it. The operator's rule is that it cannot delete — only action,
+  or send back with reasons — and an adopted dream carries a live symbol grant,
+  so a power it gained by *talking* would be that rule undone through a
+  conversation.
+- **A `DEFER` with no wake condition is refused**, and recorded as
+  `NO_DECISION` with the cause named. It needs a `DreamCondition` with a symbol,
+  a field, an operator and a **number** — the existing rule that a threshold is
+  never the name of another figure. A deferral naming nothing is "we ran out of
+  things to say" wearing a decision's clothes.
+- **The verdict is what the AGENT decided, never inferred from side effects.**
+  Reading it back off "did an adoption row appear" would be a second source of
+  truth that can disagree with the first.
+
 **The change gate is the one that actually stops them talking forever:** a
 dream may only be conferred again if **something changed** since the last
 exchange — a condition fulfilled, a hop added or checked, an operator note, a
