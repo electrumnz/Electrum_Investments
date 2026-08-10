@@ -850,6 +850,57 @@ class Rules(BaseModel):
                 return instrument
         return None
 
+    def true_class_key(self, symbol: str) -> str:
+        """Which instrument class a symbol REALLY belongs to. `""` when unknowable.
+
+        **The question `for_symbol` cannot answer, and the difference is a
+        permission.** `for_symbol` scans ENABLED classes only, so a symbol listed
+        under a class the operator has switched off is invisible to it — which
+        made "is this symbol from a blocked class?" unanswerable at exactly the
+        moment an adopted dream claimed one under a different class's key. This
+        scans every block, enabled or not, and falls back to the symbol's shape.
+
+        Two sources, and they must AGREE:
+
+        - **What the file lists.** A symbol in an `allowed_symbols` list belongs
+          to that block, whether or not it is enabled.
+        - **What the broker routes on.** `models.class_key_for_symbol` is the
+          same rule `AlpacaBroker.place_order` branches on, so a `BTC/USD` order
+          goes out unbracketed with no broker-side stop no matter which class a
+          grant claimed for it.
+
+        **Where they cannot both answer, the answer is `""`.** Two blocks
+        listing one symbol, or a listing that disagrees with the routing rule,
+        leaves the class genuinely undetermined — and a symbol whose class is
+        unknown is a symbol whose limits are unknown. Callers read `""` as "drop
+        this", never as a default, which is the same rule as an absent
+        indicator being `None` rather than zero.
+
+        Consequence worth knowing rather than guarding against: a hypothetical
+        `futures:` block listing `ES` would resolve to `""`, because the shape
+        rule reads a bare ticker as an equity and nothing on Globex is reachable
+        through Alpaca anyway. That is the seam the session-shape template in
+        `config/rules.yaml` is already waiting on; when a second broker arrives,
+        the routing rule is what has to learn about it, not this method.
+
+        Pure, and cheap enough to call per symbol per gate: it walks a handful
+        of lists held in memory.
+        """
+        from .models import class_key_for_symbol
+
+        clean = symbol.strip().upper()
+        shape = class_key_for_symbol(clean)
+        listed = sorted(
+            name
+            for name, instrument in self.instruments.items()
+            if clean in instrument.allowed_symbols
+        )
+        if len(listed) > 1:
+            return ""
+        if listed:
+            return listed[0] if listed[0] == shape else ""
+        return shape
+
     def classes_in_session(self, moment: datetime) -> list[str]:
         """Enabled classes whose window is open right now.
 

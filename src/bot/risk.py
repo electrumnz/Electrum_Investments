@@ -151,7 +151,7 @@ class RiskGate:
         # and handed to the three gates that measure what the class is already
         # carrying, so a granted symbol cannot be invisible to the caps it is
         # supposed to be subject to.
-        class_symbols = self._class_symbols(resolved, grants)
+        class_symbols = self._class_symbols(resolved, grants, account)
 
         checks: list[str | None] = [
             self._kill_switch(),
@@ -207,6 +207,15 @@ class RiskGate:
           the same arrangement as `mode=ro` plus the statement guard in
           `insight.py`. A gate that trusted its input to have been filtered
           would be a gate whose safety lived in another file.
+        - **A grant whose class disagrees with the SYMBOL resolves to nothing
+          too**, and this is the half that was missing. Asking only whether the
+          claimed key names an enabled class let `BTC/USD` through under
+          `us_equity`: the equity book's limits applied, and the order still
+          reached Alpaca as a crypto order — unbracketed, so with no
+          broker-side stop. `Rules.true_class_key` derives the real class from
+          every instrument block and from the same routing rule the broker uses,
+          and answers `""` when the two cannot agree, which drops it. Pure
+          arithmetic over `rules`, so the gate stays deterministic.
         """
         listed = self._rules.for_symbol(symbol)
         if listed is not None:
@@ -216,16 +225,22 @@ class RiskGate:
         if class_key is None:
             return ResolvedClass(None, None, None)
 
+        true_key = self._rules.true_class_key(symbol)
+        if not true_key or true_key != class_key:
+            return ResolvedClass(None, None, None)
+
         instrument = self._rules.enabled_instruments.get(class_key)
         if instrument is None:
             return ResolvedClass(None, None, None)
         return ResolvedClass(instrument, class_key, class_key)
 
-    @staticmethod
     def _class_symbols(
-        resolved: ResolvedClass, grants: Mapping[str, str]
+        self,
+        resolved: ResolvedClass,
+        grants: Mapping[str, str],
+        account: AccountSnapshot,
     ) -> set[str]:
-        """Every symbol that counts as this class: listed plus currently granted.
+        """Every symbol that counts as this class: listed, granted, or HELD.
 
         **This is what stops a grant bypassing the caps that are not about the
         symbol.** `_concurrent_positions`, `_class_total_risk` and
@@ -240,18 +255,41 @@ class RiskGate:
         have bought entry to the allowlist AND a quiet exemption from three
         limits. Adoption buys the first and must not buy the second.
 
-        The membership is computed from the grants in force NOW, which has a
-        consequence worth stating rather than discovering: a position still held
-        under a grant that has since expired drops back out of the class's
-        counts. That is not new — before grants existed it was never in them —
-        and it is the same shape as the `dream-expired-holding` case, where the
-        permission to open ends while the position stands.
+        **An OPEN POSITION counts whether or not a grant is still in force, and
+        that correction is the important one.** Membership used to be computed
+        from the grants live at this instant, and the docstring called the
+        consequence — a lapsed grant's position dropping out of the counts —
+        "not new, it was never in them". That was wrong: before adoption existed
+        a position in an unlisted symbol could not exist at all. Worse, the
+        trading agent picks the moment: `return_to_vault` is one of its two
+        powers, so handing a dream back with the position still open moved
+        $1,200 of live class risk out of a $1,500 class cap and flipped a
+        rejection into an approval, with nothing closed and nothing changed
+        about what was at stake.
+
+        So a held symbol is matched by `Rules.true_class_key`, which is the same
+        derivation the grant fence and the broker's routing use — the class the
+        position was necessarily opened under, since a grant disagreeing with it
+        can no longer be issued. It is read off the account snapshot rather than
+        off the journal's `Trade.asset_class`, which is copied from the model's
+        own proposal and would let a mislabelled proposal choose which caps it
+        faced.
+
+        Pure: `true_class_key` walks lists held in memory, so the gate stays
+        deterministic.
         """
         if resolved.instrument is None:
             return set()
         symbols = set(resolved.instrument.allowed_symbols)
         if resolved.class_key is not None:
-            symbols |= {s for s, key in grants.items() if key == resolved.class_key}
+            key = resolved.class_key
+            symbols |= {s for s, grant in grants.items() if grant == key}
+            symbols |= {
+                p.symbol
+                for p in account.open_positions
+                if p.symbol not in symbols
+                and self._rules.true_class_key(p.symbol) == key
+            }
         return symbols
 
     def trip_kill_switch(self) -> None:
@@ -308,10 +346,12 @@ class RiskGate:
         """The allowlist, plus whatever an adopted dream currently widens it by.
 
         A grant only passes here once it has RESOLVED — that is, once its class
-        key names an enabled instrument block. A grant naming a disabled class
-        is refused with its own sentence, because "not in the allowed list" on a
-        symbol a dream visibly granted would send an operator looking for the
-        wrong problem.
+        key names an enabled instrument block AND agrees with the class the
+        symbol actually belongs to. Each way of failing that gets its own
+        sentence, because "not in the allowed list" on a symbol a dream visibly
+        granted would send an operator looking for the wrong problem, and
+        "that class is switched off" on a grant that named an ENABLED class
+        would send them to the wrong line of `config/rules.yaml`.
         """
         if self._rules.is_symbol_allowed(proposal.symbol):
             return None
@@ -319,14 +359,32 @@ class RiskGate:
             return None
 
         claimed = grants.get(proposal.symbol)
-        if claimed is not None:
+        if claimed is None:
+            return f"symbol {proposal.symbol} is not in the allowed list"
+
+        true_key = self._rules.true_class_key(proposal.symbol)
+        if not true_key:
             return (
                 f"symbol {proposal.symbol} is not in the allowed list: an "
-                f"adopted dream grants it under '{claimed}', which is not an "
-                f"enabled instrument class. A dream may widen the symbols "
-                f"inside an enabled class and can never enable a class."
+                f"adopted dream grants it under '{claimed}', and which "
+                f"instrument class it really belongs to cannot be established. "
+                f"A symbol whose class is unknown is a symbol whose limits are "
+                f"unknown."
             )
-        return f"symbol {proposal.symbol} is not in the allowed list"
+        if true_key != claimed:
+            return (
+                f"symbol {proposal.symbol} is not in the allowed list: an "
+                f"adopted dream grants it under '{claimed}', but it belongs to "
+                f"'{true_key}'. The broker routes on the symbol rather than on "
+                f"the claim, so this would apply one class's limits to an order "
+                f"placed as another's."
+            )
+        return (
+            f"symbol {proposal.symbol} is not in the allowed list: an "
+            f"adopted dream grants it under '{claimed}', which is not an "
+            f"enabled instrument class. A dream may widen the symbols "
+            f"inside an enabled class and can never enable a class."
+        )
 
     def _within_session(self, instrument: InstrumentRules | None) -> str | None:
         """Session window comes from the instrument class, not a global setting.

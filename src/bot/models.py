@@ -62,6 +62,65 @@ class AssetClass(StrEnum):
     OPTION = "us_option"
 
 
+# Alpaca writes a crypto pair with a slash — `BTC/USD` — and writes nothing else
+# that way.
+_CRYPTO_PAIR_MARK = "/"
+
+
+def is_crypto_symbol(symbol: str) -> bool:
+    """Alpaca writes crypto pairs with a slash (BTC/USD); equities never have one.
+
+    **This is the ROUTER's rule and the FENCE's rule, and they have to be the
+    same one.** `AlpacaBroker.place_order` branches on it to decide whether an
+    order goes out as an unbracketed crypto order — no broker-side stop, because
+    Alpaca accepts no bracket on crypto — and `grants.py` and `RiskGate` branch
+    on it to decide which class's limits a symbol faces. An adversarial audit
+    found the two disagreeing: an adopted dream claiming `BTC/USD` under
+    `us_equity` was permitted under the equity book's limits and then routed to
+    Alpaca as a crypto order, so the operator's third rule was gone. One
+    definition, re-exported by `broker.is_crypto_symbol`, is what stops that
+    happening again.
+    """
+    return _CRYPTO_PAIR_MARK in symbol
+
+
+def class_key_for_symbol(symbol: str) -> str:
+    """Which `instruments:` key a symbol would belong to, from its shape alone.
+
+    Three answers, and they are the three asset classes Alpaca actually offers:
+    a slash is a crypto pair, an OCC contract is an option, and everything else
+    is an equity — which is what a bare ticker IS at Alpaca, ETFs included.
+    Empty for a symbol that is not a symbol, which callers read as "cannot be
+    established" and never as a default.
+
+    `parse_occ_symbol` is reused rather than a second regex written here, so
+    there is one definition of an OCC symbol in the repository. The import is
+    local because `options` imports nothing from this module and this module is
+    imported by everything: keeping it inside the function keeps that true
+    whichever way a future edit runs.
+
+    **It answers a shape, not an existence.** `ZZZZ` comes back `us_equity`
+    because that is what a four-letter ticker is, and whether Alpaca lists it is
+    a question for the broker at order time. Guessing wrong in that direction
+    costs nothing: the symbol still faces every gate under that class's limits.
+
+    **A second broker would need this revisited.** `ES` is a Globex future and
+    reads as an equity here. Harmless while Alpaca is the only adapter — nothing
+    on Globex is reachable — and it is the same seam the session-shape template
+    in `config/rules.yaml` is waiting on.
+    """
+    from .options import parse_occ_symbol
+
+    clean = symbol.strip().upper()
+    if not clean:
+        return ""
+    if is_crypto_symbol(clean):
+        return str(AssetClass.CRYPTO)
+    if parse_occ_symbol(clean) is not None:
+        return str(AssetClass.OPTION)
+    return str(AssetClass.EQUITY)
+
+
 class ExecutionMode(StrEnum):
     """Where an order actually goes.
 

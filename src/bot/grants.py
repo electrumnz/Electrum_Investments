@@ -12,7 +12,7 @@ resolved out here, where a failure costs a permission rather than a rule, and
 handed in as a plain mapping in the same shape as `news_windows`. Nothing in
 `risk.py` imports this module and nothing in this module imports `risk`.
 
-## The operator's rule, and the four ways this enforces it
+## The operator's rule, and the five ways this enforces it
 
 *The dreamer may look outside `allowed_symbols` to other Alpaca instruments, as
 long as it does not go around the hard blocks on GROUPS of instruments.*
@@ -22,6 +22,20 @@ long as it does not go around the hard blocks on GROUPS of instruments.*
   — class is DROPPED. Crypto off means an adopted dream naming BTC/USD grants
   nothing, whatever the dream says. That is what makes "off" mean off rather
   than "off unless a dream says otherwise".
+- **And the block is checked against the SYMBOL, not against the key the
+  adoption claims.** This is the half that was missing, and an adversarial audit
+  walked straight through it: the code asked only "is the class this row names
+  an enabled one?", so an adoption saying `BTC/USD` under `us_equity` was a live
+  permission to trade crypto under the equity book's limits — 0.5% risk cap, 15%
+  concentration and one-position rules all bypassed — and because
+  `AlpacaBroker.place_order` routes on `"/" in symbol`, the order that reached
+  Alpaca *was* a crypto order: unbracketed, so **no broker-side stop**, which is
+  the operator's third rule gone. `Rules.true_class_key` now derives the real
+  class from every instrument block's `allowed_symbols`, enabled or not, and
+  from `models.is_crypto_symbol` — the same rule the broker routes on. A claim
+  that disagrees with it is dropped, and so is a symbol the two cannot agree on.
+  The fence and the router are one definition now, because two of them is
+  exactly how they came to disagree.
 - **A symbol already in `rules.allowed_symbols` is not a grant.** It is already
   permitted, and reporting it as granted would make the audit trail claim a
   dream was load-bearing on a trade that would have happened anyway.
@@ -52,11 +66,23 @@ So `resolve_grant_dream_ids` answers it, off the same store and with the same
 failure direction. It is deliberately not folded into the first function: the
 gate must not be handed a dream id it has no use for, and a caller that only
 wants to know what may be traded should not pay for a second query.
+
+## An empty mapping has five causes, and the caller is told which
+
+Failing closed is right and it costs the caller information: the feature
+switched off, nothing adopted, a broken store, an unreadable row and a set over
+the cap all produce `{}`. On a `cycle_complete` line they are one blank list.
+That is the `calendar_degraded` and `stops_unchecked` lesson — a zero has to be
+a stated fact rather than the absence of a warning — so `resolve_grants` returns
+a `GrantResolution` naming its state, and the loop puts `grants_degraded` on the
+heartbeat beside the other two. `resolve_granted_symbols` is the mapping-only
+wrapper, for callers with nowhere to report a degradation.
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Protocol
 
@@ -66,6 +92,43 @@ from .config import Rules
 from .dreaming import Adoption
 
 log = structlog.get_logger(__name__)
+
+
+# What the resolver could not do, in one word each. `granted` and `none_live`
+# are ordinary answers; the other three mean the mapping is not a complete
+# description of what is adopted.
+GRANTED = "granted"
+NONE_LIVE = "none_live"
+SWITCHED_OFF = "switched_off"
+UNAVAILABLE = "unavailable"
+OVER_CAP = "over_cap"
+
+_DEGRADED_STATES = frozenset({UNAVAILABLE, OVER_CAP})
+
+
+@dataclass(frozen=True)
+class GrantResolution:
+    """What may be traded beyond `allowed_symbols`, and how much to trust it.
+
+    `symbols` is the whole permission and is safe to use on its own — every
+    failure path leaves it empty. `state` exists because empty has five causes
+    and only two of them are ordinary, and a reader handed a blank list reaches
+    for the wrong one every time.
+    """
+
+    symbols: dict[str, str] = field(default_factory=dict)
+    state: str = NONE_LIVE
+
+    @property
+    def degraded(self) -> bool:
+        """True when `symbols` is not a complete description of what is adopted.
+
+        Deliberately False for `switched_off`: a feature nobody turned on is a
+        stated configuration rather than a failure, and flagging it would make
+        every deployment that does not use dreams look broken. It is still named
+        in `state`, so the two are distinguishable on the heartbeat.
+        """
+        return self.state in _DEGRADED_STATES
 
 
 class GrantSource(Protocol):
@@ -87,25 +150,25 @@ class AdoptionSource(Protocol):
     def adoptions(self, dream_id: int | None = None) -> list[Adoption]: ...
 
 
-def resolve_granted_symbols(
+def resolve_grants(
     store: GrantSource, rules: Rules, *, now: datetime
-) -> dict[str, str]:
-    """Symbols an adopted dream permits right now, mapped to their class key.
+) -> GrantResolution:
+    """Symbols an adopted dream permits right now, and how much to trust the set.
 
-    The value is the `instruments:` key from `config/rules.yaml` — "us_equity",
-    "crypto" — and it is the load-bearing half of the pair. `Rules.for_symbol`
-    cannot find a granted symbol, because it is in no `allowed_symbols` list, so
-    without the class the gate would have no limits to apply. A symbol whose
-    class is unknown is a symbol whose risk cap is unknown, and it is dropped
-    rather than defaulted.
+    The value in the mapping is the `instruments:` key from `config/rules.yaml`
+    — "us_equity", "crypto" — and it is the load-bearing half of the pair.
+    `Rules.for_symbol` cannot find a granted symbol, because it is in no
+    `allowed_symbols` list, so without the class the gate would have no limits
+    to apply. A symbol whose class is unknown is a symbol whose risk cap is
+    unknown, and it is dropped rather than defaulted.
 
     Empty is the honest answer to every failure and to every switched-off
-    deployment, and it is indistinguishable from "nothing is adopted". That is
-    fine here and only here: an empty grant set changes nothing about what may
-    be traded, so there is no confident wrong figure to be had from it.
+    deployment. What `state` adds is which of the five it was, because an empty
+    permission set that means "the store would not open" and one that means
+    "nothing is adopted" are opposite findings and read identically.
     """
     if not rules.dreaming.allow_symbol_grants:
-        return {}
+        return GrantResolution(state=SWITCHED_OFF)
     try:
         return _resolve(store, rules, now)
     except Exception as exc:
@@ -121,10 +184,23 @@ def resolve_granted_symbols(
                 "config/rules.yaml alone."
             ),
         )
-        return {}
+        return GrantResolution(state=UNAVAILABLE)
 
 
-def _resolve(store: GrantSource, rules: Rules, now: datetime) -> dict[str, str]:
+def resolve_granted_symbols(
+    store: GrantSource, rules: Rules, *, now: datetime
+) -> dict[str, str]:
+    """The mapping alone, for a caller with nowhere to report a degradation.
+
+    Every read-only surface — the MCP tools, the vault readout — wants the
+    permission and has no heartbeat to put a flag on. The decision loop calls
+    `resolve_grants` instead, because that is the one caller whose empty list
+    somebody reads later to work out what the bot could see.
+    """
+    return resolve_grants(store, rules, now=now).symbols
+
+
+def _resolve(store: GrantSource, rules: Rules, now: datetime) -> GrantResolution:
     live = store.granted_symbols(now)
     enabled = rules.enabled_instruments
     listed = set(rules.allowed_symbols)
@@ -134,6 +210,29 @@ def _resolve(store: GrantSource, rules: Rules, now: datetime) -> dict[str, str]:
     # two cycles comparable by eye.
     for symbol, raw_class in sorted(live.items()):
         class_key = str(raw_class)
+        true_key = rules.true_class_key(str(symbol))
+        if not true_key or true_key != class_key:
+            # **The class hard block, checked against the symbol.** The row's
+            # own key is a claim; this is what the symbol actually is, derived
+            # from every instrument block's `allowed_symbols` — enabled or not —
+            # and from the rule `AlpacaBroker.place_order` routes on. A grant for
+            # `BTC/USD` under `us_equity` dies here, and so does one whose class
+            # cannot be established at all, because a symbol whose class is
+            # unknown is a symbol whose limits are unknown.
+            log.warning(
+                "grant_dropped_class_mismatch",
+                symbol=symbol,
+                claimed_class=class_key,
+                true_class=true_key or "unknown",
+                detail=(
+                    "An adopted dream grants this symbol under a class it does "
+                    "not belong to. The broker routes on the symbol, not on the "
+                    "claim, so honouring this would apply one class's limits to "
+                    "an order placed as another's — and a crypto order carries "
+                    "no broker-side stop at all."
+                ),
+            )
+            continue
         if class_key not in enabled:
             # The hard block. Not a warning about a typo — it is the rule doing
             # its job, and it is logged so an operator can see a dream asking
@@ -176,8 +275,10 @@ def _resolve(store: GrantSource, rules: Rules, now: datetime) -> dict[str, str]:
                 "or expire some adoptions, or raise the cap deliberately."
             ),
         )
-        return {}
-    return granted
+        return GrantResolution(state=OVER_CAP)
+    return GrantResolution(
+        symbols=granted, state=GRANTED if granted else NONE_LIVE
+    )
 
 
 def resolve_grant_dream_ids(
@@ -200,8 +301,28 @@ def resolve_grant_dream_ids(
     """
     if not granted:
         return {}
+    # **The whole read is inside the guard, not just the query.** It used to
+    # wrap `store.adoptions()` alone, so the `is_live` loop below ran outside
+    # it — and `is_live` compares datetimes, which raises `TypeError` on a naive
+    # `now`. That is the exact shape `claude.propose` was wrapped for: an
+    # exception out of a helper, into the decision cycle, killing the loop that
+    # reconciles the journal and watches open stops. A guard that covers the
+    # network call and not the arithmetic after it guards the half that was
+    # already being careful.
     try:
-        rows = store.adoptions()
+        ids: dict[str, int] = {}
+        ambiguous: set[str] = set()
+        for adoption in store.adoptions():
+            if not adoption.is_live(now):
+                continue
+            for symbol in adoption.symbols_granted:
+                if symbol not in granted:
+                    continue
+                held = ids.get(symbol)
+                if held is not None and held != adoption.dream_id:
+                    ambiguous.add(symbol)
+                    continue
+                ids[symbol] = adoption.dream_id
     except Exception as exc:
         log.warning(
             "grant_provenance_unavailable",
@@ -209,20 +330,6 @@ def resolve_grant_dream_ids(
             detail="Trades opened under a grant this cycle will carry no dream id.",
         )
         return {}
-
-    ids: dict[str, int] = {}
-    ambiguous: set[str] = set()
-    for adoption in rows:
-        if not adoption.is_live(now):
-            continue
-        for symbol in adoption.symbols_granted:
-            if symbol not in granted:
-                continue
-            held = ids.get(symbol)
-            if held is not None and held != adoption.dream_id:
-                ambiguous.add(symbol)
-                continue
-            ids[symbol] = adoption.dream_id
 
     for symbol in sorted(ambiguous):
         log.warning(

@@ -73,8 +73,7 @@ from .claude_client import CallUsage, ClaudeClient
 from .config import CLAUDE_PRICING_USD_PER_MTOK, ClaudeTier, Env, Rules
 from .dreaming import Dream, DreamStage, DreamStore, DreamVerdict, Hop
 from .journal import Journal
-from .models import AssetClass
-from .options import parse_occ_symbol
+from .models import class_key_for_symbol as _class_key_for_symbol
 from .souls import GROGU, load_soul
 
 log = structlog.get_logger(__name__)
@@ -94,44 +93,14 @@ RECENT_CLOSURES = 8
 SCOPE = "scope"
 
 
-# Alpaca writes a crypto pair with a slash — `BTC/USD` — and writes nothing else
-# that way. That is the whole classifier for crypto, and it is a shape test
-# rather than a lookup on purpose: the point of this feature is that the dreamer
-# may name symbols nobody has listed anywhere, so a table of known symbols would
-# refuse exactly the case it exists to permit.
-_CRYPTO_PAIR_MARK = "/"
-
-
-def class_key_for_symbol(symbol: str) -> str:
-    """Which `instruments:` key a symbol would belong to, from its shape alone.
-
-    Three answers, and they are the three asset classes Alpaca actually offers:
-    a slash is a crypto pair, an OCC contract is an option, and everything else
-    is an equity — which is what a bare ticker IS at Alpaca, ETFs included.
-
-    `parse_occ_symbol` is reused rather than a second regex written here, so
-    there is one definition of an OCC symbol in the repository.
-
-    **It answers a shape, not an existence.** `ZZZZ` comes back `us_equity`
-    because that is what a four-letter ticker is, and whether Alpaca lists it is
-    a question for the broker at order time, not for a dreamer's subject line.
-    Guessing the class wrong in that direction costs nothing: the symbol still
-    faces every gate, under that class's own limits, and `RiskGate` still refuses
-    anything it cannot price.
-
-    **A second broker would need this revisited.** `ES` is a Globex future and
-    reads as an equity here. That is harmless while Alpaca is the only adapter —
-    nothing on Globex is reachable — and it is the same seam the session-shape
-    template in `config/rules.yaml` is waiting on.
-    """
-    clean = symbol.strip().upper()
-    if not clean:
-        return ""
-    if _CRYPTO_PAIR_MARK in clean:
-        return str(AssetClass.CRYPTO)
-    if parse_occ_symbol(clean) is not None:
-        return str(AssetClass.OPTION)
-    return str(AssetClass.EQUITY)
+# Which `instruments:` key a symbol's SHAPE says it belongs to. Re-exported from
+# `models` rather than defined here, because the same question is asked by the
+# broker's routing (`is_crypto_symbol`), by `grants.py` and by `RiskGate`, and an
+# audit found this copy and the router's disagreeing about `BTC/USD`. It is a
+# shape test rather than a lookup on purpose: the point of this feature is that
+# the dreamer may name symbols nobody has listed anywhere, so a table of known
+# symbols would refuse exactly the case it exists to permit.
+class_key_for_symbol = _class_key_for_symbol
 
 
 @dataclass(frozen=True)

@@ -118,10 +118,34 @@ def _kind_css() -> str:
 
 STYLES = """
 :root {
-  --ink:#0B0E12; --graphite:#161B22; --slate:#29313C; --pewter:#7D8896;
+  /* Tell the browser this is a dark document, before anything else in here.
+     Nothing else can: a stylesheet colouring `body` says nothing about the
+     chrome the platform draws ITSELF. Without it the chat `<textarea>`, the
+     sign-in password field, every scrollbar (`.scroll` is a horizontal
+     scroller on four pages), `::selection` and the paint that happens BEFORE
+     this stylesheet applies all come from the light palette — so a phone on a
+     slow tailnet flashes white, and a white input sits inside a graphite
+     panel. One declaration, and it is the only one that reaches any of them. */
+  color-scheme:dark;
+  /* `--pewter` is the recessive text colour and it is used at 10px — `.stat
+     span.k`, `th`, `.eyebrow`, `.tape .clk .city` are all .625rem uppercase
+     mono. #7D8896 measured 4.81:1 on graphite, which clears WCAG 2's 4.5:1
+     and clears it on a formula known to OVERSTATE contrast on a dark ground:
+     WCAG 2 does not model reverse polarity, and APCA scores a 10px weight-400
+     face here well under its body-text floor. Lifted to 5.76:1, which is one
+     token edit rather than an audit of the ~40 rules that read it. Still
+     recessive against `--bone` at 14.59:1, which is the job it does. */
+  --ink:#0B0E12; --graphite:#161B22; --slate:#29313C; --pewter:#8B96A4;
   --bone:#E9ECEF; --patina:#4E8C7D;
-  /* Severity, for banners. */
-  --amber:#C08A3E; --rust:#B3524A;
+  /* Severity, for banners. Two rusts, because one colour was doing two jobs
+     with only one of them measured. `--rust` is a 3px left border — a non-text
+     boundary, which needs 3:1, and it makes 3.48:1 on graphite. The same token
+     also coloured `.banner.crit b`, which is 11px uppercase mono at .14em
+     tracking, needs 4.5:1, and got 3.48:1: the most severe state on the deck
+     had the least readable heading, which is a warning that did not happen.
+     `--rust-text` is the same hue lifted to 5.50:1 on graphite (6.14:1 on
+     ink). Borders keep `--rust`; label text takes `--rust-text`. */
+  --amber:#C08A3E; --rust:#B3524A; --rust-text:#CF7A70;
   /* Figures only, lifted for contrast on graphite. Same pair as the public
      site: patina brightened for a gain, a cold rose for a loss, because a warm
      red on this ground reads as brick. */
@@ -143,10 +167,22 @@ STYLES = """
   --ease-jump: cubic-bezier(.7,0,.84,0);
 }
 *,*::before,*::after{box-sizing:border-box}
+/* iOS Safari inflates text in a rotated viewport unless this is pinned, and the
+   thing it inflates hardest is a wide table — which is every table on this deck,
+   sitting in a `.scroll` with columns that are aligned on purpose. The setting
+   is not zoom: page zoom still works and still should. */
+html{-webkit-text-size-adjust:100%;text-size-adjust:100%}
 body{margin:0;background:var(--ink);color:var(--bone);font-family:var(--sans);
   font-size:15px;line-height:1.6;-webkit-font-smoothing:antialiased}
 :focus-visible{outline:2px solid var(--patina);outline-offset:3px}
-a{color:var(--bone);text-decoration-color:var(--slate);text-underline-offset:4px}
+/* An inline link used to be `--bone` — the body colour — underlined in
+   `--slate`, which is 1.47:1 against ink. Body-coloured text with an invisible
+   underline is not distinguishable as a link by ANY channel, which is WCAG
+   1.4.1 failing in the direction where there is no colour difference either.
+   The underline is the channel here, so it has to be visible: `--pewter` is
+   6.44:1 on ink, and the offset keeps it clear of the descenders at 15px.
+   Hover moves it to the one accent this identity has. */
+a{color:var(--bone);text-decoration-color:var(--pewter);text-underline-offset:4px}
 a:hover{text-decoration-color:var(--patina)}
 .wrap{width:min(100% - 2rem,1240px);margin-inline:auto}
 .num{font-family:var(--mono);font-variant-numeric:tabular-nums}
@@ -162,8 +198,17 @@ h1{font-size:1.75rem} h2{font-size:1.375rem;margin-bottom:.25rem} h3{font-size:1
 .eyebrow{font-family:var(--mono);font-size:.6875rem;letter-spacing:.18em;
   text-transform:uppercase;color:var(--pewter);margin:0}
 
+/* The insets need `viewport-fit=cover` on the viewport meta to be anything but
+   `0px`, and both `<head>` blocks carry it. On a desktop, on Android and on a
+   phone with no notch every one of these resolves to zero, so this is inert
+   until the hardware makes it matter — and when it does, the nav's last link
+   is otherwise under the rounded corner in landscape and the footer under the
+   home indicator. Every `env()` carries an explicit `0px` fallback so an engine
+   that does not know the keyword drops the whole declaration to the same
+   padding it had before rather than to nothing. */
 header.bar{border-bottom:1px solid var(--slate);position:sticky;top:0;
-  background:rgba(11,14,18,.94);backdrop-filter:blur(8px);z-index:20}
+  background:rgba(11,14,18,.94);backdrop-filter:blur(8px);z-index:20;
+  padding-inline:env(safe-area-inset-left,0px) env(safe-area-inset-right,0px)}
 header.bar .wrap{display:flex;align-items:center;gap:.875rem;
   padding:.75rem 0;flex-wrap:wrap}
 .brand{display:flex;align-items:center;gap:.6rem;font-family:var(--serif);
@@ -184,7 +229,8 @@ nav a[aria-current=page]{color:var(--bone);border-color:var(--patina)}
   display:inline-block}
 .live.paper i{background:var(--patina)}
 
-main{padding:2rem 0 4rem}
+main{padding:2rem 0 calc(4rem + env(safe-area-inset-bottom,0px));
+  padding-inline:env(safe-area-inset-left,0px) env(safe-area-inset-right,0px)}
 .page-head{display:flex;align-items:baseline;gap:1rem;flex-wrap:wrap;
   margin-bottom:1.5rem}
 .page-head .asof{margin-left:auto;font-family:var(--mono);font-size:.75rem;
@@ -244,6 +290,16 @@ section.block>h2{margin-bottom:.75rem}
 .tape .fixed .dot{width:6px;height:6px;border-radius:50%;background:var(--pewter);
   display:inline-block;flex:none}
 .tape .view{flex:1;overflow:hidden;position:relative}
+/* The view carries `tabindex="0"` because under `prefers-reduced-motion` it
+   becomes a horizontal scroller with no focusable descendant, and Safari and
+   Firefox give such a container no keyboard route of their own — the strip
+   would be readable with a mouse and unreachable without one, in exactly the
+   mode chosen by somebody who asked for less movement.
+   The offset is NEGATIVE here alone. `:focus-visible` draws at +3px everywhere
+   else, and `.tape` is `overflow:hidden`, so an outside ring on this element
+   would be clipped away to nothing on three sides. Inset, it lands on the
+   strip. */
+.tape .view:focus-visible{outline:2px solid var(--patina);outline-offset:-3px}
 .tape .track{display:flex;align-items:center;gap:0;height:100%;width:max-content;
   animation:tape-run 90s linear infinite;will-change:transform}
 /* Each copy of the run is its own flex row inside the track, so the translation
@@ -469,7 +525,11 @@ section.block>h2{margin-bottom:.75rem}
 .banner.ok{border-left-color:var(--patina)}
 .banner b{display:block;font-family:var(--mono);font-size:.6875rem;
   letter-spacing:.14em;text-transform:uppercase;margin-bottom:.3rem}
-.banner.crit b{color:var(--rust)} .banner.warn b{color:var(--amber)}
+/* The label takes the TEXT rust, not the border one. It is 11px uppercase mono
+   at .14em tracking, which is small text needing 4.5:1; `--rust` gives it
+   3.48:1. The border above keeps `--rust` because a 3px rail is a non-text
+   boundary and 3.48:1 clears the 3:1 that applies to one. */
+.banner.crit b{color:var(--rust-text)} .banner.warn b{color:var(--amber)}
 .banner.ok b{color:var(--patina)}
 
 .grid{display:grid;gap:1rem;align-items:start}
@@ -506,8 +566,27 @@ table{width:100%;border-collapse:collapse;font-size:.8125rem}
    BOTH directions, and anything overflowing its end edges by even a pixel is
    scrollable overflow rather than a decoration hanging over the border. The
    bracket corner at `bottom:-1px;right:-1px` was exactly that pixel — see
-   `.scroll::after` below. */
+   `.scroll::after` below.
+
+   `overscroll-behavior:contain` is the OTHER half of the operator's "weird
+   scrolling stuff", and a different cause from the bracket. A touch drag that
+   reaches the end of a horizontally scrolled table CHAINS into the nearest
+   ancestor that can scroll, which is the page — so swiping a wide table
+   sideways on a phone walks the whole deck instead, and pulling down inside the
+   chat log bounces the document. `contain` stops the chain at the box and keeps
+   the scroll where the gesture was aimed. It does not disable the scroll and it
+   does not prevent overscroll INSIDE the box.
+
+   Every `.scroll` in this file also carries `role="region"`, `tabindex="0"` and
+   a name, and that tab stop is DELIBERATE — do not "fix" it away. It is not the
+   junk one described above, which came from 1px of phantom overflow and had no
+   name attached. A box that can scroll must be reachable from the keyboard, and
+   whether this one actually scrolls depends on the viewport, which the server
+   cannot see: the same table scrolls on a phone and does not on the deck. So
+   the stop is unconditional and named, which is the trade WCAG 2.1.1 asks for.
+   `tests/test_web.py` pins that every wrapper carries both. */
 .scroll{overflow-x:auto;border:1px solid var(--slate);border-radius:2px}
+.scroll,.chat .log{overscroll-behavior:contain}
 caption{text-align:left;padding:0 0 .6rem;color:var(--pewter);font-size:.8125rem}
 /* No `position:sticky` here, and its absence is deliberate rather than an
    oversight. Sticky resolves against the nearest SCROLLPORT, which is `.scroll`
@@ -526,6 +605,13 @@ th{text-align:left;font-family:var(--mono);font-size:.625rem;letter-spacing:.12e
   background:var(--graphite)}
 td{padding:.7rem .875rem;border-bottom:1px solid var(--slate);vertical-align:top}
 td.r,th.r{text-align:right}
+/* Tabular figures come with `.num` and every right-aligned cell in the repo
+   carries it — which means the alignment a reader scans a column of money by is
+   held by nobody but the author of the next cell. One forgotten `num` puts a
+   column on proportional digits, where the decimal points stop lining up and
+   nothing anywhere reports it. `.r` already means "this is a figure", so it can
+   carry the consequence itself and the discipline stops being load-bearing. */
+td.r{font-variant-numeric:tabular-nums}
 tr.data td.r{white-space:nowrap}
 tr:last-child td{border-bottom:0}
 tr.data td{border-bottom:0}
@@ -1222,6 +1308,24 @@ nav a:hover::after,nav a[aria-current=page]::after{transform:scaleX(1)}
   nav{margin-left:0;width:100%;order:3}
   .live{margin-left:auto;padding-left:0;border-left:0}
   .scroll{border:0}
+  /* A STATED LIMIT, because it is a real one and pretending otherwise is worse.
+     `display:block` on a table removes the table, row and cell roles in every
+     engine; the visually hidden `thead` takes the column headers out of the
+     tree entirely; and `td[data-l]::before` puts the label back as generated
+     content, which screen readers announce inconsistently and some do not
+     announce at all. So under 760px these tables are, to a non-visual reader,
+     an undifferentiated run of values — the card layout is bought with the
+     semantics, on this breakpoint only.
+     The known repair is to restate every role in the markup (`role="table"`,
+     `rowgroup`, `row`, `columnheader`, `cell`) so `display` cannot strip them.
+     It is deliberately NOT done here: redundant ARIA on a native table is an
+     anti-pattern that is only correct because of what this block does, it is
+     ~40 attributes carried on every desktop render to fix a phone, and the
+     compatibility case for it is contested. Naming the trade is this
+     codebase's answer to a gap it has decided not to close — the same answer
+     `strategy.requires` and the weekday-shaped session guard already give.
+     `scope=col` on every `<th>` and the named `role="region"` wrapper are the
+     parts that are unambiguously right, and those ARE done. */
   table,thead,tbody,tr,td{display:block;width:100%}
   caption{display:block}
   thead{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)}
@@ -2551,6 +2655,15 @@ def shell(
     Empty is a supported state and renders no strip at all — a deployment
     with the watchlist switched off, or any page built without one, gets the
     header sitting straight on the content exactly as before.
+
+    Two things in the `<head>` are duplicated in `login_page` and have to stay
+    that way, because that page does not come through here and it is the first
+    thing a phone loads. `theme-color` paints the browser's own chrome to match
+    the deck, so the address bar stops sitting on the page as a light band.
+    `viewport-fit=cover` is not a layout choice: it is the precondition for
+    `env(safe-area-inset-*)` resolving to anything but zero, and without it the
+    safe-area padding in `STYLES` is dead code on the only hardware that needs
+    it.
     """
     nav = "".join(
         f'<a href="{path}"{" aria-current=page" if path == active else ""}>{label}</a>'
@@ -2561,7 +2674,8 @@ def shell(
     mode = "paper" if env.alpaca_paper_trade else "LIVE"
     return f"""<!doctype html>
 <html lang="en-GB"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#0B0E12">
 <meta name="robots" content="noindex">
 <link rel="icon" href="{FAVICON}">
 <title>{_e(title)} &middot; Mudhorn Capital</title><style>{STYLES}</style></head>
@@ -3144,7 +3258,21 @@ def ticker_tape(
         # marquee was written. The duplicate exists to make a translation loop
         # seamless, which is a statement about pixels and about nothing a
         # non-visual reader is being told.
-        f'<div class="view"><div class="track">'
+        #
+        # `role="marquee"` names the region for what it is, and its implicit
+        # `aria-live="off"` is exactly right — the cells repaint every few
+        # seconds and announcing that would never stop. The role REQUIRES an
+        # accessible name, so the label is not optional decoration.
+        #
+        # `tabindex="0"` is the other half of the reduced-motion fix. With the
+        # animation off the strip becomes an ordinary horizontal scroller, and
+        # Safari and Firefox do not make a scroll container focusable on their
+        # own — so without this the whole watchlist is mouse-only in the mode
+        # somebody chose by asking for less motion. Unconditional because the
+        # server cannot read a media query, and a tabindex added by script
+        # would make a keyboard route depend on the projection layer.
+        f'<div class="view" role="marquee" tabindex="0" '
+        f'aria-label="Watchlist prices and exchange clocks"><div class="track">'
         f'<div class="marquee-run">{run}</div>'
         f'<div class="marquee-run dup" aria-hidden="true">{run}</div>'
         "</div></div>"
@@ -3416,8 +3544,10 @@ def _working_orders(orders: list[WorkingOrder], prices: dict[str, float]) -> str
     if not orders:
         return (
             '<section class="block"><h2>Pending orders</h2>'
-            '<div class="scroll"><p class="empty">Nothing resting at the broker. '
-            "Every order either filled or was never sent.</p></div></section>"
+            '<div class="scroll" role="region" tabindex="0" '
+            'aria-label="Pending orders"><p class="empty">Nothing resting at '
+            "the broker. Every order either filled or was never sent.</p>"
+            "</div></section>"
         )
 
     rows = ""
@@ -5151,7 +5281,8 @@ def login_page(*, env: Env, error: str = "") -> str:
     message = f'<p class="err" role="alert">{_e(error)}</p>' if error else ""
     return f"""<!doctype html>
 <html lang="en-GB"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#0B0E12">
 <meta name="robots" content="noindex">
 <link rel="icon" href="{FAVICON}">
 <title>Sign in &middot; Mudhorn Capital</title><style>{STYLES}</style></head>

@@ -30,6 +30,13 @@ from .models import (
     TradingActivity,
     WorkingOrder,
 )
+from .models import (
+    # `x as x` is mypy's explicit re-export form under --strict. Written
+    # out rather than left implicit because the re-export is the POINT
+    # here: one definition of "is this crypto", shared by the router and
+    # the fence. See the note below.
+    is_crypto_symbol as is_crypto_symbol,
+)
 
 if TYPE_CHECKING:
     pass
@@ -48,9 +55,13 @@ def _from_ny(naive: datetime) -> datetime:
     return naive.replace(tzinfo=NY).astimezone(UTC)
 
 
-def is_crypto_symbol(symbol: str) -> bool:
-    """Alpaca writes crypto pairs with a slash (BTC/USD); equities never have one."""
-    return "/" in symbol
+# `is_crypto_symbol` is re-exported from `models` rather than defined here, and
+# the re-export is deliberate: this module ROUTES on it — a crypto order goes out
+# unbracketed, so no broker-side stop rests behind it — while `grants.py` and
+# `RiskGate` FENCE on it. Two definitions of "is this crypto" is exactly how the
+# router and the fence came to disagree, which is how an adopted dream claiming
+# `BTC/USD` under `us_equity` reached Alpaca as a stopless crypto order. Keep
+# the name importable from here so every existing call site reads as it did.
 
 
 # Enough daily bars for a 200-day average with room to spare, which is the
