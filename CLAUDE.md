@@ -606,6 +606,14 @@ surface genuinely needs live news, the prerequisite is a paid tier with its own
 quota, kept separate from the loop's — not a second consumer of the same 100
 requests.
 
+Web access more broadly is a deferred decision rather than a settled no, and
+`docs/HANDOFF.md` records the four separate things it could mean and how their
+risk differs. Two rules hold whichever is chosen: **nothing web-derived may
+become a gating input**, because `RiskGate` has to stay deterministic and must
+not fail open on a network call; and **the model reads rendered, attributable
+text, never raw pages**, which is the `indicators.py` rule arriving from a new
+direction.
+
 ### The query index is derived, and that is what makes open SQL safe
 
 `news_history.py` answers "what has it seen lately" by scanning dated files.

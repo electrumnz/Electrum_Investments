@@ -170,6 +170,50 @@ It is not built, and the reasons are worth stating rather than rediscovering:
   would key on the account and perhaps a keyword list, both written down in
   `config/rules.yaml` where they can be reviewed.
 
+**Web access. Deferred, and the first job is deciding which kind.**
+
+Nothing in this system can reach the open web. Hermes' `browser`,
+`computer_use` and `x_search` toolsets are disabled in
+`deploy/hermes-config.yaml`; the trading model sees only what `context.py`
+renders; and the chat surface reads recordings rather than fetching. That will
+not hold forever — three feeds is a narrow view of the world, and the day a
+position moves on something none of them carried is the day this comes up.
+
+**"Give the bot web access" is four different projects, and they are not
+equally sensible.** Ranked from most defensible to least:
+
+1. **More or better feeds** — a paid market-data tier, a real news API, a
+   filings source. Low risk, because it arrives as structured data through an
+   adapter in `src/bot/data/`, gets recorded in `MarketInputs`, and is
+   reviewable afterwards. This is almost certainly what is actually wanted.
+2. **A live news tool for chat** — needs a paid tier with **its own quota**,
+   kept separate from the loop's. The reason is in CLAUDE.md: Marketaux's free
+   allowance is already fully spent by the loop, so a second consumer starves
+   the trading cycle on exactly the day somebody is asking about the news.
+3. **Browser access for Hermes** — it is an agent that reaches a brokerage
+   account through the MCP server, on a headless box. The toolsets are off as a
+   security posture, not an oversight. Turning them on is a decision about what
+   an agent with a prompt injection in its context window is allowed to do.
+4. **Web search for the trading model** — the one to be most careful about.
+   `indicators.py` exists because a model handed raw material produces a
+   confident number nobody can check. Raw web pages are that failure with more
+   surface: the gate checks size and stops, not whether the reasoning was
+   invented, and a page can be written by anyone with an interest in what this
+   account does next.
+
+Three constraints hold across all four and should survive whoever picks this up:
+
+- **Nothing web-derived may become a gating input.** `RiskGate` is
+  deterministic Python precisely so it cannot be argued with, and a network
+  call inside it could also fail open. The Finnhub calendar is the one feed
+  that reaches the gate, and it carries `is_degraded` for exactly this reason.
+- **The model reads answers, not sources.** Whatever arrives should be
+  rendered into the context block as recorded, attributable text — the same
+  contract as headlines today — never handed over as pages to reason from.
+- **Every new feed needs its own rate budget and a degraded flag.** An empty
+  result from an expired key looks identical to a quiet day, and only one of
+  those should change a decision.
+
 ---
 
 ## Suggested order of work
