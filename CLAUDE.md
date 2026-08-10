@@ -1625,6 +1625,24 @@ is decoration.
   BTC/USD grants nothing, whatever the dream says. The dreamer may look outside
   the *symbol* list; it may never cross a *class* boundary the operator has
   shut.
+
+  **This was WRITTEN BEFORE IT WAS TRUE, and an adversarial audit proved it
+  false.** The check tested the class key the adoption row *claimed*, and never
+  asked what class the symbol actually belongs to — so an adoption saying
+  `BTC/USD` under `us_equity` was a live permission to trade crypto under the
+  equity book's limits, with crypto's 0.5% risk cap, 15% concentration and
+  one-position rules all bypassed. Worse: `AlpacaBroker` routes on `"/" in
+  symbol`, so the order reaching Alpaca *is* a crypto order — unbracketed, and
+  therefore **with no broker-side stop at all**, which is the operator's third
+  rule gone. The guarantee now requires the claimed class to agree with the
+  symbol's true class, derived from the same routing rule the broker uses.
+
+  The lesson is bigger than the bug. **A guarantee written in this file is not
+  a guarantee, and prose that asserts one is how it stops being checked.** This
+  paragraph asserted the property, `tests/test_grants.py` only ever tried
+  `{"BTC/USD": "crypto"}` — the case that already worked — and 166 tests were
+  green over the hole. Where this file claims a structural property, there must
+  be a test that fails when it is removed.
 - **The grant is resolved OUTSIDE the gate and passed in**, in the same shape
   as `news_windows`. `src/bot/grants.py` does the resolving; `risk.py` reads no
   database, opens no file and makes no network call. A gate that can fail is a

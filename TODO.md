@@ -339,6 +339,61 @@ fire for one.** The gate's logic is fine; its input is narrowed. Mutating
 pre-filtered windows, which looks fixed and behaves inconsistently — worse
 than the open gap. It closes with the prompt-side work, not before.
 
+### An adversarial audit broke it: seven holes, three serious
+
+Run against the permission path with working reproductions, not by reading.
+**166 tests were green over every one of them.** The probes live in the
+session scratchpad; each is being fixed with a test that fails without the fix.
+
+1. **CRITICAL — the class hard-block tested the CLAIMED key, never the
+   symbol.** An adoption saying `BTC/USD` under `us_equity` was a live
+   permission to trade crypto under the equity book's limits: 0.5% risk cap,
+   15% concentration and one-position rules all bypassed. And because
+   `AlpacaBroker` routes on `"/" in symbol`, the order reaching Alpaca *is* a
+   crypto order — **unbracketed, so no broker-side stop**, which is rule 3
+   gone. `CLAUDE.md` asserted the opposite in prose; `tests/test_grants.py`
+   only ever tried `{"BTC/USD": "crypto"}`, the case that already worked.
+2. **CRITICAL — `adopt_dream`'s `symbols`/`asset_class` overrides are a blank
+   cheque.** A dream carrying no symbols and no class can be adopted with
+   invented ones, so any dream in the vault becomes a token for granting
+   yourself anything. The fix belongs in `DreamStore.adopt` — the store must
+   validate that a grant matches the dream's own claim — rather than in the
+   caller, so it holds whatever any future tool does.
+3. **HIGH — handing a dream back drops a still-open position out of three
+   class caps**, and the trading agent picks the moment. `_class_symbols` reads
+   grants in force *now*, so a position stops counting the instant the grant
+   ends. Membership for an OPEN position must come from what it was opened
+   under; `Trade.dream_id` already records that.
+4. **HIGH — expiry compares ISO timestamps as STRINGS in SQL and fails open.**
+   With a `+13:00` stamp — Pacific/Auckland, which the dream timer uses **by
+   design** — a grant six hours past expiry reads as live from
+   `granted_symbols` while `Adoption.is_live` correctly says expired. Two
+   paths, two answers, and the permission one is the wrong one to be lenient.
+5. **MEDIUM-HIGH — a live grant can sit on a non-ADOPTED dream.** The join
+   checks the dream exists, not that it is adopted; and `adopt()` writes across
+   three connections, so an interruption strands a live grant on a dream still
+   in the vault, which `return_to_vault` then refuses to close.
+6. **MEDIUM — the MCP order path passes no `news_windows` at all**, so the
+   earnings blackout has never applied to an order placed through chat or by
+   the operator. Pre-existing, and nothing to do with dreams.
+7. **LOW — `expires_at IS NULL` reads as permanent** (it should read as
+   expired, since `adopt` always writes one), and a naive `now` raises
+   `TypeError` out of `grants.py` into the decision cycle.
+
+**And one that is live right now because the Funnel is up:** the sign-in rate
+limiter keys on `request.client.host`, so behind a Funnel or any reverse proxy
+every visitor shares one bucket. A remote guesser can therefore lock the
+**operator** out indefinitely, because the throttle also blocks the correct
+password. Availability rather than disclosure, and worth fixing before this is
+relied on.
+
+Clean on audit, recorded so it is not re-checked: `max_granted_symbols` has no
+bypass; `grants.py` returned `{}` for all eighteen malformed inputs tried;
+`evaluate` reads no file, network or clock; both migrations are additive,
+idempotent and preserve rows; and the auth surface refuses every route
+including `/live` and `/openapi.json`, with forged cookies rejected and the
+rate limit unmovable by `X-Forwarded-For`.
+
 ### One bypass was found and CLOSED, recorded so it is not reopened
 
 Three gates measure "how much of this class am I already carrying" by symbol
