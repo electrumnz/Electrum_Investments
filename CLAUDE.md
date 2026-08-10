@@ -117,8 +117,74 @@ it. That is the point.
 ### Each instrument class carries its own rules
 
 `config/rules.yaml` has an `instruments:` block keyed by asset class. Session
-windows, symbol lists and strategy live there; the portfolio limits (1% per
-trade, 2% total risk, stand-down, daily loss, margin) stay global.
+windows, symbol lists, strategy and **that class's own risk limits** live there;
+the account-wide rules (2% total risk, stand-down, daily loss, margin) stay
+global.
+
+**A per-class limit may only ever TIGHTEN a portfolio limit, never loosen one,
+and `Rules._per_class_limits_only_tighten` enforces that at load.** This is the
+whole reason limits are allowed to live in two places. The operator's four rules
+are a ceiling on the *account*; if an instrument block could raise its own
+per-trade cap then "max 1% of equity at risk per trade" would mean "1%, unless a
+block further down the file disagrees", which is not a limit.
+
+It **raises rather than clamps**. Silently clamping 3% back to 1% leaves
+somebody believing they configured 3%, reading it off the Settings page, and
+being wrong about what the gate is doing. The guard runs for disabled classes
+too — a limit edited while a class is off must not become a surprise on the day
+somebody enables it, which for crypto is a weekend or the small hours.
+
+`max_concurrent_positions` on a class counts **within** that class, so both caps
+apply and they measure different things: a class that gets loud cannot fill
+every slot the portfolio has. Membership is by the class's own
+`allowed_symbols`, not the position's asset-class enum, so one source answers
+the question.
+
+**Crypto is configured while disabled, on purpose.** The moment to enable it is
+a moment when nothing else is open, which is the worst possible moment to be
+deciding what a crypto position should be allowed to risk. Its limits are set
+(half the per-trade risk, a third of the concentration, one position) with the
+market shut and nothing riding on the decision, so enabling is a one-word edit.
+
+### No pre-market. After hours is fine
+
+The operator's rule, and it needs its own gate check because `sessions_utc`
+**structurally cannot express it**.
+
+Those are fixed UTC hours; the US session is defined in New York time and moves
+an hour twice a year. So `[[14, 21]]` is the *winter* window applied all year:
+
+- **summer (EDT)** — session 13:30–20:00 UTC, window runs to 21:00, so an hour
+  of after-hours is permitted every day
+- **winter (EST)** — session 14:30–21:00 UTC, window opens at 14:00, so half an
+  hour of **pre-market** is permitted every day
+
+Wrong at one end in each half of the year, silently. That gap used to cost
+nothing, because an out-of-hours equity order was queued to the next open rather
+than filled. **It costs something now: Alpaca runs a pre-market session from
+04:00 ET**, plus an overnight venue, so an order placed into one *trades*, in a
+thinner book than anybody chose.
+
+`RiskGate._premarket` reads the phase from `market_clock`, which computes in New
+York time, so it follows daylight saving with no diary entry and stays
+deterministic and offline. It can only ever add a reason to refuse.
+
+Scoped to 04:00–09:30 New York and nothing else — after hours was explicitly
+kept, and a test pins that the rule does not quietly grow into
+regular-session-only. Off for crypto: a 24/7 market has no pre-market, and the
+phases it reads are the US equity ones, so switched on there it would refuse
+every hour of every day.
+
+**`market_clock.py` states the venue's phase and the gate's window separately
+and never merges them into one green light.** "The market is open" and "this bot
+will trade" are different claims, and confusing them is what produced the
+question this module was written after: *the market should be open right now*,
+at 04:49 New York on a Monday. Alpaca was open — pre-market — four and a half
+hours before the session this bot trades. `is_tradeable_by_bot` requires both,
+which is what makes the discrepancy visible rather than hidden.
+
+Holidays are not covered here either. Thanksgiving reads as an ordinary Thursday
+to both checks.
 
 This exists because a single global `sessions_utc` is wrong the moment there is
 more than one class. Equities trade a fixed window, crypto trades continuously,
@@ -1353,6 +1419,9 @@ trades to appear useful.
 
 ```
 config/rules.yaml       Trading limits. Enforced in code. The only place to change behaviour.
+                        `instruments:` carries each class's own limits, which may only
+                        ever tighten the global ones. `watchlist:` is DISPLAY ONLY and
+                        is deliberately not `allowed_symbols`.
 src/bot/
   risk.py               The risk gate. The load-bearing file in this repo.
   reconcile.py          Squares journal against broker each cycle. Populates open risk.
@@ -1361,6 +1430,12 @@ src/bot/
   options.py            OCC parsing and expiry safety. Protective only.
   broker.py             Broker Protocol + AlpacaBroker + MockBroker. Daily bars and
                         resting orders live here.
+  market_clock.py       What time it is where the market is, and what the market
+                        is doing. Alpaca's five session phases computed in New
+                        York time, so daylight saving needs no diary entry. States
+                        the venue's phase and the gate's window SEPARATELY and
+                        never merges them into one green light. Pure; no network.
+                        Feeds RiskGate._premarket and the ticker tape.
   indicators.py         Averages, ATR, volume ratio, swing levels. Pure functions over
                         daily bars. Computed in Python so the model never derives them.
                         `snapshot()` records them as NUMBERS alongside the rendered
