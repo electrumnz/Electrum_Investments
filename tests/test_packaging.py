@@ -84,6 +84,9 @@ def test_no_source_file_is_gitignored():
     )
 
 
+@pytest.mark.skipif(
+    not (REPO_ROOT / ".git").exists(), reason="not a git checkout"
+)
 def test_every_first_party_import_resolves_to_a_committed_module():
     """The specific shape of the bug: an import of a module that was not shipped.
 
