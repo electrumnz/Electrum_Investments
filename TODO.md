@@ -316,6 +316,48 @@ Deliberately NOT on the Board: dream chains and reasoning (that is the Dreaming
 page), and `DreamLedger` rates (reasoning-quality statistics, which belong
 beside `metrics.py` on Analytics and reach the operator, never the model).
 
+### The feature is wired and INERT, and that is the next thing to fix
+
+`RiskGate` honours a grant. Nothing else does. The system prompt lists
+`rules.allowed_symbols` (`claude_client.py:270`) and the tick, indicator,
+intraday and news fetches all run over that same list
+(`main.py:94, 131-132, 288-290, 428`). So the model is never told a granted
+symbol exists, and a proposal in one would be dropped for want of a quote
+before it ever reached the gate that would have allowed it.
+
+**Until that is closed, adoption grants a permission nothing can use.** The
+gate half is the half that had to be right first — a permission path that
+worked before it was safe would be the wrong order — but the feature is not
+real until the symbol reaches the prompt and the feeds.
+
+**A second, narrower gap found in the same pass and deliberately NOT
+half-fixed:** `FinnhubCalendar` is constructed once at loop start with
+`symbols=list(rules.allowed_symbols)`, so a granted symbol is never in the set
+the earnings calendar fetches windows for, and `_news_blackout` **can never
+fire for one.** The gate's logic is fine; its input is narrowed. Mutating
+`.symbols` after construction would leave the feed's cache holding
+pre-filtered windows, which looks fixed and behaves inconsistently — worse
+than the open gap. It closes with the prompt-side work, not before.
+
+### One bypass was found and CLOSED, recorded so it is not reopened
+
+Three gates measure "how much of this class am I already carrying" by symbol
+membership of `allowed_symbols`: `_concurrent_positions`, `_class_total_risk`
+and `_instrument_capital_cap`. A granted symbol is in no such list, so a
+position held under a grant was **invisible to its own class's concurrency
+cap, class total-risk cap and capital cap.** The grant would have bought entry
+to the allowlist *and* a silent exemption from three limits — including the
+crypto 0.5% total the operator wrote in their own words.
+
+`RiskGate._class_symbols` now unions `allowed_symbols` with the symbols
+currently granted under that class and hands the set to all three. The four
+tests covering it were verified to FAIL when the union is reverted, which is
+the only way to know a test is doing its job.
+
+Consequence worth knowing rather than guarding against: a position still held
+under a **lapsed** grant drops back out of those counts. Not a regression — it
+was never in them — and the same shape as `dream-expired-holding`.
+
 ### Still to decide
 
 - Whether an adopted dream's reasoning should reach the trading model's
