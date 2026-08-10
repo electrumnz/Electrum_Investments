@@ -1338,7 +1338,7 @@ def shell(
 <meta name="robots" content="noindex">
 <link rel="icon" href="{FAVICON}">
 <title>{_e(title)} &middot; Mudhorn Capital</title><style>{STYLES}</style></head>
-<body data-mode="{_e(mode)}" data-operator="{_e(env.formal_name)}">
+<body data-mode="{_e(mode)}" data-operator="{_e(env.greeting_name)}">
 <header class="bar"><div class="wrap">
   <a class="brand" href="/">{MARK} MUDHORN <span class="thin">CAPITAL</span></a>
   <nav>{nav}</nav>
@@ -1495,8 +1495,39 @@ def banners(
 # -------------------------------------------------------------------- board
 
 
+def _board_waiting(env: Env | None) -> str:
+    """The Board before the first reading has arrived.
+
+    Same shape as the real thing, so nothing jumps when the figures land: four
+    tiles at the same size, in the same order, holding the width the numbers
+    will occupy. `.pending` carries the shimmer; the text under each tile says
+    what is being waited for rather than leaving a reader to guess whether the
+    deck is broken.
+    """
+    tiles = "".join(
+        stat(label, '<span class="pending">000,000.00</span>', meta)
+        for label, meta in (
+            ("Equity", "waiting for the first read"),
+            ("Unrealised", "across an unknown number of positions"),
+            ("Realised today", "closed trades only"),
+            ("Open risk", "loss if every stop filled at once"),
+        )
+    )
+    return (
+        head(greeting(env) if env else "Account", "Board", "not read yet")
+        + '<div class="banner" style="border-left-color:var(--holo)">'
+        "<b>Reading the account</b>No broker reading has come back yet, so "
+        "there are no figures to show. This is a cold start rather than an "
+        "empty account: nothing here is zero, it is unknown. The live stream "
+        "fills these in as soon as the first read lands, and the connection "
+        "indicator beside the mode badge says whether it is getting through."
+        "</div>"
+        + f'<div class="grid g4">{tiles}</div>'
+    )
+
+
 def board(
-    account: AccountSnapshot,
+    account: AccountSnapshot | None,
     rules: Rules,
     curve: list[tuple[str, float]],
     open_trades: list[Trade],
@@ -1511,7 +1542,18 @@ def board(
     `env` is optional and only supplies the operator's name for the greeting, so
     every existing caller keeps working and a deployment that never set
     OPERATOR_NAME renders exactly as before.
+
+    **`account` is None until the first broker read comes back**, which is the
+    honest state on a cold start rather than a gap to paper over. The page
+    renders its own shape with every figure marked as not-yet-read, and the
+    live stream fills them in a moment later. Rendering zeros would put a
+    number on screen that the page has no way to walk back — and 0.00 equity is
+    exactly the sort of plausible wrong figure this repository is built to
+    refuse.
     """
+    if account is None:
+        return _board_waiting(env)
+
     equity = account.equity_usd
     open_risk_pct = (account.open_risk_usd / equity * 100) if equity else 0.0
     largest = max(

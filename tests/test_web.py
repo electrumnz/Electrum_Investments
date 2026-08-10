@@ -35,6 +35,7 @@ from bot.models import (
     Trade,
 )
 from bot.souls import Soul
+from bot.web import live
 from bot.web.app import build_app
 
 pytest.importorskip("fastapi")
@@ -61,10 +62,24 @@ def dreams(tmp_path):
 
 
 @pytest.fixture
-def client(journal, dreams):
+def poller(journal):
+    """A poller primed with one synchronous read.
+
+    The Board no longer talks to the broker during a render — the poller owns
+    that conversation — so a test that wants figures on the page has to give it
+    a reading first. `poll_once()` is synchronous precisely so this needs no
+    event loop.
+    """
+    p = live.build_poller(journal=journal, env=_env(), force_mock=True)
+    p.poll_once()
+    return p
+
+
+@pytest.fixture
+def client(journal, dreams, poller):
     app = build_app(
         journal=journal, rules=load_rules(), env=_env(),
-        dreams=dreams, force_mock=True
+        dreams=dreams, poller=poller, force_mock=True
     )
     return TestClient(app)
 
@@ -209,6 +224,15 @@ def test_untracked_position_warning(client, journal, tmp_path, dreams):
     original = main_mod.build_broker
     main_mod.build_broker = _fixed_broker
     try:
+        # Built and polled INSIDE the swap: the poller reaches the broker
+        # through the same `build_broker`, so a poller created outside it would
+        # read the wrong account.
+        primed = live.build_poller(journal=journal, env=_env(), force_mock=True)
+        primed.poll_once()
+        app = build_app(
+            journal=journal, rules=load_rules(), env=_env(),
+            dreams=dreams, poller=primed, force_mock=True
+        )
         body = TestClient(app).get("/").text
     finally:
         main_mod.build_broker = original
@@ -705,16 +729,21 @@ def test_a_resting_order_is_shown_with_the_distance_to_its_limit(journal, dreams
 
     import bot.main as main_mod
 
-    app = build_app(
-        journal=journal, rules=load_rules(), env=_env(),
-        dreams=dreams, force_mock=True
-    )
     def _fixed(env: object, force_mock: bool = False) -> MockBroker:
         return broker
 
     original = main_mod.build_broker
     main_mod.build_broker = _fixed
     try:
+        # Built and polled INSIDE the swap: the poller reaches the broker
+        # through the same `build_broker`, so one created outside it would read
+        # a different account and find no resting orders.
+        primed = live.build_poller(journal=journal, env=_env(), force_mock=True)
+        primed.poll_once()
+        app = build_app(
+            journal=journal, rules=load_rules(), env=_env(),
+            dreams=dreams, poller=primed, force_mock=True
+        )
         body = TestClient(app).get("/").text
     finally:
         main_mod.build_broker = original

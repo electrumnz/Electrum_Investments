@@ -51,7 +51,7 @@ from ..models import AccountSnapshot, WorkingOrder
 from ..options import alerts_for_positions
 from ..souls import GROGU, YODA, load_soul
 from ..tailnet import read as read_tailnet_status
-from . import render
+from . import live, render
 from .auth import COOKIE_NAME, SESSION_TTL_SECONDS, SessionStore
 from .chat import DREAMER_BINARY, HermesBridge
 
@@ -63,6 +63,7 @@ def build_app(
     env: Env | None = None,
     audit_log: AuditLog | None = None,
     dreams: DreamStore | None = None,
+    poller: live.LivePoller | None = None,
     force_mock: bool = False,
 ) -> Any:
     """Construct the FastAPI app. Dependencies are injectable so tests never
@@ -103,39 +104,49 @@ def build_app(
     audit = audit_log or AuditLog()
     resolved_dreams = dreams or DreamStore()
 
-    def _account_orders_prices() -> tuple[AccountSnapshot, list[WorkingOrder], dict[str, float]]:
-        """One broker session for everything the Board needs.
+    # One poller for the whole application. Polling per connected browser would
+    # multiply broker load for nothing, and every page render would still be
+    # paying a round trip.
+    # Injectable like the journal and the dream store, so a test can prime it
+    # with one synchronous `poll_once()` and assert on a rendered Board without
+    # standing up an event loop.
+    resolved_poller = poller or live.build_poller(
+        journal=resolved_journal, env=resolved_env, force_mock=force_mock
+    )
+    live.install(app, resolved_poller)
 
-        Open risk is filled in from the journal, as on every other path that
-        hands out a snapshot: the broker holds stop-losses as separate orders
-        and cannot report it, so a snapshot that skipped this would understate
-        it silently.
+    def _account_orders_prices() -> (
+        tuple[AccountSnapshot | None, list[WorkingOrder], dict[str, float]]
+    ):
+        """What the Board renders, taken from the poller and NEVER blocking.
 
-        Opening a second connection per widget would triple the round trips on
-        a page refreshed by hand. Orders and quotes degrade to empty rather than
-        failing the page: a broker hiccup should cost the pending list, not the
-        equity figure next to it.
+        This used to open a broker session inline, which meant a slow Alpaca
+        held the whole page with nothing on screen — and after a hyperspace
+        jump that promised speed, which made the wait read as a broken deck
+        rather than a slow one.
+
+        The poller owns the broker conversation now. This reads whatever it has
+        and returns immediately, so a page render costs no network at all.
+
+        **`None` on a cold start is the point, not a gap.** The first request
+        after a restart has no reading yet, and the honest answer is that it is
+        unknown. Rendering zeros would be a lie the page has no way to walk
+        back, and the stream fills the figures in a moment later.
+
+        Open risk still comes from the journal rather than the broker, inside
+        the poller: stop-losses are separate orders and Alpaca cannot report
+        the aggregate, so any path handing out an `AccountSnapshot` has to do
+        this or the total-risk cap silently counts nothing.
         """
-        from ..main import build_broker
-
-        broker = build_broker(resolved_env, force_mock=force_mock)
-        broker.connect()
-        try:
-            snapshot = broker.get_account()
-            snapshot.open_risk_usd = resolved_journal.open_risk_usd()
-            try:
-                orders = broker.get_open_orders()
-            except Exception:
-                orders = []
-            prices: dict[str, float] = {}
-            for symbol in {o.symbol for o in orders}:
-                try:
-                    prices[symbol] = broker.get_tick(symbol).mid
-                except Exception:
-                    continue
-            return snapshot, orders, prices
-        finally:
-            broker.disconnect()
+        # NOT `ensure_running()`. That schedules an asyncio task and this runs
+        # in FastAPI's threadpool, where there is no loop to schedule onto. The
+        # stream starts the poller when a browser connects, which is also the
+        # behaviour worth having: a box nobody is watching does not talk to the
+        # broker every five seconds all night.
+        snapshot = resolved_poller.latest()
+        if snapshot is None:
+            return None, [], {}
+        return snapshot.account, snapshot.orders, snapshot.prices
 
     def _page(title: str, active: str, body: str) -> str:
         return render.shell(
@@ -201,6 +212,21 @@ def build_app(
     def board() -> str:
         account, orders, prices = _account_orders_prices()
         open_trades = resolved_journal.open_trades()
+
+        if account is None:
+            # Cold start: no reading yet, so there is nothing to reconcile the
+            # journal against and no position list to check for expiries. The
+            # banners are all statements about a broker reading, so rendering
+            # them here would be asserting things about an account nobody has
+            # read. The waiting Board says exactly that instead.
+            return _page(
+                "Board",
+                "/",
+                render.board(
+                    None, resolved_rules, [], open_trades,
+                    resolved_journal.get_stand_down(), 0, env=resolved_env,
+                ),
+            )
 
         journalled = {t.symbol for t in open_trades}
         held = {p.symbol for p in account.open_positions}
@@ -380,7 +406,7 @@ def build_app(
             str(payload.get("message", "")),
             history,
             soul=soul,
-            operator=resolved_env.formal_name,
+            operator=resolved_env.greeting_name,
         )
         return {"ok": reply.ok, "text": reply.text, "error": reply.error}
 

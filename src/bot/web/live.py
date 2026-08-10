@@ -284,14 +284,18 @@ class LiveState:
         age = self.age_seconds(now=moment)
 
         if status is LiveStatus.FAILING:
+            # "Account read" rather than "broker read", because the journal is
+            # part of it: a locked SQLite file fails this the same way a refused
+            # Alpaca call does, and naming the broker would send somebody
+            # looking in the wrong place.
             if self.snapshot is None:
                 return (
-                    f"The broker has not answered successfully yet ({self.error}). "
-                    "There are no figures to show — they are unknown rather than zero."
+                    f"No account read has succeeded yet ({self.error}). There are "
+                    "no figures to show — they are unknown rather than zero."
                 )
             return (
-                f"The last read of the broker failed ({self.error}). The figures "
-                f"below were read {_ago(age)} and are not being updated."
+                f"The last account read failed ({self.error}). The figures below "
+                f"were read {_ago(age)} and are not being updated."
             )
 
         if status is LiveStatus.SLOW:
@@ -536,6 +540,13 @@ class LivePoller:
         # planned stop and is the only place that does. Left unset, the 2%
         # total-risk cap has nothing to count and the page reports a risk of
         # zero against a portfolio that has plenty.
+        #
+        # A failure here fails the WHOLE read rather than degrading like the
+        # orders below, and that is deliberate. `open_risk_usd` is a plain
+        # float with no way to say "unknown", so degrading would mean writing a
+        # zero and hoping every renderer checks a flag beside it — and a leaked
+        # zero here is the exact figure that must never be invented. No board at
+        # all, clearly labelled, beats a board reporting no risk.
         account.open_risk_usd = self._open_risk_usd()
 
         orders: list[WorkingOrder] = []

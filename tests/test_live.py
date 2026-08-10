@@ -63,6 +63,15 @@ class _StubBroker(MockBroker):
         self.connects += 1
         super().connect()
 
+    def set_position(self, position: Position) -> None:
+        """`MockBroker` builds positions from fills and has no public setter.
+
+        Seeding one directly is the only way to give it an unrealised P&L, which
+        is the figure under test. It belongs on this subclass rather than in a
+        test body, so nothing outside the mock family reaches into it.
+        """
+        self._positions[position.symbol] = position
+
     def get_account(self) -> AccountSnapshot:
         self.account_reads += 1
         if self.block_for_seconds:
@@ -164,14 +173,16 @@ def test_a_completed_read_is_dated_and_live(broker):
 
 
 def test_positions_reach_the_payload_with_their_unrealised(broker):
-    broker._positions["SPY"] = Position(
-        symbol="SPY",
-        direction=Direction.BUY,
-        qty=10,
-        entry_price=575.0,
-        opened_at=NOW,
-        current_price=580.0,
-        unrealised_pnl_usd=50.0,
+    broker.set_position(
+        Position(
+            symbol="SPY",
+            direction=Direction.BUY,
+            qty=10,
+            entry_price=575.0,
+            opened_at=NOW,
+            current_price=580.0,
+            unrealised_pnl_usd=50.0,
+        )
     )
     poller = _poller(broker)
     poller.poll_once()
@@ -218,6 +229,30 @@ def test_the_open_risk_source_cannot_be_forgotten(broker):
     """
     with pytest.raises(TypeError):
         LivePoller(broker_factory=lambda: broker)  # type: ignore[call-arg]
+
+
+def test_an_unreadable_journal_fails_the_whole_read_rather_than_showing_no_risk(broker):
+    """Deliberately harsher than the orders degradation, and for a reason.
+
+    `open_risk_usd` is a plain float with no way to say "unknown", so degrading
+    would mean writing a zero and trusting every renderer to check a flag beside
+    it. A board reporting no risk against a portfolio that has plenty is exactly
+    the invented figure this repository exists to prevent; no board, clearly
+    labelled, is the better failure.
+    """
+
+    def locked() -> float:
+        raise RuntimeError("database is locked")
+
+    poller = LivePoller(broker_factory=lambda: broker, open_risk_usd=locked)
+    poller.poll_once()
+
+    payload = poller.payload()
+    assert payload["status"] == LiveStatus.FAILING.value
+    assert payload["account"] is None
+    assert "database is locked" in payload["error"]
+    # The wording must not send anybody hunting a broker outage.
+    assert "broker" not in payload["headline"]
 
 
 def test_build_poller_wires_the_journal(journal, tmp_path):
@@ -270,7 +305,7 @@ def test_a_broker_error_before_any_success_has_no_figures(broker):
     payload = poller.payload()
     assert payload["status"] == LiveStatus.FAILING.value
     assert payload["account"] is None
-    assert "not answered successfully yet" in payload["headline"]
+    assert "No account read has succeeded yet" in payload["headline"]
 
 
 def test_a_failure_does_not_end_the_poller(broker):
@@ -449,42 +484,53 @@ def test_a_missing_quote_is_named_and_its_distance_stays_unknown(broker):
 
 @pytest.mark.asyncio
 async def test_one_poller_serves_every_subscriber(broker):
-    """The point of the module. Three browsers, one broker conversation."""
-    poller = _poller(broker)
+    """The point of the module. Three browsers, one broker conversation.
+
+    A ten-second interval means exactly one read happens inside the window, so
+    the assertion is on the count rather than on a race.
+    """
+    poller = _poller(broker, interval_seconds=10.0, idle_stop_after_seconds=None)
     queues = [poller.subscribe() for _ in range(3)]
     assert poller.subscriber_count == 3
 
-    poller.poll_once()
-    poller._publish()
-
-    assert broker.account_reads == 1
-    for queue in queues:
-        assert queue.qsize() == 1
+    poller.ensure_running()
+    try:
+        await asyncio.sleep(0.05)
+        assert broker.account_reads == 1
+        for queue in queues:
+            assert queue.qsize() == 1
+    finally:
+        await poller.stop()
 
 
 @pytest.mark.asyncio
 async def test_a_subscriber_that_fell_behind_gets_no_backlog(broker):
-    """The queue holds one wake-up. A slow browser should see the CURRENT state
-    on its next turn, not a queue of superseded ones."""
-    poller = _poller(broker)
+    """The queue holds one wake-up. A browser that fell behind should see the
+    CURRENT state on its next turn, not a queue of superseded ones."""
+    poller = _poller(broker, interval_seconds=0.0, idle_stop_after_seconds=None)
     queue = poller.subscribe()
-
-    for _ in range(5):
-        poller.poll_once()
-        poller._publish()
-
-    assert queue.qsize() == 1
+    poller.ensure_running()
+    try:
+        await asyncio.sleep(0.05)
+        assert broker.account_reads > 1
+        assert queue.qsize() == 1
+    finally:
+        await poller.stop()
 
 
 @pytest.mark.asyncio
 async def test_unsubscribing_stops_the_wake_ups(broker):
-    poller = _poller(broker)
+    poller = _poller(broker, interval_seconds=0.0, idle_stop_after_seconds=None)
     queue = poller.subscribe()
     poller.unsubscribe(queue)
-    poller.poll_once()
-    poller._publish()
-    assert queue.qsize() == 0
-    assert poller.subscriber_count == 0
+    poller.ensure_running()
+    try:
+        await asyncio.sleep(0.02)
+        assert broker.account_reads >= 1
+        assert queue.qsize() == 0
+        assert poller.subscriber_count == 0
+    finally:
+        await poller.stop()
 
 
 # ---------------------------------------------------------------- the loop

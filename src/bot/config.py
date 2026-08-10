@@ -120,23 +120,16 @@ class Env(BaseSettings):
     # on it would tell an unauthenticated visitor whose account this is. That is
     # a small disclosure for paper money and it is still a change to a property
     # the page is built around, so it does not happen.
+    # One name, used everywhere. There were briefly two — a plain one and a
+    # formal one — and the split earned nothing: every surface wanted the same
+    # form, so the second field was a choice nobody had to make being offered
+    # anyway.
     operator_name: str = Field(default="", alias="OPERATOR_NAME")
-    operator_formal: str = Field(default="", alias="OPERATOR_FORMAL")
 
     @property
     def greeting_name(self) -> str:
         """What to call the operator, or empty when nobody said."""
         return self.operator_name.strip()
-
-    @property
-    def formal_name(self) -> str:
-        """The more ceremonious form, for the moments that earn it.
-
-        Falls back to the plain name rather than to nothing: a surface that
-        wanted the formal address and got an empty string would render a
-        half-sentence.
-        """
-        return self.operator_formal.strip() or self.greeting_name
 
     decision_interval_seconds: int = Field(default=900, alias="DECISION_INTERVAL_SECONDS")
 

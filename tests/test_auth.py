@@ -16,6 +16,7 @@ import pytest
 from bot.config import Env, load_rules
 from bot.dreaming import DreamStore
 from bot.journal import Journal
+from bot.web import live
 from bot.web.app import build_app
 from bot.web.auth import COOKIE_NAME, MAX_ATTEMPTS, SessionStore
 
@@ -49,19 +50,28 @@ def dreams(tmp_path):
 
 
 @pytest.fixture
-def guarded(journal, dreams):
+def poller(journal):
+    """Primed with one synchronous read: the Board reads the poller, not the
+    broker, so without this every page renders its cold-start shell."""
+    p = live.build_poller(journal=journal, env=_env(), force_mock=True)
+    p.poll_once()
+    return p
+
+
+@pytest.fixture
+def guarded(journal, dreams, poller):
     app = build_app(
         journal=journal, rules=load_rules(), env=_env(PASSWORD),
-        dreams=dreams, force_mock=True
+        dreams=dreams, poller=poller, force_mock=True
     )
     return TestClient(app, follow_redirects=False)
 
 
 @pytest.fixture
-def unguarded(journal, dreams):
+def unguarded(journal, dreams, poller):
     app = build_app(
         journal=journal, rules=load_rules(), env=_env(),
-        dreams=dreams, force_mock=True
+        dreams=dreams, poller=poller, force_mock=True
     )
     return TestClient(app, follow_redirects=False)
 
