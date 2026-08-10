@@ -38,10 +38,17 @@ import structlog
 
 log = structlog.get_logger(__name__)
 
-# The root-owned wrapper, NOT the Hermes binary itself. Two reasons, both in
-# deploy/run-chat.sh: the flags are fixed there so an untrusted prompt cannot
-# become `--yolo`, and it sits somewhere this process can actually see, unlike
-# /home/hermes which is 0700 and hidden again by the unit's ProtectHome.
+# The root-owned wrapper, NOT the Hermes binary itself. The flags are fixed in
+# deploy/run-chat.sh so an untrusted prompt cannot become `--yolo`, and it sits
+# under /opt/mudhorn where this process can stat it — /home/hermes is 0700, and
+# `Path.exists()` raises rather than returning False on a directory it may not
+# traverse, which was a 500 on the Chat page.
+#
+# That placement does NOT let the unit keep `ProtectHome`. Hermes runs from its
+# own home, and systemd sandboxing is a mount namespace that every child
+# inherits — sudo does not escape one — so the wrapper, running as `hermes`
+# inside this service's namespace, still needs /home/hermes visible. The unit
+# file explains it where someone tightening it would look.
 DEFAULT_BINARY = Path("/opt/mudhorn/deploy/run-chat.sh")
 DEFAULT_USER = "hermes"
 

@@ -686,10 +686,16 @@ Four things about it are load-bearing:
   `mudhorn → hermes`, to an account holding no credentials that reaches the
   broker only through the MCP server, where `RiskGate.evaluate` runs on every
   order. Chat cannot become an order path that skips the gate.
-  `ProtectHome` stays **on**, which is possible only because the wrapper lives
-  under `/opt/mudhorn` rather than in the agent's home — that placement also
-  fixed a 500 on the Chat page, since `Path.exists()` raises rather than
-  returning False on a directory it may not traverse.
+  **`ProtectHome` had to come off too, and the obvious reasoning for keeping it
+  was wrong.** Putting the wrapper under `/opt/mudhorn` fixes the availability
+  check — `Path.exists()` raises rather than returning False on a directory it
+  may not traverse, which was a 500 on the Chat page — but it does not fix
+  this: **systemd sandboxing is a mount namespace and every descendant inherits
+  it, sudo included.** The wrapper ran as `hermes` inside the web unit's
+  namespace, where `/home` is empty, and died on `cd /home/hermes: Permission
+  denied`. Hermes runs from that home; there is no arrangement where it can run
+  without it. The grant is smaller than it looks — the sudoers rule already
+  permits *executing as* `hermes`, which exceeds reading its files.
 - **No password set still means no gate**, which is correct for the loopback
   deployment and is tested. What must not happen is exposing it *without* one,
   and the app cannot detect that case — a Funnel or a reverse proxy still

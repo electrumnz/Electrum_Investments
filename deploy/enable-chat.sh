@@ -145,27 +145,48 @@ if systemctl show mudhorn-web -p NoNewPrivileges --value | grep -q yes; then
 fi
 say "unit permits sudo"
 
-# Exactly what the web process does: mudhorn sudo-ing to hermes to run the
-# wrapper. Captured explicitly rather than read from $? inside an elif, where
-# an intervening command would silently change it — a verification that
-# misreports is worse than no verification.
-set +e
-sudo -n -u mudhorn sudo -n -u hermes -- "$WRAPPER" </dev/null >/dev/null 2>&1
-rc=$?
-set -e
+# Asks the RUNNING SERVICE to do it, over its own HTTP endpoint, rather than
+# running sudo from this shell.
+#
+# That distinction is the whole value of this check. A `sudo -u mudhorn sudo -u
+# hermes` from a console shell runs in the console's mount namespace, where
+# everything is visible — it passed cleanly while the real thing was failing on
+# `cd /home/hermes: Permission denied`, because systemd's sandboxing is a
+# namespace that every child of the service inherits and sudo does not escape.
+# A check that cannot see the condition it is meant to catch is worse than no
+# check, because it is believed.
+#
+# Going through the endpoint means the service performs the sudo itself, inside
+# its own namespace, with its own unit settings. If it works here it works from
+# a browser.
+say "asking the running service to talk to Hermes (may take a minute)"
 
-case "$rc" in
-  # 2 is run-chat.sh refusing an empty prompt, which means it ran as hermes.
-  # That is the success case here: we are testing the permission, not Hermes.
-  2)   say "wrapper ran as hermes and refused the empty prompt, as designed" ;;
-  0)   say "wrapper ran as hermes" ;;
-  127) say "WARNING: sudo works but Hermes is not installed at its expected path."
-       say "         Chat will report that rather than answering. See docs/HERMES_SETUP.md." ;;
-  1)   say "WARNING: sudo refused. The rule may not have taken effect."
-       say "         Check: sudo -n -u mudhorn sudo -n -u hermes -- $WRAPPER" ;;
-  *)   say "WARNING: unexpected exit $rc from the wrapper. Chat may fail."
-       say "         Check: sudo -n -u mudhorn sudo -n -u hermes -- $WRAPPER" ;;
-esac
+password="$(grep -oP '^DASHBOARD_PASSWORD=\K.*' "$ENV_FILE" 2>/dev/null || true)"
+chat_token="$(grep -oP '^DASHBOARD_CHAT_TOKEN=\K.*' "$ENV_FILE" 2>/dev/null || true)"
+jar="$(mktemp)"
+body="$(mktemp)"
+trap 'rm -f "$jar" "$body"' EXIT
+
+if [[ -n "$password" ]]; then
+  curl -sS --max-time 20 -c "$jar" -o /dev/null \
+    -X POST -d "password=$password" http://127.0.0.1:8787/login || true
+fi
+
+code="$(curl -sS --max-time 200 -b "$jar" -o "$body" -w '%{http_code}' \
+  -X POST -H 'content-type: application/json' \
+  -d "{\"token\":\"$chat_token\",\"message\":\"Reply with the single word: READY\"}" \
+  http://127.0.0.1:8787/chat || echo 000)"
+
+if [[ "$code" != "200" ]]; then
+  say "WARNING: POST /chat returned $code rather than 200."
+  say "         Check: journalctl -u mudhorn-web -n 30"
+elif grep -q '"ok": *true' "$body" || grep -q '"ok":true' "$body"; then
+  say "Hermes answered. Chat is working end to end."
+else
+  say "WARNING: the service reached Hermes and got an error back:"
+  sed -n 's/.*"error": *"\([^"]*\)".*/           \1/p' "$body" | head -3
+  say "         Chat will show that message rather than an answer."
+fi
 
 systemctl is-active --quiet mudhorn-web || die "mudhorn-web is not running"
 
