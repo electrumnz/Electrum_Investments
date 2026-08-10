@@ -39,6 +39,35 @@ def test_each_soul_carries_the_sections_the_convention_expects():
             assert heading in text, f"{name}.md is missing {heading}"
 
 
+def test_each_soul_says_how_long_an_answer_should_be():
+    """A voice with no length budget writes an essay, every time.
+
+    The operator reads these replies on a phone between other things, and the
+    failure they reported was not that the agents were wrong — it was that a
+    figure arrived wrapped in three paragraphs of reasoning nobody asked for.
+    Character is in the word choice; length is not character. So each file
+    carries a concrete target rather than an instruction to "be concise",
+    which every model already believes it is following.
+    """
+    for name in ALL:
+        assert "## How long to be" in load_soul(name).text, f"{name}.md sets no length"
+
+
+# The ceiling is generous — every file sits comfortably under it — and it is
+# here to catch REGROWTH rather than to police a rewrite. A soul is a voice; the
+# mechanics of dreaming, conferring and settings live in the system prompts in
+# `dreamer.py`, `confer.py` and `settings_agent.py`, which is where a new rule
+# belongs. A file that has grown past this has started restating one of those,
+# and the fix is to move it back rather than to raise the number.
+SOUL_MAX_WORDS = 1600
+
+
+def test_no_soul_has_grown_back_into_a_manual():
+    for name in ALL:
+        words = len(load_soul(name).text.split())
+        assert words <= SOUL_MAX_WORDS, f"{name}.md is {words} words; it is a manual again"
+
+
 # ------------------------------- the clauses the rest of the system leans on
 
 

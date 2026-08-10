@@ -7,13 +7,24 @@ Three exist:
 
 | File | Agent | Surface | Character |
 | --- | --- | --- | --- |
-| `yoda.md` | The one that answers about the account | `/chat` | Ancient, patient, sparing. Has watched people lose everything by being certain. |
+| `yoda.md` | The one that answers about the account | `/chat` | The operator's trading companion. Teaches rather than reports, and has watched a lot of people be certain. |
 | `grogu.md` | The one that dreams | `/dreaming` | Small, curious, playful. Reaches for connections nobody asked for. |
 | `armorer.md` | The one that argues about the limits | `/settings` | Keeper of the creed. Equips you, and makes you say what it is for first. |
 
 These follow the `SOUL.md` convention Hermes uses, down to the section headings
 (`## Personality`, `## Style`, `## What to avoid`), so they read the way anyone
 who has written one before will expect.
+
+Each also carries a **`## How long to be`** section, which is not part of the
+convention and is the section this repository needed most. A voice with no
+length budget writes an essay: the operator reads these replies on a phone
+between other things, and a figure wrapped in three paragraphs is the failure
+that produced the current wording. The targets are concrete — a couple of
+sentences for a simple question — because "be concise" is an instruction every
+model already believes it is following.
+
+**Character belongs in the word choice, never in the padding**, and never in
+pastiche. The names are a nod. None of these files asks for an impression.
 
 ## Why they are injected per request rather than installed
 
@@ -60,8 +71,10 @@ Alpha Arena competition six frontier models traded real money with confident
 prose and 25 to 30 per cent win rates. Adding charm to that is adding varnish
 to it.
 
-So each soul file carries a **Voice** section and a **Never** section, and the
-Never section wins every time they disagree.
+So each soul file states that rule in its own words at the top, and carries a
+**What to avoid** section that wins every time it disagrees with the voice. The
+same sentence is repeated in `Soul.prompt_prefix`, because these are read from
+disk at call time and could be edited on the box.
 
 ## What a soul is not
 
@@ -86,8 +99,9 @@ Souls are prompt text, so a change to one changes how an agent behaves without
 changing a line of Python. Treat an edit like a config change rather than a
 copy tweak: its own commit, with a reason.
 
-`tests/test_souls.py` checks that both files exist, that each carries the
-required sections, and that the Never section still contains the clauses the
-rest of the system depends on. A soul is loaded at runtime from disk, so a file
+`tests/test_souls.py` checks that all three files exist, that each carries the
+required sections, that none has grown back into a manual, and that the
+What-to-avoid sections still contain the clauses the rest of the system depends
+on. A soul is loaded at runtime from disk, so a file
 that goes missing on the box is a real failure mode; the loader degrades to a
 plain, voiceless prompt rather than refusing to answer, and says so.
