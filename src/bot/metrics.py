@@ -31,6 +31,19 @@ THIN_SAMPLE_THRESHOLD = 20
 WEEKDAY_NAMES = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
 
 
+def _count(n: int, singular: str, plural: str | None = None) -> str:
+    """A count and its noun agreeing: `1 trade`, `3 trades`.
+
+    Deliberately a local four-liner rather than an import. These strings are
+    read by the Analytics page, but this module is pure functions over
+    `list[Trade]` and must not learn about a rendering layer to get a plural
+    right; `render.py` carries its own copy for the same reason `money` in the
+    browser matches `_money` in Python. The rule is that both agree, not that
+    one calls the other.
+    """
+    return f"{n} {singular if n == 1 else (plural or singular + 's')}"
+
+
 @dataclass(frozen=True)
 class PerformanceSummary:
     """Headline performance over a set of closed trades."""
@@ -71,7 +84,7 @@ class PerformanceSummary:
         if self.trade_count == 0:
             return "no closed trades yet"
         if self.profit_factor is None:
-            return f"no losing trades yet across {self.trade_count}"
+            return f"no losing trades yet across {_count(self.trade_count, 'trade')}"
         if self.profit_factor >= 2.0:
             verdict = "strong"
         elif self.profit_factor >= 1.5:
@@ -81,7 +94,10 @@ class PerformanceSummary:
         else:
             verdict = "losing money"
         if self.sample_is_thin:
-            return f"{verdict}, but only {self.trade_count} trades so treat as noise"
+            return (
+                f"{verdict}, but only {_count(self.trade_count, 'trade')} "
+                "so treat as noise"
+            )
         return verdict
 
 

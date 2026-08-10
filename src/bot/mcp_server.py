@@ -24,8 +24,14 @@ from .broker import Broker
 from .config import Env, Rules, load_rules
 from .dreaming import (
     DEFAULT_DREAMS_PATH,
+    Adoption,
+    Dream,
     DreamStore,
+    MoveResult,
+    Vault,
+    VaultTTLs,
 )
+from .grants import resolve_granted_symbols
 from .insight import DEFAULT_DB_PATH as INSIGHT_DB_PATH
 from .insight import InsightIndex, run_query
 from .journal import Journal
@@ -1033,6 +1039,659 @@ def _parse_ts(value: Any) -> datetime | None:
     except ValueError:
         return None
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+
+
+# ------------------------------------------------------------------ the dreams
+#
+# **These tools reach `DreamStore` and nothing else.** No broker, no
+# `OrderProposal`, no call into `place_order`, and no import that could become
+# one. That is the argument `dreaming.py` and `confer.py` are built on, arriving
+# on the tool surface: a `Dream` carries no quantity, no entry, no stop and no
+# side, so nothing turns one into an order without somebody writing new fields
+# and new validation by hand.
+#
+# What adoption buys is a SYMBOL PERMISSION with an expiry on it. Everything
+# that decides whether a considered trade actually happens is untouched —
+# `RiskGate.evaluate` still runs on every order path, the stop is still required
+# and still validated, and the size still follows from it.
+#
+# Two verbs, because the trading agent is the one with a route to the broker and
+# therefore gets the smaller set: `adopt_dream` (vault to adopted) and
+# `return_dream` (adopted back to the vault, with a stated reason). There is
+# deliberately no `move_dream` and no `delete_dream` here. `DreamStore` refuses
+# the trader both anyway; the absence of the tool is the readable half of that
+# guarantee, in the same way `TraderPowers` is.
+
+# How close to lapsing counts as "expiring soon".
+#
+# Ten days, the same notice period as the Tailscale banner and for the same
+# reason: the failure is notice followed by a loss of capability, and the notice
+# period is the only time anything can be done about it. A grant that lapses
+# unannounced leaves a position held under a permission that no longer exists.
+GRANT_WARNING_DAYS = 10.0
+
+# What a caller has to read before concluding anything from an empty list.
+# Written once and attached to every readout here, because the failure it
+# prevents is the one `news_history.has_cycles` and
+# `WatchReport.can_grade_anything` exist for: a shelf that is empty and a store
+# that could not be read produce the same empty list, and only one of them says
+# anything about the dreamer.
+EMPTY_VS_UNREADABLE = (
+    "An empty list means that shelf is empty, which is an ordinary state. It "
+    "means nothing at all unless store_readable is true — if the store could "
+    "not be read, say so rather than reporting a quiet vault."
+)
+
+
+def _store() -> tuple[DreamStore | None, str]:
+    """The dream store, or the reason it could not be opened. Never raises.
+
+    Broad on purpose, exactly like `fetch_market_ticks` and
+    `grants.resolve_granted_symbols`. This is a SQLite open behind an agent
+    turn: the failures are `sqlite3.Error`, a permissions problem, a directory
+    that is not there. Any of them propagating would reach the agent as a tool
+    crash, and an agent handed a crash says "I cannot see the dreams" — which is
+    indistinguishable, in the transcript, from "there are no dreams".
+    """
+    try:
+        return _session.dreams, ""
+    except Exception as exc:
+        return None, f"{type(exc).__name__}: {exc}"
+
+
+def _unreadable(detail: str) -> dict[str, Any]:
+    """The one shape every tool here returns when the store will not open."""
+    return {
+        "store_readable": False,
+        "error": detail,
+        "note": (
+            "The dream store could not be read, so nothing below is known. "
+            "This is NOT an empty vault and must not be reported as one."
+        ),
+    }
+
+
+def _days(then: datetime, now: datetime) -> float:
+    """Days between two moments, to one decimal so an hour stays visible."""
+    return round((now - then).total_seconds() / 86400.0, 1)
+
+
+def _ttls() -> VaultTTLs:
+    """The TTLs from `config/rules.yaml`, never the dataclass defaults.
+
+    The file an operator edits is the file that decides. Reading the defaults
+    here would let this tool and the Settings page disagree about when a dream
+    expires, and the one nobody is reading would be the wrong one.
+    """
+    return _session.rules.dreaming.vault_ttls()
+
+
+def _expiry(dream: Dream, now: datetime, ttls: VaultTTLs) -> dict[str, Any]:
+    """When this dream ages out of the shelf it is on.
+
+    Measured from `vault_entered_at` and never from `created_at`: a dream pulled
+    back out for another pass gets a fresh clock, because the alternative
+    punishes exactly the reworking the arrangement wants to encourage.
+
+    A shelf with no TTL — the archive — reports `None` rather than a number, and
+    `expires_in_days: null` means never, not today.
+    """
+    days = ttls.days_for(dream.vault)
+    if days is None:
+        return {"expires_in_days": None, "expired": False, "ttl_days": None}
+    remaining = days - (now - dream.vault_entered_at).total_seconds() / 86400.0
+    return {
+        "expires_in_days": round(remaining, 1),
+        "expired": remaining <= 0,
+        "ttl_days": days,
+    }
+
+
+def _dream_brief(dream: Dream, now: datetime, ttls: VaultTTLs) -> dict[str, Any]:
+    """One row in a list. Every age it can state, it states.
+
+    `has_conditions` travels beside `all_conditions_met` deliberately: a dream
+    with no conditions is False for the second, and a reader given only that
+    reads "not yet" where the truth is "nothing was ever claimed".
+    """
+    return {
+        "id": dream.id,
+        "title": dream.title,
+        "vault": str(dream.vault),
+        "stage": str(dream.stage),
+        "verdict": str(dream.verdict) if dream.verdict else None,
+        # Arithmetic over the `checked` flags on the chain, never the model's
+        # own opinion of its sourcing.
+        "verification": str(dream.verification),
+        "weakest_hop": dream.weakest_hop,
+        "hops": len(dream.chain),
+        "unchecked_hops": len(dream.unverified_hops),
+        "symbols": list(dream.symbols),
+        "asset_class_key": dream.asset_class_key,
+        "instruments": list(dream.instruments),
+        "has_conditions": dream.has_conditions,
+        "conditions": len(dream.conditions),
+        "conditions_met": dream.conditions_met,
+        "all_conditions_met": dream.all_conditions_met,
+        "wisp": dream.wisp,
+        "created_at": dream.created_at.isoformat(timespec="minutes"),
+        "updated_at": dream.updated_at.isoformat(timespec="minutes"),
+        "age_days": _days(dream.created_at, now),
+        "vault_entered_at": dream.vault_entered_at.isoformat(timespec="minutes"),
+        "days_on_this_shelf": _days(dream.vault_entered_at, now),
+        **_expiry(dream, now, ttls),
+    }
+
+
+def _adoption_row(adoption: Adoption, now: datetime) -> dict[str, Any]:
+    """One grant, with its clock. `live` is arithmetic, never a stored flag."""
+    expires = adoption.expires_at
+    return {
+        "dream_id": adoption.dream_id,
+        "symbols_granted": list(adoption.symbols_granted),
+        "asset_class": adoption.asset_class,
+        "adopted_at": adoption.adopted_at.isoformat(timespec="minutes"),
+        "held_for_days": _days(adoption.adopted_at, now),
+        "expires_at": expires.isoformat(timespec="minutes") if expires else None,
+        "expires_in_days": (
+            round((expires - now).total_seconds() / 86400.0, 1) if expires else None
+        ),
+        "returned_at": (
+            adoption.returned_at.isoformat(timespec="minutes")
+            if adoption.returned_at
+            else None
+        ),
+        "return_reason": adoption.return_reason,
+        "live": adoption.is_live(now),
+    }
+
+
+def _move_payload(result: MoveResult) -> dict[str, Any]:
+    """A `MoveResult` as the agent reads it. A refusal is an answer, not an error.
+
+    Every refusal reason is carried, because `DreamStore` collects them rather
+    than short-circuiting — the same property `RiskGate` has, for the same
+    reason. An agent told one thing wrong with a move fixes it, asks again and
+    is told the second; an agent that has to ask repeatedly is what an
+    unattended surface must not encourage.
+    """
+    return {
+        "ok": result.ok,
+        "dream_id": result.dream_id,
+        "moved_from": str(result.moved_from) if result.moved_from else None,
+        "moved_to": str(result.moved_to) if result.moved_to else None,
+        "refusals": [str(r) for r in result.refusals],
+        "detail": result.detail,
+        "note": (
+            ""
+            if result.ok
+            else (
+                "This was refused by the dream store, which is deterministic "
+                "code. Fix what it names or leave the dream where it is; the "
+                "answer will not change if it is asked again."
+            )
+        ),
+    }
+
+
+@server.tool()
+def list_dreams(vault: str | None = None, limit: int = 20) -> dict[str, Any]:
+    """What is on each dream shelf, newest first, with an age on every row.
+
+    Five shelves. `workbench` is being dreamt about now, `prophecy` is a
+    long-horizon claim with conditions attached, `vault` is the only shelf the
+    trading agent can see and where the two agents talk, `adopted` is what the
+    trading agent has taken, and `archive` is retired.
+
+    **Quote the ages.** A dream offered three months ago and one offered this
+    morning are different facts, and only the second could be described as news.
+    `days_on_this_shelf` is the figure that matters for an offer nobody has
+    answered; `expires_in_days` is how long it has before it ages out.
+
+    A dream is speculative by construction. `verification` is arithmetic over
+    which links in the chain name a source — `unverified` means at least one hop
+    is an assumption — and `weakest_hop` is the sentence that could kill it.
+    Never present a chain as established fact.
+
+    An empty shelf is an ordinary state and says nothing on its own. Check
+    `store_readable` first: an unreadable store produces the same empty lists,
+    and reporting that as a quiet vault is the failure this tool must avoid.
+
+    Args:
+        vault: One of workbench, prophecy, vault, adopted, archive. Omit for
+            every shelf at once.
+        limit: Maximum dreams returned per shelf (default 20).
+    """
+    store, error = _store()
+    if store is None:
+        return _unreadable(error)
+
+    if vault:
+        try:
+            wanted = [Vault(vault.strip().lower())]
+        except ValueError:
+            # A refusal, not an exception. A mistyped shelf name is an ordinary
+            # thing for an agent to do, and the useful answer names the shelves.
+            return {
+                "store_readable": True,
+                "error": f"'{vault}' is not a shelf.",
+                "valid_vaults": [str(v) for v in Vault],
+            }
+    else:
+        wanted = list(Vault)
+
+    now = datetime.now(UTC)
+    ttls = _ttls()
+    counts = store.counts_by_vault()
+    caps = _session.rules.dreaming.vault_caps()
+
+    shelves: dict[str, Any] = {}
+    for shelf in wanted:
+        dreams = store.in_vault(shelf, limit=max(1, limit))
+        cap = caps.limit_for(shelf)
+        shelves[str(shelf)] = {
+            "held": counts.get(shelf, 0),
+            "cap": cap,
+            "full": cap is not None and counts.get(shelf, 0) >= cap,
+            "returned": len(dreams),
+            "dreams": [_dream_brief(d, now, ttls) for d in dreams],
+        }
+
+    return {
+        "store_readable": True,
+        "error": "",
+        "asked_at": now.isoformat(timespec="minutes"),
+        "vault_filter": str(wanted[0]) if vault else "all shelves",
+        # Every shelf is a key even when it is empty, so a zero is a stated fact
+        # rather than a missing one. Same reason `stop_watch` puts a breach
+        # count of zero on every cycle line.
+        "counts_by_vault": {str(v): counts.get(v, 0) for v in Vault},
+        "shelves": shelves,
+        "note": EMPTY_VS_UNREADABLE,
+    }
+
+
+@server.tool()
+def get_dream(dream_id: int) -> dict[str, Any]:
+    """One dream in full: the chain, the conditions, the verdict, the transcript.
+
+    The causal chain is the point of a dream and it comes back hop by hop, each
+    with whether anybody actually checked it and what against. A chain is a
+    hypothesis precisely because every link is a separate claim that can be
+    attacked on its own, so read `unchecked_hops` and `weakest_hop` before
+    repeating any of it and never present an unchecked hop as a fact.
+
+    `messages` is the agent-to-agent transcript, oldest first, because a
+    negotiation read newest-first is a negotiation read backwards. Every turn
+    carries its age: a message from March is not part of a conversation
+    happening now. `adoptions` is every grant this dream has carried, live or
+    handed back.
+
+    A missing dream comes back as `found: false` rather than as an error.
+
+    Args:
+        dream_id: The id from list_dreams.
+    """
+    store, error = _store()
+    if store is None:
+        return _unreadable(error)
+
+    dream = store.get(dream_id)
+    if dream is None:
+        return {
+            "store_readable": True,
+            "found": False,
+            "dream_id": dream_id,
+            "note": (
+                "No dream with that id. It may have been retired by the "
+                "dreamer; call list_dreams for what is actually there."
+            ),
+        }
+
+    now = datetime.now(UTC)
+    return {
+        "store_readable": True,
+        "found": True,
+        **_dream_brief(dream, now, _ttls()),
+        "seed": dream.seed,
+        "origin": dream.origin,
+        "trigger": dream.trigger,
+        "chain": [
+            {"claim": hop.claim, "checked": hop.checked, "source": hop.source}
+            for hop in dream.chain
+        ],
+        "condition_detail": [
+            {
+                "text": c.text,
+                # The checkable half. `null` means the condition is prose only,
+                # which is "cannot be graded" and never "did not hold".
+                "trigger": (t.render() if (t := c.as_trigger()) is not None else None),
+                "is_checkable": c.is_checkable,
+                "fulfilled": c.fulfilled,
+                "fulfilled_at": (
+                    c.fulfilled_at.isoformat(timespec="minutes")
+                    if c.fulfilled_at
+                    else None
+                ),
+                "note": c.note,
+            }
+            for c in dream.conditions
+        ],
+        "thoughts": [
+            {
+                "stage": str(t.stage),
+                "text": t.text,
+                "at": t.at.isoformat(timespec="minutes"),
+                "age_days": _days(t.at, now),
+                "by": t.by,
+            }
+            for t in dream.thoughts
+        ],
+        "messages": [
+            {
+                "speaker": m.speaker,
+                "kind": m.kind,
+                "text": m.text,
+                "at": m.at.isoformat(timespec="minutes"),
+                "age_days": _days(m.at, now),
+            }
+            for m in store.messages(dream_id)
+        ],
+        "adoptions": [_adoption_row(a, now) for a in store.adoptions(dream_id)],
+        "note": (
+            "The chain is speculative by construction. Quote the verification "
+            "badge and the weakest hop alongside it, and quote the ages."
+        ),
+    }
+
+
+@server.tool()
+def dream_vault_status() -> dict[str, Any]:
+    """The shelves against their caps, the live grants, and what lapses soon.
+
+    Three questions, answered apart because they fail apart:
+
+    - **What is held**, per shelf, against the cap in config/rules.yaml. A full
+      shelf refuses a move and says so. The cap is a working constraint about
+      what a person can hold in their head, not a risk rule — except `adopted`,
+      which matches max_concurrent_positions so that an adoption the account has
+      no slot to trade cannot be promised.
+    - **What is permitted right now.** `symbols_in_force` is what the risk gate
+      will actually honour and it is a SUBSET of what the adoptions claim: a
+      grant naming an instrument class that is disabled in config/rules.yaml
+      grants nothing, and a symbol already on the allowed list is not a grant
+      at all because it was permitted anyway. `symbols_claimed_by_adoptions` is
+      the raw store answer, and the gap between the two is the rules doing their
+      job rather than an error.
+    - **What is about to lapse**, with the days remaining. Expiry withdraws the
+      right to OPEN a position in a granted symbol and never closes anything: a
+      position held under a lapsed grant stands and is still the operator's to
+      manage.
+
+    An empty `symbols_in_force` is the normal state and means the account is
+    trading exactly what config/rules.yaml already allows. An unreadable store
+    is reported as `store_readable: false` and must not be summarised as a
+    quiet vault.
+    """
+    store, error = _store()
+    if store is None:
+        return _unreadable(error)
+
+    now = datetime.now(UTC)
+    rules = _session.rules
+    ttls = _ttls()
+    caps = rules.dreaming.vault_caps()
+    counts = store.counts_by_vault()
+
+    live = [a for a in store.adoptions() if a.is_live(now)]
+    claimed = store.granted_symbols(now)
+    in_force = resolve_granted_symbols(store, rules, now=now)
+
+    expiring = [
+        _adoption_row(a, now)
+        for a in live
+        if a.expires_at is not None
+        and (a.expires_at - now).total_seconds() / 86400.0 <= GRANT_WARNING_DAYS
+    ]
+
+    # Already past their shelf's TTL. `DreamStore.expired` is a pure read — it
+    # marks nothing and deletes nothing — so this is a report, and
+    # `electrum-bot vault-expire` is what acts on it.
+    expired = store.expired(now, ttls)
+
+    return {
+        "store_readable": True,
+        "asked_at": now.isoformat(timespec="minutes"),
+        "shelves": {
+            str(v): {
+                "held": counts.get(v, 0),
+                "cap": caps.limit_for(v),
+                "ttl_days": ttls.days_for(v),
+                "full": (
+                    caps.limit_for(v) is not None
+                    and counts.get(v, 0) >= (caps.limit_for(v) or 0)
+                ),
+            }
+            for v in Vault
+        },
+        "grants_enabled": rules.dreaming.allow_symbol_grants,
+        "max_granted_symbols": rules.dreaming.max_granted_symbols,
+        "live_adoptions": [_adoption_row(a, now) for a in live],
+        "symbols_in_force": dict(sorted(in_force.items())),
+        "symbols_claimed_by_adoptions": dict(sorted(claimed.items())),
+        "expiring_within_days": GRANT_WARNING_DAYS,
+        "grants_expiring_soon": expiring,
+        "dreams_past_their_ttl": [
+            {
+                "id": d.id,
+                "title": d.title,
+                "vault": str(d.vault),
+                "days_on_this_shelf": _days(d.vault_entered_at, now),
+            }
+            for d in expired
+        ],
+        "note": (
+            "A permission is not an order. An adopted dream widens which "
+            "symbols may be CONSIDERED; risk, concentration, session, "
+            "concurrency and cooldown all still apply under that symbol's own "
+            "class limits, and every order still goes through place_order. "
+            + EMPTY_VS_UNREADABLE
+        ),
+    }
+
+
+@server.tool()
+def adopt_dream(
+    dream_id: int, symbols: list[str] | None = None, asset_class: str = ""
+) -> dict[str, Any]:
+    """Take a dream out of the vault, granting its symbols until the grant lapses.
+
+    **This is a permission, not a trade.** It adds the named symbols to what may
+    be considered, for as long as the adoption is live, under the existing
+    limits of an already-enabled instrument class. It cannot enable a class,
+    cannot raise a cap and cannot skip a gate. Nothing is bought, nothing is
+    sized and no position is opened — that is check_order and place_order,
+    exactly as for any other symbol.
+
+    Refused, with every reason at once, when the dream is not in the vault (the
+    only shelf visible from here), when it names no symbols, when its instrument
+    class is unresolved, or when the adopted shelf is full. A full shelf is an
+    ordinary answer: the cap matches max_concurrent_positions, so a fourth
+    adoption would be a promise the account has no slot to keep. A refusal comes
+    back as `ok: false` with its reasons — it is not an error, and asking again
+    will not change it.
+
+    The grant is time-boxed. Report `expires_at` and `expires_in_days` when
+    describing what was taken, because a permission with no stated end is one
+    nobody revisits.
+
+    Args:
+        dream_id: The id from list_dreams.
+        symbols: Override the symbols to grant. Omit to take the dream's own
+            claim, which is the offer as the dreamer made it.
+        asset_class: The instruments key from config/rules.yaml — "us_equity",
+            "crypto". Omit to take the dream's own. An unresolved class grants
+            nothing, because a symbol whose class is unknown is a symbol whose
+            risk limits are unknown.
+    """
+    store, error = _store()
+    if store is None:
+        return _unreadable(error)
+
+    now = datetime.now(UTC)
+    result = store.adopt(
+        dream_id,
+        symbols=list(symbols) if symbols else None,
+        asset_class=asset_class,
+        at=now,
+        # From the rules file rather than the dataclass defaults, so the cap and
+        # the clock an operator can read are the ones actually applied.
+        caps=_session.rules.dreaming.vault_caps(),
+        ttl_days=_session.rules.dreaming.ttl_days.adopted,
+    )
+
+    payload = _move_payload(result)
+    payload["store_readable"] = True
+    if result.ok:
+        grants = [a for a in store.adoptions(dream_id) if a.is_live(now)]
+        payload["grant"] = _adoption_row(grants[0], now) if grants else None
+        payload["symbols_in_force"] = dict(
+            sorted(resolve_granted_symbols(store, _session.rules, now=now).items())
+        )
+        payload["note"] = (
+            "The grant expires on the date above. A symbol whose grant has "
+            "lapsed is refused like any other unlisted symbol, and expiry never "
+            "closes a position that is already open. If symbols_in_force does "
+            "not contain what was just granted, the rules did not honour it — "
+            "most often because its instrument class is disabled."
+        )
+    # Recorded for the same reason `mcp_place_order` is: a permission that
+    # leaves no trace is a permission nobody can audit afterwards, and a
+    # refusal is as worth having on the record as a grant.
+    _session.audit.record_event(
+        "mcp_adopt_dream",
+        {
+            "dream_id": dream_id,
+            "ok": result.ok,
+            "refusals": [str(r) for r in result.refusals],
+            "symbols": list(symbols) if symbols else None,
+            "asset_class": asset_class,
+        },
+    )
+    return payload
+
+
+@server.tool()
+def return_dream(dream_id: int, reason: str) -> dict[str, Any]:
+    """Hand an adopted dream back to the vault, saying why. Withdraws the grant.
+
+    The reason is required and a blank one is refused by the store. It does not
+    have to be a good reason — nothing here judges it — but a return with no
+    record is an argument reversed silently, and the record is most of what the
+    dream vault is for. It is written into the transcript as a `return` turn,
+    where the dreamer can read it.
+
+    The symbol permission ends immediately. Any position already open in a
+    returned symbol stands: closing is deliberately outside this path and
+    nothing here will close one.
+
+    Args:
+        dream_id: The id from list_dreams.
+        reason: Why it is going back. One sentence is enough.
+    """
+    store, error = _store()
+    if store is None:
+        return _unreadable(error)
+
+    result = store.return_to_vault(dream_id, reason=reason)
+    payload = _move_payload(result)
+    payload["store_readable"] = True
+    if result.ok:
+        payload["note"] = (
+            "The grant is withdrawn as of now. A position still open in one of "
+            "its symbols is untouched and remains yours to manage; there are "
+            "simply no new entries permitted in it."
+        )
+    _session.audit.record_event(
+        "mcp_return_dream",
+        {"dream_id": dream_id, "ok": result.ok, "reason": reason},
+    )
+    return payload
+
+
+@server.tool()
+def post_dream_message(
+    dream_id: int, speaker: str, text: str, kind: str = "note"
+) -> dict[str, Any]:
+    """Record one turn of the conversation about a dream. Append-only.
+
+    The transcript is most of why the dream vault is worth having: the
+    interesting part of a negotiation is the point where somebody changed their
+    mind, and a store keeping only the current position would throw exactly that
+    away. Use this when a chat turn settles something — a question put to the
+    dreamer, the answer, the reasoning behind taking a dream or leaving it.
+
+    Nothing is overwritten and nothing can be edited afterwards, so write the
+    turn as it was said.
+
+    Args:
+        dream_id: The id from list_dreams. A message on a dream that does not
+            exist is refused, because it could never be read back.
+        speaker: Who is speaking — conventionally "trader", "dreamer" or
+            "operator". Recorded verbatim: it is a claim about who spoke rather
+            than a verified identity, so do not sign a turn as somebody else.
+        text: The turn itself. Long prose is trimmed rather than rejected; an
+            empty turn is refused, because a blank line in a transcript is
+            indistinguishable from a bug.
+        kind: question, answer, offer, accept, return or note (default note).
+            offer, accept and return are written by the store itself when an
+            adoption starts or ends, so prefer question, answer or note here.
+    """
+    store, error = _store()
+    if store is None:
+        return _unreadable(error)
+
+    if not text.strip():
+        return {
+            "store_readable": True,
+            "posted": False,
+            "dream_id": dream_id,
+            "error": "An empty message is not a turn. Say something, or say nothing.",
+        }
+
+    # Checked here rather than left to the store, which has no foreign key and
+    # would happily write a message hanging off an id that does not exist — a
+    # turn nobody can read back, on a conversation that never happened.
+    if store.get(dream_id) is None:
+        return {
+            "store_readable": True,
+            "posted": False,
+            "dream_id": dream_id,
+            "error": (
+                f"No dream with id {dream_id}, so there is nothing to say it "
+                "about. Call list_dreams for what is there."
+            ),
+        }
+
+    message = store.add_message(
+        dream_id,
+        speaker=speaker.strip() or "unknown",
+        text=text,
+        kind=kind.strip() or "note",
+    )
+    return {
+        "store_readable": True,
+        "posted": True,
+        "dream_id": dream_id,
+        "message_id": message.id,
+        "speaker": message.speaker,
+        "kind": message.kind,
+        "text": message.text,
+        "at": message.at.isoformat(timespec="minutes"),
+        # Prose trims rather than being rejected, so a caller is told when the
+        # stored turn is not the turn it sent.
+        "truncated": message.text != text.strip(),
+    }
 
 
 @server.tool()
