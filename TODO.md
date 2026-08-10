@@ -1047,7 +1047,7 @@ move rather than reconstructing it afterwards.
 
 ---
 
-## 17. A settings agent
+## 17. A settings agent — BUILT. The Armorer.
 
 The only route to changing `config/rules.yaml` from the interface. Deliberately
 conservative, stubborn, and **asymmetric**: it makes the operator argue for a
@@ -1057,8 +1057,68 @@ limit getting looser and encourages one getting tighter.
 limit validator was removed — a hard refusal at config load is the same intent
 implemented as a wall, at the moment it helps least.
 
-Settings has no edit control today and `tests/test_web.py` enforces that, so
-this is a deliberate change to that rule rather than an addition beside it.
+Settings had no edit control and `tests/test_web.py` enforced that. **That
+assertion has now been widened three times, deliberately, by editing it rather
+than deleting it** — `<select>` picks which limit, `<input>` and `<textarea>`
+carry the value and the reason, and two `<button>`s ask and confirm.
+
+`src/bot/settings_agent.py` holds a 30-entry `LimitFact` table answering four
+separate questions per limit — what it is, why it sits there, the goal it
+serves, and what loosening costs. Four rather than one paragraph, because
+collapsing them is how "it is for safety" ends up being the whole justification
+for a number.
+
+### The design I got wrong, and the operator's correction
+
+I built it to **record** a change request for a human to apply at a shell, and
+argued that was the safe shape because `config/` is root-owned so the service
+account cannot edit its own limits.
+
+The operator's answer: *"Settings agent can't edit settings?? That's broken.
+That's what setting agent is for, to give Josh an educated experience into why
+settings are important. The armorer can access and change trading settings."*
+
+That is right and my version was a gate wearing an agent's clothes. The whole
+argument for this character is that a wall teaches nothing; producing a chore
+for the operator to run by hand is the same wall with an extra step. It applies
+now, through a root-owned wrapper with the request id on stdin, so `config/`
+stays root-owned and the asymmetry survives.
+
+**The asymmetry is what must not be simplified away.** Tightening is recorded
+as asked. Loosening states the arithmetic and waits for a second, explicit
+agreement after it has been read.
+
+### The forge window — the before/after, which was the missing half
+
+*"Maybe armourer needs a before and after window, lists old and new settings,
+confirms before applying, make it look cool though, tie deep into that armourer
+theme."*
+
+`src/bot/web/forge_window.py`. Beskar on the anvil: **as it stands** on the
+left, **as it would be** on the right, glowing amber for a loosening and patina
+for a tightening, with what it costs, the Armorer's objection and the cut in the
+file underneath.
+
+Both values on screen at once, because "raise it to 2.0" is a number with
+nothing to compare it against and `1.0 → 2.0` is a change. The old side is **the
+exact text on the line**, never a re-rendering of the parsed number — `90000`
+and `90000.0` are one limit and two different diffs.
+
+Six of its nine tests are mistakes made elsewhere in this repository arriving in
+a new file: the backslash-in-a-Python-string CSS trap, the two-class
+declaration-order trap, `body.focus()` being a silent no-op, `innerHTML` on
+client-built nodes, and a dismissed dialog that rejects instead of resolving.
+
+Two that are worth stating as rules rather than as tests:
+
+- **`prefers-reduced-motion` switches the animation off and never the window.**
+  Fewer moving pixels is not a request to be denied the only route to agreeing
+  to a change. Same reading the Cmd+K console got right; the starfield gets to
+  ignore it because it is decoration and this is a control.
+- **The caller keeps its inline fallback.** The window is reached through
+  `window.MUDHORN_FORGE`, so a failed load costs a nicer confirmation and never
+  the ability to confirm. Same principle as the console falling back to an
+  ordinary navigation when the projection layer did not build.
 
 ---
 
@@ -1091,6 +1151,53 @@ this is a deliberate change to that rule rather than an addition beside it.
   machinery.
 - **Vercel AI Gateway.** `https://ai-gateway.vercel.sh` speaks the Anthropic
   Messages API, so it is a base-URL swap rather than a rewrite.
+
+---
+
+## 19. The copy is sterile, and that is a product fault rather than a polish one
+
+*"The copy on dream page and other pages is weak! Super sterile and logical, the
+agent is doing the work the user doesn't need to read an essay."*
+
+Correct, and the cause is identifiable rather than a matter of taste. Every
+lesson in `CLAUDE.md` about not overclaiming got applied to the *page copy* as
+well as to the figures, and the result is prose that hedges a claim nobody was
+going to doubt. A card that says "this is derived from the audit log and is not
+authoritative" three times has spent its whole word budget on a disclaimer.
+
+**The rule that actually applies is narrower than the one being followed.** A
+FIGURE may never be stated more confidently than it was measured. A SENTENCE
+introducing a panel is not a figure, and writing it like one produces a
+dashboard that reads as though it is apologising.
+
+So the pass is: keep every caveat that qualifies a number, delete every one that
+qualifies a heading, and let the three souls' voices reach the pages they own —
+the deck currently sounds like none of them.
+
+**What must not be lost while doing it.** These are load-bearing sentences and
+each is a bug that reached a user once:
+
+- "read time unknown" rather than a default of now
+- a cold start saying unknown rather than zero
+- `has_cycles` / `can_grade_anything` / first-visit reported apart from empty
+- the Dreaming isolation banner's exact wording, which was an overclaim once and
+  is pinned by two tests
+- the Settings card that must not guess WHY the calendar is empty
+
+### Also outstanding on the interface
+
+- **Mobile scroll.** *"Scroll is a bit sucky on mobile in some places."* The
+  `.scroll::after` phantom-overflow fix landed; this is a separate report and
+  needs driving on a real narrow viewport rather than reasoning about.
+- **The fusion card.** Symbiosis has a backend; what the operator asked for is
+  the moment two dreams become one thing — *"like a cartoon where two creatures
+  would combine into a special creature"* — with the **animation paused until
+  next viewed** while the joining happens in the backend regardless. That
+  pairing is the interesting constraint: the state change must not wait on
+  somebody looking at it, and the reveal must not be missed because nobody was.
+- **The vault surfaces.** Prophecy vault with Grogu and the crystal ball, the
+  dream vault, the adopted shelf, the A2A transcript, the wisp left behind on
+  adoption, and the orb treatment on a trade that came from a dream.
 
 ---
 
