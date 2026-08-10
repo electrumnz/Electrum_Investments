@@ -19,7 +19,10 @@ from bot.dreaming import (
     DREAMER,
     FUSION,
     OPERATOR,
+    TEXT_MAX_CHARS,
     TRADER,
+    ConferenceDecision,
+    ConferenceVerdict,
     Dream,
     DreamCondition,
     DreamStage,
@@ -28,6 +31,7 @@ from bot.dreaming import (
     DreamVerdict,
     Hop,
     MoveRefusal,
+    NoDecision,
     Vault,
     VaultCaps,
     VaultTTLs,
@@ -517,7 +521,7 @@ def test_a_migrated_database_ends_up_identical_to_a_fresh_one(tmp_path):
         finally:
             conn.close()
 
-    for table in ("dreams", "dream_messages", "adoptions"):
+    for table in ("dreams", "dream_messages", "adoptions", "conference_decisions"):
         assert columns(old, table) == columns(tmp_path / "fresh.db", table), table
 
 
@@ -3081,3 +3085,452 @@ def test_the_hop_pin_needed_no_column_of_its_own(tmp_path):
 
     assert "conditions" in columns
     assert not [c for c in columns if "settles" in c]
+
+
+# ============================================ the conference decision record
+#
+# `dream_messages` is what was SAID. `conference_decisions` is what was DECIDED,
+# and it exists because the second used to have to be reconstructed out of the
+# first plus a scattering of side effects. `tests/test_confer.py` covers which
+# verdict each ending produces; this section is about the store keeping it.
+
+
+# `confer.CONFERENCE`, written out rather than imported. `decided_by` is a plain
+# string here for the reason `DreamMessage.speaker` is one, and this file is
+# about the store keeping a row rather than about the module that fills it.
+CONFERENCE = "conference"
+
+
+def _decision(**overrides) -> ConferenceDecision:
+    base = {
+        "dream_id": 1,
+        "verdict": ConferenceVerdict.DECLINE,
+        "decided_by": TRADER,
+        "at": datetime(2026, 6, 1, 9, 0, tzinfo=UTC),
+        "reason": "hop 2 is unchecked and it is the whole chain",
+    }
+    return ConferenceDecision(**{**base, **overrides})
+
+
+def test_a_verdict_round_trips_whole(tmp_path):
+    store = DreamStore(tmp_path / "dreams.db")
+
+    written = store.record_conference_decision(_decision(turns=4))
+
+    assert written.id is not None
+    read = store.conference_decisions(1)
+    assert len(read) == 1
+    assert read[0] == written
+
+
+def test_a_deferrals_wake_condition_survives_the_round_trip(tmp_path):
+    """The checkable half is the point of it. A deferral whose threshold did not
+    come back would be a deferral with nothing to wake it, one storage layer
+    later."""
+    store = DreamStore(tmp_path / "dreams.db")
+    wake = DreamCondition(
+        text="SPY closing above 620",
+        symbol="SPY",
+        field=TriggerField.CLOSE,
+        op=TriggerOp.ABOVE,
+        value=620.0,
+    )
+
+    store.record_conference_decision(
+        _decision(verdict=ConferenceVerdict.DEFER, wake=wake)
+    )
+
+    read = store.conference_decisions(1)[0]
+    assert read.wake == wake
+    assert read.wake is not None and read.wake.is_gradeable
+
+
+def test_a_deferral_with_nothing_to_wake_it_is_REFUSED(tmp_path):
+    """**A rule that rejects.**
+
+    A stored verdict is precisely the thing a renderer stops questioning, so a
+    half-written one is worse than the reconstruction it replaced. A deferral
+    that names nothing is not a deferral, and prose with no threshold is the
+    same gap wearing a sentence.
+    """
+    store = DreamStore(tmp_path / "dreams.db")
+
+    with pytest.raises(ValueError, match="checkable wake condition"):
+        store.record_conference_decision(_decision(verdict=ConferenceVerdict.DEFER))
+
+    with pytest.raises(ValueError, match="checkable wake condition"):
+        store.record_conference_decision(
+            _decision(
+                verdict=ConferenceVerdict.DEFER,
+                wake=DreamCondition(text="when the spread normalises"),
+            )
+        )
+
+    # A threshold with no symbol is a comparison with no subject: `is_gradeable`
+    # is stricter than `is_checkable` and this is the case it exists for.
+    with pytest.raises(ValueError, match="checkable wake condition"):
+        store.record_conference_decision(
+            _decision(
+                verdict=ConferenceVerdict.DEFER,
+                wake=DreamCondition(
+                    text="a close above 620",
+                    field=TriggerField.CLOSE,
+                    op=TriggerOp.ABOVE,
+                    value=620.0,
+                ),
+            )
+        )
+
+    assert store.conference_decisions(1) == []
+
+
+def test_a_no_decision_with_no_stated_cause_is_REFUSED(tmp_path):
+    """The absence of a decision is its own state, and it has to say which way
+    it happened. A turn cap, a failed call and an unconditioned deferral are
+    three different facts about the two agents."""
+    store = DreamStore(tmp_path / "dreams.db")
+
+    with pytest.raises(ValueError, match="stated cause"):
+        store.record_conference_decision(
+            _decision(verdict=ConferenceVerdict.NO_DECISION, decided_by=CONFERENCE)
+        )
+
+    assert store.conference_decisions(1) == []
+
+
+def test_no_decision_is_never_a_decision(tmp_path):
+    """`decided` is what a renderer reads to know whether anybody settled
+    anything, and the four real verdicts are the ones that answer yes."""
+    settled = [
+        ConferenceVerdict.PROMOTE,
+        ConferenceVerdict.DECLINE,
+        ConferenceVerdict.ARCHIVE,
+    ]
+    for verdict in settled:
+        assert _decision(verdict=verdict).decided
+
+    undecided = _decision(
+        verdict=ConferenceVerdict.NO_DECISION,
+        decided_by=CONFERENCE,
+        undecided=NoDecision.TURNS_EXHAUSTED,
+    )
+    assert not undecided.decided
+
+
+def test_the_verdicts_are_the_operators_three_plus_decline_plus_no_decision():
+    """Five, and none may be folded into another.
+
+    A decline is a judgement on the merits with no wake condition, so it is not
+    a deferral; it is emphatically not an archive either. And nobody deciding is
+    its own state rather than the mildest real decision.
+    """
+    assert {str(v) for v in ConferenceVerdict} == {
+        "promote",
+        "defer",
+        "decline",
+        "archive",
+        "no_decision",
+    }
+
+
+def test_the_latest_verdict_is_the_latest(tmp_path):
+    store = DreamStore(tmp_path / "dreams.db")
+    first = datetime(2026, 6, 1, 9, 0, tzinfo=UTC)
+
+    store.record_conference_decision(_decision(at=first, reason="first"))
+    store.record_conference_decision(
+        _decision(at=first + timedelta(days=1), reason="second")
+    )
+
+    latest = store.latest_conference_decision(1)
+    assert latest is not None and latest.reason == "second"
+    # And the feed is newest-first, unlike the transcript. A transcript read
+    # backwards is a negotiation read backwards; a feed of outcomes is asked
+    # what happened most recently.
+    assert [d.reason for d in store.conference_decisions(1)] == ["second", "first"]
+
+
+def test_a_dream_never_conferred_is_a_third_state_and_not_the_mildest_verdict(
+    tmp_path,
+):
+    """`None` means the two of them have never reached this dream. A caller that
+    rendered it as a no-decision would report a conversation that never happened
+    as one that happened and settled nothing — the same rule as a first visit in
+    `seen.py`."""
+    store = DreamStore(tmp_path / "dreams.db")
+
+    assert store.latest_conference_decision(1) is None
+    assert store.conference_decisions(1) == []
+
+
+def test_verdicts_are_kept_per_dream(tmp_path):
+    store = DreamStore(tmp_path / "dreams.db")
+
+    store.record_conference_decision(_decision(dream_id=1, reason="about one"))
+    store.record_conference_decision(_decision(dream_id=2, reason="about two"))
+
+    assert [d.reason for d in store.conference_decisions(1)] == ["about one"]
+    assert len(store.conference_decisions()) == 2
+
+
+def test_a_verdict_word_this_version_cannot_read_is_skipped_and_never_coerced(
+    tmp_path,
+):
+    """Forgiving on read like every other row here — and note what is NOT done.
+
+    Nothing defaults to `NO_DECISION` and no unknown word is mapped to the
+    nearest known one. A verdict nobody can read rendered as "they settled
+    nothing" is a plausible wrong statement about what two agents did, which is
+    the coercion trap `str()` on an SDK enum already sprang once on the order
+    status.
+    """
+    path = tmp_path / "dreams.db"
+    store = DreamStore(path)
+    store.record_conference_decision(_decision(reason="readable"))
+
+    conn = sqlite3.connect(path)
+    conn.execute(
+        "INSERT INTO conference_decisions (dream_id, at, verdict, decided_by,"
+        " reason, effected, effect_detail, undecided, turns)"
+        " VALUES (1, '2026-06-02T09:00:00+00:00', 'escalate', 'trader', 'x',"
+        " NULL, '', '', 2)"
+    )
+    conn.commit()
+    conn.close()
+
+    read = store.conference_decisions(1)
+
+    assert [d.reason for d in read] == ["readable"]
+
+
+def test_a_stored_deferral_whose_wake_condition_is_gone_is_skipped_on_read(tmp_path):
+    """The same guard on the way out as on the way in.
+
+    A row written by hand, or by a version that allowed it, would otherwise
+    render as a deferral with nothing to wake it — which is exactly the shape
+    this record exists to make impossible.
+    """
+    path = tmp_path / "dreams.db"
+    store = DreamStore(path)
+
+    conn = sqlite3.connect(path)
+    conn.execute(
+        "INSERT INTO conference_decisions (dream_id, at, verdict, decided_by,"
+        " reason, wake, effected, effect_detail, undecided, turns)"
+        " VALUES (1, '2026-06-02T09:00:00+00:00', 'defer', 'trader', 'x', NULL,"
+        " NULL, '', '', 2)"
+    )
+    conn.commit()
+    conn.close()
+
+    assert store.conference_decisions(1) == []
+
+
+def test_effected_keeps_its_three_answers_through_the_store(tmp_path):
+    """`None` is "this verdict asks nothing of any shelf" and is not `False`.
+
+    Stored as a nullable INTEGER for that reason. A column defaulting to 0 would
+    turn every decline into a decision the store had refused.
+    """
+    store = DreamStore(tmp_path / "dreams.db")
+    at = datetime(2026, 6, 1, 9, 0, tzinfo=UTC)
+
+    store.record_conference_decision(
+        _decision(dream_id=1, at=at, verdict=ConferenceVerdict.PROMOTE, effected=True)
+    )
+    store.record_conference_decision(
+        _decision(
+            dream_id=2,
+            at=at,
+            verdict=ConferenceVerdict.PROMOTE,
+            effected=False,
+            effect_detail="the adopted shelf is full",
+        )
+    )
+    store.record_conference_decision(_decision(dream_id=3, at=at))
+
+    assert store.conference_decisions(1)[0].effected is True
+    assert store.conference_decisions(2)[0].effected is False
+    assert store.conference_decisions(3)[0].effected is None
+
+
+def test_a_verdicts_prose_is_trimmed_rather_than_rejected(tmp_path):
+    """The `TEXT_MAX_CHARS` rule, in a new place. Nothing downstream parses a
+    reason, so losing the tail of a sentence costs a reader some context where a
+    rejected write would cost the whole verdict."""
+    store = DreamStore(tmp_path / "dreams.db")
+
+    store.record_conference_decision(_decision(reason="x" * (TEXT_MAX_CHARS + 400)))
+
+    stored = store.conference_decisions(1)[0]
+    assert len(stored.reason) <= TEXT_MAX_CHARS + 1
+
+
+# ------------------------------------------------- the migration, fourth time
+#
+# `conference_decisions` is a whole TABLE rather than a column, and that is the
+# one case `CREATE TABLE IF NOT EXISTS` genuinely handles: the statement is a
+# no-op on a table that exists and creates one that does not, on the droplet as
+# much as in a `tmp_path`. "It needed no ALTER" is still a claim, so it is
+# checked here rather than remembered — starting, as every migration test in
+# this file does, from a database built without it.
+
+PRE_DECISION_SCHEMA = """
+CREATE TABLE IF NOT EXISTS dreams (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  title        TEXT NOT NULL,
+  seed         TEXT NOT NULL,
+  stage        TEXT NOT NULL,
+  verdict      TEXT,
+  weakest_hop  TEXT NOT NULL DEFAULT '',
+  trigger_note TEXT NOT NULL DEFAULT '',
+  origin       TEXT NOT NULL DEFAULT '',
+  chain        TEXT NOT NULL DEFAULT '[]',
+  thoughts     TEXT NOT NULL DEFAULT '[]',
+  instruments  TEXT NOT NULL DEFAULT '[]',
+  created_at   TEXT NOT NULL,
+  updated_at   TEXT NOT NULL,
+  vault           TEXT NOT NULL DEFAULT 'workbench',
+  vault_entered_at TEXT NOT NULL DEFAULT '',
+  conditions      TEXT NOT NULL DEFAULT '[]',
+  symbols         TEXT NOT NULL DEFAULT '[]',
+  asset_class_key TEXT NOT NULL DEFAULT '',
+  wisp            TEXT NOT NULL DEFAULT '',
+  parents              TEXT NOT NULL DEFAULT '[]',
+  shared_hops          TEXT NOT NULL DEFAULT '[]',
+  verification_ceiling TEXT NOT NULL DEFAULT '',
+  weakest_hop_index    INTEGER
+);
+CREATE TABLE IF NOT EXISTS dream_messages (
+  id       INTEGER PRIMARY KEY AUTOINCREMENT,
+  dream_id INTEGER NOT NULL,
+  at       TEXT NOT NULL,
+  speaker  TEXT NOT NULL,
+  kind     TEXT NOT NULL DEFAULT 'note',
+  text     TEXT NOT NULL DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS adoptions (
+  id              INTEGER PRIMARY KEY AUTOINCREMENT,
+  dream_id        INTEGER NOT NULL,
+  adopted_at      TEXT NOT NULL,
+  symbols_granted TEXT NOT NULL DEFAULT '[]',
+  asset_class     TEXT NOT NULL DEFAULT '',
+  returned_at     TEXT,
+  return_reason   TEXT NOT NULL DEFAULT '',
+  expires_at      TEXT
+);
+"""
+
+
+def _pre_decision_store_with_a_row(path: Path) -> None:
+    """A dream and a conversation, written before any verdict was recorded."""
+    conn = sqlite3.connect(path)
+    conn.executescript(PRE_DECISION_SCHEMA)
+    conn.execute(
+        "INSERT INTO dreams (title, seed, stage, verdict, weakest_hop,"
+        " trigger_note, origin, chain, thoughts, instruments, created_at,"
+        " updated_at, vault, vault_entered_at, conditions, symbols,"
+        " asset_class_key, wisp, parents, shared_hops, verification_ceiling,"
+        " weakest_hop_index)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (
+            "Drought and hydro",
+            "the reservoir is at a decade low",
+            "verdict",
+            "keep",
+            "whether the smelter can actually curtail",
+            "the spot auction print",
+            "a headline about rainfall",
+            json.dumps([{"claim": "the reservoir is low", "checked": True,
+                         "source": "the operator's own gauge"}]),
+            json.dumps([{"stage": "verdict", "text": "it holds",
+                         "at": "2026-07-01T09:00:00+00:00", "by": ""}]),
+            json.dumps(["hydro"]),
+            "2026-06-01T09:00:00+00:00",
+            "2026-07-01T09:00:00+00:00",
+            "vault",
+            "2026-07-01T09:00:00+00:00",
+            json.dumps([{"text": "SPY clears 600", "symbol": "SPY",
+                         "field": "close", "op": "above", "value": 600.0,
+                         "fulfilled": True,
+                         "fulfilled_at": "2026-07-02T09:00:00+00:00"}]),
+            json.dumps(["SPY"]),
+            "us_equity",
+            "",
+            "[]",
+            "[]",
+            "",
+            1,
+        ),
+    )
+    conn.execute(
+        "INSERT INTO dream_messages (dream_id, at, speaker, kind, text)"
+        " VALUES (1, '2026-07-03T09:00:00+00:00', 'dreamer', 'offer', 'here it is')"
+    )
+    conn.commit()
+    conn.close()
+
+
+def test_a_database_that_predates_the_decision_record_gains_the_table_in_place(
+    tmp_path,
+):
+    """Every existing row survives, and the new table is usable rather than
+    merely present.
+
+    The suite is structurally blind to a missing schema change — every other
+    test in this file builds its store from scratch and therefore always gets
+    the new shape — which is why this one starts from the shape the droplet is
+    actually running.
+    """
+    path = tmp_path / "dreams.db"
+    _pre_decision_store_with_a_row(path)
+
+    store = DreamStore(path)
+
+    dreams = store.recent()
+    assert len(dreams) == 1
+    assert dreams[0].title == "Drought and hydro"
+    assert dreams[0].vault is Vault.VAULT
+    assert [c.text for c in dreams[0].conditions] == ["SPY clears 600"]
+    assert [m.text for m in store.messages(1)] == ["here it is"]
+
+    # Nothing has been decided about it, and that is the honest answer for a
+    # database written before verdicts were recorded — never a manufactured one.
+    assert store.latest_conference_decision(1) is None
+
+    written = store.record_conference_decision(
+        _decision(reason="not while hop 2 is an assumption")
+    )
+    assert store.conference_decisions(1) == [written]
+
+
+def test_the_decision_table_migration_ends_up_identical_to_a_fresh_database(tmp_path):
+    old = tmp_path / "old.db"
+    _pre_decision_store_with_a_row(old)
+    DreamStore(old)
+    DreamStore(tmp_path / "fresh.db")
+
+    def columns(path: Path, table: str) -> list[str]:
+        conn = sqlite3.connect(path)
+        try:
+            return [str(row[1]) for row in conn.execute(f"PRAGMA table_info({table})")]
+        finally:
+            conn.close()
+
+    assert columns(old, "conference_decisions") == columns(
+        tmp_path / "fresh.db", "conference_decisions"
+    )
+    assert columns(old, "conference_decisions")
+
+
+def test_opening_a_migrated_store_twice_keeps_the_verdicts(tmp_path):
+    """`CREATE TABLE IF NOT EXISTS` runs on every open, so it must be a no-op on
+    the second one. A statement that dropped and recreated would lose the
+    record."""
+    path = tmp_path / "dreams.db"
+    _pre_decision_store_with_a_row(path)
+
+    DreamStore(path).record_conference_decision(_decision(reason="kept"))
+    reopened = DreamStore(path)
+
+    assert [d.reason for d in reopened.conference_decisions(1)] == ["kept"]

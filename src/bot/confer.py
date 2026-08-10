@@ -82,12 +82,91 @@ same argument, and the lifetime cap stops an infinite sequence of new ones.**
 Without the second, a dream edited every morning would buy a fresh three every
 morning forever.
 
+## Every exchange ends in exactly one recorded verdict
+
+The transcript records what was SAID. `ConferenceDecision` records what was
+DECIDED, and the two answer different questions. Before it existed, "what did
+they decide about this dream" had to be reconstructed by reading six turns of
+prose and a scattering of side effects — an adoption row here, a vault move
+there, the absence of both somewhere else — and arriving at an answer nobody
+had written down.
+
+**The verdict is what the AGENT decided, and never what this module inferred
+from a side effect.** It is taken off the turn the agent actually took. Whether
+the store then did the thing is a separate field, because the trading agent
+agreeing to adopt and the adopted shelf being full are two facts and an
+exchange where the first happened is not one that decided nothing.
+
+Five verdicts, four of which are decisions. `ConferenceVerdict` carries the
+argument for each; the two worth knowing before touching this module:
+
+- **`NO_DECISION` must never collapse into `DEFER`.** A turn cap, a failed
+  model call and a deferral that named nothing to wake it are all "nobody
+  decided", and reporting the absence of a decision as the mildest real one is
+  how a silent failure starts looking healthy.
+- **`ARCHIVE` is the dreamer's, about its own dream, and the trading agent has
+  no route to it — not even a recommendation.** See "who may archive" below.
+
+A verdict is written for every exchange that reached the model, including the
+ones that decided nothing. None is written for an exchange the caps SKIPPED: no
+model was called and no conversation happened, so there is nothing to have
+decided, and a row a day saying so would fill the only permanent record with
+the noise the change gate exists to prevent.
+
+## Who may archive, and why it is not the trading agent
+
+The operator's commission for the trading agent is that it "cannot delete, can
+only action or send back to vault with reasons". An adopted dream carries a
+live symbol grant, so the agent with a route to the broker is the one that gets
+the smaller set of verbs — which is the same asymmetry `DreamStore.move`
+enforces and `TraderPowers` states.
+
+**So archival is not a power a conversation can hand it, and it is not offered
+as a recommendation either.** A trading agent that could recommend retirement
+would be putting pressure on the dreamer to destroy a chain it did not want,
+recorded on the dream, from the party with the least standing to ask. `DECLINE`
+already says everything the trading agent has standing to say: I will not take
+this, and here is why. The dreamer reads the transcript; if the reason kills the
+chain, the dreamer archives it, which is a verb it already holds.
+
+**What archives a dream here is the DREAMER withdrawing its own dream**, on its
+own turn, with a stated reason — `DreamerTurn.withdraw`. That is not a new
+power: `DREAMER_VAULTS` already contains `ARCHIVE` and `DreamStore.move`
+already permits `dreamer → archive` from anywhere the dreamer holds. It is the
+same verb through a new door, and the defensible trigger is the one the
+conference is built to produce: the trading agent asks the one question that
+would kill the chain and the dreamer cannot answer it.
+
+Nothing is destroyed by it. The archive is a shelf, `delete` is a different
+method, and this module never calls it — `tests/test_confer.py` asserts the
+name does not appear here at all.
+
+## A deferral names what would wake it, or it is not a deferral
+
+`ConferenceVerdict.DEFER` requires a `DreamCondition` with a symbol, a field, an
+operator and a **number**. The threshold is a number and never the name of
+another figure, for the reason `DreamCondition` gives at length: "above the
+20-day" re-checked next month tests a level nobody ever saw.
+
+A deferral that names nothing is "we ran out of things to say" wearing a
+decision's clothes, so it is refused: the exchange is recorded as `NO_DECISION`
+with `NoDecision.DEFER_WITHOUT_WAKE`, and the transcript says which half was
+missing. That is a rule that REJECTS, and `tests/test_confer.py` proves it does
+rather than proving it exists.
+
+The wake condition is recorded on the decision and deliberately **not** appended
+to the dream's own conditions. Those are the dreamer's pre-registered claims and
+they decide what `promotion_for` and `all_conditions_met` do; writing the
+trading agent's condition into that list would let one agent change what the
+other's dream needs in order to be promoted.
+
 ## Failure
 
 Same rule as the decision loop's model call and the dreamer's, learned the same
 way: a `ValidationError` out of the SDK killed a live cycle once and systemd
 restarted it straight into the same failure. A failed call here ends the
-exchange, writes a note saying so, and returns `ConferOutcome.CALL_FAILED`.
+exchange, writes a note saying so, records `NO_DECISION` with
+`NoDecision.CALL_FAILED`, and returns `ConferOutcome.CALL_FAILED`.
 
 **It is never recorded as a completed exchange that decided nothing.** A failure
 before the opening offer writes no `offer` message and no agent turn, so it
@@ -114,10 +193,16 @@ from .dreaming import (
     DREAMER,
     TEXT_MAX_CHARS,
     TRADER,
+    ConferenceDecision,
+    ConferenceVerdict,
     Dream,
+    DreamCondition,
     DreamMessage,
     DreamStore,
     MoveResult,
+    NoDecision,
+    TriggerField,
+    TriggerOp,
     Vault,
     VaultCaps,
 )
@@ -219,22 +304,39 @@ class TraderVerdict(StrEnum):
     """What the trading agent decided about an offered dream.
 
     Three, and none of them is a trade. The most this can produce is a symbol
-    permission with an expiry on it.
+    permission with an expiry on it. **None of them is an archive either**, and
+    that absence is the operator's commission rather than an oversight — see the
+    module docstring under "who may archive".
+
+    `DEFER` was called `park` while it meant "stop for now". It means "come back
+    when this happens" now, and carries a condition that says what: a rename
+    rather than a tidy-up, because the verb's meaning changed.
     """
 
     # Take it: `DreamStore.adopt` moves it to ADOPTED and writes the grant.
     ACCEPT = "accept"
-    # Not for me. The dream stays in the vault, where the dreamer can rework it
-    # or offer it again once something has changed.
+    # Not for me, on the merits. The dream stays in the vault, where the dreamer
+    # can rework it or offer it again once something has changed. No wake
+    # condition, because there is nothing the world could do to change the
+    # answer — and requiring one would push the trading agent into inventing a
+    # threshold, which is worse than an honest sentence.
     DECLINE = "decline"
-    # Neither of us is going to settle this today. Also leaves it in the vault:
-    # the trading agent may not move a dream anywhere, and pretending otherwise
-    # here would be this module routing around `DreamStore.move`.
-    PARK = "park"
+    # Not now, and here is what would change that. Requires a checkable wake
+    # condition; without one the exchange is recorded as having decided nothing.
+    # Also leaves the dream in the vault: the trading agent may not move a dream
+    # anywhere, and pretending otherwise here would be this module routing
+    # around `DreamStore.move`.
+    DEFER = "defer"
 
 
 class ConferOutcome(StrEnum):
     """How one dream's turn in a conference ended.
+
+    **Not the same thing as the stored verdict, and both exist.** This is the
+    run's bookkeeping — it distinguishes the endings a caller has to count and
+    the caps that produced them, including the three skips that never reached a
+    model. `ConferenceVerdict` is what the agents decided, and the skips have no
+    entry there because nobody decided anything.
 
     Every value is an ordinary answer. `NOTHING_NEW` and `EXCHANGES_EXHAUSTED`
     are the two that cost no model call at all, and they are the two that make
@@ -243,15 +345,25 @@ class ConferOutcome(StrEnum):
 
     ADOPTED = "adopted"
     DECLINED = "declined"
-    PARKED = "parked"
+    DEFERRED = "deferred"
+    # The dreamer withdrew its own dream to the archive rather than keep
+    # offering it. The one ending that is the DREAMER's decision.
+    WITHDRAWN = "withdrawn"
     # Six turns and no verdict. Recorded as its own outcome rather than folded
-    # into `PARKED`, because "they could not agree" and "they agreed to leave
-    # it" are different facts about the dreamer and about the trader.
+    # into `DEFERRED`, because "they could not agree" and "they agreed to wait
+    # for something" are different facts about the dreamer and about the trader.
     TURNS_EXHAUSTED = "turns_exhausted"
     # The trading agent said accept and `DreamStore.adopt` refused — a full
     # adopted vault, no symbols, an unresolved class. Not a failure of the
     # conversation, and it must not be reported as one.
     ADOPTION_REFUSED = "adoption_refused"
+    # The dreamer withdrew and `DreamStore.move` refused. Its own value for the
+    # same reason `ADOPTION_REFUSED` is: the decision happened and the shelf
+    # would not take it, which is not the same as no decision.
+    WITHDRAWAL_REFUSED = "withdrawal_refused"
+    # The trading agent said defer and named nothing that would wake it. The
+    # verdict is refused and the exchange is recorded as having decided nothing.
+    DEFER_REFUSED = "defer_refused"
     CALL_FAILED = "call_failed"
     NOTHING_NEW = "nothing_new"
     # Three exchanges since the last thing that changed. NOT the end of the
@@ -311,6 +423,13 @@ class ExchangeResult:
     detail: str = ""
     usage: tuple[CallUsage, ...] = ()
 
+    # The stored verdict, handed back so a caller need not go to the database
+    # for what it just watched happen. `None` for a SKIP and only for a skip:
+    # nothing was decided because nothing was said. A caller that treats `None`
+    # as "decided nothing" is making the mistake `ConferenceVerdict.NO_DECISION`
+    # exists to stop, one layer up.
+    decision: ConferenceDecision | None = None
+
     @property
     def conferred(self) -> bool:
         """Whether a model was actually called about this dream."""
@@ -346,6 +465,34 @@ class ConferenceReport:
     @property
     def adopted(self) -> int:
         return sum(1 for e in self.exchanges if e.outcome is ConferOutcome.ADOPTED)
+
+    @property
+    def decisions(self) -> tuple[ConferenceDecision, ...]:
+        """Every verdict this run recorded, in the order the exchanges ran.
+
+        One per conferred exchange, including the ones that decided nothing.
+        Skips contribute none, so this is shorter than `exchanges` on a quiet
+        day and that is the honest shape: a skip is the caps working, not a
+        conference.
+        """
+        return tuple(e.decision for e in self.exchanges if e.decision is not None)
+
+    @property
+    def decided(self) -> int:
+        """Exchanges that reached an actual decision."""
+        return sum(1 for d in self.decisions if d.decided)
+
+    @property
+    def undecided(self) -> int:
+        """Exchanges that happened and settled nothing.
+
+        Counted apart from `decided` rather than derived by subtracting it from
+        `conferred`, so the two numbers can be read side by side. A run where
+        every exchange came back undecided is a fact about the two agents, and
+        one where none did is a different one; both produce the same
+        `conferred`.
+        """
+        return sum(1 for d in self.decisions if not d.decided)
 
     @property
     def calls(self) -> int:
@@ -656,20 +803,79 @@ class TraderPowers:
 
 
 class DreamerTurn(BaseModel):
-    """One turn from the dreamer's side.
+    """One turn from the dreamer's side, and possibly a withdrawal.
 
-    Text only. The KIND of the turn — offer, answer — is decided by this module
-    from where the turn sits in the exchange, never by the model, because a
-    speaker that chose its own label could write "accept" on its own turn and
-    the transcript would misreport who decided what.
+    The KIND of the turn — offer, answer — is decided by this module from where
+    the turn sits in the exchange, never by the model, because a speaker that
+    chose its own label could write "accept" on its own turn and the transcript
+    would misreport who decided what.
+
+    **`withdraw` is the one decision this side of the conversation can reach**,
+    and it is the only route to `ConferenceVerdict.ARCHIVE` anywhere in this
+    module. See the module docstring: it is a verb the dreamer already holds
+    over its own dream, arriving through a new door rather than a new power.
     """
 
     text: str = Field(
         description=(
             "Your turn, in a few sentences. Make the case, or answer what you "
-            "were asked. No numbers you were not shown."
+            "were asked. No numbers you were not shown. If you are withdrawing, "
+            "this is the reason, in your own words."
         )
     )
+    withdraw: bool = Field(
+        default=False,
+        description=(
+            "true only to WITHDRAW this dream to the archive, because you now "
+            "think the chain is dead — a hop you cannot check and cannot argue "
+            "for, or a condition the world has already failed. It stops being "
+            "offered and nothing is destroyed: the chain, the thoughts and this "
+            "whole conversation stay on the record. Withdrawing a chain you "
+            "still believe in because you were asked a hard question is the "
+            "wrong reason; say you cannot check it instead."
+        ),
+    )
+
+
+class WakeCondition(BaseModel):
+    """What would end a deferral. The checkable half is not optional.
+
+    Same split as `DreamCondition` and `AssessmentTrigger`, and it converts
+    straight into the first of those rather than being a fourth shape: `text` is
+    the sentence a person reads, and symbol/field/op/value is the claim code can
+    settle.
+
+    **The threshold is a number and never the name of another figure.** "Above
+    the 20-day" re-checked next month tests a level nobody ever saw, because the
+    average moved in the meantime — so it is not the claim that was made.
+    """
+
+    text: str = Field(
+        description=(
+            "The condition in a sentence, including why it is the thing that "
+            "would change your answer."
+        )
+    )
+    symbol: str = Field(description="Whose figure this is, e.g. SPY.")
+    field: TriggerField = Field(description="Which figure. One the loop computes.")
+    op: TriggerOp = Field(description="above, below, at_or_above or at_or_below.")
+    value: float = Field(
+        description=(
+            "The threshold, as a NUMBER. Never the name of another figure: an "
+            "average moves, so 'above the 20-day' checked later is a different "
+            "claim from the one you are making now."
+        )
+    )
+
+    def as_condition(self) -> DreamCondition:
+        """The same claim as the type the prophecy shelf already grades."""
+        return DreamCondition(
+            text=self.text,
+            symbol=self.symbol.strip().upper(),
+            field=self.field,
+            op=self.op,
+            value=self.value,
+        )
 
 
 class TraderTurn(BaseModel):
@@ -685,8 +891,19 @@ class TraderTurn(BaseModel):
         default=None,
         description=(
             "null to keep asking. accept to take the dream and grant its "
-            "symbols. decline to leave it in the vault. park to stop for now. "
+            "symbols. decline to leave it in the vault for good reasons of "
+            "merit. defer to wait for something specific — which needs `wake`. "
             "On your last turn you must choose one."
+        ),
+    )
+    wake: WakeCondition | None = Field(
+        default=None,
+        description=(
+            "REQUIRED with a defer, ignored otherwise. What would have to "
+            "happen for you to look at this again, as a symbol, a figure, an "
+            "operator and a number. A deferral that names nothing is not a "
+            "deferral and is recorded as having decided nothing, so decline "
+            "instead if you cannot name one."
         ),
     )
 
@@ -732,6 +949,17 @@ How to be useful:
   agent declining for a stated reason is a perfectly good outcome.
 - Short. A turn is a few sentences.
 
+**You may WITHDRAW this dream, and you are the only one who can.** The trading
+agent cannot archive a dream and cannot delete one; if it does not want this, it
+declines and the dream stays in the vault. Set `withdraw` when the question you
+have just been asked has shown you the chain is dead — a hop you cannot check
+and cannot argue for, or a condition the world has already failed. Nothing is
+destroyed by it: the chain, the thoughts and this conversation stay on the
+record, and the dream stops being offered.
+
+Withdrawing because the question was hard is the wrong reason. "I cannot check
+that hop" is an answer, not a retirement.
+
 You have no view on position size, entry, stop or direction, and no way to
 express one. That is the trading agent's work and it does not begin until long
 after this conversation.
@@ -750,7 +978,12 @@ cooldown, and a required stop that the size is computed from. The risk gate is
 deterministic code and cannot be argued with.
 
 **You cannot place an order in this conversation and there is no path to one.**
-Your only moves are: accept the dream, decline it, or park it.
+Your only moves are: accept the dream, decline it, or defer it.
+
+**You cannot archive a dream and you cannot delete one, and you are not being
+asked to recommend either.** A dream you will not take is a DECLINE with your
+reason; whether the chain is worth retiring is the dreamer's call about its own
+work, and it can read what you said.
 
 The dream you are shown is SPECULATIVE BY CONSTRUCTION. It arrives with a
 verification badge counted from how many of its hops name a source, and with
@@ -766,7 +999,17 @@ How to decide:
   worth adopting because it is interesting. Interesting is the dreamer's job.
 - Decline for a stated reason. A decline is a normal outcome and a frequent one,
   and the record of why is worth more than a reluctant acceptance.
-- Park when neither of you is going to settle it today.
+- **Defer only when you can name what would end the wait.** A deferral carries a
+  `wake` condition: a symbol, a figure, an operator and a NUMBER, plus the
+  sentence saying why that is the thing that would change your answer. The
+  number is a number and never the name of another figure — an average moves, so
+  "above the 20-day" checked next month is a different claim from the one you
+  made today.
+
+  If you cannot name one, DECLINE. A deferral that names nothing is recorded as
+  having decided nothing at all, which is worse for you than a decline: it says
+  the two of you talked and got nowhere, and the dreamer learns nothing it can
+  act on.
 - NEVER state a number you were not shown.
 - Short. A turn is a few sentences.
 
@@ -973,6 +1216,12 @@ class Conference:
             conferred=report.conferred,
             skipped=report.skipped,
             adopted=report.adopted,
+            # Both, rather than one and a subtraction. A run where every
+            # exchange settled nothing is a fact about the two agents, and a
+            # zero stated each run is a fact rather than the absence of a
+            # warning — the same reason the cycle line carries its breach count.
+            decided=report.decided,
+            undecided=report.undecided,
             calls=report.calls,
             cost_usd=round(report.cost_usd, 4),
         )
@@ -1128,14 +1377,19 @@ class Conference:
         """One bounded exchange on one dream. Never raises.
 
         Turns alternate, dreamer first, up to `MAX_TURNS_PER_EXCHANGE`. The
-        exchange ends EARLY on accept, decline or park; it ends on a failed call
-        with `CALL_FAILED`; and it ends at the turn cap with `TURNS_EXHAUSTED`.
+        exchange ends EARLY on a decision — the trading agent accepting,
+        declining or deferring, or the dreamer withdrawing its own dream; it
+        ends on a failed call with `CALL_FAILED`; and it ends at the turn cap
+        with `TURNS_EXHAUSTED`.
 
-        **Every ending is written to the transcript, including the ones that
-        decided nothing.** A dream the trading agent kept declining is a fact
-        about the dreamer worth having, and a conversation that ran out of turns
-        is a fact about both of them. Storing only the exchanges that concluded
-        would leave a record that flatters everyone in it.
+        **Every ending is written to the transcript AND recorded as exactly one
+        verdict, including the endings that decided nothing.** A dream the
+        trading agent kept declining is a fact about the dreamer worth having, a
+        conversation that ran out of turns is a fact about both of them, and a
+        record holding only the exchanges that concluded would flatter everyone
+        in it. The verdict for an ending that settled nothing is
+        `ConferenceVerdict.NO_DECISION` with a stated cause — never the mildest
+        real decision, which is what makes a silent failure look healthy.
         """
         dream_id = int(dream.id or 0)
         usage: list[CallUsage] = []
@@ -1147,11 +1401,9 @@ class Conference:
 
             try:
                 if speaks_first:
-                    turn_text, verdict, spent = self._dreamer_turn(
-                        dream, messages, opening=index == 0
-                    )
+                    turn = self._dreamer_turn(dream, messages, opening=index == 0)
                 else:
-                    turn_text, verdict, spent = self._trader_turn(
+                    turn = self._trader_turn(
                         dream,
                         messages,
                         # The trading agent gets one turn after each of the
@@ -1160,41 +1412,25 @@ class Conference:
                         # know it is out of turns writes another question.
                         final=index >= MAX_TURNS_PER_EXCHANGE - 1,
                     )
-                usage.append(spent)
+                usage.append(turn.usage)
             except _TurnFailed as failure:
-                self._note(
-                    dream_id,
-                    f"The exchange ended after {turns} turn(s): the model call "
-                    f"failed ({failure.detail}). Nothing was decided.",
-                    at=now,
-                )
-                log.warning(
-                    "confer_call_failed",
-                    dream_id=dream_id,
-                    turns=turns,
-                    error=failure.detail,
-                )
-                return ExchangeResult(
-                    dream_id=dream_id,
-                    outcome=ConferOutcome.CALL_FAILED,
-                    turns=turns,
-                    detail=failure.detail,
-                    usage=tuple(usage),
+                return self._failed(
+                    dream_id, failure, turns=turns, usage=usage, now=now
                 )
 
             turns += 1
             self._store.add_message(
                 dream_id,
                 speaker=DREAMER if speaks_first else TRADER,
-                kind=_kind_for(index, verdict),
-                text=turn_text,
+                kind=_kind_for(index, decided=turn.decided),
+                text=turn.text,
                 at=now,
             )
 
-            if verdict is not None:
+            if turn.decided:
                 return self._settle(
                     dream_id,
-                    verdict,
+                    turn,
                     turns=turns,
                     usage=usage,
                     now=now,
@@ -1219,6 +1455,18 @@ class Conference:
                 turns=turns,
                 detail="six turns, no verdict",
                 usage=tuple(usage),
+                decision=self._record(
+                    dream_id,
+                    ConferenceVerdict.NO_DECISION,
+                    by=CONFERENCE,
+                    reason=(
+                        "Six turns and neither of them reached a verdict. They "
+                        "talked and did not converge; nobody decided anything."
+                    ),
+                    at=now,
+                    turns=turns,
+                    undecided=NoDecision.TURNS_EXHAUSTED,
+                ),
             ),
             now=now,
         )
@@ -1228,40 +1476,59 @@ class Conference:
     def _settle(
         self,
         dream_id: int,
-        verdict: TraderVerdict,
+        turn: _Turn,
         *,
         turns: int,
         usage: list[CallUsage],
         now: datetime,
         caps: VaultCaps | None,
     ) -> ExchangeResult:
-        """Act on the trading agent's verdict, within its two powers.
+        """Act on whatever was decided, and record it as exactly one verdict.
 
-        `decline` and `park` move nothing, and that is not an omission. The
+        Four decisions are reachable from here and each is dispatched to its own
+        method, because they differ in who decided, what the store is asked to
+        do, and whether anything can refuse. What they share is the last line of
+        each: one `ConferenceDecision`, carrying the deciding agent's own words.
+
+        `decline` and `defer` move nothing, and that is not an omission. The
         trading agent may not move a dream between the dreamer's shelves —
-        `DreamStore.move` refuses it by actor — so a park here is a state of the
-        conversation and never a state of the vault. Implementing it as a move
-        would be this module routing around the store, which is the one thing
-        the store's actor rules exist to prevent.
+        `DreamStore.move` refuses it by actor — so a deferral here is a state of
+        the conversation and never a state of the vault. Implementing it as a
+        move would be this module routing around the store, which is the one
+        thing the store's actor rules exist to prevent.
         """
-        if verdict is not TraderVerdict.ACCEPT:
-            outcome = (
-                ConferOutcome.DECLINED
-                if verdict is TraderVerdict.DECLINE
-                else ConferOutcome.PARKED
+        if turn.withdraw:
+            return self._withdraw(
+                dream_id, turn, turns=turns, usage=usage, now=now, caps=caps
             )
-            log.info("confer_verdict", dream_id=dream_id, verdict=str(verdict))
-            return self._closing(
-                ExchangeResult(
-                    dream_id=dream_id,
-                    outcome=outcome,
-                    turns=turns,
-                    detail=f"the trading agent chose to {verdict}",
-                    usage=tuple(usage),
-                ),
-                now=now,
+        if turn.verdict is TraderVerdict.ACCEPT:
+            return self._promote(
+                dream_id, turn, turns=turns, usage=usage, now=now, caps=caps
             )
+        if turn.verdict is TraderVerdict.DEFER:
+            return self._defer(dream_id, turn, turns=turns, usage=usage, now=now)
+        return self._decline(dream_id, turn, turns=turns, usage=usage, now=now)
 
+    def _promote(
+        self,
+        dream_id: int,
+        turn: _Turn,
+        *,
+        turns: int,
+        usage: list[CallUsage],
+        now: datetime,
+        caps: VaultCaps | None,
+    ) -> ExchangeResult:
+        """The trading agent adopted. The verdict is PROMOTE either way.
+
+        **A refused adoption is still a PROMOTE verdict**, with `effected=False`
+        and the store's reason beside it. The two of them agreed and the shelf
+        had no room, and those are two facts: recording the refusal as though
+        nothing had been decided would throw away the agreement, which is the
+        half that says something about the agents. It is a refusal rather than a
+        failure — a full adopted vault is a normal Tuesday — so it is reported
+        and never raised.
+        """
         result = self._powers.adopt(
             dream_id,
             at=now,
@@ -1270,11 +1537,18 @@ class Conference:
             # expiry an operator can read is the one that actually applies.
             ttl_days=self._rules.dreaming.ttl_days.adopted,
         )
+        decision = self._record(
+            dream_id,
+            ConferenceVerdict.PROMOTE,
+            by=TRADER,
+            reason=turn.text,
+            at=now,
+            turns=turns,
+            effected=result.ok,
+            effect_detail=result.detail,
+        )
+
         if not result.ok:
-            # A refusal is an ordinary answer — a full adopted vault is a normal
-            # Tuesday — so it is recorded and reported rather than raised, and
-            # it is NOT reported as a failed conversation. The two of them
-            # agreed; the store had no room.
             self._note(
                 dream_id,
                 "The trading agent accepted, and the store refused the "
@@ -1294,6 +1568,7 @@ class Conference:
                     turns=turns,
                     detail=result.detail,
                     usage=tuple(usage),
+                    decision=decision,
                 ),
                 now=now,
             )
@@ -1305,6 +1580,302 @@ class Conference:
             turns=turns,
             detail=result.detail,
             usage=tuple(usage),
+            decision=decision,
+        )
+
+    def _decline(
+        self,
+        dream_id: int,
+        turn: _Turn,
+        *,
+        turns: int,
+        usage: list[CallUsage],
+        now: datetime,
+    ) -> ExchangeResult:
+        """Not for me, on the merits. Nothing moves and nothing is asked of the store.
+
+        `effected` stays `None` rather than `True`: this verdict asks nothing of
+        any shelf, and "nothing was required" is a different answer from "what
+        was required was done".
+        """
+        log.info("confer_verdict", dream_id=dream_id, verdict="decline")
+        return self._closing(
+            ExchangeResult(
+                dream_id=dream_id,
+                outcome=ConferOutcome.DECLINED,
+                turns=turns,
+                detail="the trading agent declined it",
+                usage=tuple(usage),
+                decision=self._record(
+                    dream_id,
+                    ConferenceVerdict.DECLINE,
+                    by=TRADER,
+                    reason=turn.text,
+                    at=now,
+                    turns=turns,
+                ),
+            ),
+            now=now,
+        )
+
+    def _defer(
+        self,
+        dream_id: int,
+        turn: _Turn,
+        *,
+        turns: int,
+        usage: list[CallUsage],
+        now: datetime,
+    ) -> ExchangeResult:
+        """Not now, and here is what would change that — or it is not a deferral.
+
+        **The rule that REJECTS.** A wake condition has to be gradeable: a
+        symbol, a figure, an operator and a number. Prose alone, or a triple with
+        nothing to look it up against, is a deferral that names nothing, and a
+        deferral that names nothing is "we ran out of things to say" wearing a
+        decision's clothes. It is recorded as `NO_DECISION` with
+        `DEFER_WITHOUT_WAKE` rather than as the mildest decision available.
+
+        The transcript is told which half was missing, because the dreamer reads
+        it and "no decision" with no explanation teaches nobody anything.
+        """
+        wake = turn.wake
+        if wake is None or not wake.is_gradeable:
+            missing = (
+                "no wake condition at all"
+                if wake is None
+                else "a wake condition with no symbol and threshold to check"
+            )
+            self._note(
+                dream_id,
+                "The trading agent said defer and gave "
+                f"{missing}. A deferral that names nothing is not a deferral, "
+                "so this exchange is recorded as having decided nothing. A "
+                "condition needs a symbol, a figure, an operator and a number; "
+                "a decline is the honest answer when none can be named.",
+                at=now,
+            )
+            log.warning(
+                "confer_defer_without_wake", dream_id=dream_id, turns=turns
+            )
+            return self._closing(
+                ExchangeResult(
+                    dream_id=dream_id,
+                    outcome=ConferOutcome.DEFER_REFUSED,
+                    turns=turns,
+                    detail=f"a deferral with {missing}",
+                    usage=tuple(usage),
+                    decision=self._record(
+                        dream_id,
+                        ConferenceVerdict.NO_DECISION,
+                        by=CONFERENCE,
+                        reason=(
+                            "The trading agent reached for a deferral and gave "
+                            f"{missing}. Nothing was decided, and nothing would "
+                            "wake it."
+                        ),
+                        at=now,
+                        turns=turns,
+                        undecided=NoDecision.DEFER_WITHOUT_WAKE,
+                    ),
+                ),
+                now=now,
+            )
+
+        log.info(
+            "confer_verdict",
+            dream_id=dream_id,
+            verdict="defer",
+            wake=f"{wake.symbol} {wake.field} {wake.op} {wake.value}",
+        )
+        return self._closing(
+            ExchangeResult(
+                dream_id=dream_id,
+                outcome=ConferOutcome.DEFERRED,
+                turns=turns,
+                detail=f"deferred until {wake.text}",
+                usage=tuple(usage),
+                decision=self._record(
+                    dream_id,
+                    ConferenceVerdict.DEFER,
+                    by=TRADER,
+                    reason=turn.text,
+                    at=now,
+                    turns=turns,
+                    wake=wake,
+                ),
+            ),
+            now=now,
+        )
+
+    def _withdraw(
+        self,
+        dream_id: int,
+        turn: _Turn,
+        *,
+        turns: int,
+        usage: list[CallUsage],
+        now: datetime,
+        caps: VaultCaps | None,
+    ) -> ExchangeResult:
+        """The dreamer retired its own dream. **The only route to ARCHIVE here.**
+
+        `by=DREAMER`, and the store is what enforces that: `DreamStore.move`
+        refuses `TRADER` outright and this module has no way to ask as anybody
+        else. Nothing is destroyed — the archive is a shelf, and `delete` is a
+        different method that this module never calls and whose name
+        `tests/test_confer.py` asserts does not appear in this file.
+
+        A refusal from the store is reported the same way a refused adoption is:
+        the verdict stands, `effected` is False, and the reason travels with it.
+        The caps travel too, so the archive limit an operator can read in
+        `config/rules.yaml` is the one that applies here — the miss
+        `TraderPowers.adopt` already made once, where a `ttl_days` that never
+        reached the store left a figure in the file governing nothing.
+        """
+        result = self._store.move(
+            dream_id,
+            Vault.ARCHIVE,
+            by=DREAMER,
+            reason=turn.text,
+            at=now,
+            caps=self._caps(caps),
+        )
+        decision = self._record(
+            dream_id,
+            ConferenceVerdict.ARCHIVE,
+            by=DREAMER,
+            reason=turn.text,
+            at=now,
+            turns=turns,
+            effected=result.ok,
+            effect_detail=result.detail,
+        )
+
+        if not result.ok:
+            self._note(
+                dream_id,
+                "The dreamer withdrew this dream, and the store refused the "
+                f"move: {result.detail}",
+                at=now,
+            )
+            log.warning(
+                "confer_withdrawal_refused",
+                dream_id=dream_id,
+                refusals=[str(r) for r in result.refusals],
+            )
+            return self._closing(
+                ExchangeResult(
+                    dream_id=dream_id,
+                    outcome=ConferOutcome.WITHDRAWAL_REFUSED,
+                    turns=turns,
+                    detail=result.detail,
+                    usage=tuple(usage),
+                    decision=decision,
+                ),
+                now=now,
+            )
+
+        log.info("confer_withdrawn", dream_id=dream_id, turns=turns)
+        return ExchangeResult(
+            dream_id=dream_id,
+            outcome=ConferOutcome.WITHDRAWN,
+            turns=turns,
+            detail=result.detail,
+            usage=tuple(usage),
+            decision=decision,
+        )
+
+    def _failed(
+        self,
+        dream_id: int,
+        failure: _TurnFailed,
+        *,
+        turns: int,
+        usage: list[CallUsage],
+        now: datetime,
+    ) -> ExchangeResult:
+        """A model call that produced no turn. **Recorded as a failure.**
+
+        Never as a completed exchange that decided nothing, and never as a
+        deferral: the verdict is `NO_DECISION` with `CALL_FAILED`, which says the
+        machinery broke rather than that the two of them weighed it up. Nothing
+        can be concluded about either agent from a call that did not return.
+
+        `_closing` is deliberately not called. That method says a dream has
+        parked or is closed for good, and a failed call has decided nothing about
+        the dream's budget — a failure before the opening offer does not even
+        count as an exchange, so tomorrow's run tries again.
+        """
+        self._note(
+            dream_id,
+            f"The exchange ended after {turns} turn(s): the model call "
+            f"failed ({failure.detail}). Nothing was decided.",
+            at=now,
+        )
+        log.warning(
+            "confer_call_failed",
+            dream_id=dream_id,
+            turns=turns,
+            error=failure.detail,
+        )
+        return ExchangeResult(
+            dream_id=dream_id,
+            outcome=ConferOutcome.CALL_FAILED,
+            turns=turns,
+            detail=failure.detail,
+            usage=tuple(usage),
+            decision=self._record(
+                dream_id,
+                ConferenceVerdict.NO_DECISION,
+                by=CONFERENCE,
+                reason=(
+                    f"The model call failed after {turns} turn(s): "
+                    f"{failure.detail}. Nobody decided anything, and nothing "
+                    "about either agent can be read off this."
+                ),
+                at=now,
+                turns=turns,
+                undecided=NoDecision.CALL_FAILED,
+            ),
+        )
+
+    def _record(
+        self,
+        dream_id: int,
+        verdict: ConferenceVerdict,
+        *,
+        by: str,
+        reason: str,
+        at: datetime,
+        turns: int,
+        wake: DreamCondition | None = None,
+        effected: bool | None = None,
+        effect_detail: str = "",
+        undecided: NoDecision | None = None,
+    ) -> ConferenceDecision:
+        """Store the one verdict this exchange reached. The single write path.
+
+        Every ending goes through here, so "does every exchange record a
+        verdict" is answerable by counting the callers rather than by reading
+        the whole class. `DreamStore.record_conference_decision` refuses an
+        incoherent row, and the callers above are the reason it can never see
+        one: a deferral is only ever built with a gradeable condition, and a
+        `NO_DECISION` only ever with a cause.
+        """
+        return self._store.record_conference_decision(
+            ConferenceDecision(
+                dream_id=dream_id,
+                verdict=verdict,
+                decided_by=by,
+                at=at,
+                reason=reason,
+                wake=wake,
+                effected=effected,
+                effect_detail=effect_detail,
+                undecided=undecided,
+                turns=turns,
+            )
         )
 
     def _closing(self, result: ExchangeResult, *, now: datetime) -> ExchangeResult:
@@ -1369,13 +1940,15 @@ class Conference:
 
     # ---------------------------------------------------------------- calls
     #
-    # Both return the same triple — the turn's text, the verdict if there is
-    # one, and what the call cost — so the exchange loop treats the two speakers
-    # identically and the only asymmetry left is that one of them can decide.
+    # Both return the same `_Turn` — what was said, what if anything was decided,
+    # and what the call cost — so the exchange loop treats the two speakers
+    # identically. The asymmetry is in what each CAN decide: the trading agent
+    # reaches a verdict about taking the dream, and the dreamer's one decision is
+    # withdrawing its own.
 
     def _dreamer_turn(
         self, dream: Dream, messages: Sequence[DreamMessage], *, opening: bool
-    ) -> tuple[str, TraderVerdict | None, CallUsage]:
+    ) -> _Turn:
         instruction = (
             "Offer this dream to the trading agent. Say what it claims, what it "
             "rests on, and what would break it first."
@@ -1387,18 +1960,22 @@ class Conference:
             _turn_prompt(dream, messages, instruction=instruction),
             DreamerTurn,
         )
-        # The dreamer never carries a verdict. It offers; the agent that has to
-        # answer for the consequence is the one that decides, which is the same
-        # asymmetry `DreamStore.move` enforces from the other direction.
-        return str(turn.text), None, usage
+        # The dreamer carries no TRADER verdict — it offers, and the agent that
+        # has to answer for the consequence is the one that decides whether to
+        # take it, which is the asymmetry `DreamStore.move` enforces from the
+        # other direction. What it can decide is to withdraw its own dream, and
+        # that is the only ARCHIVE anywhere in this module.
+        return _Turn(
+            text=str(turn.text), usage=usage, withdraw=bool(turn.withdraw)
+        )
 
     def _trader_turn(
         self, dream: Dream, messages: Sequence[DreamMessage], *, final: bool
-    ) -> tuple[str, TraderVerdict | None, CallUsage]:
+    ) -> _Turn:
         instruction = (
             "This is your LAST turn. You must set a verdict: accept, decline or "
-            "park. A question here is a wasted turn and the exchange closes "
-            "without a decision."
+            "defer — and a defer needs its wake condition. A question here is a "
+            "wasted turn and the exchange closes without a decision."
             if final
             else "Ask the one question that would settle this, or set a verdict "
             "now if you already know."
@@ -1414,7 +1991,22 @@ class Conference:
             TraderTurn,
         )
         verdict = turn.verdict
-        return str(turn.text), verdict if isinstance(verdict, TraderVerdict) else None, usage
+        wake = turn.wake
+        return _Turn(
+            text=str(turn.text),
+            usage=usage,
+            verdict=verdict if isinstance(verdict, TraderVerdict) else None,
+            # Converted here rather than in `_defer`, so the only shape that
+            # travels past this line is the one the prophecy shelf already
+            # grades. A wake condition on anything but a deferral is dropped: a
+            # condition attached to an acceptance says nothing, and storing one
+            # would put a threshold on a decision that does not wait for it.
+            wake=(
+                wake.as_condition()
+                if isinstance(wake, WakeCondition) and verdict is TraderVerdict.DEFER
+                else None
+            ),
+        )
 
     def _call(
         self, client: TurnCaller, prompt: str, schema: type[BaseModel]
@@ -1465,7 +2057,37 @@ class _TurnFailed(Exception):
         self.detail = detail
 
 
-def _kind_for(index: int, verdict: TraderVerdict | None) -> str:
+@dataclass(frozen=True)
+class _Turn:
+    """One speaker's turn, as the exchange loop needs it.
+
+    Private, and deliberately not the pydantic model the API returned. The
+    schemas are what a MODEL may write; this is what this module has decided the
+    turn means, with the wake condition already converted into the shape the
+    store keeps and a verdict that could not survive validation already dropped.
+    Keeping them apart is what stops a model's field reaching a database
+    unexamined.
+    """
+
+    text: str
+    usage: CallUsage
+    verdict: TraderVerdict | None = None
+    wake: DreamCondition | None = None
+    withdraw: bool = False
+
+    @property
+    def decided(self) -> bool:
+        """Whether this turn ends the exchange.
+
+        The dreamer's withdrawal counts, which is the whole reason this is a
+        property rather than `verdict is not None` written at the call site: an
+        exchange now has two ways to end in a decision and only one of them is
+        the trading agent's.
+        """
+        return self.verdict is not None or self.withdraw
+
+
+def _kind_for(index: int, *, decided: bool) -> str:
     """Which `MESSAGE_KINDS` badge a turn gets.
 
     Decided from the turn's position and never by the model, so a speaker cannot
@@ -1477,12 +2099,17 @@ def _kind_for(index: int, verdict: TraderVerdict | None) -> str:
     `DreamStore.adopt` writes for us so the transcript is complete even when
     neither agent thought to narrate it. Writing a second `accept` here would
     put two of them in the record for one event.
+
+    **A withdrawal on the opening turn is a `note` and not an `offer`**, which
+    matters beyond tidiness: `exchanges_so_far` counts opening offers, so filing
+    a retirement as one would record an offer that was never made. A dreamer
+    that withdraws instead of offering has not offered.
     """
     if index == 0:
-        return "offer"
+        return "note" if decided else "offer"
     if index % 2 == 0:
-        return "answer"
-    return "note" if verdict is not None else "question"
+        return "note" if decided else "answer"
+    return "note" if decided else "question"
 
 
 def run_conference(
@@ -1529,13 +2156,21 @@ __all__ = [
     "ChangeSignal",
     "ConferOutcome",
     "Conference",
+    # Re-exported for a renderer, which reads the DECISION and has no business
+    # importing the module that runs the conversation. `dreaming.py` is where
+    # these live; naming them here means a page can take everything it needs
+    # from one import without that import being the machinery.
+    "ConferenceDecision",
     "ConferenceReport",
+    "ConferenceVerdict",
     "DreamerTurn",
     "ExchangeResult",
+    "NoDecision",
     "TraderPowers",
     "TraderTurn",
     "TraderVerdict",
     "TurnCaller",
+    "WakeCondition",
     "change_signals",
     "epoch_started_at",
     "exchanges_in_epoch",

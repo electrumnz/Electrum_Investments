@@ -96,6 +96,35 @@ the vaults. `MoveResult` collects every reason at once rather than
 short-circuiting, exactly as `RiskGate` does, so a caller is told everything
 wrong with a move instead of the first thing.
 
+## What was SAID and what was DECIDED are two records
+
+`dream_messages` is the transcript. `conference_decisions` is the verdict, one
+row per exchange that reached a model, and it exists because the second used to
+have to be reconstructed from the first: six turns of prose plus a scattering of
+side effects — an adoption row here, a vault move there, the absence of both
+somewhere else — producing an answer nobody had written down.
+
+Four properties, and `confer.py` holds the argument for each:
+
+- **The verdict is what the AGENT decided, never what the code inferred from a
+  side effect.** Reading it back off "did an adoption row appear" would be a
+  second source of truth about one event. So `effected` is a SEPARATE field, and
+  three-valued: the trading agent agreeing and the adopted shelf being full are
+  two facts, and `None` — this verdict asks nothing of any shelf — is not the
+  same answer as "what was required was done".
+- **`NO_DECISION` is its own state and never `DEFER`.** A turn cap, a failed
+  call, a deferral that named nothing to wake it: nobody decided. Reporting the
+  absence of a decision as the mildest real one is how a silent failure starts
+  looking healthy, which is `has_cycles` and `can_grade_anything` again.
+- **A deferral carries a checkable wake condition or it is not stored as one.**
+  `is_coherent` is checked on write and on read, and an incoherent row is
+  refused rather than rendered as the nearest thing that would parse.
+- **The wake condition is recorded on the DECISION and never appended to the
+  dream's conditions.** Those are the dreamer's pre-registered claims and they
+  decide what `promotion_for` and `all_conditions_met` do; writing the trading
+  agent's condition into that list would let one agent change what the other's
+  dream needs in order to be promoted.
+
 ## Symbiosis: two chains that meet at the same hop
 
 Two second-order chains often share a link. A dream about drought cutting hydro
@@ -230,7 +259,18 @@ from typing import Any
 
 import structlog
 
-from .models import AssessmentTrigger, TriggerField, TriggerOp
+from .models import AssessmentTrigger
+
+# **Re-exported on purpose, with the redundant-looking alias that mypy --strict
+# requires to call it deliberate.** `confer.py` needs this vocabulary to make a
+# deferral's wake condition checkable, and `tests/test_confer.py` asserts that
+# `confer.py` imports no `models` at all — a blunt net over the sharp rule that
+# there is no route from a conversation to an order. The net is worth keeping
+# blunt, so the trigger vocabulary travels through the module that already owns
+# the condition shape rather than the net being loosened to admit one name from
+# the file `OrderProposal` lives in.
+from .models import TriggerField as TriggerField
+from .models import TriggerOp as TriggerOp
 from .triggers import CycleReadings
 
 log = structlog.get_logger(__name__)
@@ -714,6 +754,186 @@ class Adoption:
         if self.expires_at is None:
             return False
         return _as_utc(self.expires_at) > _as_utc(now)
+
+
+# ------------------------------------------------ what a conference decided
+#
+# The transcript records what was SAID. This is what was DECIDED, and the two
+# are different records answering different questions. Reconstructing the second
+# from the first means reading six turns of prose and a scattering of side
+# effects — an adoption row here, a vault move there, the absence of both
+# somewhere else — and arriving at an answer nobody wrote down.
+
+
+class ConferenceVerdict(StrEnum):
+    """How one agent-to-agent exchange ended. **Exactly one per exchange.**
+
+    Five values, four of which are decisions. The operator named three; the
+    other two are here because folding either of them into one of the three
+    would be the mistake this type exists to prevent.
+
+    **`DECLINE` is not `DEFER`.** A deferral names the condition that would wake
+    it; a decline is a judgement on the merits with no such condition, and the
+    remedy is the dreamer reworking the chain rather than the world moving.
+    Recording a decline as a deferral would put a wake condition on a decision
+    that never had one — or, worse, invite one to be invented, which is the
+    failure `DreamCondition` already refuses from the other direction.
+
+    **`NO_DECISION` is not `DEFER` either, and this is the important one.** A
+    conversation that hit the turn cap, died on a failed model call, or produced
+    a deferral with nothing to wake it did not decide to wait. Nobody decided
+    anything. Reporting the absence of a decision as the mildest real decision is
+    exactly how a silent failure starts looking healthy — the same rule as
+    `news_history.has_cycles`, `WatchReport.can_grade_anything` and `seen.py`'s
+    first visit, arriving at the conference.
+
+    **`ARCHIVE` is the DREAMER's, and no verdict here is the trading agent's
+    route to one.** See `DreamStore.move`: the trading agent may adopt out of the
+    vault and hand back with a reason, and nothing else, and a conversation must
+    not become the door that gives it more. What archives a dream is its own
+    dreamer withdrawing it.
+    """
+
+    # The trading agent adopted it. The grant exists; `Adoption` is the record.
+    PROMOTE = "promote"
+    # The trading agent parked it against a NAMED, checkable wake condition.
+    # `ConferenceDecision.wake` is not optional for this value — see
+    # `ConferenceDecision.is_coherent`.
+    DEFER = "defer"
+    # The trading agent will not take it, and said why. The dream stays in the
+    # vault; the dreamer may rework it and offer it again.
+    DECLINE = "decline"
+    # The dreamer withdrew its own dream to the archive.
+    ARCHIVE = "archive"
+    # Nobody decided. `ConferenceDecision.undecided` says which way.
+    NO_DECISION = "no_decision"
+
+
+# The verdicts that are actually a decision. Named rather than written as
+# `is not NO_DECISION` at each call site, so a sixth verdict added later has one
+# place to be classified.
+DECIDED_VERDICTS: frozenset[ConferenceVerdict] = frozenset(
+    {
+        ConferenceVerdict.PROMOTE,
+        ConferenceVerdict.DEFER,
+        ConferenceVerdict.DECLINE,
+        ConferenceVerdict.ARCHIVE,
+    }
+)
+
+
+class NoDecision(StrEnum):
+    """WHY nobody decided. Only ever set alongside `ConferenceVerdict.NO_DECISION`.
+
+    Three, and they are three different facts about the two agents. A turn cap
+    means they talked and did not converge; a failed call means the machinery
+    broke and nothing can be concluded about either of them; an unconditioned
+    deferral means the trading agent reached for the word and could not name what
+    would end the wait.
+
+    An exchange that never happened at all — skipped because nothing changed,
+    because the epoch's budget is spent, or because the dream is at its lifetime
+    ceiling — is deliberately **not** in here and writes no decision row. No
+    model was called and no conversation took place, so there is nothing to have
+    decided; a row a day saying so would fill the only permanent record with the
+    exact noise the change gate exists to prevent. What those skips produce is a
+    `ConferOutcome` in the run's report and a log line, which is where a fact
+    about the caps belongs.
+    """
+
+    TURNS_EXHAUSTED = "turns_exhausted"
+    CALL_FAILED = "call_failed"
+    # The trading agent said defer and named no checkable wake condition. Refused
+    # rather than recorded, because a deferral that names nothing is "we ran out
+    # of things to say" wearing a decision's clothes.
+    DEFER_WITHOUT_WAKE = "defer_without_wake"
+
+
+@dataclass(frozen=True)
+class ConferenceDecision:
+    """One exchange's verdict: what was decided, by whom, why, and when.
+
+    **The verdict is what the AGENT decided, never what the code inferred from a
+    side effect.** Reading it back off "did an adoption row appear" would be a
+    second source of truth about one event, and the two would eventually
+    disagree — the reasoning that keeps `Adoption.is_live` computed from the row
+    rather than stored as a flag, arriving from the opposite direction. So the
+    verdict comes off the turn the agent actually took, and whether the store
+    then did the thing is a SEPARATE field.
+
+    That separation is load-bearing. The trading agent agreeing to adopt and the
+    adopted shelf being full are two facts, and an exchange where the first
+    happened and the second refused it is not a conversation that decided
+    nothing — it is one that decided PROMOTE and was told there was no room.
+    Collapsing them would lose the agreement.
+
+    `reason` is **the deciding agent's own words**, taken from the turn it
+    decided on, never a sentence this repository wrote about it. For
+    `NO_DECISION` there are no agent words, so `decided_by` is the conference
+    narrating itself and the reason says what stopped it.
+    """
+
+    dream_id: int
+    verdict: ConferenceVerdict
+    # `DREAMER`, `TRADER`, or `CONFERENCE` when nobody decided. A plain string
+    # for the reason `DreamMessage.speaker` is one: the intended direction is
+    # several dreamers arguing a topic out, and a closed enum would refuse the
+    # record of the thing it exists to keep.
+    decided_by: str
+    at: datetime
+    reason: str = ""
+
+    # DEFER only, and required by it. A `DreamCondition` rather than a new type,
+    # so the wake condition is the same checkable claim the prophecy shelf
+    # already grades: prose for a person, and a field/op/value/symbol for code.
+    # **The threshold is a number and never the name of another figure** — see
+    # `DreamCondition`, where the whole argument lives.
+    #
+    # It is recorded HERE and deliberately not appended to the dream's own
+    # conditions. Those are the dreamer's pre-registered claims and they decide
+    # what `promotion_for` and `all_conditions_met` do; writing a trading agent's
+    # condition into that list would let one agent change what the other's dream
+    # needs to be promoted.
+    wake: DreamCondition | None = None
+
+    # Whether the store did the thing this verdict implies. **Three-valued on
+    # purpose.** `None` means the verdict asks nothing of the store — a defer, a
+    # decline and a no-decision all leave every shelf exactly where it was — and
+    # is not the same answer as "it was done". A `True` default would report the
+    # good outcome for the two verdicts that never attempt anything, which is the
+    # shape of every missing-versus-absent bug in this repository.
+    effected: bool | None = None
+    effect_detail: str = ""
+
+    # Set only with `NO_DECISION`, and required by it.
+    undecided: NoDecision | None = None
+
+    # How many turns the exchange ran. Zero is meaningful: a call that failed
+    # before the opening offer produced no turn at all.
+    turns: int = 0
+    id: int | None = None
+
+    @property
+    def decided(self) -> bool:
+        """Whether anybody decided anything. Read this before the verdict."""
+        return self.verdict in DECIDED_VERDICTS
+
+    @property
+    def is_coherent(self) -> bool:
+        """Whether this row says a thing that can actually be true.
+
+        Two pairings and both are structural rather than stylistic: a deferral
+        with nothing to wake it is not a deferral, and a no-decision with no
+        cause cannot say what stopped it. `DreamStore.record_conference_decision`
+        refuses an incoherent row rather than storing one, because a stored
+        verdict is the thing a renderer trusts and a half-written one is worse
+        than the reconstruction it replaced.
+        """
+        if self.verdict is ConferenceVerdict.DEFER:
+            return self.wake is not None and self.wake.is_gradeable
+        if self.verdict is ConferenceVerdict.NO_DECISION:
+            return self.undecided is not None
+        return True
 
 
 @dataclass(frozen=True)
@@ -1937,6 +2157,83 @@ def _to_adoption(row: sqlite3.Row) -> Adoption | None:
     )
 
 
+def _to_conference_decision(row: sqlite3.Row) -> ConferenceDecision | None:
+    """One stored verdict, or `None` if it will not parse.
+
+    Forgiving on read, like every other row reader here. A verdict word this
+    version does not know is a row written by a newer one, and the honest answer
+    is to skip it and say so rather than to take down the page — but note what is
+    NOT done: no unknown verdict is coerced to a known one, and nothing defaults
+    to `NO_DECISION`. A verdict nobody can read must not be rendered as a
+    conversation that settled nothing, which is the same coercion trap
+    `str()`-on-an-SDK-enum sprang on the order status.
+
+    A `DEFER` whose wake condition will not parse is dropped for the same reason
+    it is refused on write: it would render as a deferral with nothing to wake
+    it, which is precisely the shape this record exists to make impossible.
+    """
+    try:
+        verdict = ConferenceVerdict(str(row["verdict"]))
+    except ValueError:
+        log.warning(
+            "conference_decision_unreadable",
+            decision_id=row["id"],
+            verdict=str(row["verdict"]),
+        )
+        return None
+
+    undecided: NoDecision | None = None
+    raw_cause = str(row["undecided"] or "")
+    if raw_cause:
+        try:
+            undecided = NoDecision(raw_cause)
+        except ValueError:
+            log.warning(
+                "conference_decision_unreadable",
+                decision_id=row["id"],
+                undecided=raw_cause,
+            )
+            return None
+
+    wake: DreamCondition | None = None
+    raw_wake = row["wake"]
+    if raw_wake:
+        try:
+            wake = DreamCondition.from_row(json.loads(raw_wake))
+        except (json.JSONDecodeError, TypeError, AttributeError) as exc:
+            log.warning(
+                "conference_decision_unreadable", decision_id=row["id"], error=str(exc)
+            )
+            return None
+
+    effected = row["effected"]
+    decision = ConferenceDecision(
+        id=int(row["id"]),
+        dream_id=int(row["dream_id"]),
+        at=_dt(row["at"]),
+        verdict=verdict,
+        decided_by=str(row["decided_by"] or ""),
+        reason=str(row["reason"] or ""),
+        wake=wake,
+        effected=None if effected is None else bool(effected),
+        effect_detail=str(row["effect_detail"] or ""),
+        undecided=undecided,
+        turns=int(row["turns"] or 0),
+    )
+    if not decision.is_coherent:
+        log.warning(
+            "conference_decision_unreadable",
+            decision_id=row["id"],
+            detail=(
+                "Stored verdict does not hold together — a deferral with no "
+                "checkable wake condition, or a no-decision with no cause. "
+                "Skipped rather than rendered as the mildest reading of itself."
+            ),
+        )
+        return None
+    return decision
+
+
 def _fusion_title(parents: Sequence[Dream]) -> str:
     """A name for a fusion whose caller supplied none.
 
@@ -2275,6 +2572,38 @@ CREATE INDEX IF NOT EXISTS ix_adoptions_dream ON adoptions (dream_id);
 -- handed back, so the partial index is the whole working set and stays small
 -- however long the history gets.
 CREATE INDEX IF NOT EXISTS ix_adoptions_live ON adoptions (returned_at, expires_at);
+
+-- What each agent-to-agent exchange DECIDED, as opposed to what was said in it.
+-- One row per exchange that reached the model, including the ones that decided
+-- nothing; none for an exchange the caps skipped, which never happened.
+--
+-- **A new TABLE reaches an existing database and a new COLUMN does not.**
+-- `CREATE TABLE IF NOT EXISTS` is a no-op on a table that is already there,
+-- which is why `_add_dream_columns` exists — but a table that is NOT there is
+-- created by exactly this statement, on the droplet as much as in a `tmp_path`,
+-- so nothing needs to be altered and no backfill is possible or wanted. That is
+-- a claim rather than a convenience, so `tests/test_dreaming.py` starts from a
+-- database built without this table and proves it appears with every existing
+-- row intact.
+--
+-- `wake` is one `DreamCondition` as JSON, for `DEFER` and nothing else.
+-- `effected` is nullable because three answers are possible and "this verdict
+-- asks nothing of the store" is one of them.
+CREATE TABLE IF NOT EXISTS conference_decisions (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  dream_id      INTEGER NOT NULL,
+  at            TEXT NOT NULL,
+  verdict       TEXT NOT NULL,
+  decided_by    TEXT NOT NULL,
+  reason        TEXT NOT NULL DEFAULT '',
+  wake          TEXT,
+  effected      INTEGER,
+  effect_detail TEXT NOT NULL DEFAULT '',
+  undecided     TEXT NOT NULL DEFAULT '',
+  turns         INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS ix_conference_decisions_dream
+  ON conference_decisions (dream_id, at);
 """
 
 
@@ -3337,6 +3666,122 @@ class DreamStore:
             )
             for r in rows
         ]
+
+    # ------------------------------------------------------- what they decided
+
+    def record_conference_decision(
+        self, decision: ConferenceDecision
+    ) -> ConferenceDecision:
+        """Store one exchange's verdict. Append-only; nothing is ever amended.
+
+        **Every exchange that reached the model writes exactly one of these, the
+        ones that decided nothing included.** That is already the rule for the
+        transcript — a dream the trading agent kept declining is a fact about the
+        dreamer worth having — and it applies harder to a decision: a record that
+        held only the conversations that concluded would flatter everyone in it
+        and would make "they never reach a verdict" invisible.
+
+        **An incoherent row is REFUSED rather than stored.** A deferral with no
+        checkable wake condition and a no-decision with no cause are the two
+        pairings that cannot be true, and a stored verdict is precisely the thing
+        a renderer stops questioning. Raising here rather than returning a
+        refusal is deliberate and is the one place in this file that does: every
+        other refusal answers a question an agent asked and is an ordinary
+        Tuesday, whereas this one can only be reached by a caller in this
+        repository constructing a row wrong. `Conference` builds them through
+        `ConferenceVerdict`-specific helpers so the error is unreachable from a
+        model's output — a defer the model could not justify is turned into
+        `NO_DECISION` at that boundary, which is a decision this store never
+        sees the wrong shape of.
+        """
+        if not decision.is_coherent:
+            raise ValueError(
+                f"An incoherent conference decision on dream {decision.dream_id}: "
+                f"{decision.verdict} needs "
+                + (
+                    "a checkable wake condition — a symbol, a field, an operator "
+                    "and a number. A deferral that names nothing is not a "
+                    "deferral."
+                    if decision.verdict is ConferenceVerdict.DEFER
+                    else "a stated cause. The absence of a decision is its own "
+                    "state and has to say which way it happened."
+                )
+            )
+
+        stamp = _as_utc(decision.at)
+        stored = replace(decision, at=stamp, reason=_trim(decision.reason))
+        with self._connect() as conn:
+            cursor = conn.execute(
+                "INSERT INTO conference_decisions (dream_id, at, verdict,"
+                " decided_by, reason, wake, effected, effect_detail, undecided,"
+                " turns) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (
+                    stored.dream_id,
+                    _iso_utc(stamp),
+                    str(stored.verdict),
+                    stored.decided_by,
+                    stored.reason,
+                    json.dumps(stored.wake.to_row()) if stored.wake else None,
+                    None if stored.effected is None else int(stored.effected),
+                    _trim(stored.effect_detail),
+                    str(stored.undecided) if stored.undecided else "",
+                    stored.turns,
+                ),
+            )
+            row_id = int(cursor.lastrowid or 0)
+        log.info(
+            "conference_decision",
+            dream_id=stored.dream_id,
+            verdict=str(stored.verdict),
+            decided_by=stored.decided_by,
+            effected=stored.effected,
+            undecided=str(stored.undecided) if stored.undecided else "",
+            turns=stored.turns,
+        )
+        return replace(stored, id=row_id)
+
+    def conference_decisions(
+        self, dream_id: int | None = None, limit: int = 200
+    ) -> list[ConferenceDecision]:
+        """Verdicts, newest first, for one dream or across every dream.
+
+        **Newest first, unlike `messages`, and the difference is not an
+        oversight.** A transcript read backwards is a negotiation read
+        backwards, so that one is oldest-first. This is a feed of outcomes, and
+        the question asked of a feed is what happened most recently.
+
+        Forgiving on read like everything else here: a row whose verdict came
+        from a newer version is skipped rather than raising, because the page
+        that renders these is one an operator opened to look at everything else
+        too.
+        """
+        sql = "SELECT * FROM conference_decisions"
+        params: tuple[object, ...] = ()
+        if dream_id is not None:
+            sql += " WHERE dream_id=?"
+            params = (dream_id,)
+        sql += " ORDER BY at DESC, id DESC LIMIT ?"
+        with self._connect() as conn:
+            rows = conn.execute(sql, (*params, limit)).fetchall()
+
+        out: list[ConferenceDecision] = []
+        for row in rows:
+            decision = _to_conference_decision(row)
+            if decision is not None:
+                out.append(decision)
+        return out
+
+    def latest_conference_decision(self, dream_id: int) -> ConferenceDecision | None:
+        """What was decided about this dream last, or `None` if nothing ever was.
+
+        `None` is "the two of them have never reached this dream", which is a
+        third state and not the mildest verdict. A caller that rendered it as a
+        no-decision would report a conversation that never happened as one that
+        happened and settled nothing — the same rule as `seen.py`'s first visit
+        being its own answer rather than "nothing changed".
+        """
+        found = self.conference_decisions(dream_id, limit=1)
+        return found[0] if found else None
 
     # ------------------------------------------------------------- the handover
 

@@ -29,18 +29,23 @@ import pytest
 from bot.claude_client import CallUsage
 from bot.confer import (
     CONFERENCE,
+    DREAMER_SYSTEM_PROMPT,
     MAX_DREAMS_PER_RUN,
     MAX_EXCHANGES_LIFETIME,
     MAX_EXCHANGES_PER_EPOCH,
     MAX_TURNS_PER_EXCHANGE,
+    TRADER_SYSTEM_PROMPT,
     Change,
     ChangeKind,
     Conference,
+    ConferenceVerdict,
     ConferOutcome,
     DreamerTurn,
+    NoDecision,
     TraderPowers,
     TraderTurn,
     TraderVerdict,
+    WakeCondition,
     change_signals,
     epoch_started_at,
     exchanges_in_epoch,
@@ -62,6 +67,8 @@ from bot.dreaming import (
     DreamMessage,
     DreamStore,
     Hop,
+    TriggerField,
+    TriggerOp,
     Vault,
     VaultCaps,
 )
@@ -167,6 +174,25 @@ def _declines() -> _Speaker:
     return _Speaker(
         verdict=TraderVerdict.DECLINE, text="not for me: the second hop is unchecked"
     )
+
+
+def _wake(value: float = 620.0) -> WakeCondition:
+    """A wake condition in the shape a deferral needs: a symbol and a NUMBER."""
+    return WakeCondition(
+        text="SPY closing above 620, which is where the thesis starts mattering",
+        symbol="spy",
+        field=TriggerField.CLOSE,
+        op=TriggerOp.ABOVE,
+        value=value,
+    )
+
+
+def _defers(text: str = "not yet", wake: WakeCondition | None = None) -> TraderTurn:
+    return TraderTurn(text=text, verdict=TraderVerdict.DEFER, wake=wake or _wake())
+
+
+def _withdraws(text: str = "the second hop is dead and I cannot argue it") -> DreamerTurn:
+    return DreamerTurn(text=text, withdraw=True)
 
 
 # ============================================================ cap 1: six turns
@@ -778,7 +804,11 @@ def test_the_conference_has_no_route_to_an_order():
 
 
 def test_the_verdicts_are_three_and_none_of_them_is_a_trade():
-    assert {str(v) for v in TraderVerdict} == {"accept", "decline", "park"}
+    """Accept, decline, defer. **No archive**, which is the operator's
+    commission rather than an oversight: the agent with a route to the broker
+    gets the smaller set of verbs, and a conversation must not become the door
+    that hands it a bigger one."""
+    assert {str(v) for v in TraderVerdict} == {"accept", "decline", "defer"}
 
 
 def test_a_decline_leaves_the_dream_where_it_was(rules, store):
@@ -794,17 +824,17 @@ def test_a_decline_leaves_the_dream_where_it_was(rules, store):
     assert store.adoptions(dream_id) == []
 
 
-def test_a_park_moves_nothing_either(rules, store):
+def test_a_defer_moves_nothing_either(rules, store):
     """The trading agent may not move a dream between the dreamer's shelves, so
-    a park is a state of the conversation and never a state of the vault."""
+    a deferral is a state of the conversation and never a state of the vault."""
     dream_id = _vaulted(store)
-    trader = _Speaker(turns=[TraderTurn(text="not today", verdict=TraderVerdict.PARK)])
+    trader = _Speaker(turns=[_defers("not today")])
 
     result = _conference(rules, store, trader=trader).confer_once(
         store.get(dream_id), now=LATER
     )
 
-    assert result.outcome is ConferOutcome.PARKED
+    assert result.outcome is ConferOutcome.DEFERRED
     dream = store.get(dream_id)
     assert dream is not None and dream.vault is Vault.VAULT
 
@@ -1155,3 +1185,509 @@ def test_the_grant_expires_on_the_files_clock_rather_than_the_dataclass_default(
 
     adoption = store.adoptions(dream_id)[0]
     assert adoption.expires_at == LATER + timedelta(days=7)
+
+
+# ============================================ the verdict: one per exchange
+#
+# The transcript records what was SAID. `ConferenceDecision` records what was
+# DECIDED, and this section is about the second. Every test here is about a
+# property that would otherwise have to be reconstructed by reading six turns of
+# prose and guessing at side effects.
+
+
+def test_every_exchange_that_reached_the_model_records_exactly_one_verdict(
+    rules, store
+):
+    """One row, whatever the ending. A record holding only the exchanges that
+    concluded would flatter everyone in it."""
+    endings: list[tuple[_Speaker, _Speaker, ConferenceVerdict]] = [
+        (_Speaker(), _Speaker(verdict=TraderVerdict.ACCEPT), ConferenceVerdict.PROMOTE),
+        (_Speaker(), _declines(), ConferenceVerdict.DECLINE),
+        (_Speaker(), _Speaker(turns=[_defers()]), ConferenceVerdict.DEFER),
+        (_Speaker(turns=[_withdraws()]), _Speaker(), ConferenceVerdict.ARCHIVE),
+        # Six turns, nobody decides.
+        (_Speaker(), _Speaker(), ConferenceVerdict.NO_DECISION),
+    ]
+
+    for index, (dreamer, trader, expected) in enumerate(endings):
+        dream_id = _vaulted(store, at=BASE, title=f"ending {index}")
+
+        _conference(rules, store, dreamer=dreamer, trader=trader).confer_once(
+            store.get(dream_id), now=LATER
+        )
+
+        recorded = store.conference_decisions(dream_id)
+        assert len(recorded) == 1, expected
+        assert recorded[0].verdict is expected
+        assert recorded[0].at == LATER
+
+
+def test_a_conferred_exchange_always_carries_its_verdict_and_a_skip_never_does(
+    rules, store
+):
+    """The invariant, stated once rather than implied by the cases above.
+
+    `ExchangeResult.decision` is `None` for a skip and only for a skip. A caller
+    that treated `None` as "decided nothing" would be making the mistake
+    `NO_DECISION` exists to stop, one layer up — so the two states are kept
+    distinguishable at the boundary as well as in the store.
+    """
+    stale = _vaulted(store, at=BASE, title="stale")
+    _conference(rules, store, trader=_declines()).run(now=LATER)
+    _vaulted(store, at=BASE + timedelta(hours=1), title="fresh")
+
+    report = _conference(rules, store, trader=_Speaker(turns=[_defers()])).run(
+        now=LATER + timedelta(days=1)
+    )
+
+    assert {e.dream_id for e in report.exchanges} >= {stale}
+    for exchange in report.exchanges:
+        assert exchange.conferred == (exchange.decision is not None)
+    assert len(report.decisions) == report.conferred
+
+
+def test_a_skipped_exchange_records_no_verdict_at_all(rules, store):
+    """A skip is the caps working, not a conference.
+
+    No model was called and nothing was said, so there is nothing to have
+    decided. A row a day saying so would fill the only permanent record with the
+    exact noise the change gate exists to prevent — and would do it in the one
+    place where the noise is permanent.
+    """
+    dream_id = _vaulted(store)
+    _conference(rules, store, trader=_declines()).run(now=LATER)
+    assert len(store.conference_decisions(dream_id)) == 1
+
+    report = _conference(rules, store, trader=_declines()).run(
+        now=LATER + timedelta(days=1)
+    )
+
+    assert [e.outcome for e in report.exchanges] == [ConferOutcome.NOTHING_NEW]
+    assert report.exchanges[0].decision is None
+    assert len(store.conference_decisions(dream_id)) == 1
+
+
+def test_the_reason_is_the_deciding_agents_own_words(rules, store):
+    """Not a sentence this repository wrote about the decision.
+
+    "the trading agent chose to decline" is the code narrating itself and says
+    nothing an operator could not have guessed from the verdict. The value of
+    the record is the reasoning, which only the agent has.
+    """
+    dream_id = _vaulted(store)
+    trader = _Speaker(
+        turns=[
+            TraderTurn(
+                text="hop 2 is the whole chain and it is unchecked; I will not "
+                "hold a permission on an assumption",
+                verdict=TraderVerdict.DECLINE,
+            )
+        ]
+    )
+
+    _conference(rules, store, trader=trader).confer_once(store.get(dream_id), now=LATER)
+
+    decision = store.latest_conference_decision(dream_id)
+    assert decision is not None
+    assert decision.reason.startswith("hop 2 is the whole chain")
+    assert decision.decided_by == TRADER
+
+
+def test_the_verdict_is_what_the_agent_decided_and_not_what_the_store_did(
+    rules, store
+):
+    """**The property this whole record turns on.**
+
+    Reading the verdict back off "did an adoption row appear" would be a second
+    source of truth about one event, and the two would eventually disagree. The
+    trading agent agreeing to adopt and the adopted shelf being full are two
+    facts: an exchange where the first happened is not one that decided nothing.
+    """
+    dream_id = _vaulted(store)
+    trader = _Speaker(turns=[TraderTurn(text="taking it", verdict=TraderVerdict.ACCEPT)])
+
+    result = _conference(rules, store, trader=trader).confer_once(
+        store.get(dream_id), now=LATER, caps=VaultCaps(adopted=0)
+    )
+
+    assert result.outcome is ConferOutcome.ADOPTION_REFUSED
+    assert store.adoptions(dream_id) == []
+
+    decision = store.latest_conference_decision(dream_id)
+    assert decision is not None
+    # The agreement survives the refusal, and the refusal is a separate field
+    # rather than a different verdict.
+    assert decision.verdict is ConferenceVerdict.PROMOTE
+    assert decision.decided is True
+    assert decision.effected is False
+    assert "full" in decision.effect_detail.lower() or decision.effect_detail
+
+
+def test_a_verdict_that_asks_nothing_of_the_store_is_neither_done_nor_failed(
+    rules, store
+):
+    """`effected` is three-valued, and `None` is the third answer.
+
+    A decline, a deferral and a no-decision all leave every shelf exactly where
+    it was. A `True` there would report the good outcome for the verdicts that
+    never attempt anything, which is the shape of every missing-versus-absent
+    bug in this repository.
+    """
+    declined = _vaulted(store, at=BASE, title="declined")
+    deferred = _vaulted(store, at=BASE, title="deferred")
+
+    _conference(rules, store, trader=_declines()).confer_once(
+        store.get(declined), now=LATER
+    )
+    _conference(rules, store, trader=_Speaker(turns=[_defers()])).confer_once(
+        store.get(deferred), now=LATER
+    )
+
+    for dream_id in (declined, deferred):
+        decision = store.latest_conference_decision(dream_id)
+        assert decision is not None
+        assert decision.effected is None
+        assert decision.effect_detail == ""
+
+
+# ============================== the fourth state: nobody decided anything
+
+
+def test_the_turn_cap_is_recorded_as_no_decision_and_never_as_a_defer(rules, store):
+    """**Must not collapse into the mildest real decision.**
+
+    Six turns and no verdict is two agents that did not converge. Reporting it
+    as "they agreed to wait" would put a decision in the record that nobody
+    made, and would do it in the direction that reads as healthy — the same rule
+    as `has_cycles`, `can_grade_anything` and a first visit.
+    """
+    dream_id = _vaulted(store)
+
+    result = _conference(rules, store).confer_once(store.get(dream_id), now=LATER)
+
+    assert result.outcome is ConferOutcome.TURNS_EXHAUSTED
+    decision = result.decision
+    assert decision is not None
+    # Stated in this order deliberately: the thing being pinned is that a turn
+    # cap does NOT read as the mildest real decision, and the positive assertion
+    # after it says what it reads as instead.
+    assert decision.verdict is not ConferenceVerdict.DEFER
+    assert decision.verdict is ConferenceVerdict.NO_DECISION
+    assert decision.decided is False
+    assert decision.undecided is NoDecision.TURNS_EXHAUSTED
+    assert decision.decided_by == CONFERENCE
+    assert decision.wake is None
+    assert decision.turns == MAX_TURNS_PER_EXCHANGE
+
+
+@pytest.mark.parametrize("turns_before", [0, 1])
+def test_a_failed_call_is_recorded_as_a_failure_and_never_as_a_quiet_exchange(
+    rules, store, turns_before
+):
+    """A cycle that could not get a decision must not be recorded as one that
+    decided to do nothing. Nothing about either agent can be read off a call
+    that did not return."""
+    dream_id = _vaulted(store)
+    boom = RuntimeError("the model went away")
+    dreamer = _Speaker(raises=boom if turns_before == 0 else None)
+    trader = _Speaker(raises=boom)
+
+    result = _conference(rules, store, dreamer=dreamer, trader=trader).confer_once(
+        store.get(dream_id), now=LATER
+    )
+
+    assert result.outcome is ConferOutcome.CALL_FAILED
+    decision = result.decision
+    assert decision is not None
+    assert decision.verdict is ConferenceVerdict.NO_DECISION
+    assert decision.undecided is NoDecision.CALL_FAILED
+    assert decision.decided is False
+    assert decision.turns == turns_before
+    assert "the model went away" in decision.reason
+
+
+def test_the_run_counts_decided_and_undecided_apart(rules, store):
+    """A run where every exchange settled nothing is a fact about the two
+    agents, and one where none did is a different one. Both produce the same
+    `conferred`, so the two counts are stated rather than subtracted."""
+    _vaulted(store, at=BASE, title="a")
+    _vaulted(store, at=BASE + timedelta(minutes=1), title="b")
+
+    report = _conference(rules, store).run(now=LATER)
+
+    assert report.conferred == 2
+    assert report.decided == 0
+    assert report.undecided == 2
+    assert len(report.decisions) == 2
+
+
+# ================================= a defer names what would wake it, or it is not one
+
+
+def test_a_defer_records_the_wake_condition_a_renderer_needs(rules, store):
+    dream_id = _vaulted(store)
+    trader = _Speaker(turns=[_defers("the chain holds but the level does not")])
+
+    result = _conference(rules, store, trader=trader).confer_once(
+        store.get(dream_id), now=LATER
+    )
+
+    assert result.outcome is ConferOutcome.DEFERRED
+    decision = store.latest_conference_decision(dream_id)
+    assert decision is not None
+    assert decision.verdict is ConferenceVerdict.DEFER
+    assert decision.decided is True
+    assert decision.reason == "the chain holds but the level does not"
+    wake = decision.wake
+    assert wake is not None
+    # The checkable half survives the round trip, normalised the way every other
+    # symbol in this repository is.
+    assert wake.symbol == "SPY"
+    assert wake.field is TriggerField.CLOSE
+    assert wake.op is TriggerOp.ABOVE
+    assert wake.value == 620.0
+    assert wake.is_gradeable
+    # And the sentence a person reads survives with it.
+    assert "620" in wake.text
+
+
+def test_a_defer_with_no_wake_condition_is_REFUSED(rules, store):
+    """**The rule that rejects.**
+
+    A deferral that names nothing is "we ran out of things to say" wearing a
+    decision's clothes. It is recorded as having decided nothing, with the cause
+    named, rather than as the mildest decision available.
+    """
+    dream_id = _vaulted(store)
+    trader = _Speaker(
+        turns=[TraderTurn(text="let us wait and see", verdict=TraderVerdict.DEFER)]
+    )
+
+    result = _conference(rules, store, trader=trader).confer_once(
+        store.get(dream_id), now=LATER
+    )
+
+    assert result.outcome is ConferOutcome.DEFER_REFUSED
+    decision = store.latest_conference_decision(dream_id)
+    assert decision is not None
+    assert decision.verdict is ConferenceVerdict.NO_DECISION
+    assert decision.undecided is NoDecision.DEFER_WITHOUT_WAKE
+    assert decision.wake is None
+    # The dreamer reads the transcript, so it is told which half was missing.
+    notes = [m.text for m in store.messages(dream_id) if m.speaker == CONFERENCE]
+    assert any("names nothing is not a deferral" in n for n in notes)
+
+
+def test_a_wake_condition_with_no_symbol_cannot_settle_anything_so_it_is_refused(
+    rules, store
+):
+    """`is_gradeable` is stricter than `is_checkable`, and this is why.
+
+    A field, an operator and a number with nothing to look them up against is a
+    comparison with no subject. It would render as a deferral with a threshold
+    on it and would never be settleable, which is worse than an honest sentence
+    saying nobody could name one.
+    """
+    dream_id = _vaulted(store)
+    trader = _Speaker(
+        turns=[
+            TraderTurn(
+                text="waiting for the level",
+                verdict=TraderVerdict.DEFER,
+                wake=WakeCondition(
+                    text="a close above 620",
+                    symbol="   ",
+                    field=TriggerField.CLOSE,
+                    op=TriggerOp.ABOVE,
+                    value=620.0,
+                ),
+            )
+        ]
+    )
+
+    result = _conference(rules, store, trader=trader).confer_once(
+        store.get(dream_id), now=LATER
+    )
+
+    assert result.outcome is ConferOutcome.DEFER_REFUSED
+    decision = store.latest_conference_decision(dream_id)
+    assert decision is not None
+    assert decision.verdict is ConferenceVerdict.NO_DECISION
+    assert decision.undecided is NoDecision.DEFER_WITHOUT_WAKE
+
+
+def test_the_wake_condition_is_never_written_onto_the_dreams_own_conditions(
+    rules, store
+):
+    """The dream's conditions are the DREAMER's pre-registered claims, and they
+    decide what `promotion_for` and `all_conditions_met` do. Writing the trading
+    agent's condition into that list would let one agent change what the other's
+    dream needs in order to be promoted."""
+    dream_id = _vaulted(store)
+
+    _conference(rules, store, trader=_Speaker(turns=[_defers()])).confer_once(
+        store.get(dream_id), now=LATER
+    )
+
+    dream = store.get(dream_id)
+    assert dream is not None
+    assert dream.conditions == []
+
+
+def test_a_wake_condition_on_anything_but_a_defer_is_dropped(rules, store):
+    """A threshold attached to an acceptance says nothing and waits for nothing.
+    Storing one would put a condition on a decision that does not have one."""
+    dream_id = _vaulted(store)
+    trader = _Speaker(
+        turns=[
+            TraderTurn(text="taking it", verdict=TraderVerdict.ACCEPT, wake=_wake())
+        ]
+    )
+
+    _conference(rules, store, trader=trader).confer_once(store.get(dream_id), now=LATER)
+
+    decision = store.latest_conference_decision(dream_id)
+    assert decision is not None
+    assert decision.verdict is ConferenceVerdict.PROMOTE
+    assert decision.wake is None
+
+
+# ==================================================== who may archive a dream
+
+
+def test_the_trading_agent_has_no_archive_verb_at_all(rules, store):
+    """**The operator's commission, asserted rather than trusted.**
+
+    The trading agent "cannot delete, can only action or send back to vault with
+    reasons". An adopted dream carries a live symbol grant, so the agent with a
+    route to the broker is the one that gets the smaller set of verbs — and a
+    conversation must not become the door that hands it a bigger one. Not even
+    as a recommendation: a decline with a reason is everything it has standing
+    to say.
+    """
+    assert "archive" not in {str(v) for v in TraderVerdict}
+    assert "withdraw" not in {f for f in TraderTurn.model_fields}
+
+    # And the store refuses it directly, which is the lock rather than the
+    # statement of the lock.
+    dream_id = _vaulted(store)
+    refusal = store.move(dream_id, Vault.ARCHIVE, by=TRADER, at=LATER)
+
+    assert refusal.refused
+    dream = store.get(dream_id)
+    assert dream is not None and dream.vault is Vault.VAULT
+
+
+def test_the_dreamer_may_withdraw_its_own_dream_and_that_is_the_only_archive(
+    rules, store
+):
+    """A verb the dreamer already holds, arriving through a new door.
+
+    `DREAMER_VAULTS` contains ARCHIVE and `DreamStore.move` already permits
+    dreamer-to-archive, so nothing is widened. The defensible trigger is the one
+    the conference is built to produce: the trading agent asks the question that
+    would kill the chain and the dreamer cannot answer it.
+    """
+    dream_id = _vaulted(store)
+    dreamer = _Speaker(turns=[_withdraws("hop 2 is dead; I cannot source it")])
+
+    result = _conference(rules, store, dreamer=dreamer, trader=_Speaker()).confer_once(
+        store.get(dream_id), now=LATER
+    )
+
+    assert result.outcome is ConferOutcome.WITHDRAWN
+    dream = store.get(dream_id)
+    assert dream is not None and dream.vault is Vault.ARCHIVE
+
+    decision = store.latest_conference_decision(dream_id)
+    assert decision is not None
+    assert decision.verdict is ConferenceVerdict.ARCHIVE
+    assert decision.decided_by == DREAMER
+    assert decision.reason == "hop 2 is dead; I cannot source it"
+    assert decision.effected is True
+
+
+def test_a_withdrawal_ends_the_exchange_before_the_trading_agent_answers(
+    rules, store
+):
+    """The dreamer speaks first, so a withdrawal on the opening turn costs one
+    model call rather than six. And it is filed as a `note` rather than an
+    `offer`: `exchanges_so_far` counts opening offers, and a dreamer that
+    withdrew instead of offering has not offered."""
+    dream_id = _vaulted(store)
+    trader = _Speaker()
+
+    result = _conference(
+        rules, store, dreamer=_Speaker(turns=[_withdraws()]), trader=trader
+    ).confer_once(store.get(dream_id), now=LATER)
+
+    assert result.turns == 1
+    assert trader.prompts == []
+    kinds = [m.kind for m in store.messages(dream_id) if m.speaker == DREAMER]
+    assert kinds == ["note"]
+    assert exchanges_so_far(store.messages(dream_id)) == 0
+
+
+def test_a_withdrawal_destroys_nothing(rules, store):
+    """The archive is a shelf and `delete` is a different method. The chain, the
+    conversation and every adoption row stay on the record — an argument nobody
+    can read afterwards is worse than one that was retired."""
+    dream_id = _vaulted(store)
+
+    _conference(
+        rules, store, dreamer=_Speaker(turns=[_withdraws()]), trader=_Speaker()
+    ).confer_once(store.get(dream_id), now=LATER)
+
+    dream = store.get(dream_id)
+    assert dream is not None
+    assert [h.claim for h in dream.chain] == ["the brood map is published", "assumed"]
+    assert store.messages(dream_id)
+    assert store.conference_decisions(dream_id)
+
+
+def test_a_refused_withdrawal_keeps_the_verdict_and_says_it_did_not_take_effect(
+    rules, store
+):
+    """Same shape as a refused adoption: the decision happened and the shelf
+    would not take it, which is not the same as no decision."""
+    dream_id = _vaulted(store)
+
+    result = _conference(
+        rules, store, dreamer=_Speaker(turns=[_withdraws()]), trader=_Speaker()
+    ).confer_once(store.get(dream_id), now=LATER, caps=VaultCaps(archive=0))
+
+    assert result.outcome is ConferOutcome.WITHDRAWAL_REFUSED
+    dream = store.get(dream_id)
+    assert dream is not None and dream.vault is Vault.VAULT
+
+    decision = store.latest_conference_decision(dream_id)
+    assert decision is not None
+    assert decision.verdict is ConferenceVerdict.ARCHIVE
+    assert decision.effected is False
+    assert decision.effect_detail
+
+
+def test_each_side_is_told_which_verbs_are_its_own(rules, store):
+    """The asymmetry only works if each side knows where the line is. The
+    dreamer is told withdrawal is its own and nobody else's; the trading agent
+    is told it cannot archive and is not being asked to recommend it.
+
+    Whitespace is flattened first. Both prompts are hard-wrapped prose, so a
+    clause that reads as one sentence spans two lines, and a test searching the
+    raw text would fail the next time somebody reflowed a paragraph — an edit
+    that changes nothing at all.
+    """
+    dreamer_prompt = " ".join(DREAMER_SYSTEM_PROMPT.split())
+    trader_prompt = " ".join(TRADER_SYSTEM_PROMPT.split())
+
+    assert "WITHDRAW" in dreamer_prompt
+    assert "you are the only one who can" in dreamer_prompt
+    assert "cannot archive a dream" in trader_prompt
+    assert "not being asked to recommend either" in trader_prompt
+
+    # And the trading agent is told what a deferral costs it if it cannot name a
+    # wake condition, because the alternative is a model reaching for the mildest
+    # word and being recorded as having decided nothing.
+    assert "Defer only when you can name what would end the wait" in trader_prompt
+    assert "never the name of another figure" in trader_prompt
+    assert "If you cannot name one, DECLINE" in trader_prompt
