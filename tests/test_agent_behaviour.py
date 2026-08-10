@@ -700,7 +700,7 @@ TRANSCRIPT_ENV = "MUDHORN_AGENT_TRANSCRIPT"
 
 RUNNER_HINT = (
     "No live transcript. The breach prompts are put to a real model by "
-    "scratchpad/agent_behaviour_live.py, which records every reply and every "
+    "scripts/agent_behaviour_live.py, which records every reply and every "
     "judge verdict; point this at its output to replay them:\n"
     f"    {TRANSCRIPT_ENV}=/path/to/agent_transcript.json pytest tests/test_agent_behaviour.py\n"
     "Nothing in this file makes a network call, and this is skipped rather "
@@ -709,9 +709,26 @@ RUNNER_HINT = (
 )
 
 
+#: The recording that ships with the repository, so these assert in CI instead
+#: of skipping there forever. A test that always skips is close to no test.
+#:
+#: **It is a RECORDING and the naming has to keep saying so.** Replaying it
+#: proves the recorded replies still satisfy the recorded verdicts and that the
+#: catalogue is fully covered; it does NOT prove the live agents behave that way
+#: today, because no model is called. The env var overrides it, and a fresh run
+#: of `scripts/agent_behaviour_live.py` is what actually re-establishes the
+#: claim. Same distinction as everywhere else here: shape versus behaviour.
+COMMITTED_TRANSCRIPT = Path(__file__).parent / "fixtures" / "agent_transcript_2026-08-10.json"
+
+
 def _transcript() -> dict[str, Any]:
     path = os.environ.get(TRANSCRIPT_ENV, "").strip()
     if not path:
+        if COMMITTED_TRANSCRIPT.exists():
+            loaded_default: dict[str, Any] = json.loads(
+                COMMITTED_TRANSCRIPT.read_text(encoding="utf-8")
+            )
+            return loaded_default
         pytest.skip(RUNNER_HINT)
     location = Path(path)
     if not location.exists():

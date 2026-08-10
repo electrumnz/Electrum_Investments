@@ -54,7 +54,7 @@ strict = true
 # deploy/ holds one Python script, and it runs as root against the Hermes
 # config. A script nobody type-checks because it lives outside src/ is exactly
 # the kind of thing that fails on the box rather than in CI.
-files = ["src", "tests", "deploy"]
+files = ["src", "tests", "deploy", "scripts"]
 
 [[tool.mypy.overrides]]
 module = ["alpaca.*", "mcp.*", "uvicorn.*"]
