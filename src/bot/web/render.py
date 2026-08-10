@@ -25,12 +25,13 @@ from __future__ import annotations
 
 import html
 import json
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from zoneinfo import ZoneInfo
 
 from ..audit import AuditView, DecisionEntry
 from ..broker import is_crypto_symbol
-from ..config import DAY_NAMES, Env, InstrumentRules, Rules
+from ..config import DAY_NAMES, Env, InstrumentRules, Rules, WatchlistRules
 from ..dreamer import estimated_cost_usd, read_schedule
 from ..dreaming import (
     THIN_LEDGER_THRESHOLD,
@@ -40,13 +41,53 @@ from ..dreaming import (
     DreamVerdict,
     Hop,
 )
-from ..market_clock import ClockFace, MarketPhase, MarketState, clock_faces
+from ..market_clock import (
+    NY,
+    ClockFace,
+    MarketState,
+    VenueState,
+    clock_faces,
+    is_continuous,
+    venue_state,
+)
 from ..metrics import JournalReport, render_excursions, render_summary
 from ..models import AccountSnapshot, StandDownState, Trade, WorkingOrder
 from ..options import ExpiryAlert
+from ..session_calendar import SessionCalendar
 from ..tailnet import TailnetStatus
-from .live import TickerQuote
+from .live import SessionDayView, TickerQuote
 from .seen import SinceLastVisit
+
+#: A hue per kind, applied to the SYMBOL LABEL ONLY.
+#:
+#: Direction already owns green and red on the price, the move and the rail, and
+#: a second colour axis competing for the same glance would make both harder to
+#: read. So the kind colours the name and nothing else — enough to see at a
+#: glance that a strip holds metals and bonds and crypto rather than sixteen
+#: large caps, without ever being mistaken for a gain or a loss.
+#:
+#: Deliberately none of them are the gain or loss colours.
+KIND_HUES: dict[str, str] = {
+    "index": "var(--holo)",
+    "equity": "#9AA6B8",
+    "crypto": "#C9922F",
+    "defensive": "#7FA88C",
+    "commodity": "#C4A24A",
+    "rates": "#8E9BC4",
+    "volatility": "#B8737F",
+    "international": "#6FA9A2",
+    "energy": "#B08050",
+    "unclassified": "var(--pewter)",
+}
+
+
+def _kind_css() -> str:
+    """One rule per kind. Generated so the palette above is the only source."""
+    return "".join(
+        f'.tape .cell[data-kind="{kind}"] .sym{{color:{hue}}}'
+        for kind, hue in KIND_HUES.items()
+    )
+
 
 STYLES = """
 :root {
@@ -209,10 +250,20 @@ section.block>h2{margin-bottom:.75rem}
    Not colour alone. `.shut` also strikes the rail back to neutral and the cell
    carries `title`, because a dimmed green and a dimmed red are exactly the
    pair that about one man in twelve cannot separate. */
+/* Out of hours: a REAL price you cannot act on at that price.
+   Deliberately not a dimmer version of `.shut`, because the two make opposite
+   claims about the figure. `.shut` says the number is yesterday's; this says
+   the number is now and the ORDER is the part that waits. So the price stays
+   at full strength and the marker goes on the rail and the symbol: a hollow
+   rail rather than a lit one, and a hairline under the name. */
+.tape .cell.v-ooh::before{opacity:.28;box-shadow:none}
+.tape .cell.v-ooh .sym{border-bottom:1px dashed currentColor;padding-bottom:1px}
+.tape .cell.v-ooh .mv{opacity:.8}
 .tape .cell.shut .sym,.tape .cell.shut .px,.tape .cell.shut .mv{
   color:var(--pewter);opacity:.65}
 .tape .cell.shut::before{background:var(--slate);opacity:.5;box-shadow:none}
 .tape .cell.shut::after{display:none}
+.tape .cell.shut .sym{border-bottom:none}
 
 .tape .clk{display:flex;align-items:center;gap:.45rem;padding:0 .9rem;
   white-space:nowrap;font-family:var(--mono);font-size:.75rem;height:100%;
@@ -259,6 +310,34 @@ section.block>h2{margin-bottom:.75rem}
   70%{filter:blur(5px);opacity:.55}
   100%{filter:blur(0);opacity:1}}
 .tape .clk.turning .t{animation:tape-spin 1500ms ease-in-out}
+/* Directional, so the transition says WHICH way the session went rather than
+   only that it went. Up into the regular session, down into a shut market,
+   sideways into pre-market, after hours or overnight — the same three states
+   the cells carry, so the whole strip tells one story. The vertical blur is
+   what reads as digits spinning past on a mechanical counter. */
+@keyframes tape-spin-up{
+  0%{filter:blur(0);opacity:1;transform:translateY(0)}
+  35%{filter:blur(0 3px);opacity:.7;transform:translateY(-5px)}
+  70%{filter:blur(0 5px);opacity:.5;transform:translateY(-9px)}
+  71%{transform:translateY(9px)}
+  100%{filter:blur(0);opacity:1;transform:translateY(0)}}
+@keyframes tape-spin-down{
+  0%{filter:blur(0);opacity:1;transform:translateY(0)}
+  35%{filter:blur(0 3px);opacity:.7;transform:translateY(5px)}
+  70%{filter:blur(0 5px);opacity:.5;transform:translateY(9px)}
+  71%{transform:translateY(-9px)}
+  100%{filter:blur(0);opacity:1;transform:translateY(0)}}
+@keyframes tape-spin-side{
+  0%{filter:blur(0);opacity:1;transform:translateX(0)}
+  35%{filter:blur(3px 0);opacity:.7;transform:translateX(-6px)}
+  70%{filter:blur(5px 0);opacity:.5;transform:translateX(6px)}
+  100%{filter:blur(0);opacity:1;transform:translateX(0)}}
+.tape .clk.turn-up .t{animation:tape-spin-up 1500ms ease-in-out}
+.tape .clk.turn-down .t{animation:tape-spin-down 1500ms ease-in-out}
+.tape .clk.turn-side .t{animation:tape-spin-side 1500ms ease-in-out}
+/* The directional rules come after the plain one and are more specific, so a
+   clock carrying both `turning` and `turn-up` runs the directional animation.
+   `turning` alone stays the fallback for a direction the script did not set. */
 @keyframes tape-flash{0%{background:rgba(111,211,232,.20)}100%{background:transparent}}
 .tape.turning{animation:tape-flash 1800ms ease-out}
 .tape[data-phase=open] .fixed .dot{background:var(--patina)}
@@ -279,7 +358,9 @@ section.block>h2{margin-bottom:.75rem}
   .tape .track{animation:none;width:auto}
   .tape .view{overflow-x:auto}
   .tape .fixed .dot{animation:none}
-  .tape .clk.turning .t,.tape.turning{animation:none}
+  .tape .clk.turning .t,.tape.turning,
+  .tape .clk.turn-up .t,.tape .clk.turn-down .t,
+  .tape .clk.turn-side .t{animation:none}
   /* The pulse goes too, and the colour and the wedge carry the tick instead —
      both of which are already there and neither of which moves. */
   .tape .cell.pulse-up::after,.tape .cell.pulse-down::after,
@@ -1040,6 +1121,11 @@ nav a:hover::after,nav a[aria-current=page]::after{transform:scaleX(1)}
   .fx-ready .fx-panel{opacity:1!important;clip-path:none!important;transform:none!important}
 }
 """
+
+# Generated rather than written out, so `KIND_HUES` is the only place a kind's
+# colour is stated. A hand-maintained second list is how a kind gets added to
+# the config and silently renders in the fallback grey.
+STYLES += _kind_css()
 
 SCRIPT = """
 /* The projection layer for the command centre: starfield, hyperspace jump,
@@ -2072,12 +2158,30 @@ SCRIPT = """
       turned = changeAt;
       bar.setAttribute('data-phase', nextPhase);
       until.textContent = nextPhase + ' now — reload for the next boundary';
-      bar.classList.add('turning');
-      window.setTimeout(function () { bar.classList.remove('turning'); }, 1900);
+
+      /* The direction carries the meaning. A blur alone says "something
+         changed" and makes the reader look for what; spinning UP into the
+         regular session, DOWN into a shut market and SIDEWAYS into an
+         out-of-hours session says which of the three before they read a word.
+         Matches the three states the cells use, so the strip tells one story.
+
+         Unknown phases fall back to sideways rather than guessing a direction:
+         a wrong direction is worse than a neutral one, because it would be
+         read as information. */
+      var dir = nextPhase === 'open' ? 'up'
+              : (nextPhase === 'weekend' ? 'down' : 'side');
+      var marks = ['turning', 'turn-' + dir];
+      var clear = function (el) {
+        window.setTimeout(function () {
+          el.classList.remove('turning', 'turn-up', 'turn-down', 'turn-side');
+        }, 1900);
+      };
+      bar.classList.add(marks[0], marks[1]);
+      clear(bar);
       for (var j = 0; j < faces.length; j++) {
         (function (el) {
-          el.classList.add('turning');
-          window.setTimeout(function () { el.classList.remove('turning'); }, 1900);
+          el.classList.add(marks[0], marks[1]);
+          clear(el);
         })(faces[j]);
       }
     }
@@ -2482,11 +2586,12 @@ def _limit_row(value: float | int | None, default: float | int, fmt: str) -> str
 
 
 def _is_continuous(inst: InstrumentRules) -> bool:
-    """A market with no closed hours at all: every day, midnight to midnight."""
-    by_day = inst.windows_by_day
-    return len(by_day) == 7 and all(
-        windows == [(0, 24)] for windows in by_day.values()
-    )
+    """A market with no closed hours at all: every day, midnight to midnight.
+
+    Delegates so the dashboard and the model's context cannot form different
+    opinions about which markets have a session at all.
+    """
+    return is_continuous(inst.windows_by_day)
 
 
 def _countdown(seconds: float) -> str:
@@ -2557,7 +2662,23 @@ FULL_SCALE_PCT = 3.0
 PER_GROUP = 4
 
 
-def _tape_cell(quote: TickerQuote, *, live_venue: bool) -> str:
+
+#: What each venue state MEANS, in a sentence, on the cell's tooltip.
+#:
+#: Three, because the middle one is a different claim from either neighbour: the
+#: figure is current and what you can do with it is not. Collapsing it into
+#: "market shut" would be false about the price; collapsing it into the live
+#: state would be false about the order.
+VENUE_TITLES: dict[VenueState, str] = {
+    VenueState.LIVE: "regular session, trading now",
+    VenueState.OUT_OF_HOURS: (
+        "out of hours - this price is live, but an order placed now rests "
+        "until the next regular open"
+    ),
+    VenueState.CLOSED: "market shut - this is the last session's close",
+}
+
+def _tape_cell(quote: TickerQuote, *, venue: VenueState, kind: str) -> str:
     """One instrument on the tape.
 
     **A quote that could not be read renders as unavailable, never as flat.**
@@ -2566,10 +2687,10 @@ def _tape_cell(quote: TickerQuote, *, live_venue: bool) -> str:
     not happen here.
     """
     pct = quote.change_pct
-    classes = ["cell"]
+    classes = ["cell", f"v-{venue.value}"]
     if quote.tradeable:
         classes.append("can")
-    if not live_venue:
+    if venue is VenueState.CLOSED:
         # Greyed, because the figure is last session's close and not a live
         # price. The move beside it is still TRUE — it is what happened on the
         # last day that traded — so it is dimmed rather than withheld: hiding a
@@ -2596,10 +2717,15 @@ def _tape_cell(quote: TickerQuote, *, live_venue: bool) -> str:
     # A title, not only a dimmer colour. A dimmed green and a dimmed red are
     # the pair about one man in twelve cannot separate, and "why is this one
     # grey" is a question the tape should answer without being asked twice.
-    title = "" if live_venue else ' title="market shut - last session close"'
+    #
+    # Out of hours gets its own sentence rather than sharing the shut one. The
+    # figure is CURRENT in that state and stale in the other, so one label for
+    # both would be wrong about one of them.
+    title = f"{kind} - {VENUE_TITLES[venue]}"
     return (
         f'<span class="{" ".join(classes)}" style="--mag:{mag:.3f}" '
-        f'data-tick="{_e(quote.symbol)}"{title}>'
+        f'data-tick="{_e(quote.symbol)}" data-kind="{_e(kind)}" '
+        f'title="{_e(title)}">'
         f'<span class="sym">{_e(quote.symbol)}</span>{body}</span>'
     )
 
@@ -2613,7 +2739,13 @@ def _tape_clock(face: ClockFace, local: datetime) -> str:
     )
 
 
-def ticker_tape(state: MarketState, quotes: list[TickerQuote]) -> str:
+def ticker_tape(
+    state: MarketState,
+    quotes: list[TickerQuote],
+    *,
+    watchlist: WatchlistRules | None = None,
+    calendar: SessionCalendar | None = None,
+) -> str:
     """The strip under the header: session phase, four clocks, the watchlist.
 
     One clock per four instruments, so the four zones are spread through the
@@ -2630,34 +2762,53 @@ def ticker_tape(state: MarketState, quotes: list[TickerQuote]) -> str:
     """
     faces = clock_faces(state.now)
 
-    def live_venue(symbol: str) -> bool:
-        """Whether THIS symbol's market is trading, per instrument class.
+    # The calendar's two answers, resolved once rather than per cell. Both are
+    # about the US equity session, so a continuous market never consults them.
+    local_date = state.now.astimezone(NY).date()
+    trades_today = calendar.is_trading_day(local_date) if calendar else None
+    today = calendar.day(local_date) if calendar else None
+    past_close = today is not None and state.now >= today.close_utc
 
-        Crypto never greys out. It runs continuously, so a Sunday BTC price
-        is a live one — and dimming it alongside the equities would be the
-        single global session all over again, which is the bug
-        `config/rules.yaml` grew an `instruments:` block to fix. Equities
-        grey only on the weekend: pre-market, regular and after-hours all
-        quote, so a price during any of them is current even when the bot
-        will not act on it.
+    def venue_for(symbol: str) -> VenueState:
+        """Which of the three states THIS symbol's market is in.
+
+        Crypto is never anything but live. It runs continuously, so a Sunday
+        BTC price is a current one — and greying it alongside the equities
+        would be the single global session all over again, which is the bug
+        `config/rules.yaml` grew an `instruments:` block to fix.
+
+        For equities the distinction that matters is the middle state. A
+        pre-market quote is REAL, so it must not be greyed like a Sunday
+        close; but an order against it rests until the open, so it must not
+        look like a regular-session price either.
         """
-        if is_crypto_symbol(symbol):
-            return True
-        return state.phase is not MarketPhase.WEEKEND
+        return venue_state(
+            continuous=is_crypto_symbol(symbol),
+            phase=state.phase,
+            trades_today=trades_today,
+            past_close=past_close,
+        )
+
+    def kind_for(symbol: str) -> str:
+        return watchlist.kind_of(symbol) if watchlist else "unclassified"
+
+    def cell(quote: TickerQuote) -> str:
+        return _tape_cell(
+            quote, venue=venue_for(quote.symbol), kind=kind_for(quote.symbol)
+        )
 
     groups: list[str] = []
     for index, (face, local) in enumerate(faces):
         groups.append(_tape_clock(face, local))
         chunk = quotes[index * PER_GROUP : (index + 1) * PER_GROUP]
         groups.extend(
-            _tape_cell(q, live_venue=live_venue(q.symbol)) for q in chunk
+            cell(q) for q in chunk
         )
     # Anything past the last group still gets shown rather than silently
     # dropped: a watchlist that is not a multiple of four is a config choice,
     # not a reason to hide symbols the operator asked for.
     groups.extend(
-        _tape_cell(q, live_venue=live_venue(q.symbol))
-        for q in quotes[len(faces) * PER_GROUP :]
+        cell(q) for q in quotes[len(faces) * PER_GROUP :]
     )
 
     run = "".join(groups)
@@ -3490,7 +3641,100 @@ def _row(key: str, value: str, why: str = "") -> str:
     )
 
 
-def settings_page(rules: Rules, env: Env, *, chat_enabled: bool) -> str:
+def _calendar_card(
+    sessions_ahead: Sequence[SessionDayView],
+    *,
+    loaded: bool,
+    degraded: bool,
+    poller_has_read: bool,
+) -> str:
+    """Which days actually trade, keyed to the equity classes rather than to a
+    symbol.
+
+    Every US equity on Alpaca shares one session, so a table keyed by symbol
+    would be N identical rows with N chances to drift apart. The class is the
+    real key and `config/rules.yaml` already holds the configured window; this
+    card holds the part the config CANNOT state, because it changes by date:
+    which days are skipped and which end early.
+
+    An empty list with `loaded` false is NOT "no sessions ahead". A calendar
+    nobody fetched and a quarter with no trading days are opposite findings, and
+    a card that rendered both as a blank space would be the more dangerous one
+    silently. Same rule as the cold-start Board saying unknown rather than zero.
+    """
+    if not loaded:
+        # Two different facts, and guessing between them is the failure this
+        # whole card is about. "The Board has not been opened" is a reasonable
+        # cause and is WRONG whenever the poller has in fact read and the
+        # broker had no calendar to give — which is every mock deployment. So
+        # the state that is known is reported, and no cause is invented for the
+        # other. Found by running it, not by the suite.
+        why = (
+            "The live poller has not read yet, so this fills in once the Board "
+            "has been opened."
+            if not poller_has_read
+            else "The poller has read and the broker returned no calendar — "
+            "either it is a MockBroker, which has none, or the fetch failed."
+        )
+        return (
+            '<div class="card"><h3>Trading calendar</h3>'
+            '<p class="muted">Not loaded. Holidays and early closes are '
+            "unknown, and the hours above assume an ordinary session. "
+            f"{why}</p>"
+            '<p class="source">src/bot/session_calendar.py</p></div>'
+        )
+
+    stale = (
+        '<p class="warn">The last refresh failed, so these dates are not '
+        "confirmed current. They are published well in advance and rarely "
+        "change.</p>"
+        if degraded
+        else ""
+    )
+    if not sessions_ahead:
+        rows = (
+            '<p class="muted">No sessions in the fetched range.</p>'
+        )
+    else:
+        rows = '<dl class="kv">' + "".join(
+            _row(
+                day.date,
+                _e(day.label),
+                "Shorter session than the usual 09:30-16:00."
+                if day.early_close
+                else "",
+            )
+            for day in sessions_ahead
+        ) + "</dl>"
+
+    early = [d for d in sessions_ahead if d.early_close]
+    note = (
+        "An early close is the one that bites quietly: the session is genuinely "
+        "open, every figure stays plausible, and the market shuts three hours "
+        "before anything here would otherwise assume."
+        if early
+        else "All standard 09:30-16:00 New York sessions."
+    )
+    return (
+        '<div class="card"><h3>Trading calendar</h3>'
+        + stale
+        + rows
+        + f'<p class="muted">{note}</p>'
+        '<p class="source">Alpaca trading calendar, cached. Gates nothing.</p>'
+        "</div>"
+    )
+
+
+def settings_page(
+    rules: Rules,
+    env: Env,
+    *,
+    chat_enabled: bool,
+    sessions_ahead: Sequence[SessionDayView] = (),
+    calendar_loaded: bool = False,
+    calendar_degraded: bool = False,
+    poller_has_read: bool = False,
+) -> str:
     """Structured, and read-only for anything that governs risk.
 
     A settings screen that could widen a limit would be a settings screen that
@@ -3584,7 +3828,12 @@ def settings_page(rules: Rules, env: Env, *, chat_enabled: bool) -> str:
         "Deficit calls.</p></div></div></section>"
     )
 
-    instrument_cards = ""
+    instrument_cards = _calendar_card(
+        sessions_ahead,
+        loaded=calendar_loaded,
+        degraded=calendar_degraded,
+        poller_has_read=poller_has_read,
+    )
     for name, inst in rules.instruments.items():
         sessions = inst.render_sessions()
         # Shown beside the hours rather than folded into them. The hours alone
@@ -3619,9 +3868,13 @@ def settings_page(rules: Rules, env: Env, *, chat_enabled: bool) -> str:
                 else ""
             )
             # This class's own limits, beside the portfolio ones rather than
-            # instead of them. A per-instrument limit may only tighten a
-            # portfolio limit — the config refuses a looser one at startup —
-            # so showing both is showing which is actually binding.
+            # instead of them. A per-instrument limit OVERRIDES the portfolio
+            # one in either direction — the validator that once refused a looser
+            # class limit at config load is gone, because refusing to start
+            # denies at the least useful moment and offers the operator no way
+            # to say "yes, I mean it". So showing both is the only way to read
+            # which figure is actually in force, and `_limit_row` says out loud
+            # when a class is looser than the default.
             #
             # "portfolio limit" rather than a blank where a class has no
             # opinion: an empty cell reads as "no limit", which is the exact

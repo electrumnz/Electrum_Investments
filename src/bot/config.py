@@ -558,18 +558,67 @@ class WatchlistRules(BaseModel):
     """
 
     enabled: bool = True
-    symbols: list[str] = Field(default_factory=list)
+
+    # Symbols grouped by KIND, and the grouping is the point rather than
+    # decoration. Sixteen large-cap US equities scroll past as sixteen of the
+    # same thing; an index beside a metal beside a crypto pair beside the long
+    # bond is a picture of what is moving where. The kind is declared here
+    # because it cannot be derived — `GLD` is an ETF by structure and gold by
+    # meaning, and only the second is worth showing.
+    #
+    # Order within a kind is preserved; order ACROSS kinds is not what reaches
+    # the tape. See `symbols`.
+    kinds: dict[str, list[str]] = Field(default_factory=dict)
+
     # Its own cadence, slower than the account poll. Fifteen quotes every five
     # seconds is 180 requests a minute against a per-minute limit; once a
     # minute is nowhere near it, and a tape is not a figure anyone trades off.
     refresh_seconds: float = Field(default=60.0, gt=0)
 
+    @property
+    def symbols(self) -> list[str]:
+        """Every watched symbol, INTERLEAVED across kinds rather than grouped.
+
+        Round-robin, so consecutive cells are of different kinds wherever there
+        are kinds left to draw from. Rendering the groups in order would put
+        five equities in a row and then three metals, which is the monotony the
+        kinds were introduced to break — the mix has to be visible in a glance
+        at any part of the strip, not only in a full scroll of it.
+
+        Duplicates are dropped, keeping the first appearance: a symbol listed
+        under two kinds is a config mistake, and drawing it twice on a
+        sixteen-cell strip would look like a rendering fault.
+        """
+        out: list[str] = []
+        seen: set[str] = set()
+        columns = list(self.kinds.values())
+        for row in range(max((len(c) for c in columns), default=0)):
+            for column in columns:
+                if row < len(column) and column[row] not in seen:
+                    seen.add(column[row])
+                    out.append(column[row])
+        return out
+
+    def kind_of(self, symbol: str) -> str:
+        """The kind a symbol was declared under, or `unclassified`.
+
+        Never guessed from the ticker. A symbol nobody classified is shown as
+        unclassified rather than assigned to whichever kind looks likeliest —
+        same rule as an indicator with too few bars reporting `unavailable`
+        instead of a shorter average wearing the wrong label.
+        """
+        for kind, symbols in self.kinds.items():
+            if symbol in symbols:
+                return kind
+        return "unclassified"
+
     @model_validator(mode="after")
     def _enabled_needs_symbols(self) -> WatchlistRules:
         if self.enabled and not self.symbols:
             raise ValueError(
-                "watchlist.enabled is true but symbols is empty, so the tape "
-                "would render nothing and look broken rather than switched off."
+                "watchlist.enabled is true but no symbols are listed under "
+                "watchlist.kinds, so the tape would render nothing and look "
+                "broken rather than switched off."
             )
         return self
 

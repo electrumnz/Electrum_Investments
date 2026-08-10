@@ -45,6 +45,7 @@ from .models import (
 from .options import alerts_for_positions
 from .reconcile import apply_journal_state, reconcile, record_fill
 from .risk import RiskGate
+from .session_calendar import SessionCalendar
 
 log = structlog.get_logger()
 
@@ -156,6 +157,8 @@ def cmd_smoketest(env: Env, rules: Rules, *, force_mock: bool = False) -> int:
             activity=broker.get_activity(),
             indicators=indicators,
             symbols_without_history=no_history,
+            instruments=rules.instruments,
+            broker_clock=broker.get_clock(),
         )
         decision, usage = claude.propose(context)
         log.info(
@@ -192,6 +195,12 @@ def cmd_loop(
     news = build_news_feed(env)
     calendar = build_calendar_feed(env, rules)
     social = build_social_feed(env, rules)
+
+    # Which days trade and until what time. Distinct from `calendar` above,
+    # which is Finnhub's EARNINGS calendar and feeds a gate rule; this one is
+    # Alpaca's TRADING calendar, feeds no rule, and exists because a half-day
+    # is invisible while it is happening.
+    session_calendar = SessionCalendar()
 
     journal = Journal()
     account = broker.get_account()
@@ -257,6 +266,13 @@ def cmd_loop(
             recon = reconcile(journal, broker, rules, account=account)
             account = apply_journal_state(account, journal)
             stand_down_state = journal.get_stand_down()
+
+            # A no-op on 95 of 96 cycles a day: `refresh` returns immediately
+            # unless the cache is stale or its horizon has walked forward. It
+            # never raises, and a failure keeps the days already held rather
+            # than clearing them — dates published months ago do not stop being
+            # true because one fetch timed out.
+            session_calendar.refresh(broker)
 
             # Checked every cycle, before anything else. An option expiry is the
             # one thing here that resolves itself automatically and irreversibly
@@ -365,6 +381,19 @@ def cmd_loop(
                 previous_verdicts=previous_verdicts,
                 social_posts=posts,
                 social_degraded=social_degraded,
+                instruments=rules.instruments,
+                # One extra call per cycle, and it buys what `market_clock`
+                # structurally cannot compute: whether the broker agrees the
+                # regular session is running right now. Returns None rather
+                # than raising, so a bad minute at Alpaca costs the check and
+                # not the cycle.
+                broker_clock=broker.get_clock(),
+                # Refreshed at most every 20 hours inside `refresh`, so this is
+                # a dict lookup on all but one cycle a day. It answers which
+                # days are skipped and which end EARLY — the second being the
+                # one nothing else here can see, because a half-day looks
+                # exactly like an ordinary session until 13:00 passes.
+                calendar=session_calendar,
             )
             # Catches broadly, and for the same reason `fetch_market_ticks`
             # does. This is a network call to a model that returns free text,

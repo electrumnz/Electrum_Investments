@@ -295,9 +295,12 @@ def test_the_flat_form_still_works_and_is_what_the_shipped_config_uses():
 
     equities = Rules.load(RULES_PATH).instruments["us_equity"]
 
-    assert equities.windows_by_day[0] == [(14, 21)]
+    # 08:00 UTC is 04:00 New York in summer — the operator widened this to
+    # cover pre-market and after-hours. The flat form is what is under test
+    # here; the hours themselves are a config decision.
+    assert equities.windows_by_day[0] == [(8, 24)]
     assert set(equities.windows_by_day) == {0, 1, 2, 3, 4}
-    assert equities.render_sessions() == "14:00-21:00"
+    assert equities.render_sessions() == "08:00-24:00"
 
 
 def test_a_per_day_schedule_renders_per_day():

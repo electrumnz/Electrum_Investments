@@ -10,12 +10,13 @@ are identified by UUID strings rather than integer tickets.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 import structlog
 
 from .config import Env
+from .market_clock import BrokerClock, TradingDay
 from .models import (
     AccountSnapshot,
     AssetClass,
@@ -34,6 +35,17 @@ if TYPE_CHECKING:
     pass
 
 log = structlog.get_logger()
+
+
+def _from_ny(naive: datetime) -> datetime:
+    """Read a naive Alpaca calendar stamp as New York time and return UTC.
+
+    `.replace(tzinfo=...)` is correct with `zoneinfo` and would not have been
+    with `pytz`, which needs `localize` to pick the right offset for the date.
+    """
+    from .market_clock import NY
+
+    return naive.replace(tzinfo=NY).astimezone(UTC)
 
 
 def is_crypto_symbol(symbol: str) -> bool:
@@ -74,6 +86,26 @@ class Broker(Protocol):
         """
         ...
 
+    def get_clock(self) -> BrokerClock | None:
+        """The broker's own reading of whether the regular session is open.
+
+        `None` means the question could not be asked, never that the market is
+        shut — same rule as `orders_degraded` and `FinnhubCalendar.is_degraded`.
+        `market_clock` computes the phases offline and does it better; this
+        exists for the one thing arithmetic cannot know, which is a holiday.
+        """
+        ...
+
+    def get_calendar(self, start: date, end: date) -> list[TradingDay] | None:
+        """Which days trade between `start` and `end`, and until what time.
+
+        `None` means the question could not be asked. It must NOT be an empty
+        list on failure: an empty list is a real and different answer — no
+        trading days in the range — and conflating them would let an outage
+        read as a fortnight-long holiday.
+        """
+        ...
+
     def connect(self) -> None: ...
     def disconnect(self) -> None: ...
     def get_account(self) -> AccountSnapshot: ...
@@ -108,6 +140,8 @@ class MockBroker:
         self._intraday: dict[str, list[Bar]] = {}
         self._open_orders: list[WorkingOrder] = []
         self._orders_degraded = False
+        self._clock: BrokerClock | None = None
+        self._calendar: list[TradingDay] | None = None
 
     @property
     def orders_degraded(self) -> bool:
@@ -117,6 +151,24 @@ class MockBroker:
         """Test hook. Nothing in memory can fail, so the flag has to be set by
         hand for a caller's degraded path to be exercisable at all."""
         self._orders_degraded = degraded
+
+    def set_clock(self, clock: BrokerClock | None) -> None:
+        """Test hook. Defaults to `None`, which is the honest answer for a
+        broker with no calendar behind it rather than a cheerful 'open'."""
+        self._clock = clock
+
+    def get_clock(self) -> BrokerClock | None:
+        return self._clock
+
+    def set_calendar(self, days: list[TradingDay] | None) -> None:
+        """Test hook. `None` by default — a broker with no calendar behind it
+        cannot answer, and `[]` would claim the range holds no trading days."""
+        self._calendar = days
+
+    def get_calendar(self, start: date, end: date) -> list[TradingDay] | None:
+        if self._calendar is None:
+            return None
+        return [d for d in self._calendar if start <= d.date <= end]
 
     def connect(self) -> None:
         self._connected = True
@@ -301,6 +353,67 @@ class AlpacaBroker:
 
     def disconnect(self) -> None:
         self._connected = False
+
+    def get_clock(self) -> BrokerClock | None:
+        """Alpaca's calendar-aware reading of the regular session.
+
+        Catches broadly and returns `None`, for the same reason
+        `fetch_market_ticks` does: this feeds a context block and a display, and
+        an SDK error escaping here would end the decision loop over a nicety.
+        `None` says the question could not be asked. It must never be read as
+        "the market is shut" — the caller says so in the rendered text.
+        """
+        try:
+            raw: Any = self._trading.get_clock()
+            return BrokerClock(
+                is_open=bool(raw.is_open),
+                next_open=raw.next_open.astimezone(UTC),
+                next_close=raw.next_close.astimezone(UTC),
+            )
+        except Exception as exc:
+            log.warning("clock_fetch_failed", error=f"{type(exc).__name__}: {exc}")
+            return None
+
+    def get_calendar(self, start: date, end: date) -> list[TradingDay] | None:
+        """Alpaca's trading calendar for a date range.
+
+        Deferred import for the same reason the constructor defers its clients:
+        the package stays importable without the SDK.
+
+        The open and close come back as NAIVE datetimes on Alpaca's models,
+        already carrying the right date but stamped in New York. Attaching UTC
+        to them instead would be a four-hour error in summer and five in winter,
+        and a silent one — the value stays entirely plausible. So the zone is
+        named explicitly and then converted.
+        """
+        from alpaca.trading.requests import GetCalendarRequest
+
+        try:
+            raw: Any = self._trading.get_calendar(
+                GetCalendarRequest(start=start, end=end)
+            )
+        except Exception as exc:
+            log.warning(
+                "calendar_fetch_failed", error=f"{type(exc).__name__}: {exc}"
+            )
+            return None
+
+        days: list[TradingDay] = []
+        for entry in raw:
+            try:
+                days.append(
+                    TradingDay(
+                        date=entry.date,
+                        open_utc=_from_ny(entry.open),
+                        close_utc=_from_ny(entry.close),
+                    )
+                )
+            except (AttributeError, TypeError, ValueError) as exc:
+                # One malformed row must not discard the rest of the year.
+                log.warning(
+                    "calendar_row_skipped", error=f"{type(exc).__name__}: {exc}"
+                )
+        return days
 
     def get_account(self) -> AccountSnapshot:
         # The SDK's return type is a union with a raw-dict variant; we always get

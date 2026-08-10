@@ -205,6 +205,11 @@ def build_app(
                 )
                 for sym in watchlist.symbols
             ],
+            # The kinds, so the strip reads as a mix rather than as sixteen of
+            # the same thing, and the calendar, so a holiday greys out instead
+            # of showing yesterday's close at full strength.
+            watchlist=watchlist,
+            calendar=resolved_poller.calendar,
         )
 
     def _page(title: str, active: str, body: str) -> str:
@@ -402,6 +407,18 @@ def build_app(
             ),
         )
 
+    def _calendar_view(snapshot: live.LiveSnapshot | None) -> dict[str, Any]:
+        if snapshot is None:
+            # No reading at all. Distinct from a reading whose calendar was
+            # empty, and the card says which — it must not guess a cause.
+            return {"poller_has_read": False}
+        return {
+            "sessions_ahead": snapshot.sessions_ahead,
+            "calendar_loaded": snapshot.calendar_loaded,
+            "calendar_degraded": snapshot.calendar_degraded,
+            "poller_has_read": True,
+        }
+
     @app.get("/settings", response_class=HTMLResponse)
     def settings() -> str:
         return _page(
@@ -411,6 +428,12 @@ def build_app(
                 resolved_rules,
                 resolved_env,
                 chat_enabled=bool(resolved_env.dashboard_chat_token),
+                # Read from the poller, never fetched here. Settings has no
+                # `data-live` target and must not be the page that opens a
+                # broker conversation — the same rule that stopped the Board
+                # reading Alpaca inline. Before the first read this renders as
+                # "not loaded", which is the honest answer rather than a blank.
+                **_calendar_view(resolved_poller.latest()),
             ),
         )
 

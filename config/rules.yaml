@@ -199,9 +199,28 @@ instruments:
     # US regular session is 09:30-16:00 ET = 13:30-20:00 UTC (14:30-21:00 EDT).
     # Deliberately skips the first 30 minutes of the open, the noisiest period.
     sessions_utc:
-      - [14, 21]
+      - [8, 24]
 
-    # Operator's rule: no pre-market. After hours is fine.
+    # Operator's decision: pre-market AND after-hours are both acceptable. If
+    # the agent wants to trade them, it may.
+    #
+    # 08:00-24:00 UTC is 04:00-20:00 New York in summer, which is Alpaca's
+    # whole tradeable day: pre-market from 04:00, the regular session, and
+    # after-hours to 20:00. In winter it shifts an hour and covers 03:00-19:00
+    # ET instead, so the last hour of after-hours falls outside. That is the
+    # daylight-saving problem described below, and it now costs an hour at the
+    # END of the day rather than admitting pre-market at the start.
+    #
+    # **An order placed outside the regular session does not fill there.**
+    # `place_order` sends a bracket or an OTO, and Alpaca does not accept
+    # either with `extended_hours`, so an out-of-hours order RESTS and becomes
+    # eligible at the next open. That is deliberate rather than a limitation
+    # to route around: it is what keeps the stop at the broker. Trading the
+    # thin book instead would mean a plain limit order and no broker-side stop.
+    #
+    # So what widening this buys is the ability to PLACE at any hour, with the
+    # fill arriving at the open. The old note follows, because the
+    # daylight-saving trap it describes is still real.
     #
     # This is NOT expressible in sessions_utc above, and the reason is daylight
     # saving: those are fixed UTC hours, while the US session is defined in New
@@ -217,7 +236,7 @@ instruments:
     # RiskGate._premarket reads the phase in New York time, so it follows
     # daylight saving with no diary entry, and it can only ever narrow what the
     # window above permits.
-    refuse_premarket: true
+    refuse_premarket: false
 
     # Monday to Friday. Monday is 0, Sunday is 6.
     #
@@ -360,35 +379,57 @@ instruments:
 watchlist:
   enabled: true
 
-  # The six tradeable names first, then what moves them. Starting from
-  # `allowed_symbols` is deliberate: the tape should lead with what the bot
-  # can actually act on, and the rest is context. Fifteen is long enough to
-  # be worth scrolling and short enough that one refresh is sixteen quotes
-  # rather than a rate-limit problem.
+  # DISPLAY ONLY. Nothing here reaches the risk gate — see WatchlistRules.
+  # A symbol on the tape is not tradeable unless it is ALSO in an enabled
+  # instrument class, and the renderer marks the ones that are.
   #
-  # SIXTEEN rather than fifteen, and the number is load-bearing: the tape
-  # interleaves one clock per four instruments, so four clocks want a
-  # multiple of four. A remainder would leave one clock trailing a short
-  # group and the repeat would visibly limp.
-  symbols:
-    - SPY      # tradeable
-    - QQQ      # tradeable
-    - AAPL     # tradeable
-    - MSFT     # tradeable
-    - JNJ      # tradeable
-    - KO       # tradeable
-    - NVDA
-    - AMZN
-    - GOOGL
-    - META
-    - TSLA
-    - AMD
-    - IWM
-    - BTC/USD  # crypto is a disabled instrument class, so this is
-               # watch-only — which is exactly the case the tape's
-               # tradeable marker exists to make visible.
-    - TLT
-    - GLD
+  # Grouped by KIND, and the grouping is the whole point. Sixteen large-cap
+  # US equities scroll past as sixteen of the same thing. An index beside a
+  # metal beside a crypto pair beside the long bond is a picture of what is
+  # moving where — and when they disagree, that disagreement is the most
+  # useful thing on the strip.
+  #
+  # The kind is declared rather than derived. GLD is an ETF by structure and
+  # gold by meaning, and only the second is worth showing; no amount of
+  # ticker-parsing recovers that.
+  #
+  # `symbols` is DERIVED by interleaving these round-robin, so consecutive
+  # cells are of different kinds. Listing them grouped would put five
+  # equities in a row and then three metals, which is the monotony the kinds
+  # exist to break.
+  #
+  # SIXTEEN in total, and the number is load-bearing: the tape interleaves one
+  # clock per four instruments, so four clocks want a multiple of four. A
+  # remainder leaves one clock trailing a short group and the repeat limps.
+  kinds:
+    index:
+      - SPY        # tradeable
+      - QQQ        # tradeable
+      - IWM        # small caps: leads the others at turns
+    equity:
+      - AAPL       # tradeable
+      - MSFT       # tradeable
+      - NVDA
+    crypto:
+      # Crypto is a DISABLED instrument class, so these are watch-only —
+      # exactly the case the tape's tradeable marker exists to make visible.
+      # They are also the only cells that keep quoting at 3am on a Sunday.
+      - BTC/USD
+      - ETH/USD
+    defensive:
+      - JNJ        # tradeable
+      - KO         # tradeable
+    commodity:
+      - GLD        # gold
+      - USO        # crude
+    rates:
+      - TLT        # 20-year Treasuries: the other side of a risk-off day
+    volatility:
+      - VIXY       # not the VIX itself, which has no tradeable quote
+    international:
+      - EEM        # emerging markets
+    energy:
+      - XLE
 
   # Its own cadence, deliberately slower than the five-second account poll.
   # Fifteen quotes every five seconds is 180 requests a minute against a

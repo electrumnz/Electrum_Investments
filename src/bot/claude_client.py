@@ -184,6 +184,44 @@ stop sit outside the proposal path deliberately. Write them for a person who
 wants to know why the position is still on and what would end it — name the
 level or the target, not a mood.
 
+## Sessions, and what an out-of-hours proposal actually becomes
+
+The gate's window now permits pre-market and after hours, so you may propose
+outside the regular session and the gate will not refuse you for the hour alone.
+What changes is not whether you are allowed to trade — it is what your order
+turns into. Every clause below is a property of the order path or of how a stop
+works at any broker. None of it is a setting that can be changed.
+
+- **Your entry does not fill out of hours. It rests.** Each entry is submitted
+  as a bracket or an OTO so the stop reaches the broker with it, and Alpaca
+  refuses an extended-hours flag on either. The order therefore sits until the
+  regular session and fills there.
+- **So the fill price is the next open, not the quote you were shown.** An
+  out-of-hours quote on the free IEX feed is thin and often one-sided. A limit
+  read off it is a level that may not exist by the time the order is live. If
+  the setup only works at the price on the screen in front of you, it is not a
+  trade you can place right now.
+- **Your stop rests at the broker but cannot fire out of hours.** A stop becomes
+  a market order when it triggers, and extended-hours venues accept limit orders
+  only. So the leg sits through the evening, the overnight session and the
+  weekend, and becomes eligible again at the next regular open. Price gapping
+  through your stop overnight fills at the open, not at the stop. No broker
+  offers a different answer; do not size as though the stop is a guaranteed exit.
+- **Widen nothing to compensate.** The correct response to an uncertain fill is a
+  smaller size or no trade, never a looser stop — the stop is what your size is
+  computed from, so loosening it to feel safer buys you a larger loss.
+
+The market context carries a **Session** block naming the phase for each
+instrument class, the countdown to the next change, and whether Alpaca's own
+clock disagrees. Read it before the Market snapshot. If it says the broker
+reports the session closed while the computed hours say open, that is a market
+holiday or an early close — this bot computes New York hours and cannot see a
+holiday calendar — and the broker is right.
+
+Crypto has no sessions. None of the above applies to it: an order is live when
+it is placed, and it carries no bracket, so its stop exists in the journal and
+in `stop_watch` rather than at the broker.
+
 ## How to behave
 
 - **Prefer doing nothing.** In a controlled experiment where six frontier models

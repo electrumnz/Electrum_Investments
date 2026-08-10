@@ -7,11 +7,13 @@ from datetime import UTC, datetime
 import structlog
 
 from .broker import Broker
+from .config import InstrumentRules
 from .indicators import Indicators, compute
 from .indicators import render as render_indicators
 from .intraday import IntradayView
 from .intraday import compute as compute_intraday
 from .intraday import render as render_intraday
+from .market_clock import BrokerClock, render_sessions
 from .models import (
     AccountSnapshot,
     OrderProposal,
@@ -22,6 +24,7 @@ from .models import (
 )
 from .options import ExpiryAlert, render_alerts
 from .risk import NewsWindow
+from .session_calendar import SessionCalendar
 
 log = structlog.get_logger()
 
@@ -43,10 +46,14 @@ def build_market_context(
     previous_verdicts: list[tuple[OrderProposal, RiskVerdict]] | None = None,
     social_posts: list[str] | None = None,
     social_degraded: bool = False,
+    instruments: dict[str, InstrumentRules] | None = None,
+    broker_clock: BrokerClock | None = None,
+    calendar: SessionCalendar | None = None,
+    now: datetime | None = None,
 ) -> str:
     """Render a stable, parseable text blob. Goes AFTER the cached system prompt."""
-    now = datetime.now(UTC).isoformat(timespec="seconds")
-    lines: list[str] = [f"Current UTC time: {now}", ""]
+    now = now or datetime.now(UTC)
+    lines: list[str] = [f"Current UTC time: {now.isoformat(timespec='seconds')}", ""]
 
     # Deliberately first. Everything else here is an opportunity; this is the
     # only section where doing nothing has an automatic, irreversible outcome.
@@ -60,6 +67,31 @@ def build_market_context(
             "un-fundable positions in the final hour. Do Not Exercise cannot be "
             "filed through the API, so closing the position is the only way to "
             "choose a different outcome."
+        )
+        lines.append("")
+
+    # Before the account and the quotes, deliberately. Every figure below is a
+    # reading; this says what a proposal built on those readings would actually
+    # become, and out of hours the answer is "an order that rests and fills at
+    # a price not shown anywhere in this document". A model that reads the
+    # snapshot first and the session last has already anchored on a fill price
+    # it will not get.
+    #
+    # Omitted entirely rather than guessed at when the caller supplied no
+    # instruments: a session block computed from nothing would be a confident
+    # statement about a market nobody described.
+    if instruments:
+        lines.extend(
+            render_sessions(
+                now,
+                windows_by_class={
+                    name: inst.windows_by_day
+                    for name, inst in instruments.items()
+                    if inst.enabled
+                },
+                broker_clock=broker_clock,
+                calendar=calendar,
+            )
         )
         lines.append("")
 
@@ -165,7 +197,7 @@ def build_market_context(
         # afternoon, and a trigger written three days ago should not be read as
         # one written fifteen minutes ago.
         if previous_at is not None:
-            age = datetime.now(UTC) - previous_at
+            age = now - previous_at
             hours = age.total_seconds() / 3600
             when = (
                 f"{age.total_seconds() / 60:.0f} minutes ago"
