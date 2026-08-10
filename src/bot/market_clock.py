@@ -28,9 +28,13 @@ network call, and this module is deliberately pure.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, datetime, time, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from enum import StrEnum
+from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo
+
+if TYPE_CHECKING:  # a cache built on this module; imported for typing only
+    from .session_calendar import SessionCalendar
 
 __all__ = [
     "CLOCKS",
@@ -38,6 +42,7 @@ __all__ = [
     "ClockFace",
     "MarketPhase",
     "MarketState",
+    "TradingDay",
     "clock_faces",
     "is_continuous",
     "market_state",
@@ -230,6 +235,51 @@ def market_state(
 
 
 @dataclass(frozen=True)
+class TradingDay:
+    """One dated session from Alpaca's calendar, with its real open and close.
+
+    The `close` is why this is worth fetching at all. `_phase_at` computes a
+    16:00 New York close every trading day, and on a half-day — the Friday after
+    Thanksgiving, Christmas Eve, 3rd July — the market shuts at 13:00. Three
+    hours out, and nothing looks wrong while it is happening: the session is
+    genuinely open, just not for as long as anything here assumed.
+
+    A holiday at least reads as a suspicious silence. An early close does not.
+    """
+
+    date: date
+    open_utc: datetime
+    close_utc: datetime
+
+    @property
+    def open_local(self) -> datetime:
+        return self.open_utc.astimezone(NY)
+
+    @property
+    def close_local(self) -> datetime:
+        return self.close_utc.astimezone(NY)
+
+    @property
+    def is_early_close(self) -> bool:
+        return self.close_local.timetz().replace(tzinfo=None) < REGULAR_END
+
+    @property
+    def is_late_open(self) -> bool:
+        return self.open_local.timetz().replace(tzinfo=None) > REGULAR_START
+
+    @property
+    def is_unusual(self) -> bool:
+        return self.is_early_close or self.is_late_open
+
+    def render(self) -> str:
+        stamp = (
+            f"{self.date:%a %d %b} "
+            f"{self.open_local:%H:%M}-{self.close_local:%H:%M} New York"
+        )
+        return f"{stamp} — EARLY CLOSE" if self.is_early_close else stamp
+
+
+@dataclass(frozen=True)
 class BrokerClock:
     """What Alpaca says about the regular session. Deliberately only that.
 
@@ -331,6 +381,7 @@ def render_sessions(
     *,
     windows_by_class: dict[str, dict[int, list[tuple[int, int]]]],
     broker_clock: BrokerClock | None = None,
+    calendar: SessionCalendar | None = None,
 ) -> list[str]:
     """What an order placed right now would actually do, per instrument class.
 
@@ -338,6 +389,10 @@ def render_sessions(
     moment — it is a property of the moment AND the instrument. Crypto trades
     continuously; saying "the market is shut" beside a crypto symbol would be
     false, and a single global answer is the bug `sessions_utc` already had.
+
+    `calendar` is the US equity trading calendar and applies only to classes
+    that have sessions at all. It answers the two questions the arithmetic
+    above cannot: which days are skipped, and which end early.
     """
     lines: list[str] = ["## Session — what an order placed now would actually do"]
     any_shut = False
@@ -382,12 +437,26 @@ def render_sessions(
         # a class that has sessions at all.
         if any_scheduled and not broker_clock.is_open:
             any_shut = True
-    elif any_scheduled:
+
+    if any_scheduled and calendar is not None:
+        local_date = now.astimezone(NY).date()
+        lines.extend(calendar.render(local_date))
+        # Two independent reasons the market can be shut while `_phase_at` reads
+        # OPEN, and the calendar catches both without a live call — so a failed
+        # `get_clock` does not take the holiday check down with it.
+        if calendar.is_trading_day(local_date) is False:
+            any_shut = True
+        today = calendar.day(local_date)
+        if today is not None and now >= today.close_utc:
+            # Past an early close. The clock above still says OPEN for hours.
+            any_shut = True
+    elif any_scheduled and broker_clock is None:
         # The Finnhub lesson: an unavailable check must not read as a clean one.
         lines.append(
-            "- Alpaca's own clock was NOT read this cycle, so a market holiday "
-            "or an early close would not show up above. The hours here are "
-            "computed from New York time and assume an ordinary trading day."
+            "- Neither Alpaca's clock nor its trading calendar was read this "
+            "cycle, so a market holiday or an early close would not show up "
+            "above. The hours here are computed from New York time and assume "
+            "an ordinary trading day."
         )
 
     if any_shut:

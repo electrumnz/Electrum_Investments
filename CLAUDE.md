@@ -235,8 +235,8 @@ at 04:49 New York on a Monday. Alpaca was open — pre-market — four and a hal
 hours before the session this bot trades. `is_tradeable_by_bot` requires both,
 which is what makes the discrepancy visible rather than hidden.
 
-**Holidays are the one thing the arithmetic cannot see, and `Broker.get_clock`
-is what closes it.** Thanksgiving is a Thursday and Labor Day is a Monday;
+**Holidays and early closes are what the arithmetic cannot see, and there are
+two independent answers to them on purpose.** Thanksgiving is a Thursday and Labor Day is a Monday;
 `_phase_at` reads both as ordinary trading days, and no amount of New York time
 zone care changes that. Alpaca's `GET /v2/clock` knows the calendar, so its
 reading is carried into the context beside the computed one.
@@ -258,6 +258,49 @@ Four things about that, and they are the usual rules in a new place:
   out-of-hours mechanics were withheld at exactly the moment they mattered most
   the first time this was written. A broker `is_open: False` now forces them.
   `tests/test_market_clock.py` pins it on Labor Day 2026.
+
+**The second answer is `session_calendar.py`, and it exists for the EARLY CLOSE
+rather than the holiday.** The two are not equally dangerous:
+
+- A holiday reads as a suspicious silence. Nothing fills, no bars arrive, and
+  something eventually looks wrong.
+- **An early close does not.** On the Friday after Thanksgiving, Christmas Eve
+  and 3rd July the market shuts at 13:00 New York. `_phase_at` says 16:00 for
+  three more hours, the session was genuinely open, and every figure on screen
+  stays plausible. `get_clock` cannot help — it reports the state *now*, not
+  that today ends early — and nothing else in the repository can see it at all.
+
+So the calendar is fetched once a day and everything else is a pure lookup. Five
+properties are load-bearing and every one is a rule already used elsewhere:
+
+- **Keyed to the instrument class, never to a symbol.** Every US equity on
+  Alpaca shares one session, so a per-symbol table is N identical rows with N
+  chances to drift apart — and it gets worse as `allowed_symbols` grows, not
+  better. The class is the real key and `config/rules.yaml` already holds it.
+- **A failed refresh KEEPS the days it already had.** These dates were published
+  months ago and do not stop being true because one fetch timed out. Clearing
+  them would turn a transient failure into "every day is unknown", at the moment
+  the answer is most wanted. It is flagged as stale instead.
+- **A failed fetch backs off, on its own clock.** `RETRY_AFTER` is separate from
+  `REFRESH_AFTER` because a failure leaves `_fetched_at` unset, so "have we ever
+  fetched" stays false and every caller re-attempts. Observed live against
+  `MockBroker`: the web poller reads every five seconds, so it made five failed
+  attempts in ten and would have run all day. Against real Alpaca that is a hot
+  retry loop aimed at an endpoint that has just shown it is unhappy.
+- **Out of range is `None`, not "holiday".** Absence from the dict means "does
+  not trade" only inside the window actually fetched, which is what `covers`
+  exists for. Same rule as `has_cycles` and `can_grade_anything`.
+- **It is derived, so it is never backed up and never gates.** `RiskGate` stays
+  deterministic and must not fail open on a network call. The gate's own session
+  check is still weekday-shaped and still does not know about holidays; this
+  makes the gap visible to the operator and to the model rather than closing it
+  inside the gate.
+
+**The Settings card must not guess WHY it is empty**, and it did. "The Board has
+not been opened" is a plausible cause and is wrong whenever the poller has read
+and the broker had no calendar to give — which is every mock deployment. The two
+states are now reported apart. Found by loading the page with the suite green,
+which is the third time that has been the only way to find something.
 
 This exists because a single global `sessions_utc` is wrong the moment there is
 more than one class. Equities trade a fixed window, crypto trades continuously,
@@ -1588,6 +1631,14 @@ src/bot/
   audit.py              Append-only JSONL decision log, and the reader the
                         Decisions page renders. The only record of a REJECTED
                         proposal.
+  session_calendar.py   Which days trade and until what time. Alpaca's trading
+                        calendar, cached once a day, answering the two things
+                        New York clock arithmetic structurally cannot: which
+                        days are SKIPPED and which end EARLY. Keyed to the
+                        instrument class, never to a symbol — every US equity
+                        shares one session. Gates nothing, is never backed up,
+                        and answers `None` for "could not ask" rather than
+                        letting an outage read as a quiet quarter.
   news_history.py       What the loop was SHOWN, recalled out of the audit log
                         and deduped across cycles. Reads rather than fetches,
                         because the Marketaux quota belongs to the loop. Pure

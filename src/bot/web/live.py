@@ -98,7 +98,9 @@ from pydantic import BaseModel, Field
 from ..broker import Broker
 from ..config import Env
 from ..journal import Journal
+from ..market_clock import NY
 from ..models import AccountSnapshot, WorkingOrder
+from ..session_calendar import SessionCalendar
 
 log = structlog.get_logger()
 
@@ -220,6 +222,19 @@ class TickerQuote(BaseModel):
         return (self.last - self.previous_close) / self.previous_close * 100
 
 
+class SessionDayView(BaseModel):
+    """One upcoming session, pre-resolved for the page.
+
+    Carried on the snapshot rather than fetched at render time because the
+    poller owns the broker conversation — a Settings render must not open one.
+    Same rule that stopped the Board reading Alpaca inline.
+    """
+
+    date: str
+    label: str
+    early_close: bool
+
+
 class LiveSnapshot(BaseModel):
     """One successful read of the account, dated.
 
@@ -255,6 +270,16 @@ class LiveSnapshot(BaseModel):
     # reading would not be.
     ticker: list[TickerQuote] = Field(default_factory=list)
     ticker_taken_at: datetime | None = None
+
+    # Which days trade and until what time. Refreshed at most every 20 hours
+    # inside the poller, so it costs one call a day rather than one per read.
+    #
+    # `sessions_ahead` empty and `calendar_loaded` False are DIFFERENT facts and
+    # must not collapse: a calendar nobody fetched is not a quarter with no
+    # sessions in it. Same rule as `has_cycles` in news_history.
+    sessions_ahead: list[SessionDayView] = Field(default_factory=list)
+    calendar_loaded: bool = False
+    calendar_degraded: bool = False
 
     @property
     def unrealised_pnl_usd(self) -> float:
@@ -542,6 +567,7 @@ class LivePoller:
         self._ticker_at: datetime | None = None
         self._closes: dict[str, float] = {}
         self._closes_day: date | None = None
+        self._calendar = SessionCalendar()
 
     # ------------------------------------------------------------- reading
 
@@ -693,6 +719,19 @@ class LivePoller:
 
         ticker, ticker_at = self._read_ticker(broker)
 
+        # A no-op on all but one read a day. Never raises: a calendar failure
+        # must not cost the equity reading this snapshot exists for.
+        self._calendar.refresh(broker, self._clock())
+        today = self._clock().astimezone(NY).date()
+        sessions = [
+            SessionDayView(
+                date=d.date.isoformat(),
+                label=d.render(),
+                early_close=d.is_early_close,
+            )
+            for d in self._calendar.upcoming(today, count=5)
+        ]
+
         return LiveSnapshot(
             taken_at=self._clock(),
             account=account,
@@ -702,6 +741,9 @@ class LivePoller:
             quotes_unavailable=quotes_unavailable,
             ticker=ticker,
             ticker_taken_at=ticker_at,
+            sessions_ahead=sessions,
+            calendar_loaded=self._calendar.is_loaded,
+            calendar_degraded=self._calendar.is_degraded,
         )
 
     def _read_ticker(

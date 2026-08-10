@@ -249,13 +249,18 @@ def test_the_broker_saying_open_while_the_hours_say_otherwise_is_named_too():
     assert "The broker is authoritative" in text
 
 
-def test_an_unread_clock_says_so_rather_than_implying_an_ordinary_day():
+def test_neither_source_read_says_so_rather_than_implying_an_ordinary_day():
     """`FinnhubCalendar.is_degraded` in another costume. Silence about holidays
     reads as "no holiday" unless it is stated, and on Thanksgiving that is a
-    confident wrong answer."""
+    confident wrong answer.
+
+    Fires only when BOTH the live clock and the cached calendar are absent. With
+    either one present the caveat would be false, and a warning that is
+    sometimes wrong is one an operator learns to skip.
+    """
     text = scheduled(at(8, 10, 15, 0), None)
 
-    assert "NOT read this cycle" in text
+    assert "Neither Alpaca's clock nor its trading calendar" in text
     assert "market holiday" in text
 
 

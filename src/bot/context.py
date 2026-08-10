@@ -24,6 +24,7 @@ from .models import (
 )
 from .options import ExpiryAlert, render_alerts
 from .risk import NewsWindow
+from .session_calendar import SessionCalendar
 
 log = structlog.get_logger()
 
@@ -47,6 +48,7 @@ def build_market_context(
     social_degraded: bool = False,
     instruments: dict[str, InstrumentRules] | None = None,
     broker_clock: BrokerClock | None = None,
+    calendar: SessionCalendar | None = None,
     now: datetime | None = None,
 ) -> str:
     """Render a stable, parseable text blob. Goes AFTER the cached system prompt."""
@@ -88,6 +90,7 @@ def build_market_context(
                     if inst.enabled
                 },
                 broker_clock=broker_clock,
+                calendar=calendar,
             )
         )
         lines.append("")

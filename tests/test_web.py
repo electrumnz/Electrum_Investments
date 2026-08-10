@@ -13,6 +13,7 @@ non-GET route exists in the whole application, and it is `POST /chat`.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -1664,3 +1665,112 @@ def test_the_sign_in_page_carries_no_live_targets(client):
     # contains the `[data-live]` selector it guards on, so a looser check
     # passes for the wrong reason.
     assert 'data-live="' not in login_page(env=env)
+
+
+# ------------------------------------------------ the trading calendar card
+
+
+def _settings_with(
+    sessions_ahead: Sequence[live.SessionDayView] = (),
+    *,
+    loaded: bool = False,
+    degraded: bool = False,
+    poller_has_read: bool = False,
+) -> str:
+    return render.settings_page(
+        load_rules(),
+        _env(),
+        chat_enabled=False,
+        sessions_ahead=sessions_ahead,
+        calendar_loaded=loaded,
+        calendar_degraded=degraded,
+        poller_has_read=poller_has_read,
+    )
+
+
+def test_an_unloaded_calendar_renders_as_unknown_not_as_an_empty_run():
+    """The cold-start Board rule in a second place. A calendar nobody fetched
+    and a quarter with no trading days are opposite findings, and a card that
+    drew both as blank space would present the dangerous one silently."""
+    html = _settings_with()
+
+    assert "Trading calendar" in html
+    assert "Not loaded" in html
+    assert "assume an ordinary session" in html
+
+
+def test_a_loaded_calendar_lists_the_sessions_and_marks_the_half_day():
+    from bot.web.live import SessionDayView
+
+    html = _settings_with(
+        sessions_ahead=[
+            SessionDayView(
+                date="2026-11-25",
+                label="Wed 25 Nov 09:30-16:00 New York",
+                early_close=False,
+            ),
+            SessionDayView(
+                date="2026-11-27",
+                label="Fri 27 Nov 09:30-13:00 New York — EARLY CLOSE",
+                early_close=True,
+            ),
+        ],
+        loaded=True,
+    )
+
+    assert "Not loaded" not in html
+    assert "2026-11-27" in html
+    assert "EARLY CLOSE" in html
+    assert "Shorter session than the usual" in html
+    # The sentence that says why a half-day is worth a card at all.
+    assert "bites quietly" in html
+
+
+def test_a_stale_calendar_says_the_dates_are_unconfirmed():
+    """It still renders the dates — they were published months ago and a failed
+    refresh does not make them wrong — but it must not present them as this
+    morning's reading."""
+    html = _settings_with(loaded=True, degraded=True)
+
+    assert "last refresh failed" in html
+    assert "not confirmed current" in html
+
+
+def test_the_calendar_card_is_not_keyed_by_symbol():
+    """Every US equity on Alpaca shares one session. A per-symbol table would be
+    N identical rows with N chances to drift apart, so the hours are keyed to
+    the instrument class and the calendar sits beside them once."""
+    from bot.config import load_rules
+    from bot.web.live import SessionDayView
+
+    html = _settings_with(
+        sessions_ahead=[
+            SessionDayView(date="2026-11-25", label="Wed 25 Nov", early_close=False)
+        ],
+        loaded=True,
+    )
+    # Bounded to the card itself. A fixed-width slice ran on into the
+    # instrument cards below, which DO list symbols — and would have failed
+    # this test for the wrong reason.
+    end = "Alpaca trading calendar, cached."
+    card = html[html.index("Trading calendar") : html.index(end)]
+
+    for symbol in load_rules().instruments["us_equity"].allowed_symbols:
+        assert symbol not in card
+
+
+def test_the_calendar_card_does_not_guess_why_it_is_unloaded():
+    """Two different facts, and the card said the wrong one.
+
+    "The Board has not been opened" is a plausible cause and is wrong whenever
+    the poller HAS read and the broker had no calendar to give — which is every
+    mock deployment. Caught by loading the page, with the suite green.
+    """
+    never_read = _settings_with(poller_has_read=False)
+    read_but_empty = _settings_with(poller_has_read=True)
+
+    assert "has not read yet" in never_read
+    assert "returned no calendar" not in never_read
+
+    assert "returned no calendar" in read_but_empty
+    assert "has not read yet" not in read_but_empty

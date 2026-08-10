@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import html
 import json
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from zoneinfo import ZoneInfo
 
@@ -51,7 +52,7 @@ from ..metrics import JournalReport, render_excursions, render_summary
 from ..models import AccountSnapshot, StandDownState, Trade, WorkingOrder
 from ..options import ExpiryAlert
 from ..tailnet import TailnetStatus
-from .live import TickerQuote
+from .live import SessionDayView, TickerQuote
 from .seen import SinceLastVisit
 
 STYLES = """
@@ -3497,7 +3498,100 @@ def _row(key: str, value: str, why: str = "") -> str:
     )
 
 
-def settings_page(rules: Rules, env: Env, *, chat_enabled: bool) -> str:
+def _calendar_card(
+    sessions_ahead: Sequence[SessionDayView],
+    *,
+    loaded: bool,
+    degraded: bool,
+    poller_has_read: bool,
+) -> str:
+    """Which days actually trade, keyed to the equity classes rather than to a
+    symbol.
+
+    Every US equity on Alpaca shares one session, so a table keyed by symbol
+    would be N identical rows with N chances to drift apart. The class is the
+    real key and `config/rules.yaml` already holds the configured window; this
+    card holds the part the config CANNOT state, because it changes by date:
+    which days are skipped and which end early.
+
+    An empty list with `loaded` false is NOT "no sessions ahead". A calendar
+    nobody fetched and a quarter with no trading days are opposite findings, and
+    a card that rendered both as a blank space would be the more dangerous one
+    silently. Same rule as the cold-start Board saying unknown rather than zero.
+    """
+    if not loaded:
+        # Two different facts, and guessing between them is the failure this
+        # whole card is about. "The Board has not been opened" is a reasonable
+        # cause and is WRONG whenever the poller has in fact read and the
+        # broker had no calendar to give — which is every mock deployment. So
+        # the state that is known is reported, and no cause is invented for the
+        # other. Found by running it, not by the suite.
+        why = (
+            "The live poller has not read yet, so this fills in once the Board "
+            "has been opened."
+            if not poller_has_read
+            else "The poller has read and the broker returned no calendar — "
+            "either it is a MockBroker, which has none, or the fetch failed."
+        )
+        return (
+            '<div class="card"><h3>Trading calendar</h3>'
+            '<p class="muted">Not loaded. Holidays and early closes are '
+            "unknown, and the hours above assume an ordinary session. "
+            f"{why}</p>"
+            '<p class="source">src/bot/session_calendar.py</p></div>'
+        )
+
+    stale = (
+        '<p class="warn">The last refresh failed, so these dates are not '
+        "confirmed current. They are published well in advance and rarely "
+        "change.</p>"
+        if degraded
+        else ""
+    )
+    if not sessions_ahead:
+        rows = (
+            '<p class="muted">No sessions in the fetched range.</p>'
+        )
+    else:
+        rows = '<dl class="kv">' + "".join(
+            _row(
+                day.date,
+                _e(day.label),
+                "Shorter session than the usual 09:30-16:00."
+                if day.early_close
+                else "",
+            )
+            for day in sessions_ahead
+        ) + "</dl>"
+
+    early = [d for d in sessions_ahead if d.early_close]
+    note = (
+        "An early close is the one that bites quietly: the session is genuinely "
+        "open, every figure stays plausible, and the market shuts three hours "
+        "before anything here would otherwise assume."
+        if early
+        else "All standard 09:30-16:00 New York sessions."
+    )
+    return (
+        '<div class="card"><h3>Trading calendar</h3>'
+        + stale
+        + rows
+        + f'<p class="muted">{note}</p>'
+        '<p class="source">Alpaca trading calendar, cached. Gates nothing.</p>'
+        "</div>"
+    )
+
+
+def settings_page(
+    rules: Rules,
+    env: Env,
+    *,
+    chat_enabled: bool,
+    sessions_ahead: Sequence[SessionDayView] = (),
+    calendar_loaded: bool = False,
+    calendar_degraded: bool = False,
+    poller_has_read: bool = False,
+) -> str:
     """Structured, and read-only for anything that governs risk.
 
     A settings screen that could widen a limit would be a settings screen that
@@ -3591,7 +3685,12 @@ def settings_page(rules: Rules, env: Env, *, chat_enabled: bool) -> str:
         "Deficit calls.</p></div></div></section>"
     )
 
-    instrument_cards = ""
+    instrument_cards = _calendar_card(
+        sessions_ahead,
+        loaded=calendar_loaded,
+        degraded=calendar_degraded,
+        poller_has_read=poller_has_read,
+    )
     for name, inst in rules.instruments.items():
         sessions = inst.render_sessions()
         # Shown beside the hours rather than folded into them. The hours alone
