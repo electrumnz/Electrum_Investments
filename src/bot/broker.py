@@ -26,6 +26,7 @@ from .models import (
     OrderResult,
     OrderStatus,
     Position,
+    StopAtBroker,
     Tick,
     TradingActivity,
     WorkingOrder,
@@ -349,6 +350,23 @@ class MockBroker:
             order_id=order_id,
             filled_price=fill_price,
             filled_qty=proposal.qty,
+            # The same routing rule `AlpacaBroker` applies, and reported for the
+            # same reason: what a caller branches on is whether a stop is
+            # resting, and that answer follows from the SYMBOL rather than from
+            # anything this mock holds. A double that answers it differently
+            # would pin a path production never takes — the `orders_degraded`
+            # trap — and one that answered FIXED for crypto would hide the gap
+            # `stop_watch` exists to cover.
+            #
+            # It deliberately does NOT synthesise a resting leg in
+            # `_open_orders`. This mock fills instantly, so there is no parent
+            # for a bracket child to hang off, and `set_open_orders` stays the
+            # single way a test says what is resting.
+            stop_at_broker=(
+                StopAtBroker.ABSENT
+                if is_crypto_symbol(proposal.symbol)
+                else StopAtBroker.FIXED
+            ),
         )
 
     def close_position(self, symbol: str) -> OrderResult:
@@ -703,6 +721,21 @@ class AlpacaBroker:
             # this says what is actually resting at the broker, and a stop leg
             # nobody can read the level of is most of the way to no stop.
             stop_price = getattr(o, "stop_price", None)
+            # A trailing leg's own description. `stop_price` above is where it
+            # has trailed TO, which is a reading rather than a level anybody
+            # chose; these say how it got there and where it goes next, and
+            # without them a leg that moves on its own is indistinguishable from
+            # a stop somebody has been quietly editing.
+            #
+            # Alpaca sets `trail_percent` or `trail_price`, never both, and
+            # `hwm` — the highest (lowest) price seen since the leg was
+            # submitted — beside them. All three are absent on every other order
+            # type, which is correct and dull; `trail_is_unreadable` is what
+            # tells that apart from a trailing leg the broker described to
+            # nobody.
+            trail_percent = getattr(o, "trail_percent", None)
+            trail_price = getattr(o, "trail_price", None)
+            high_water_mark = getattr(o, "hwm", None)
             # `order_type` on newer SDKs, `type` on older ones. Both are enums
             # that stringify to things like "OrderType.STOP_LIMIT", so take the
             # `.value` when there is one and normalise what is left.
@@ -729,6 +762,11 @@ class AlpacaBroker:
                     qty=qty,
                     limit_price=float(limit_price) if limit_price else None,
                     stop_price=float(stop_price) if stop_price else None,
+                    trail_percent=float(trail_percent) if trail_percent else None,
+                    trail_price=float(trail_price) if trail_price else None,
+                    high_water_mark=(
+                        float(high_water_mark) if high_water_mark else None
+                    ),
                     order_type=order_type,
                     status=_order_status(broker_status),
                     broker_status=broker_status,
@@ -779,6 +817,27 @@ class AlpacaBroker:
         Limit only, deliberately. Market orders were a documented source of
         slippage loss in LLM trading experiments, and `OrderProposal` has no way
         to express one.
+
+        ## A trailing exit does not become a trailing leg, and cannot
+
+        `proposal.trail_percent` is the agent's chosen exit and it is honoured
+        as far as Alpaca allows, which is not all the way. **The only stop a
+        bracket or an OTO can carry is `StopLossRequest`** — a trigger and an
+        optional limit — and a trailing stop is a separate order TYPE that can
+        only be submitted against a position that already exists. There is no
+        arrangement of one order that is both an entry and a trailing exit.
+
+        So a trailing proposal goes out exactly as a fixed one does, with the
+        leg resting at `stop_loss_price`, and the result says
+        `stop_at_broker=FIXED` rather than claiming a trail. That is the safe
+        half rather than a compromise: the fixed leg makes the operator's third
+        rule true from the first instant, at the level the position was sized
+        against, and a trail can only ever tighten it from there.
+
+        The half that is genuinely not done is that nothing moves the stop on a
+        trail's behalf afterwards. It is logged here rather than left silent,
+        because a trail that reached nobody would be a decision the agent made
+        and the system quietly dropped.
         """
         if not self._connected:
             return OrderResult(accepted=False, error="not connected")
@@ -793,10 +852,30 @@ class AlpacaBroker:
         crypto = is_crypto_symbol(proposal.symbol)
         side = OrderSide.BUY if proposal.direction == Direction.BUY else OrderSide.SELL
 
+        if proposal.exit_is_trailing:
+            # Said out loud on every trailing order, at info rather than debug,
+            # because the gap it names is the one an operator would otherwise
+            # discover by watching a stop fail to move.
+            log.info(
+                "trail_not_attached_to_entry",
+                symbol=proposal.symbol,
+                trail_percent=proposal.trail_percent,
+                initial_stop=proposal.stop_loss_price,
+                reason=(
+                    "Alpaca accepts no trailing leg on an entry — a bracket or "
+                    "OTO stop is a fixed trigger and a trailing stop is a "
+                    "separate order against an existing position. The initial "
+                    "stop is what rests; the trail is recorded and not yet "
+                    "executed by anything."
+                ),
+            )
+
         if crypto:
             # Crypto trades around the clock and rejects DAY. Alpaca does not
             # accept bracket orders on crypto either, so the stop stays a
             # journal figure here and the loop's monitor is what watches it.
+            # A trail is in the same position, one step further out: there is no
+            # leg for it to be attached to in the first place.
             return self._submit(
                 LimitOrderRequest(
                     symbol=proposal.symbol,
@@ -804,7 +883,8 @@ class AlpacaBroker:
                     side=side,
                     time_in_force=TimeInForce.GTC,
                     limit_price=proposal.limit_price,
-                )
+                ),
+                stop_at_broker=StopAtBroker.ABSENT,
             )
 
         # A BRACKET, so the stop actually rests at the broker.
@@ -862,14 +942,31 @@ class AlpacaBroker:
                 side=side,
                 time_in_force=TimeInForce.GTC,
                 limit_price=proposal.limit_price,
+                # Fixed whether or not a trail was asked for. See the docstring:
+                # Alpaca has no trailing variant of this request, and the fixed
+                # trigger is the half that must always be there.
                 stop_loss=StopLossRequest(stop_price=proposal.stop_loss_price),
                 **exits,
-            )
+            ),
+            stop_at_broker=StopAtBroker.FIXED,
         )
 
-    def _submit(self, request: Any) -> OrderResult:
+    def _submit(
+        self,
+        request: Any,
+        *,
+        stop_at_broker: StopAtBroker = StopAtBroker.UNSTATED,
+    ) -> OrderResult:
         """One place that talks to `submit_order`, so entry and bracket paths
-        cannot drift in how they report a failure."""
+        cannot drift in how they report a failure — or in what they claim is
+        protecting the position afterwards.
+
+        `stop_at_broker` is passed in rather than inferred from the request,
+        because the caller is the only thing that knows what it decided. A
+        failure carries UNSTATED regardless: nothing was submitted, so there is
+        no protection to describe, and reporting ABSENT would be a claim about a
+        position that does not exist.
+        """
 
         try:
             order: Any = self._trading.submit_order(request)
@@ -883,6 +980,7 @@ class AlpacaBroker:
             order_id=str(order.id),
             filled_price=float(filled_price) if filled_price else None,
             filled_qty=float(filled_qty) if filled_qty else None,
+            stop_at_broker=stop_at_broker,
         )
 
     def replace_stop(self, order_id: str, *, stop_price: float) -> OrderResult:

@@ -18,6 +18,7 @@ def _proposal(
     limit_price: float = 580.00,
     stop_loss_price: float | None = None,
     take_profit_price: float | EllipsisType | None = ...,
+    trail_percent: float | None = None,
 ) -> OrderProposal:
     """`take_profit_price=None` means NO TARGET; omitting it takes the default.
 
@@ -37,6 +38,7 @@ def _proposal(
         limit_price=limit_price,
         stop_loss_price=stop_loss_price if stop_loss_price is not None else sl,
         take_profit_price=tp if take_profit_price is ... else take_profit_price,
+        trail_percent=trail_percent,
         rationale=rationale,
     )
 
@@ -434,6 +436,145 @@ def test_a_target_still_produces_a_bracket():
     assert request.stop_loss.stop_price == 575.0
 
 
+# ------------------------------------------- a trail is NOT a leg at the broker
+#
+# The constraint that shapes all of this, and it is the "a broker-side stop OR
+# an out-of-hours fill, never both" trade in a second place: **Alpaca accepts no
+# trailing leg on an entry.** `StopLossRequest` — the only stop a bracket or an
+# OTO can carry — is a trigger and an optional limit, and a trailing stop is a
+# separate order TYPE that can only be submitted against a position that already
+# exists.
+#
+# So a trailing proposal rests a FIXED stop at the initial level. That is the
+# safe half rather than a compromise: the operator's third rule is true from the
+# first instant, at the level the position was sized against, and a trail can
+# only tighten from there. What must not happen is the system claiming a trail
+# it is not holding.
+
+
+def test_a_trailing_exit_still_rests_a_fixed_stop_at_the_initial_level():
+    """The guarantee. A trail must not cost the trade its broker-side stop.
+
+    The dangerous version of this change would submit a plain limit order and
+    arrange the trail afterwards — which is rule 3 gone for as long as it takes
+    somebody to notice the second step never ran.
+    """
+    from alpaca.trading.enums import OrderClass, TimeInForce
+
+    from bot.models import StopAtBroker
+
+    trading = _CapturingTrading()
+    result = _alpaca_with(trading).place_order(
+        _proposal(
+            symbol="SPY",
+            stop_loss_price=575.0,
+            take_profit_price=None,
+            trail_percent=1.5,
+        )
+    )
+
+    assert result.accepted
+    request = trading.requests[0]
+    assert request.order_class == OrderClass.OTO
+    assert request.stop_loss.stop_price == 575.0
+    assert request.time_in_force == TimeInForce.GTC
+    # Whatever else changed, this did not: the leg is a fixed trigger.
+    assert getattr(request.stop_loss, "trail_percent", None) is None
+    assert result.stop_at_broker is StopAtBroker.FIXED
+
+
+def test_a_trailing_exit_is_not_reported_as_a_trailing_leg():
+    """The half that would be a lie. `stop_at_broker` says what is RESTING.
+
+    A caller reading FIXED here knows the trail is still its own problem. One
+    reading TRAILING would believe the broker was moving the stop, and would be
+    wrong on every cycle until somebody checked the account by hand.
+    """
+    from bot.models import StopAtBroker
+
+    trading = _CapturingTrading()
+    result = _alpaca_with(trading).place_order(
+        _proposal(symbol="SPY", trail_percent=0.75)
+    )
+
+    assert result.stop_at_broker is not StopAtBroker.TRAILING
+
+
+def test_a_crypto_trailing_exit_degrades_the_way_the_crypto_stop_already_does():
+    """Crypto takes no bracket at Alpaca, so there is no leg for a trail to be
+    attached to and no leg for the STOP either. Both are journal figures watched
+    by `stop_watch`, and the result says so rather than looking identical to a
+    bracketed equity entry."""
+    from alpaca.trading.enums import OrderClass
+
+    from bot.models import StopAtBroker
+
+    trading = _CapturingTrading()
+    result = _alpaca_with(trading).place_order(
+        _proposal(
+            symbol="BTC/USD",
+            limit_price=60_000.0,
+            stop_loss_price=57_000.0,
+            take_profit_price=None,
+            trail_percent=3.0,
+        )
+    )
+
+    request = trading.requests[0]
+    assert request.order_class in (None, OrderClass.SIMPLE)
+    assert request.stop_loss is None
+    assert result.stop_at_broker is StopAtBroker.ABSENT
+
+
+def test_a_refused_submission_claims_no_protection_at_all():
+    """UNSTATED, not ABSENT. Nothing was submitted, so there is no position for
+    a claim about protection to be about — the same distinction as `has_cycles`
+    and first-visit, arriving on the order path."""
+    from bot.models import StopAtBroker
+
+    class _Failing(_CapturingTrading):
+        def submit_order(self, request: Any) -> Any:
+            raise RuntimeError("422 unprocessable")
+
+    result = _alpaca_with(_Failing()).place_order(
+        _proposal(symbol="SPY", trail_percent=2.0)
+    )
+
+    assert not result.accepted
+    assert result.stop_at_broker is StopAtBroker.UNSTATED
+
+
+def test_the_mock_reports_the_same_routing_consequence_as_alpaca():
+    """A double that answered this differently would pin a path production never
+    takes — the `orders_degraded` trap, which was found the same way.
+
+    The mock holds no order objects, so what it is faithful about is the
+    ROUTING: an equity entry leaves a stop at the broker and a crypto one does
+    not, and that follows from the symbol rather than from anything in memory.
+    """
+    from bot.models import StopAtBroker
+
+    broker = MockBroker()
+    broker.connect()
+    broker.set_price("SPY", 579.98, 580.02)
+    broker.set_price("BTC/USD", 64_990.0, 65_010.0)
+
+    equity = broker.place_order(_proposal(symbol="SPY", trail_percent=1.0))
+    crypto = broker.place_order(
+        _proposal(
+            symbol="BTC/USD",
+            limit_price=65_000.0,
+            stop_loss_price=63_000.0,
+            take_profit_price=None,
+        )
+    )
+
+    assert equity.stop_at_broker is StopAtBroker.FIXED
+    assert crypto.stop_at_broker is StopAtBroker.ABSENT
+    # And it does not invent a resting leg it has no parent for.
+    assert broker.get_open_orders() == []
+
+
 # ------------------------------------------------------------- the broker clock
 
 
@@ -612,3 +753,82 @@ def test_an_order_type_this_code_has_never_heard_of_still_travels():
     assert order.order_type == "trailing_stop"
     assert order.is_stop is True
     assert order.stop_price == 815.00
+
+
+def test_a_trailing_leg_reads_back_its_trail_and_its_high_water_mark():
+    """`stop_price` alone would make a trailing leg look like a fixed stop that
+    is quietly moving on its own.
+
+    The level IS correct — it is where the broker has trailed to — but it is a
+    reading rather than a level anybody chose, and the same rule applies as to a
+    timestamp on the Board: a figure that will be a different number tomorrow
+    has to arrive with what determines it. Alpaca reports the trail and the
+    high-water mark; without them nothing in this repository could say where the
+    stop goes next.
+    """
+    trading = _ListingTrading(
+        [
+            _RawOrder(
+                order_type="trailing_stop",
+                stop_price="815.00",
+                trail_percent="2.5",
+                hwm="795.12",
+            )
+        ]
+    )
+
+    order = _alpaca_with(trading).get_open_orders()[0]
+
+    assert order.is_stop is True
+    assert order.is_trailing is True
+    assert order.stop_price == 815.00
+    assert order.trail_percent == 2.5
+    assert order.high_water_mark == 795.12
+    assert order.trail_is_unreadable is False
+    assert order.trigger_price_unknown is False
+
+
+def test_an_absolute_trail_reads_back_too():
+    """Alpaca sets `trail_percent` OR `trail_price`, never both. A reader that
+    only knew about one would report a perfectly well-described leg as
+    undescribed."""
+    trading = _ListingTrading(
+        [_RawOrder(order_type="trailing_stop", stop_price="815.00", trail_price="5.00")]
+    )
+
+    order = _alpaca_with(trading).get_open_orders()[0]
+
+    assert order.trail_price == 5.00
+    assert order.trail_percent is None
+    assert order.trail_is_unreadable is False
+
+
+def test_a_trailing_leg_with_no_trail_reported_says_so():
+    """`trigger_price_unknown` one level up.
+
+    The current trigger can be read and nothing whatever can be said about where
+    it goes next — so the level on screen is a stop that moves for reasons
+    nobody can state. That is a different fact from a fixed stop at 815 and must
+    not render as one.
+    """
+    trading = _ListingTrading([_RawOrder(order_type="trailing_stop", stop_price="815.00")])
+
+    order = _alpaca_with(trading).get_open_orders()[0]
+
+    assert order.trail_is_unreadable is True
+    # And the trigger itself is perfectly readable, which is why this needs its
+    # own question rather than being folded into the existing one.
+    assert order.trigger_price_unknown is False
+
+
+def test_a_fixed_stop_is_not_reported_as_an_unreadable_trail():
+    """The absent-versus-unknown rule, on the new field. A plain stop has no
+    trail and that is correct and dull, exactly as `stop_price is None` is on a
+    limit order."""
+    trading = _ListingTrading([_RawOrder(order_type="stop", stop_price="820.00")])
+
+    order = _alpaca_with(trading).get_open_orders()[0]
+
+    assert order.is_trailing is False
+    assert order.trail_percent is None
+    assert order.trail_is_unreadable is False

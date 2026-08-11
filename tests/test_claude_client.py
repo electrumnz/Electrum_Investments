@@ -84,10 +84,14 @@ DREAMER_SCHEMAS: dict[str, type[BaseModel]] = {
 # a schema arriving at this cap should be read as a warning rather than as a
 # budget to spend.
 #
-# `PositionPlan` is the current worst at five, which makes `ClaudeDecision` the
-# slowest schema this repository sends: 14.7 seconds, against 3.1 for the fixed
-# `DreamStep`. Measure the next optional field added there rather than assuming
-# it fits.
+# **Nothing in this repository is anywhere near it any more**, and that is not a
+# reason to relax it. `ClaudeDecision` was the worst at five on `PositionPlan`
+# and went to zero when the trailing exit needed a field on `OrderProposal` —
+# measured 2026-08-11, three shapes alternating within one run, four cold
+# compiles each: 12 optional took 10.9-14.2s, adding the trail as a 13th took
+# 11.7-14.4s, and the shipped all-required shape took 8.0-11.7s WITH the extra
+# field. The cap is what stands between here and that, for the next model that
+# grows a field with a default.
 SAFE_OPTIONAL_PROPERTIES_PER_OBJECT = 8
 
 
@@ -258,6 +262,65 @@ def test_the_dreamers_schemas_leave_nothing_optional(name):
     )
 
 
+def test_the_decision_schema_leaves_nothing_optional_either():
+    """The slowest schema this repository sends, and now the cheapest shape.
+
+    It was 12 optional properties across five objects — five of them on
+    `PositionPlan` — and 14.7 seconds against 3.1 for the fixed `DreamStep`. The
+    trailing exit needed a field on `OrderProposal`, which sits inside exactly
+    that schema, so the cheap move was to spend nothing rather than to spend a
+    little: every property on every object here is required on the wire and
+    none in Python.
+
+    Zero rather than "under the cap", for the same reason the dreamer's is
+    zero. This is the object graph a field gets added to whenever the prompt
+    asks for one more thing, and the cap above is where compilation is already
+    slow rather than where it breaks.
+    """
+    schema = ClaudeDecision.model_json_schema()
+    nodes = object_nodes(schema)
+    assert set(nodes) >= {
+        "ClaudeDecision",
+        "OrderProposal",
+        "SymbolAssessment",
+        "PositionPlan",
+    }, sorted(nodes)
+
+    for name, node in nodes.items():
+        assert optional_properties(node) == [], (
+            f"{name} declares optional properties again "
+            f"({', '.join(optional_properties(node))}). Add "
+            "claude_client.EVERY_FIELD_REQUIRED to the model — a null costs "
+            "nothing on the wire and an absent key is what the grammar "
+            "compiler cannot afford."
+        )
+
+
+def test_a_proposal_can_still_be_built_without_naming_an_exit():
+    """Required on the wire must not become required in Python.
+
+    The same guarantee as `test_required_on_the_wire_does_not_make_anything_
+    required_in_python` one file over, and it matters more here: `conftest`,
+    `mcp_server._build_proposal` and most of `test_risk.py` construct proposals
+    with a handful of fields. If this had reached past the transport into the
+    domain, the fix for a schema cost would have changed what a valid order is.
+    """
+    from bot.models import Direction, OrderProposal
+
+    proposal = OrderProposal(
+        symbol="SPY",
+        direction=Direction.BUY,
+        qty=3,
+        limit_price=580.0,
+        stop_loss_price=575.0,
+        rationale="No target, no trail, and both of those are real answers.",
+    )
+
+    assert proposal.take_profit_price is None
+    assert proposal.trail_percent is None
+    assert proposal.exit_is_trailing is False
+
+
 def test_required_on_the_wire_does_not_make_anything_required_in_python():
     """The fix is a wire format and must not become a validation change.
 
@@ -330,6 +393,74 @@ def test_a_failed_dream_step_cannot_occupy_the_timer_for_three_quarters_of_an_ho
     # Still patient enough for the measured worst case: 109.3s for the first
     # call of the day, which carries the one-time grammar compile.
     assert DREAM_TIMEOUT_SECONDS >= 180
+
+
+# ------------------------------------------------- what the prompt asks for
+#
+# The prompt and the schema are one contract in two halves, and only one of them
+# is checked by the API. A prompt that names a field the model no longer has to
+# supply — or that stays silent about one it now does — is a contract that
+# disagrees with itself, and the model resolves the disagreement on its own.
+
+
+def test_the_prompt_no_longer_calls_the_target_a_field_a_proposal_NEEDS():
+    """It said so for months after the field became optional.
+
+    `take_profit_price` stopped being required when an invented target became a
+    live OCO leg resting at the broker at a price nobody chose. The prompt kept
+    listing it among the fields each proposal "needs", so the model was still
+    being told to produce one — which is the invented-target problem surviving
+    the fix that was supposed to end it.
+    """
+    from bot.claude_client import SYSTEM_PROMPT_TEMPLATE
+
+    # The sentence that enumerates them, not the paragraph — the target is
+    # named right afterwards, as something to CHOOSE rather than to supply, and
+    # that distinction is the whole content of this test.
+    needs = SYSTEM_PROMPT_TEMPLATE.split("Each proposal needs", 1)[1].split(".", 1)[0]
+
+    assert "stop_loss_price" in needs
+    assert "take_profit_price" not in needs, (
+        "the prompt lists the target among the fields a proposal must supply. "
+        "It has been optional since brackets became real orders."
+    )
+    assert "trail_percent" not in needs
+    assert "are the exit and are yours to choose" in SYSTEM_PROMPT_TEMPLATE
+
+
+def test_the_prompt_offers_all_three_exits_and_names_none_as_the_default():
+    """The exit is the agent's decision, so all three have to be on the page.
+
+    A prompt naming two of them makes the third unreachable however good the
+    schema is, which is the state this replaces: the model could not express a
+    trail because nothing ever told it one existed.
+    """
+    from bot.claude_client import SYSTEM_PROMPT_TEMPLATE
+
+    assert "trail_percent" in SYSTEM_PROMPT_TEMPLATE
+    assert "take_profit_price" in SYSTEM_PROMPT_TEMPLATE
+    # And the empty answer stays a respectable one, in the prompt's own words.
+    assert "Do not invent a target" in SYSTEM_PROMPT_TEMPLATE
+
+
+def test_the_prompt_does_not_promise_the_broker_is_holding_the_trail():
+    """The one claim that would be false.
+
+    Alpaca accepts no trailing leg on an entry, so a trailing proposal rests a
+    FIXED stop and the trail is recorded rather than executed. A prompt that let
+    the model believe otherwise would have it sizing and holding as though
+    something were following the price, which is the confident-partial-answer
+    failure with the model on the receiving end of it.
+    """
+    from bot.claude_client import SYSTEM_PROMPT_TEMPLATE
+
+    section = SYSTEM_PROMPT_TEMPLATE.split("### the exit is yours", 1)[1]
+
+    assert "does not reach the broker" in section
+    assert "can only ever tighten" in section
+    # Size still comes from the stop, and the prompt must keep saying so — a
+    # trail is the exact excuse somebody would use to loosen one.
+    assert "Do not widen the stop" in section
 
 
 LIVE_FLAG = "MUDHORN_LIVE_SCHEMA_PROBE"

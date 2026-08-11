@@ -18,22 +18,19 @@ from dataclasses import dataclass
 from typing import Any
 
 import anthropic
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, Field
 
 from .config import CLAUDE_MODEL_IDS, CLAUDE_PRICING_USD_PER_MTOK, DAY_NAMES, ClaudeTier, Env, Rules
+from .models import (
+    # `x as x` is mypy's explicit re-export form under --strict, and the
+    # re-export is the point: the models this applies to live in `models.py`,
+    # which this module imports, so the ConfigDict has to be defined there or
+    # the import closes a cycle. It is documented HERE, beside the measurements
+    # that are the only reason anybody would reach for it, and `dreamer.py` and
+    # every reader keeps importing it from where the reasoning is.
+    EVERY_FIELD_REQUIRED as EVERY_FIELD_REQUIRED,
+)
 from .models import OrderProposal, PositionPlan, SymbolAssessment
-
-
-def _require_every_property(schema: dict[str, Any]) -> None:
-    """Declare every property of this model REQUIRED in its JSON schema.
-
-    Python keeps its defaults — this touches the schema only — so every caller
-    that constructs one of these models by hand is unaffected. What changes is
-    the contract sent to the API: the model must emit every field, using the
-    empty value where it has nothing to say, instead of omitting it.
-    """
-    schema["required"] = list(schema.get("properties", ()))
-
 
 # Attach to any Pydantic model handed to `messages.parse` as an `output_format`.
 #
@@ -66,27 +63,45 @@ def _require_every_property(schema: dict[str, Any]) -> None:
 #   made came back 400 "Schema is too complex", 400 "Grammar compilation timed
 #   out", or a plain timeout.
 #
-# What is NOT the rule is a budget on the total. `ClaudeDecision` carries twelve
+# What is NOT the rule is a budget on the total. `ClaudeDecision` carried twelve
 # optional properties across four models, never more than five on any one of
-# them, and it compiles — concentration is what bites, not the sum.
+# them, and it compiled — concentration is what bites, not the sum.
 #
-# It is worth knowing WHICH schema has the least room, though, and it is not the
-# dreamer's any more. Measured the same day, same model, one call each:
+# It is worth knowing WHICH schema has the least room, though, and it was not the
+# dreamer's. Measured the same day, same model, one call each:
 #
 #     DreamStep, fixed    3.1s      DreamerTurn   3.4s
 #     TraderTurn          5.3s      ClaudeDecision  14.7s
 #
-# `ClaudeDecision` is now the slowest thing this repository sends, at five
-# optional properties on `PositionPlan`. That is inside the cap
-# `tests/test_claude_client.py` enforces and it is the one to watch: the next
-# optional field added to a position plan or an assessment is the one to
-# measure rather than assume.
+# **`ClaudeDecision` was the slowest thing this repository sends, and it now
+# leaves nothing optional at all.** That happened when the trailing exit was
+# added: the field it needed sits on `OrderProposal`, inside the schema that had
+# the least room, so the cheap move was to spend nothing rather than to spend a
+# little. Measured on 2026-08-11 against `claude-sonnet-5`, the three shapes
+# alternating within one run, four cold compiles each:
+#
+#     before   12 optional across five objects   10.9 / 11.3 / 13.5 / 14.2s
+#     naive    the trail added as a 13th         11.7 / 13.2 / 13.5 / 14.4s
+#     shipped  0 optional, WITH the new field     8.0 /  8.8 /  8.9 / 11.7s
+#
+# So the field is free and the shape it was added in pays for itself. The
+# synthetic control reproduces unchanged on the same afternoon — 12 optional
+# properties on ONE object timed out at 170s, 15 required-nullable compiled in
+# 3.1s, and 20 optional was refused outright with 400 "too many partitions".
+#
+# **Two things about measuring this, both of which got it wrong first.**
+# Alternate the shapes rather than taking a before and an after an hour apart:
+# the spread within one shape is wider than the gap between two, so a single
+# pair of readings measures the afternoon. And rebuild EVERY shape under a fresh
+# name, including the one already in the file — the server caches a compiled
+# grammar, and a schema sent earlier that day reads back in about 2.5 seconds.
+# The first attempt here subclassed the live `ClaudeDecision`, left its nested
+# `$defs` byte-identical to something already compiled, and measured the cache.
 #
 # The alternative was to drop `output_format` and validate the JSON on this
 # side, which hands back to the model the freedom to return a value the schema
 # forbids — a number this repository would then have to trust. This keeps the
 # guarantee and costs a handful of `null`s on the wire.
-EVERY_FIELD_REQUIRED = ConfigDict(json_schema_extra=_require_every_property)
 
 
 class ClaudeDecision(BaseModel):
@@ -97,7 +112,14 @@ class ClaudeDecision(BaseModel):
     quiet cycle records only "no proposals", and "nothing met the conditions"
     is indistinguishable from "the loop never looked", which are very different
     states to be in and only one of them is fine.
+
+    Every property is REQUIRED on the wire and none in Python, here and on all
+    three nested models. An empty list is still the right answer on a quiet
+    cycle; what changes is that the model has to SAY `[]` rather than leave the
+    key out. See `EVERY_FIELD_REQUIRED` for why that is the cheap direction.
     """
+
+    model_config = EVERY_FIELD_REQUIRED
 
     market_assessment: str = Field(description="One-paragraph read of the current market.")
     proposals: list[OrderProposal] = Field(
@@ -188,9 +210,49 @@ Return JSON with:
   including the ones you are passing on.
 - `position_plans`: one entry for every position currently open.
 
-Each proposal needs `symbol`, `direction` (buy or sell), `qty` (shares or coin
-units, not lots), `limit_price`, `stop_loss_price`, `take_profit_price`, and a
-`rationale` of at least one full sentence.
+Each proposal needs `symbol`, `asset_class`, `direction` (buy or sell), `qty`
+(shares or coin units, not lots), `limit_price`, `stop_loss_price` and a
+`rationale` of at least one full sentence. `take_profit_price` and
+`trail_percent` are the exit and are yours to choose — see below. State every
+field: where you have nothing to say, say `null` or an empty list rather than
+leaving the key out.
+
+### the exit is yours, and there are three of them
+
+`stop_loss_price` is required and is not part of this choice. It is the hard
+stop, it is what your size is computed from, and every exit below sits on top of
+it. What you are choosing is how the trade ENDS when it goes your way.
+
+- **A fixed target.** Set `take_profit_price` and leave `trail_percent` null.
+  The order goes out as a bracket: entry, stop, and a limit at your target, all
+  resting at the broker.
+- **No target.** Leave both null. The order is an entry plus a stop, and the
+  trade runs until the stop fills or something closes it. This is a normal
+  trade, not an unfinished one — the operator's rules require a stop and have
+  never required an exit. **Do not invent a target to fill the field.** A number
+  chosen to look complete is a live order at a price you did not mean.
+- **A trail.** Set `trail_percent` — how far behind the best price the stop
+  follows, as a percentage — for a trade whose thesis is "let it run", where a
+  fixed target would cap the part you were trying to catch. You may set a
+  target as well, but a trail with a tight target is two answers to one
+  question.
+
+Three things about a trail that are properties of the broker rather than
+settings, and none of them can be configured away:
+
+- **It does not reach the broker attached to your entry.** Alpaca's bracket and
+  OTO orders carry a FIXED stop trigger; a trailing stop is a separate order
+  type that can only be placed against a position that already exists. So the
+  leg resting behind your entry is at `stop_loss_price`, exactly as if you had
+  asked for a fixed stop, and the trail is recorded rather than executed.
+- **It can only ever tighten.** A trail is measured from the best price the
+  trade has seen, floored by the stop already in force, so it never gives room
+  back. Choosing a trail wider than your initial stop distance therefore does
+  nothing at all until price has run far enough to earn it.
+- **It changes nothing about your size.** Risk is `|limit_price -
+  stop_loss_price| x qty` either way. Do not widen the stop because a trail
+  feels safer — that buys a bigger loss at the same 1%, and the gate will
+  approve it, because the gate checks arithmetic and not intent.
 
 ### assessments — say what you looked at, not only what you took
 

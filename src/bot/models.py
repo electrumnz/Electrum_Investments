@@ -11,8 +11,9 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import StrEnum
+from typing import Any
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 # Free text the model writes and nothing downstream parses. Generous, because
 # the prompt now asks for a stance on every symbol and a plan for every
@@ -36,6 +37,33 @@ def truncate_free_text(value: object) -> object:
     if isinstance(value, str) and len(value) > RATIONALE_MAX_CHARS:
         return value[: RATIONALE_MAX_CHARS - 1].rstrip() + "…"
     return value
+
+
+def _require_every_property(schema: dict[str, Any]) -> None:
+    """Declare every property of this model REQUIRED in its JSON schema.
+
+    Python keeps its defaults — this touches the schema only — so every caller
+    that constructs one of these models by hand is unaffected. What changes is
+    the contract sent to the API: the model must emit every field, using the
+    empty value where it has nothing to say, instead of omitting it.
+    """
+    schema["required"] = list(schema.get("properties", ()))
+
+
+# Attach to any model handed to `messages.parse` as an `output_format`.
+#
+# **A null is free; an ABSENCE is what costs.** A property the schema does not
+# require may be present or absent, so the grammar the API compiles has to
+# accept every subset of the optional set in any order, and each optional field
+# doubles that space. `claude_client.EVERY_FIELD_REQUIRED` re-exports this and
+# carries the measurements — read them there before adding a field with a
+# default to anything the model returns.
+#
+# It lives HERE, in the leaf module, rather than beside those measurements,
+# because `claude_client` imports this file and the models that need it are
+# defined in it. One definition, imported both ways round, rather than a second
+# copy that can drift.
+EVERY_FIELD_REQUIRED = ConfigDict(json_schema_extra=_require_every_property)
 
 
 class Direction(StrEnum):
@@ -425,7 +453,19 @@ class TradingActivity(BaseModel):
 
 
 class OrderProposal(BaseModel):
-    """What Claude proposes — must pass the risk gate before execution."""
+    """What Claude proposes — must pass the risk gate before execution.
+
+    **Every property is REQUIRED on the wire** and none is required in Python.
+    See `EVERY_FIELD_REQUIRED`: this is the schema the decision loop sends 96
+    times a day, and an optional property is what makes one expensive to
+    compile. `asset_class` is therefore stated by the model on every proposal
+    now rather than defaulted — which is harmless, because no gate reads it.
+    `RiskGate` resolves a symbol's class from the SYMBOL, by the same rule
+    `AlpacaBroker` routes on, so a mislabelled proposal cannot choose which caps
+    it faces.
+    """
+
+    model_config = EVERY_FIELD_REQUIRED
 
     symbol: str
     asset_class: AssetClass = AssetClass.EQUITY
@@ -451,6 +491,59 @@ class OrderProposal(BaseModel):
     # `None` means "no target" and the order goes out as an OTO — entry plus a
     # stop — rather than a bracket. It does NOT mean "decide one for me".
     take_profit_price: float | None = Field(default=None, gt=0)
+
+    # A TRAILING exit, as a percentage of the best price seen. `None` is a fixed
+    # stop and is what every trade so far has been.
+    #
+    # **One field, not an enum and a number.** "Which exit style" and "how far
+    # does it trail" are one decision, and carrying them as two facts is a
+    # third fact about the same thing that can disagree with the other two —
+    # the same reason `Adoption.is_live` is computed rather than stored. A
+    # figure here IS the trail; its absence IS a fixed stop.
+    #
+    # **Percent rather than an absolute distance**, for two reasons. It means
+    # the same thing on SPY at 773 and on BTC/USD at 65,000, like every other
+    # limit in this repository; and Alpaca's own trailing order takes
+    # `trail_percent` unchanged, so nothing has to convert a unit at the
+    # boundary. Offering both — as Alpaca does — would need an "exactly one of"
+    # rule the model can get wrong, on a schema whose whole cost model is about
+    # not making the model choose.
+    #
+    # ## What it does NOT buy, and this is the part to read
+    #
+    # **Alpaca accepts no trailing leg on an entry.** The only stop a bracket or
+    # an OTO can carry is `StopLossRequest`, which takes a trigger and an
+    # optional limit and nothing else; a trailing stop is a standalone order
+    # type that can only be submitted against a position that already exists.
+    # So this is the same shape as "a broker-side stop OR an out-of-hours fill,
+    # never both": the leg resting behind the entry is FIXED, at
+    # `stop_loss_price`, and the trail is a plan the broker is not holding.
+    #
+    # That ordering is deliberate rather than a compromise. The fixed leg is
+    # what makes the operator's third rule true from the first instant, and it
+    # sits at exactly the level the position was sized against. A trail is only
+    # ever an improvement on it — see `trailing_stop_level`, which cannot widen
+    # a stop — so nothing is at risk that was not already.
+    #
+    # **Nothing moves the stop on this alone yet.** The journal has no column
+    # for a trail, so a trailing proposal is recorded in the audit log and in
+    # the order that goes out, and the level in force stays the initial stop
+    # until something moves it through `position_actions.tighten_stop` — which
+    # refuses any move away from entry, which is a trail's own invariant.
+    #
+    # Upper bound rather than an opinion on placement: at 100% a long's stop is
+    # zero and a short's is twice the price, which is not a stop.
+    trail_percent: float | None = Field(
+        default=None,
+        gt=0,
+        lt=100,
+        description=(
+            "For a TRAILING exit: how far behind the best price the stop "
+            "follows, as a percentage. Omit (null) for a fixed stop. The stop "
+            "never widens — `stop_loss_price` is still the initial level and "
+            "still what the position is sized from."
+        ),
+    )
     rationale: str = Field(min_length=10, max_length=RATIONALE_MAX_CHARS)
 
     # Truncates rather than rejects, and only because nothing reads this field.
@@ -462,14 +555,107 @@ class OrderProposal(BaseModel):
         return self.qty * self.limit_price
 
     @property
+    def exit_is_trailing(self) -> bool:
+        """Did the agent ask for a trail rather than a fixed stop?
+
+        The one reading of `trail_percent`, so no caller re-derives it and gets
+        `> 0` or `is not None` subtly differently.
+        """
+        return self.trail_percent is not None
+
+    @property
     def risk_usd(self) -> float:
         """What this trade loses if the stop fills as planned.
 
         The unit the risk caps are measured in, and the reason they are
         leverage-neutral: this is the same number whether the position was paid
         for in cash, on margin, or as a futures contract.
+
+        **A trail does not change it**, and that is why the risk gate needed no
+        edit for one. The trail is measured from the best price SEEN, which at
+        the moment of sizing is the entry, so the worst a trailing exit can do
+        is exactly what the initial stop does — `trailing_stop_level` cannot
+        return anything looser. A trail that widened the number here would be a
+        bigger loss at the same 1%, which is the thing the prompt tells the
+        model not to buy.
         """
         return abs(self.limit_price - self.stop_loss_price) * self.qty
+
+
+def trailing_stop_level(
+    *,
+    direction: Direction,
+    high_water_mark: float,
+    trail_percent: float,
+    stop_in_force: float,
+) -> float:
+    """Where a trail of this size puts the stop, given the best price seen.
+
+    Pure arithmetic, here rather than in whichever caller needs it, because the
+    alternative is every caller inventing the number — which is the failure
+    `indicators.py` exists to prevent, arriving on the exit side.
+
+    `high_water_mark` is the best price the trade has seen: the HIGHEST on a
+    long, the LOWEST on a short. Alpaca names its field the same way and
+    documents it the same way, so a level computed here and one read back off a
+    resting trailing leg mean the same thing.
+
+    **It can only ever TIGHTEN, and that is the whole guarantee.** The result is
+    floored (a long) or capped (a short) by the stop already in force, so a
+    trail wider than the initial stop distance simply does nothing until price
+    has run far enough to earn it, and a high-water mark that goes backwards —
+    which it must not, but which a caller could pass — cannot give room back.
+    Without that floor a trail would be the one thing this repository refuses:
+    a stop moving AWAY from entry on a live position, increasing the loss at
+    unchanged size, with no gate anywhere that sees it.
+
+    A non-positive high-water mark is refused rather than used. On a long it
+    would be harmless — the floor absorbs it — and on a SHORT it would compute a
+    stop of zero and cap the level down to it, which is a stop that triggers
+    immediately. Two sides of one function must not fail differently, so the
+    nonsense input is rejected on both.
+    """
+    if high_water_mark <= 0:
+        raise ValueError(
+            f"high_water_mark must be a real price, got {high_water_mark}. A "
+            "trail computed from it would put a short's stop at zero."
+        )
+    if direction == Direction.BUY:
+        return max(stop_in_force, high_water_mark * (1 - trail_percent / 100))
+    return min(stop_in_force, high_water_mark * (1 + trail_percent / 100))
+
+
+class StopAtBroker(StrEnum):
+    """What is actually resting at the broker behind an entry, if anything.
+
+    Not what was intended, and not what the journal says — what the adapter
+    submitted. The two differ by design in three places already, and until this
+    existed the difference was documented in comments and visible nowhere:
+
+    - **Crypto carries no stop at all.** Alpaca accepts no bracket on it, so the
+      stop has always been a journal figure watched by `stop_watch`. That is
+      correct and long-standing, and an `OrderResult` that looked identical to a
+      bracketed equity entry's was the `FinnhubCalendar.is_degraded` problem
+      again: a caller cannot tell "there is a leg" from "there is nothing" by
+      reading a success.
+    - **A trailing exit gets a FIXED leg.** Alpaca accepts no trailing leg on an
+      entry, so a proposal carrying `trail_percent` still rests a fixed stop at
+      the initial level — the safe half — and the trail is not at the broker.
+    - **Everything that is not an entry says nothing.** `UNSTATED` is the
+      default, so a close, a stop replacement or a refusal cannot be misread as
+      a claim about protection. Same rule as `has_cycles` and
+      `can_grade_anything`: not asked and answered-no are different findings.
+
+    `TRAILING` is unreachable from `place_order` today, deliberately kept as a
+    member because it is what a leg read back by `get_open_orders` can be, and
+    because naming it is what makes the absence above a statement rather than an
+    oversight.
+    """
+
+    UNSTATED = "unstated"
+    FIXED = "fixed"
+    TRAILING = "trailing"
+    ABSENT = "absent"
 
 
 class OrderResult(BaseModel):
@@ -478,6 +664,14 @@ class OrderResult(BaseModel):
     error: str | None = None
     filled_price: float | None = None
     filled_qty: float | None = None
+
+    # What the broker is holding behind this entry. See `StopAtBroker`.
+    #
+    # Defaults to UNSTATED, which keeps every existing construction truthful:
+    # a close, a replaced stop and a refusal are not claims about what is
+    # protecting a position, and a boolean here would have made all three say
+    # "no stop" in a field somebody would later read.
+    stop_at_broker: StopAtBroker = StopAtBroker.UNSTATED
 
 
 class OrderStatus(StrEnum):
@@ -523,7 +717,27 @@ class WorkingOrder(BaseModel):
     # existed while nothing in this repository could state what price it fires
     # at. The journal's `planned_stop` and the broker's real trigger are two
     # different facts, and only one of them was visible.
+    #
+    # **On a TRAILING leg this is a reading, not a level somebody chose.**
+    # Alpaca recomputes it as the high-water mark moves, so it is true at the
+    # moment it was fetched and will be a different number later. That is why
+    # `trail_percent`, `trail_price` and `high_water_mark` are carried beside
+    # it: without them a trailing leg is indistinguishable from a fixed stop
+    # that keeps moving on its own, which reads as an unexplained move rather
+    # than as the exit that was chosen.
     stop_price: float | None = None
+
+    # How far behind the high-water mark a trailing leg follows, and where that
+    # mark currently is, exactly as the broker reports them. Alpaca supplies
+    # `trail_percent` OR `trail_price` — never both — and `hwm` alongside.
+    #
+    # All three are `None` on every non-trailing order, which is correct and
+    # dull there, and `trail_is_unreadable` is what tells that apart from a
+    # trailing leg the broker described to nobody. Same arrangement as
+    # `order_type` beside `stop_price`.
+    trail_percent: float | None = None
+    trail_price: float | None = None
+    high_water_mark: float | None = None
 
     # What the broker calls this order: "limit", "stop", "stop_limit",
     # "trailing_stop", "market". Lowercased; empty means the broker did not say.
@@ -564,8 +778,51 @@ class WorkingOrder(BaseModel):
 
         Substring rather than equality, because "stop", "stop_limit" and
         "trailing_stop" are all stops and the set grows with the broker.
+
+        A trailing leg is therefore a stop here, which is what puts it in the
+        protective group on the Board rather than among pending entries. It is
+        the right answer: a trail reduces a position, it never opens one.
         """
         return "stop" in self.order_type.lower()
+
+    @property
+    def is_trailing(self) -> bool:
+        """Does this leg move its own trigger as price runs in its favour?
+
+        Worth asking apart from `is_stop` because the two disagree about what
+        `stop_price` MEANS. On a fixed stop it is a level somebody chose and it
+        will read the same tomorrow; on a trailing stop it is where the broker
+        has trailed to so far, and quoting it without saying so states a
+        decision that was never made.
+
+        **This is the predicate `position_actions.detect_unexplained_moves`
+        will need, and does not yet use.** That comparison holds a resting leg's
+        `stop_price` against the journal's `effective_stop` and reports any
+        difference as an unexplained move — which is right for a fixed leg and
+        wrong for a trailing one, whose whole job is to move without anyone
+        recording a reason. Measured: a trailing leg at 809 against a journalled
+        820 is reported as an unexplained stop move, and would be again on every
+        cycle it trailed. Nothing this bot PLACES can reach that state — Alpaca
+        accepts no trailing leg on an entry, so `place_order` never creates one
+        — but a leg placed by hand does, and so would any later path that
+        converts a stop after the fill.
+        """
+        return "trailing" in self.order_type.lower()
+
+    @property
+    def trail_is_unreadable(self) -> bool:
+        """A trailing leg whose trail size the broker did not report.
+
+        The `trigger_price_unknown` problem one level up. A trailing stop with
+        no trail on it can have its current trigger read and nothing whatever
+        said about where that trigger goes next — so the level on screen looks
+        like a stop that is quietly moving for reasons nobody can state.
+        """
+        return (
+            self.is_trailing
+            and self.trail_percent is None
+            and self.trail_price is None
+        )
 
     @property
     def trigger_price_unknown(self) -> bool:
@@ -685,7 +942,14 @@ class AssessmentTrigger(BaseModel):
 
 
 class SymbolAssessment(BaseModel):
-    """One symbol the model considered, whether or not it proposed anything."""
+    """One symbol the model considered, whether or not it proposed anything.
+
+    Every property is REQUIRED on the wire and none in Python. See
+    `EVERY_FIELD_REQUIRED`: there is one of these per symbol per cycle, so it is
+    the object most likely to grow a field with a default.
+    """
+
+    model_config = EVERY_FIELD_REQUIRED
 
     symbol: str
     stance: Stance
@@ -755,7 +1019,15 @@ class PositionPlan(BaseModel):
 
     It exists because "why am I still in this, and what would get me out" is the
     question an open position raises and nothing else here answers.
+
+    Every property is REQUIRED on the wire and none in Python. This object was
+    the measured worst in the repository — five optional properties, which made
+    `ClaudeDecision` the slowest schema this build sends — so a `null` for a
+    plan that has nothing to say is cheap and its absence was not. See
+    `EVERY_FIELD_REQUIRED`.
     """
+
+    model_config = EVERY_FIELD_REQUIRED
 
     symbol: str
     action: PositionAction = PositionAction.HOLD
