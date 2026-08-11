@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import pytest
 
@@ -2641,17 +2642,24 @@ def _order(
     stop_price: float | None = None,
     order_type: str = "",
     filled_qty: float = 0.0,
+    trail_percent: float | None = None,
+    trail_price: float | None = None,
+    high_water_mark: float | None = None,
+    symbol: str = "SPY",
 ) -> WorkingOrder:
     from bot.models import OrderStatus
 
     return WorkingOrder(
         order_id="o-1",
-        symbol="SPY",
+        symbol=symbol,
         direction=direction,
         qty=qty,
         limit_price=limit_price,
         stop_price=stop_price,
         order_type=order_type,
+        trail_percent=trail_percent,
+        trail_price=trail_price,
+        high_water_mark=high_water_mark,
         status=OrderStatus.NEW,
         submitted_at=ENTRY,
         filled_qty=filled_qty,
@@ -2748,6 +2756,92 @@ def test_market_is_still_said_when_the_broker_actually_says_market():
     )
 
     assert "market" in rows
+
+
+def test_a_trailing_stop_does_not_render_as_a_fixed_one():
+    """A real trailing leg read `815.0000 stop` — correct, and a lie about who
+    chose 815. The broker trailed to it and will be somewhere else next
+    reading, so the word and the trail size both have to be on the cell."""
+    held = [_position(direction=Direction.SELL)]
+    prices = {"SPY": 790.0}
+    trailing = _rows(
+        render._working_orders(
+            [
+                _order(
+                    order_type="trailing_stop",
+                    stop_price=815.0,
+                    trail_percent=1.5,
+                    high_water_mark=803.0,
+                )
+            ],
+            prices,
+            positions=held,
+        )
+    )
+    fixed = _rows(
+        render._working_orders(
+            [_order(order_type="stop", stop_price=815.0)], prices, positions=held
+        )
+    )
+
+    assert trailing != fixed
+    assert "815.0000" in trailing
+    assert "trailing stop" in trailing
+    assert "1.5% behind" in trailing
+    # The mark the trail is measured FROM. Without it the size is a distance
+    # from a point that appears nowhere on the page.
+    assert "803.0000" in trailing
+    assert "trailing" not in fixed
+
+
+def test_a_trailing_leg_with_no_trail_size_gets_the_alert_treatment():
+    """`trail_is_unreadable` is `trigger_price_unknown` one level up: the
+    current trigger reads fine and where it goes next cannot be stated, so the
+    level on screen is a number quietly moving for reasons nobody can give."""
+    held = [_position(direction=Direction.SELL)]
+    prices = {"SPY": 790.0}
+    unreadable = _rows(
+        render._working_orders(
+            [_order(order_type="trailing_stop", stop_price=815.0)],
+            prices,
+            positions=held,
+        )
+    )
+    readable = _rows(
+        render._working_orders(
+            [
+                _order(
+                    order_type="trailing_stop", stop_price=815.0, trail_percent=1.5
+                )
+            ],
+            prices,
+            positions=held,
+        )
+    )
+
+    assert '<span class="alert">' in unreadable
+    assert "trail size unknown" in unreadable
+    # The working case must not borrow the alert colour, or it stops meaning
+    # anything on the row where it is warranted.
+    assert '<span class="alert">' not in readable
+
+
+def test_a_trail_stated_as_an_amount_is_rendered_as_one():
+    """Alpaca supplies `trail_percent` OR `trail_price`, never both."""
+    row = _rows(
+        render._working_orders(
+            [
+                _order(
+                    order_type="trailing_stop", stop_price=815.0, trail_price=12.0
+                )
+            ],
+            {"SPY": 790.0},
+            positions=[_position(direction=Direction.SELL)],
+        )
+    )
+
+    assert "12.0000 behind" in row
+    assert "%" not in row.split("Market")[0]
 
 
 def test_the_distance_to_a_stop_is_the_mirror_of_the_distance_to_a_limit():
@@ -3905,6 +3999,155 @@ def test_the_trades_page_keeps_the_stop_the_trade_was_sized_with():
     assert render._money(trade.planned_risk_usd) in body
 
 
+# ------------------------------------------------------- why an exit ended
+#
+# `exit_review.py` classified every close since it shipped and rendered
+# nowhere, which is the "wired and inert" failure this repository has now hit
+# twice. These pin the distinctions that make the classification worth having.
+
+
+def _exit(reason: Any, **kw: Any) -> Any:
+    from bot.exit_review import ExitReview
+
+    fields: dict[str, Any] = {
+        "symbol": "SPY",
+        "trade_id": 1,
+        "reason": reason,
+        "detail": "closed by hand at 124.5000, with neither level reached.",
+    }
+    fields.update(kw)
+    return ExitReview(**fields)
+
+
+def test_the_exit_reasons_reach_a_page_at_all():
+    """The gap this closes: six classifications, none of them on any surface."""
+    from bot.exit_review import ExitReport
+    from bot.models import ExitReason
+
+    report = ExitReport(
+        reviews=[
+            _exit(ExitReason.STOP_HIT, symbol="AAPL", detail="at or through the stop."),
+            _exit(ExitReason.CLOSED_EARLY, symbol="NVDA"),
+        ]
+    )
+    body = render.exit_reviews(report)
+
+    assert "stop hit" in body
+    assert "plan abandoned" in body
+    assert "NVDA" in body and "AAPL" in body
+
+
+def test_closed_early_is_kept_apart_from_closed_at_a_level():
+    """The bucket that matters against the one that looks like it.
+
+    Both are somebody pressing the button. Only one is the plan being
+    abandoned; the other is the plan being followed by hand.
+    """
+    from bot.exit_review import ExitReport
+    from bot.models import ExitReason
+
+    body = render.exit_reviews(
+        ExitReport(
+            reviews=[
+                _exit(ExitReason.CLOSED_EARLY, symbol="NVDA", closed_by_hand=True),
+                _exit(ExitReason.CLOSED_AT_LEVEL, symbol="AMD", closed_by_hand=True),
+            ]
+        )
+    )
+
+    assert 'data-exit="closed_early"' in body
+    assert 'data-exit="closed_at_level"' in body
+    # And the abandoned one is called out above the list by name, because it is
+    # the only verdict here that says something about the operator or the agent.
+    assert "NVDA closed by hand with the price at neither level" in body
+    assert "AMD closed by hand" not in body
+
+
+def test_the_exit_section_carries_no_realised_figure():
+    """`exit_review.py` reads no P&L — a test parses its AST and fails if it
+    does. Putting a result beside a reason HERE would undo that at the one
+    layer left that can, so the money stays in the table below."""
+    import re
+
+    from bot.exit_review import ExitReport
+    from bot.models import ExitReason
+
+    body = render.exit_reviews(
+        ExitReport(reviews=[_exit(ExitReason.CLOSED_EARLY, symbol="NVDA")])
+    )
+    section = body[body.index("Why each position ended") :]
+
+    assert "$" not in section, "a money figure reached the exit verdicts"
+    assert not re.search(r"[-+]?\d+(\.\d+)?R\b", section), "an R multiple did"
+
+
+def test_no_report_is_not_an_empty_report():
+    """`None` means nothing was classified for this render, so the absence of
+    verdicts says nothing at all. Same shape as `unexplained=None`."""
+    from bot.exit_review import ExitReport
+
+    absent = render.exit_reviews(None)
+    empty = render.exit_reviews(ExitReport())
+
+    assert absent != empty
+    assert "were not classified for this render" in absent
+    assert "not the same as every trade having ended as designed" in empty
+
+
+def test_everything_unestablishable_is_not_a_clean_sheet():
+    """`can_grade_anything` is deliberately a different question from "is the
+    list empty". Trades closed and not one could be graded is a finding about
+    the record; nothing having closed is not."""
+    from bot.exit_review import ExitReport
+    from bot.models import ExitReason
+
+    body = render.exit_reviews(
+        ExitReport(reviews=[_exit(ExitReason.UNKNOWN, symbol="TSLA")])
+    )
+
+    assert "not one exit could be established" in body
+    assert '<span class="alert">' in body
+
+
+def test_never_classified_is_not_the_same_as_unknown():
+    """One was never asked, the other was asked and had no answer. Folding them
+    together would report a row that predates the feature as evidence."""
+    from bot.exit_review import ExitReport
+    from bot.models import ExitReason
+
+    body = render.exit_reviews(
+        ExitReport(reviews=[_exit(ExitReason.STOP_HIT)]), never_classified=3
+    )
+
+    assert "3 closed row(s) carry no reason recorded" in body
+    assert "Never classified is NOT the same as" in body
+
+
+def test_every_exit_bucket_is_listed_including_the_zeros():
+    """`ExitReport.counts` includes the zeros on purpose. A bucket rendered as
+    absent rather than as `0` would undo that at the last step — and an absent
+    line is what an outage looks like."""
+    from bot.exit_review import ExitReport
+    from bot.models import ExitReason
+
+    body = render.exit_reviews(
+        ExitReport(reviews=[_exit(ExitReason.STOP_HIT)])
+    )
+
+    for word in render.EXIT_WORDS.values():
+        assert word in body
+    assert body.count("<li data-exit=") >= len(ExitReason)
+
+
+def test_the_trades_page_renders_the_exit_verdicts(client, journal):
+    """End to end: the route builds the report and the page carries it."""
+    _closed_trade(journal, pnl=120.0)
+    body = client.get("/trades").text
+
+    assert "Why each position ended" in body
+    assert "This grades the PLAN" in body
+
+
 def test_a_move_with_no_reason_on_file_is_tagged_on_the_board():
     """The inverse tag: the broker's figure differs from the journal's and
     nothing recorded says why.
@@ -4259,6 +4502,160 @@ def test_the_board_offers_no_way_to_cancel_a_resting_stop():
 
     for control in ("<form", "<button", "cancel_order", 'href="/cancel'):
         assert control not in body
+
+
+# ------------------------------------------------------- was the loop running
+#
+# `jobs.py` recorded every pass and only the CLI could read it, so the one
+# surface an operator opens could not answer the question the module was
+# written for.
+
+
+def _history(
+    *passes: tuple[float, Any, dict[str, Any]],
+    now: datetime | None = None,
+    **kw: Any,
+) -> Any:
+    """A `JobHistory` built the way `jobs.history` builds one, from records."""
+    from bot import jobs
+
+    moment = now or datetime(2026, 5, 4, 18, 0, tzinfo=UTC)
+    built = []
+    for minutes, outcome, extra in passes:
+        started = moment - timedelta(minutes=minutes)
+        built.append(
+            jobs.Job(
+                outcome=outcome,
+                started_at=started,
+                recorded_at=started + timedelta(seconds=3),
+                interval_seconds=900.0,
+                **extra,
+            )
+        )
+    built.sort(key=lambda j: j.started_at, reverse=True)
+    return jobs.JobHistory(
+        jobs=built,
+        window_from=moment - timedelta(hours=24),
+        window_to=moment,
+        **kw,
+    )
+
+
+def test_the_board_says_whether_the_loop_is_running_at_all():
+    from bot import jobs
+
+    history = _history(
+        (10, jobs.Outcome.RAN, {"proposals": 0, "approved": 0, "executed": 0}),
+        (25, jobs.Outcome.SKIPPED, {"detail": "no class in session"}),
+        (40, jobs.Outcome.FAILED, {"detail": "read timed out"}),
+    )
+    body = render.loop_activity(history)
+
+    assert "The decision loop" in body
+    assert 'data-loop="ran"' in body
+    # The three outcomes counted apart, and the quiet cycle counted apart from
+    # the skip: one looked and stood pat, the other never looked.
+    assert "market shut, never looked" in body
+    assert "no decision obtained" in body
+    assert "1 proposed nothing" in body
+
+
+def test_no_recorded_pass_is_never_reported_as_a_quiet_loop():
+    """The fourth state, and the one that is not an outcome. An empty window
+    means the loop was stopped, restarting, or its record was lost."""
+    body = render.loop_activity(_history())
+
+    assert "No pass of the loop is on file" in body
+    assert "NOT a report that it ran and found nothing to do" in body
+    assert '<span class="alert">' in body
+
+
+def test_a_moment_nothing_covers_is_not_a_moment_out_of_range():
+    """`Coverage.OUT_OF_RANGE` says the read could not speak for the moment;
+    `NOT_RECORDED` says nothing covers it. Opposite claims about one silence,
+    and they must not share a colour or a sentence."""
+    from bot import jobs
+
+    now = datetime(2026, 5, 4, 18, 0, tzinfo=UTC)
+    # One pass three hours ago: `now` is far past its cadence horizon.
+    uncovered = render.loop_activity(
+        _history((180, jobs.Outcome.RAN, {"proposals": 0}), now=now), now=now
+    )
+    # The same history, asked about a moment before the window began.
+    outside = render.loop_activity(
+        _history((180, jobs.Outcome.RAN, {"proposals": 0}), now=now),
+        now=now - timedelta(hours=48),
+    )
+
+    assert 'data-loop="not_recorded"' in uncovered
+    assert "recorded no pass covering" in uncovered
+    assert 'data-loop="out_of_range"' in outside
+    assert "outside the span that was read" in outside
+
+
+def test_the_loop_card_asks_about_the_moment_the_log_was_read():
+    """Found on the rendered page, not by the suite.
+
+    `JobHistory.at` refuses anything past `window_to`, and `window_to` is
+    stamped when the log is READ. A fresh `datetime.now()` at render time is
+    always a hair later, so every single load answered "outside the span that
+    was read" over a history holding fifteen passes. A test passing a fixed
+    `now` cannot see it: the bug is that the two clocks are read twice.
+    """
+    from bot import jobs
+
+    audit_now = datetime.now(UTC)
+    history = _history(
+        (1, jobs.Outcome.RAN, {"proposals": 0, "approved": 0, "executed": 0}),
+        now=audit_now,
+    )
+
+    body = render.loop_activity(history)
+
+    assert "out of range" not in body.lower()
+    assert 'data-loop="ran"' in body
+
+
+def test_an_incomplete_reading_of_the_loops_day_says_so():
+    """A short read must not render as a quiet loop. Same trap as
+    `seen.reaches_past_marker`."""
+    from bot import jobs
+
+    body = render.loop_activity(
+        _history(
+            (10, jobs.Outcome.RAN, {"proposals": 0}),
+            truncated=True,
+            unreadable_records=2,
+        )
+    )
+
+    assert "known to be incomplete" in body
+    assert "hit its limit" in body
+    assert "could not be read" in body
+
+
+def test_no_history_at_all_is_its_own_answer():
+    """`None` is "not read for this render", which is not "the loop is down"."""
+    body = render.loop_activity(None)
+
+    assert "was not read for this render" in body
+    assert "No pass of the loop is on file" not in body
+
+
+def test_the_board_carries_the_loop_card_on_a_cold_start_too(client):
+    """It comes off the audit log rather than the broker, so it is answerable
+    before the first reading lands — which is exactly when somebody wants to
+    know whether the thing that trades is running."""
+    from bot import jobs
+
+    cold = render.board(
+        None, load_rules(), [], [], StandDownState(), 0, env=_env(),
+        loop=_history((10, jobs.Outcome.RAN, {"proposals": 0})),
+    )
+
+    assert "The decision loop" in cold
+    assert client.get("/").status_code == 200
+    assert "The decision loop" in client.get("/").text
 
 
 # =================================================================== symbiosis

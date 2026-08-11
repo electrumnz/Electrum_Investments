@@ -1062,6 +1062,108 @@ def test_the_heartbeat_states_a_zero_rather_than_leaving_the_field_out(
     assert beat["unexplained_check_ran"] is True
 
 
+def test_a_trailing_leg_is_named_on_the_cycle_line_and_not_counted_as_a_move(
+    monkeypatch, tmp_path
+):
+    """A trail moving is the exit working, so it must not spend the tag that
+    means "somebody moved this and said nothing" — and it must not be silent
+    either, or "nothing differed" and "this one is not compared" look alike."""
+    from bot.models import Direction, OrderStatus, WorkingOrder
+
+    broker = _short_spy_at_the_broker(stop_leg=None)
+    broker.set_open_orders(
+        [
+            WorkingOrder(
+                order_id="trail-1",
+                symbol="SPY",
+                direction=Direction.BUY,
+                qty=21,
+                order_type="trailing_stop",
+                stop_price=809.0,
+                trail_percent=1.5,
+                high_water_mark=797.0,
+                status=OrderStatus.NEW,
+                submitted_at=datetime(2026, 5, 4, 15, 0, tzinfo=UTC),
+            )
+        ]
+    )
+    logs = _cycle_with_broker(
+        monkeypatch,
+        tmp_path,
+        ClaudeDecision(market_assessment="Holding.", proposals=[]),
+        broker,
+        journal=_journal_with_the_short(tmp_path),
+    )
+
+    beat = _heartbeat(logs)
+    assert beat["unexplained_moves"] == 0
+    assert beat["trailing_stops"] == ["SPY"]
+    assert beat["unreadable_trails"] == []
+    # A trailing leg is still a resting stop, so the position is not stopless.
+    assert beat["positions_without_a_resting_stop"] == []
+
+
+def test_the_cycle_line_carries_what_reconcile_found_about_the_entry(
+    monkeypatch, tmp_path
+):
+    """`record_fill` writes the PROPOSAL's quantity and limit price, and
+    `reconcile` is what squares that against the fill. Every one of those
+    findings was reaching the `ReconcileResult` and no log line at all.
+
+    Stated zeros, for the reason `stops_breached` is: an absent field is what
+    an outage looks like, and these are the fields that say whether the open
+    risk figure describes the account or describes what was asked for.
+    """
+    logs = _cycle_with_broker(
+        monkeypatch,
+        tmp_path,
+        ClaudeDecision(market_assessment="Holding.", proposals=[]),
+        _short_spy_at_the_broker(stop_leg=820.0),
+        journal=_journal_with_the_short(tmp_path),
+    )
+
+    beat = _heartbeat(logs)
+    for field in (
+        "entries_corrected",
+        "entries_resting",
+        "entries_mid_fill",
+        "closes_deferred",
+        "plan_abandoned",
+    ):
+        assert field in beat, f"{field} is not on the cycle line"
+    assert beat["entries_resting"] == []
+    assert beat["plan_abandoned"] == 0
+
+
+def test_a_shut_market_still_states_what_reconcile_found_about_the_entry(
+    monkeypatch, tmp_path
+):
+    """The cycle these matter most on.
+
+    Reconcile runs above the skip, and an order placed out of hours RESTS until
+    the next regular open — so `entries_resting` and `closes_deferred` are at
+    their most populated precisely while the market is closed. Carrying them
+    only on `cycle_complete` would leave the field absent for the whole stretch
+    it describes.
+    """
+    logs = _run_one_cycle_with_client(
+        monkeypatch,
+        tmp_path,
+        _ExplodingClaude(AssertionError("the model must not be called when shut")),
+        in_session=False,
+    )
+
+    skip = next(e for e in logs if e["event"] == "cycle_skipped_market_closed")
+    for field in (
+        "entries_corrected",
+        "entries_resting",
+        "entries_mid_fill",
+        "closes_deferred",
+        "plan_abandoned",
+    ):
+        assert field in skip, f"{field} is absent while the market is shut"
+
+
 def test_a_position_with_no_resting_stop_is_named_rather_than_counted_clean(
     monkeypatch, tmp_path
 ):

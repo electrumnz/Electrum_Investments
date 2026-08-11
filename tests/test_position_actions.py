@@ -788,6 +788,120 @@ def test_an_unreadable_trigger_is_its_own_finding_not_a_clean_one(journal):
     assert report.anything_to_report
 
 
+def _trailing_leg(
+    stop_price: float = 809.0,
+    *,
+    trail_percent: float | None = 1.5,
+    high_water_mark: float | None = 797.0,
+):
+    """A trailing stop resting over the short, as Alpaca reports one.
+
+    Nothing this bot PLACES can produce this — Alpaca accepts no trailing leg
+    on an entry — but a leg placed by hand does, which is how the live SPY
+    position came to have one.
+    """
+    return WorkingOrder(
+        order_id=STOP_LEG_ID,
+        symbol="SPY",
+        direction=Direction.BUY,
+        qty=SPY_QTY,
+        stop_price=stop_price,
+        trail_percent=trail_percent,
+        high_water_mark=high_water_mark,
+        order_type="trailing_stop",
+        status=OrderStatus.OTHER,
+        broker_status="held",
+        submitted_at=datetime(2026, 8, 10, 13, 35, tzinfo=UTC),
+    )
+
+
+def test_a_trailing_leg_is_never_reported_as_an_unexplained_move(journal):
+    """The whole point of `WorkingOrder.is_trailing`.
+
+    A trailing leg's trigger is where the broker has trailed to, not a level
+    anybody chose, so holding it against the journal's `effective_stop` asks a
+    question it cannot answer. Measured before the fix: a trailing leg at 809
+    against a journalled 820 came back as an unexplained stop move — and would
+    have again on every cycle it trailed, turning the tag that means "somebody
+    moved this and said nothing" into background noise on the one position
+    where it was working correctly.
+    """
+    report = detect_unexplained_moves(
+        positions=[_position()],
+        orders=[_trailing_leg(809.0)],
+        open_trades=journal.open_trades(),
+        actions=[],
+    )
+
+    assert report.moves == []
+    # Named rather than merely omitted: without this, "nothing differed" and
+    # "this one is not compared" are the same silence.
+    assert report.trailing_stops == ["SPY"]
+    assert report.unreadable_trails == []
+
+
+def test_a_fixed_leg_at_the_same_level_is_still_reported(journal):
+    """The guard is `is_trailing` and nothing wider. A plain stop moved to 809
+    with no reason on file is exactly what the report exists to catch, and the
+    fix above must not have exempted it."""
+    report = detect_unexplained_moves(
+        positions=[_position()],
+        orders=[_stop_leg(stop_price=809.0)],
+        open_trades=journal.open_trades(),
+        actions=[],
+    )
+
+    assert [m.kind for m in report.moves] == ["stop"]
+    assert report.trailing_stops == []
+
+
+def test_a_working_trail_does_not_raise_anything_to_report(journal):
+    """A trail doing its job is the ordinary state of a trailing leg. Counting
+    it would make `anything_to_report` true on every cycle for as long as the
+    position was held, after which it means nothing on the cycles where
+    something really did change."""
+    report = detect_unexplained_moves(
+        positions=[_position()],
+        orders=[_trailing_leg()],
+        open_trades=journal.open_trades(),
+        actions=[],
+    )
+
+    assert report.trailing_stops == ["SPY"]
+    assert report.anything_to_report is False
+
+
+def test_a_trailing_leg_with_no_trail_size_is_an_unknown(journal):
+    """`trail_is_unreadable` is the `trigger_price_unknown` problem one level
+    up: the current trigger reads fine and where it goes next cannot be stated,
+    so the level on screen is moving for reasons nobody can give. That IS worth
+    reporting, unlike a working trail."""
+    report = detect_unexplained_moves(
+        positions=[_position()],
+        orders=[_trailing_leg(trail_percent=None, high_water_mark=None)],
+        open_trades=journal.open_trades(),
+        actions=[],
+    )
+
+    assert report.moves == []
+    assert report.trailing_stops == ["SPY"]
+    assert report.unreadable_trails == ["SPY"]
+    assert report.anything_to_report is True
+
+
+def test_a_trailing_leg_still_counts_as_a_resting_stop(journal):
+    """It reduces the position, so the position is not stopless. Reporting
+    "no resting stop" beside a resting trail would be the opposite error."""
+    report = detect_unexplained_moves(
+        positions=[_position()],
+        orders=[_trailing_leg()],
+        open_trades=journal.open_trades(),
+        actions=[],
+    )
+
+    assert report.positions_without_a_resting_stop == []
+
+
 def test_a_degraded_order_read_cannot_clear_anything(journal):
     """An empty `moves` means nothing at all when the orders could not be read.
     Same rule as `has_cycles` and `can_grade_anything`: the absence of evidence

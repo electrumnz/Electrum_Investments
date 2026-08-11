@@ -637,8 +637,8 @@ class UnexplainedMove:
 class UnexplainedMoveReport:
     """What was found, and — separately — what could not be looked at.
 
-    Three lists rather than one, because they are three different findings and
-    a caller handed only the first would read the other two as "all clear":
+    Five lists rather than one, because they are five different findings and a
+    caller handed only the first would read the rest as "all clear":
 
     - `moves` — changed, and nothing on file says why.
     - `unreadable_stops` — a stop leg is resting and the broker did not report
@@ -647,6 +647,15 @@ class UnexplainedMoveReport:
     - `positions_without_a_resting_stop` — the position is there and no stop
       order is. Expected for crypto, which Alpaca accepts no bracket on, so
       crypto is excluded; for an equity it means rule 3 is not being met.
+    - `trailing_stops` — the leg moves its own trigger by design, so its level
+      is a READING and not a decision anybody recorded. Not a finding, and
+      kept apart from the silence of "nothing differed" so that a level moving
+      every cycle is visibly accounted for rather than merely unreported.
+    - `unreadable_trails` — a trailing leg whose trail size the broker did not
+      report. Its current trigger can be read and where that trigger goes next
+      cannot, so the level on screen is quietly moving for reasons nobody can
+      state. The `unreadable_stops` problem one level up, and an unknown rather
+      than a fault.
 
     `can_check` is false when the resting orders could not be read at all, and
     an empty `moves` means nothing whatever in that case. Same rule as
@@ -658,14 +667,26 @@ class UnexplainedMoveReport:
     moves: list[UnexplainedMove] = field(default_factory=list)
     unreadable_stops: list[str] = field(default_factory=list)
     positions_without_a_resting_stop: list[str] = field(default_factory=list)
+    trailing_stops: list[str] = field(default_factory=list)
+    unreadable_trails: list[str] = field(default_factory=list)
     can_check: bool = True
 
     @property
     def anything_to_report(self) -> bool:
+        """Whether a reader needs to be told something beyond "nothing moved".
+
+        `trailing_stops` is deliberately NOT in here. A trail doing exactly
+        what it was placed to do is the ordinary state of a trailing leg, and
+        counting it would make this true on every cycle for as long as the
+        position was held — after which it stops meaning anything on the
+        cycles where something really did change. `unreadable_trails` IS in
+        here, because that one is an unknown rather than a working exit.
+        """
         return bool(
             self.moves
             or self.unreadable_stops
             or self.positions_without_a_resting_stop
+            or self.unreadable_trails
             or not self.can_check
         )
 
@@ -712,6 +733,8 @@ def detect_unexplained_moves(
     moves: list[UnexplainedMove] = []
     unreadable: list[str] = []
     stopless: list[str] = []
+    trailing: list[str] = []
+    trail_unreadable: list[str] = []
 
     for position in positions:
         symbol = position.symbol.strip().upper()
@@ -746,6 +769,25 @@ def detect_unexplained_moves(
             if leg.stop_price is None:
                 unreadable.append(symbol)
                 continue
+            if leg.is_trailing:
+                # A trailing leg's trigger is a READING of where the broker has
+                # trailed to, not a level somebody chose, so holding it against
+                # the journal's `effective_stop` asks a question it cannot
+                # answer. Measured before this line existed: a trailing leg at
+                # 809 against a journalled 820 came back as an unexplained stop
+                # move, and would have again on every cycle it trailed —
+                # turning the tag that means "somebody moved this and said
+                # nothing" into background noise on the one position where it
+                # was working correctly.
+                #
+                # Nothing this bot PLACES can reach that state, because Alpaca
+                # accepts no trailing leg on an entry, so `place_order` never
+                # creates one. A leg placed by hand does, which is exactly how
+                # the live SPY position came to have one.
+                trailing.append(symbol)
+                if leg.trail_is_unreadable:
+                    trail_unreadable.append(symbol)
+                continue
             if abs(leg.stop_price - trade.effective_stop) <= PRICE_TOLERANCE:
                 continue
             if _explained(actions, symbol, "after_stop", leg.stop_price, PRICE_TOLERANCE):
@@ -763,5 +805,7 @@ def detect_unexplained_moves(
         moves=moves,
         unreadable_stops=sorted(set(unreadable)),
         positions_without_a_resting_stop=sorted(set(stopless)),
+        trailing_stops=sorted(set(trailing)),
+        unreadable_trails=sorted(set(trail_unreadable)),
         can_check=not orders_degraded,
     )

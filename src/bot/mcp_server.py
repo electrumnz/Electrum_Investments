@@ -37,6 +37,8 @@ from .dreaming import (
 from .grants import resolve_granted_symbols
 from .insight import DEFAULT_DB_PATH as INSIGHT_DB_PATH
 from .insight import InsightIndex, run_query
+from .jobs import read as read_jobs
+from .jobs import render as render_jobs
 from .journal import Journal
 from .metrics import build_report, render_excursions, render_summary
 from .models import AccountSnapshot, AssetClass, Direction, OrderProposal
@@ -83,6 +85,13 @@ server = MCPServer(
         "quote the ages and never present a six-hour-old headline as current — "
         "but do not answer 'I have no access to news' either, because this is "
         "the news this bot trades on.\n\n"
+        "get_loop_activity answers whether the decision loop was actually "
+        "running, and what it was doing at a given moment. Four states and "
+        "none is a version of another: a pass that RAN and proposed nothing "
+        "stood pat, a SKIPPED pass never looked because the market was shut, a "
+        "FAILED pass got no decision at all, and a moment nothing covers means "
+        "the loop was stopped, restarting, or its record was lost. Never "
+        "report has_jobs=false as 'it ran and found nothing to do'.\n\n"
         "For anything outside a recent window, the full history is searchable: "
         "query_history runs read-only SQL over every decision, assessment, "
         "rejection reason and news item ever recorded, and describe_history "
@@ -716,6 +725,14 @@ def get_position_actions(symbol: str = "", limit: int = 25) -> dict[str, Any]:
         "unexplained_moves": [m.describe() for m in report.moves],
         "stop_trigger_unreadable": report.unreadable_stops,
         "positions_without_a_resting_stop": report.positions_without_a_resting_stop,
+        # A leg that moves its own trigger by design. Its level differs from
+        # the journal's on every cycle it trails, so it is deliberately not
+        # compared — and named here, because otherwise "nothing differed" and
+        # "this one is not checked" are the same silence.
+        "stop_is_trailing": report.trailing_stops,
+        # Trailing, with no trail size reported. The current trigger can be
+        # read and where it goes next cannot.
+        "trail_size_unreadable": report.unreadable_trails,
         # Named so an agent describing its own powers describes them correctly.
         # It has the two tools regardless; what this flag decides is whether the
         # unattended LOOP may act on the plans it writes.
@@ -725,7 +742,10 @@ def get_position_actions(symbol: str = "", limit: int = 25) -> dict[str, Any]:
             "An empty actions list means no move has been recorded, which is "
             "the ordinary state. An empty unexplained_moves list means nothing "
             "was found to differ — but only if broker_orders_readable is true, "
-            "and only outside whatever the two caveat lists name."
+            "and only outside whatever the caveat lists name. A symbol in "
+            "stop_is_trailing was not compared at all: its trigger moves by "
+            "design, so quote it as a reading taken now rather than as a level "
+            "anybody chose."
         ),
     }
 
@@ -1133,6 +1153,129 @@ def get_recent_decisions(limit: int = 20, days: int = 7) -> dict[str, Any]:
         "malformed_lines": view.malformed,
         "unreadable_files": view.unreadable_files,
         "record_is_incomplete": view.is_degraded,
+    }
+
+
+@server.tool()
+def get_loop_activity(hours: float = 24.0, at: str = "") -> dict[str, Any]:
+    """Was the decision loop actually running, and what was it doing?
+
+    Answers the question that used to need `journalctl | grep cycle_complete`
+    on the box — which no agent can reach, and which holds only the passes that
+    FINISHED. A cycle skipped with the market shut and a cycle whose model call
+    failed never appeared there at all.
+
+    **Four states, and collapsing any two of them is the failure this tool
+    exists to prevent:**
+
+    - `ran` — the loop completed a pass and got a decision. `proposals: 0` on
+      one of these is a QUIET cycle: it looked and stood pat, which is
+      frequently the right answer.
+    - `skipped` — no enabled instrument class was in session, so the model was
+      deliberately not asked. It did not look. The counts are `null` rather
+      than `0` for exactly that reason.
+    - `failed` — the pass could not get a decision. Never report this as a
+      cycle that decided to do nothing.
+    - **nothing covers that moment** — not an outcome at all. The loop was
+      stopped, restarting, or the record was lost.
+
+    And within that last one, `coverage` separates two more that look alike:
+    `not_recorded` means nothing accounts for the moment, `out_of_range` means
+    the read did not reach far enough to have an opinion about it. Never report
+    the second as the first.
+
+    If `has_jobs` is false, the loop recorded no pass at all in the window. That
+    is NOT "it ran and found nothing to do" — say so plainly. If `is_degraded`
+    is true the counts are known to be incomplete and every absence in them is
+    unexamined rather than established.
+
+    Args:
+        hours: How far back to look (default 24).
+        at: Optional ISO-8601 moment — "what was it doing at 14:15?". Empty
+            asks about now.
+    """
+    history = read_jobs(_session.audit, hours=max(0.1, hours))
+
+    moment: datetime | None = None
+    moment_error = ""
+    if at.strip():
+        moment = _parse_ts(at.strip())
+        if moment is None:
+            # Refused rather than silently answered about now. A question about
+            # 14:15 answered about this instant is a confident wrong answer,
+            # which is the one failure mode this whole module is arranged
+            # against.
+            moment_error = (
+                f"{at!r} is not an ISO-8601 timestamp, so no moment was looked "
+                "up and the answer below is about now. The window counts are "
+                "still the real ones."
+            )
+
+    # `window_to` rather than a fresh clock read when nobody named a moment.
+    # `JobHistory.at` refuses anything past the end of the span it read, and a
+    # second `datetime.now()` is always a hair past it — so "what is it doing
+    # now" answered `out_of_range` every single time. The instant the log was
+    # read IS now, as far as the record can speak.
+    answer = history.at(moment or history.window_to or datetime.now(UTC))
+
+    def _job(job: Any) -> dict[str, Any] | None:
+        if job is None:
+            return None
+        return {
+            "outcome": job.outcome.value,
+            "started_at": job.started_at.isoformat(timespec="seconds"),
+            "duration_seconds": round(job.duration_seconds, 3),
+            "interval_seconds": job.interval_seconds,
+            "detail": job.detail,
+            # `null` on a skip and on a failure, never 0 — those passes did not
+            # look, so a zero would be a claim they never made.
+            "proposals": job.proposals,
+            "approved": job.approved,
+            "executed": job.executed,
+            "quiet": job.quiet,
+            "equity_usd": job.standing.equity_usd,
+            "open_positions": job.standing.open_positions,
+            "open_risk_usd": job.standing.open_risk_usd,
+            "stand_down_stage": job.standing.stand_down_stage,
+        }
+
+    return {
+        "window_hours": history.window_hours,
+        # Separate from "are the counts zero", the same way `has_cycles` is in
+        # get_recent_news. No passes recorded and passes that all stood pat are
+        # opposite findings.
+        "has_jobs": history.has_jobs,
+        "passes": len(history.jobs),
+        "ran": history.ran,
+        "skipped": history.skipped,
+        "failed": history.failed,
+        "quiet": history.quiet,
+        "asked_about": answer.moment.isoformat(timespec="seconds"),
+        "coverage": answer.coverage.value,
+        "at_that_moment": answer.describe(),
+        "job_covering_that_moment": _job(answer.job),
+        "nearest_pass_before": _job(answer.nearest_before),
+        "nearest_pass_after": _job(answer.nearest_after),
+        "latest_pass": _job(history.latest),
+        "gaps": [
+            {
+                "after": gap.after.isoformat(timespec="minutes"),
+                "before": gap.before.isoformat(timespec="minutes"),
+                "minutes": round(gap.seconds / 60.0, 1),
+                # `null` when the pass before the gap never stated its cadence.
+                # A count derived from an assumed interval is a made-up number.
+                "passes_missed": gap.missed,
+                "explained_by_shutdown": gap.explained_by_shutdown,
+            }
+            for gap in history.gaps
+        ],
+        "is_degraded": history.is_degraded,
+        "read_hit_its_limit": history.truncated,
+        "unreadable_records": history.unreadable_records,
+        "malformed_lines": history.malformed_lines,
+        "unreadable_files": history.unreadable_files,
+        "moment_error": moment_error,
+        "readout": render_jobs(history),
     }
 
 

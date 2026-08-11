@@ -475,6 +475,131 @@ def test_get_recent_decisions_counts_what_it_could_not_parse(wired_session):
     assert len(result["decisions"]) == 1
 
 
+# ------------------------------------------------------- was the loop running
+#
+# `jobs.py` was read only by `electrum-bot jobs`, so no agent could answer "was
+# the loop running at 14:15" at all. These pin the distinctions that make the
+# answer worth anything.
+
+
+def _record_pass(session, outcome: str, *, minutes_ago: float, **payload):
+    """One `cycle_job` line, with a realistic gap between start and record.
+
+    Written raw rather than through `jobs.record_*` because those stamp the
+    line NOW: a back-dated `started_at` would produce a pass whose "duration"
+    was hours, and `overdue_after` would land in the future.
+    """
+    import json
+    from datetime import UTC, datetime, timedelta
+
+    started = datetime.now(UTC) - timedelta(minutes=minutes_ago)
+    body = {
+        "outcome": outcome,
+        "started_at": started.isoformat(),
+        "interval_seconds": 900.0,
+        "detail": "",
+        "equity_usd": 100_000.0,
+        "open_positions": 0,
+        "open_risk_usd": 0.0,
+        "stand_down_stage": 0,
+        "proposals": None,
+        "approved": None,
+        "executed": None,
+    }
+    body.update(payload)
+    path = session.audit._base / f"{started.date().isoformat()}.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as f:
+        f.write(
+            json.dumps(
+                {
+                    "kind": "cycle_job",
+                    "timestamp": (started + timedelta(seconds=3)).isoformat(),
+                    "payload": body,
+                }
+            )
+            + "\n"
+        )
+
+
+def test_get_loop_activity_keeps_the_three_outcomes_apart(wired_session):
+    """A quiet pass looked and stood pat; a skipped one never looked; a failed
+    one got no decision. None is a version of another."""
+    _record_pass(wired_session, "ran", minutes_ago=40, proposals=0, approved=0,
+                 executed=0)
+    _record_pass(wired_session, "skipped", minutes_ago=25,
+                 detail="no class in session")
+    _record_pass(wired_session, "failed", minutes_ago=10, detail="read timed out")
+
+    result = mcp_server.get_loop_activity()
+
+    assert result["has_jobs"] is True
+    assert (result["ran"], result["skipped"], result["failed"]) == (1, 1, 1)
+    assert result["quiet"] == 1
+    # A skip records no counts at all — a zero would be a claim it never made.
+    assert result["latest_pass"]["proposals"] is None
+    assert result["latest_pass"]["outcome"] == "failed"
+
+
+def test_get_loop_activity_answers_about_now_rather_than_out_of_range(
+    wired_session,
+):
+    """`JobHistory.at` refuses anything past the end of the span it read, and a
+    second clock read is always a hair past it — so "what is it doing now"
+    answered `out_of_range` every single time. The moment the log was read IS
+    now, as far as the record can speak."""
+    _record_pass(wired_session, "ran", minutes_ago=1, proposals=0, approved=0,
+                 executed=0)
+
+    result = mcp_server.get_loop_activity()
+
+    assert result["coverage"] == "found"
+    assert result["job_covering_that_moment"]["outcome"] == "ran"
+
+
+def test_get_loop_activity_never_reports_an_empty_window_as_a_quiet_loop(
+    wired_session,
+):
+    """No pass on file means the loop was stopped, restarting, or its record
+    was lost. Reporting that as "it ran and found nothing" is the one thing
+    this tool exists to prevent."""
+    result = mcp_server.get_loop_activity()
+
+    assert result["has_jobs"] is False
+    assert result["passes"] == 0
+    assert any("NOT" in line for line in result["readout"])
+
+
+def test_get_loop_activity_refuses_a_moment_it_cannot_parse(wired_session):
+    """A question about 14:15 answered about this instant would be a confident
+    wrong answer."""
+    _record_pass(wired_session, "ran", minutes_ago=5, proposals=0)
+
+    result = mcp_server.get_loop_activity(at="quarter past two")
+
+    assert "not an ISO-8601 timestamp" in result["moment_error"]
+    # And the window figures are still real, rather than the whole call failing.
+    assert result["passes"] == 1
+
+
+def test_get_loop_activity_keeps_unrecorded_apart_from_out_of_range(wired_session):
+    """The read could not speak for that moment, against nothing covers it.
+    Opposite claims about one silence."""
+    from datetime import UTC, datetime, timedelta
+
+    _record_pass(wired_session, "ran", minutes_ago=180, proposals=0)
+
+    uncovered = mcp_server.get_loop_activity()
+    outside = mcp_server.get_loop_activity(
+        at=(datetime.now(UTC) - timedelta(days=3)).isoformat()
+    )
+
+    assert uncovered["coverage"] == "not_recorded"
+    assert "NOT a report that it ran and did nothing" in uncovered["at_that_moment"]
+    assert outside["coverage"] == "out_of_range"
+    assert "cannot be established" in outside["at_that_moment"]
+
+
 # ------------------------------------------------------------ query history
 
 
@@ -1476,6 +1601,39 @@ def test_get_position_actions_reports_a_move_nobody_recorded(wired_session):
     assert len(readback["unexplained_moves"]) == 1
     assert "no recorded action" in readback["unexplained_moves"][0]
     assert readback["broker_orders_readable"] is True
+
+
+def test_get_position_actions_names_a_trailing_leg_rather_than_flagging_it(
+    wired_session,
+):
+    """A trailing leg's level differs from the journal's on every cycle it
+    trails, and that is the exit working. Reported as its own fact so that
+    "nothing differed" and "this one is not compared" cannot look alike."""
+    from bot.models import Direction as _Direction
+    from bot.models import WorkingOrder
+
+    _seed_the_live_position(wired_session)
+    wired_session.broker.set_open_orders(
+        [
+            WorkingOrder(
+                order_id="trail-1",
+                symbol="SPY",
+                direction=_Direction.BUY,
+                qty=21,
+                stop_price=809.0,
+                trail_percent=1.5,
+                high_water_mark=797.0,
+                order_type="trailing_stop",
+            )
+        ]
+    )
+
+    readback = mcp_server.get_position_actions()
+
+    assert readback["unexplained_moves"] == []
+    assert readback["stop_is_trailing"] == ["SPY"]
+    assert readback["trail_size_unreadable"] == []
+    assert readback["positions_without_a_resting_stop"] == []
 
 
 def test_get_position_actions_says_the_loop_is_not_armed(wired_session):

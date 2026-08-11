@@ -53,6 +53,8 @@ from ..dreaming import (
     Vault,
     promotion_for,
 )
+from ..exit_review import ExitReport, ExitReview
+from ..jobs import Coverage, JobAnswer, JobHistory, Outcome
 from ..market_clock import (
     NY,
     ClockFace,
@@ -67,6 +69,7 @@ from ..metrics import JournalReport, render_excursions, render_summary
 from ..models import (
     AccountSnapshot,
     Direction,
+    ExitReason,
     Position,
     StandDownState,
     Trade,
@@ -730,6 +733,14 @@ tr.why .quote{border-left:2px solid var(--patina);padding-left:.875rem;
 .pill.unexplained{color:var(--rust-text)}
 .pill.unreadable{color:var(--amber)} .pill.stopless{color:var(--amber)}
 .pill.moved{color:var(--pewter)}
+/* A trailing leg. An ATTRIBUTE rather than another modifier word, the same
+   move `data-verdict` and `data-vault` make: `trailing` names a state, and a
+   `.pill.trailing` rule would put one more state word into the modifier
+   vocabulary where the next bare `.trailing{...}` written for something else
+   silently restyles it. Holo rather than amber on purpose -- a trail moving is
+   the exit working, and the alert colour is reserved for the two unknowns
+   beside it. */
+.pill[data-stop=trailing]{color:var(--holo)}
 
 .curve{border:1px solid var(--slate);border-radius:2px;background:var(--graphite);
   padding:1.125rem}
@@ -772,6 +783,76 @@ tr.why .quote{border-left:2px solid var(--patina);padding-left:.875rem;
   background:var(--graphite);border:1px solid var(--slate);border-radius:2px;
   padding:1rem 1.125rem;white-space:pre-wrap;line-height:1.7}
 .empty{color:var(--pewter);font-style:italic;padding:1.25rem}
+
+/* ==================================================== the decision loop ==
+   Whether the thing that trades is running. Coloured by a `data-loop`
+   ATTRIBUTE for the reason `data-verdict` is: `ran`, `skipped` and `failed`
+   are words that name states, and none of them belongs in the modifier
+   vocabulary where a bare rule written for something else can reach it.
+
+   Four values, drawn four ways on purpose. A pass that RAN is the quiet
+   patina; a SKIPPED one is holo, because nothing looked and that is a fact
+   rather than a fault; FAILED and NOT_RECORDED are both rust, because a cycle
+   that got no decision and a moment nothing covers are the two states an
+   operator has to act on. OUT_OF_RANGE is pewter: it is the read admitting it
+   cannot speak for the moment, which is neither good news nor bad. */
+.loopnow{margin:1rem 0 0;padding:.7rem .85rem;border-radius:2px;
+  border:1px solid var(--slate);border-left-width:3px;
+  background:rgba(22,27,34,.6);font-size:.8125rem;color:var(--bone)}
+.loopnow[data-loop=ran]{border-left-color:var(--patina)}
+.loopnow[data-loop=skipped]{border-left-color:var(--holo)}
+.loopnow[data-loop=failed]{border-left-color:var(--rust)}
+.loopnow[data-loop=not_recorded]{border-left-color:var(--rust)}
+.loopnow[data-loop=out_of_range]{border-left-color:var(--pewter)}
+.gaps{list-style:none;margin:.5rem 0 0;padding:0;font-size:.8125rem;
+  color:var(--bone)}
+.gaps li{padding:.4rem 0;border-bottom:1px dashed var(--slate)}
+.gaps li:last-child{border-bottom:0}
+
+/* ============================================== why each position ended ==
+   The exit verdicts. Every identity here is a `data-exit` ATTRIBUTE, the same
+   move `data-verdict` and `data-vault` make and for the same reason: these are
+   words that name a state, and `.closed_early` in the modifier vocabulary is
+   one bare rule away from restyling something it was never written for.
+
+   NOTHING in this block carries a gain or a loss colour. The section grades
+   the plan and holds no result figure at all -- painting a verdict green or
+   red would smuggle the outcome back in through the one channel that survives
+   the text being ignored. `closed_early` is amber because the plan was
+   ABANDONED, which is a fact about discipline and true whether the trade made
+   money or lost it. */
+.tally{list-style:none;display:flex;flex-wrap:wrap;gap:.5rem;margin:1rem 0 0;
+  padding:0}
+.tally li{border:1px solid var(--slate);border-radius:2px;padding:.5rem .7rem;
+  background:var(--graphite);min-width:7.5rem}
+.tally li b{display:block;font-family:var(--mono);font-size:1.125rem;
+  color:var(--bone);font-weight:400}
+.tally li span{display:block;font-family:var(--mono);font-size:.5625rem;
+  letter-spacing:.1em;text-transform:uppercase;color:var(--pewter);
+  margin-top:.15rem}
+.tally li[data-exit=closed_early] b{color:var(--amber)}
+.tally li[data-exit=unknown] b{color:var(--pewter)}
+.exits{list-style:none;margin:1rem 0 0;padding:0}
+.exits li{padding:.8rem 0;border-bottom:1px dashed var(--slate)}
+.exits li:last-child{border-bottom:0}
+.exits .hdr{display:flex;gap:.5rem;align-items:baseline;flex-wrap:wrap;margin:0}
+.exits .hdr b{font-family:var(--mono);font-size:.875rem;color:var(--bone);
+  font-weight:400}
+.exits .what{margin:.35rem 0 0;font-size:.8125rem;color:var(--bone)}
+.exits .said{margin:.4rem 0 0;padding-left:.7rem;
+  border-left:1px solid var(--slate);font-family:var(--serif);
+  font-size:.875rem;color:var(--bone)}
+.pill[data-exit=stop_hit]{color:var(--pewter)}
+.pill[data-exit=target_hit]{color:var(--pewter)}
+.pill[data-exit=closed_at_level]{color:var(--pewter)}
+.pill[data-exit=expiry]{color:var(--holo)}
+.pill[data-exit=unknown]{color:var(--pewter)}
+.pill[data-exit=by_hand]{color:var(--bone)}
+.pill[data-exit=unconfirmed_entry]{color:var(--pewter)}
+/* The bucket that matters, and the only one lifted out of pewter. */
+.pill[data-exit=closed_early]{color:var(--amber)}
+.exits li[data-exit=closed_early]{border-left:2px solid var(--amber);
+  padding-left:.7rem}
 
 /* ------------------------------------------------------------- decisions */
 .cycle{border:1px solid var(--slate);border-radius:2px;background:var(--graphite);
@@ -3907,7 +3988,178 @@ def gate_stance(state: MarketState | None) -> str:
     )
 
 
-def _board_waiting(env: Env | None, market: MarketState | None = None) -> str:
+#: What each loop outcome is called on the deck, and the attribute that colours
+#: it. The words are the operator's, the keys are `jobs.Outcome`.
+LOOP_WORDS: dict[Outcome, str] = {
+    Outcome.RAN: "ran",
+    Outcome.SKIPPED: "skipped",
+    Outcome.FAILED: "failed",
+}
+
+
+def loop_activity(history: JobHistory | None, *, now: datetime | None = None) -> str:
+    """Was the loop actually running, and what was it doing a moment ago?
+
+    `jobs.py` has recorded every pass since it shipped and only the CLI could
+    read it, so the one surface an operator actually opens could not answer the
+    question the module was written for. It is answered from the audit log, so
+    it costs no broker call and is just as true on a cold start as it is once
+    the account has been read — which is why it renders on both.
+
+    **Four states, and they must not collapse into two.** A pass that ran and
+    proposed nothing is the bot working; a pass SKIPPED with the market shut
+    never looked; a pass that FAILED got no decision and must never be read as
+    one that decided to hold; and a moment nothing covers at all is not an
+    outcome — the loop was stopped, restarting, or the record was lost.
+    `Coverage.OUT_OF_RANGE` is kept apart from `NOT_RECORDED` again, because
+    "the read could not speak for that moment" and "nothing covers it" are
+    opposite claims about the same silence.
+
+    The headline is `JobAnswer.describe()` rather than a sentence rebuilt here.
+    Two renderings of one verdict is two things that can disagree, and the one
+    that would be wrong is the one on screen.
+    """
+    if history is None:
+        return (
+            '<section class="block"><h2>The decision loop</h2>'
+            '<p class="note">The loop\'s own record was not read for this '
+            "render, so nothing here says whether it is running.</p></section>"
+        )
+
+    # The moment the LOG was read, never the moment the page was rendered.
+    #
+    # Those are microseconds apart and the difference is total: `history.at`
+    # refuses anything past `window_to`, so a fresh `datetime.now()` here is
+    # always a hair outside the span and every load answered "outside the span
+    # that was read" — the card's headline permanently reporting that it could
+    # not say, on a history holding fifteen passes. Found by loading the page;
+    # a test passing a fixed `now` cannot see it, because the bug is precisely
+    # that the two clocks are read twice.
+    #
+    # Asking about `window_to` is also the honest question: it is the latest
+    # instant the record can speak for at all. Same rule as the Board's stamp
+    # naming `taken_at` rather than the render.
+    moment = now or history.window_to or datetime.now(UTC)
+    answer = history.at(moment)
+    head_line = (
+        f'<p class="loopnow" data-loop="{_e(_loop_key(answer))}">'
+        f"{_e(answer.describe())}</p>"
+    )
+
+    if not history.has_jobs:
+        caveat = (
+            " The read also hit its limit, so this window was not fully "
+            "examined and older passes are unexamined rather than absent."
+            if history.truncated
+            else ""
+        )
+        return (
+            '<section class="block"><h2>The decision loop</h2>'
+            + head_line
+            + '<p class="note"><span class="alert">No pass of the loop is on '
+            f"file for the last {history.window_hours:g}h. It was not running, "
+            "was restarting, or its records were lost — this is NOT a report "
+            f"that it ran and found nothing to do.{caveat}</span></p></section>"
+        )
+
+    tiles = (
+        stat(
+            "Passes",
+            f"{len(history.jobs)}",
+            f"in the last {history.window_hours:g}h",
+        )
+        + stat(
+            "Ran",
+            f"{history.ran}",
+            f"{history.quiet} proposed nothing",
+        )
+        + stat("Skipped", f"{history.skipped}", "market shut, never looked")
+        + stat("Failed", f"{history.failed}", "no decision obtained")
+    )
+
+    gaps = "".join(
+        "<li>"
+        + _e(
+            f"Gap of {gap.seconds / 60:.0f} minutes after "
+            f"{gap.after.isoformat(timespec='minutes')} — "
+            + (
+                "an unknown number of"
+                if gap.missed is None
+                else str(gap.missed)
+            )
+            + " pass(es) missing, and "
+            + (
+                "the loop was shut down inside it."
+                if gap.explained_by_shutdown
+                else "no shutdown was recorded inside it."
+            )
+        )
+        + "</li>"
+        for gap in history.gaps
+    )
+    gap_block = (
+        f'<p class="note">Stretches the recorded cadence cannot account for. A '
+        "shutdown inside one is an ordinary event; one without is the loop "
+        f'having gone away while it was supposed to be running.</p><ul class="gaps">{gaps}</ul>'
+        if gaps
+        else ""
+    )
+
+    degraded = ""
+    if history.is_degraded:
+        parts: list[str] = []
+        if history.truncated:
+            parts.append(
+                "the read hit its limit, so anything older than the oldest "
+                "pass counted here is unexamined rather than absent"
+            )
+        if history.unreadable_records:
+            parts.append(
+                f"{history.unreadable_records} job record(s) could not be read "
+                "— no start time, or an outcome this build does not recognise"
+            )
+        if history.malformed_lines or history.unreadable_files:
+            parts.append(
+                f"{history.malformed_lines} unparseable audit line(s) and "
+                f"{len(history.unreadable_files)} unreadable file(s) were "
+                "skipped"
+            )
+        degraded = (
+            '<p class="note"><span class="alert">These counts are known to be '
+            f"incomplete: {_e('; '.join(parts))}.</span></p>"
+        )
+
+    return (
+        '<section class="block"><h2>The decision loop</h2>'
+        + head_line
+        + f'<div class="grid g4">{tiles}</div>'
+        + '<p class="note">A pass that ran and proposed nothing is the bot '
+        "standing pat, which is frequently the right answer. A skipped pass "
+        "never looked, and a failed one got no decision at all — none of the "
+        "three is a version of either other.</p>"
+        + gap_block
+        + degraded
+        + "</section>"
+    )
+
+
+def _loop_key(answer: JobAnswer) -> str:
+    """The one word this answer is coloured by.
+
+    Coverage first, because `NOT_RECORDED` and `OUT_OF_RANGE` are not outcomes
+    and must never borrow an outcome's colour. Only a `FOUND` answer has a job
+    on it at all.
+    """
+    if answer.coverage is not Coverage.FOUND or answer.job is None:
+        return answer.coverage.value
+    return LOOP_WORDS[answer.job.outcome]
+
+
+def _board_waiting(
+    env: Env | None,
+    market: MarketState | None = None,
+    loop: JobHistory | None = None,
+) -> str:
     """The Board before the first reading has arrived.
 
     Same shape as the real thing, so nothing jumps when the figures land: four
@@ -3921,6 +4173,11 @@ def _board_waiting(env: Env | None, market: MarketState | None = None) -> str:
     `config/rules.yaml` and needs no broker at all. Withholding it alongside
     the figures would be treating "not read yet" as if it meant "nothing can be
     said".
+
+    `loop` is the second of those, and on this page it is the MORE useful of
+    the two: a cold start is exactly the moment somebody wants to know whether
+    the thing that trades is running, and that answer comes off the audit log
+    rather than the broker.
     """
     tiles = "".join(
         stat(label, '<span class="pending">000,000.00</span>', meta, live=key)
@@ -3963,6 +4220,7 @@ def _board_waiting(env: Env | None, market: MarketState | None = None) -> str:
         "</div>"
         + f'<div class="grid g4">{tiles}</div>'
         + gate_stance(market)
+        + loop_activity(loop)
     )
 
 
@@ -3980,6 +4238,7 @@ def board(
     stale: bool = False,
     unexplained: UnexplainedMoveReport | None = None,
     market: MarketState | None = None,
+    loop: JobHistory | None = None,
 ) -> str:
     """The account at a glance.
 
@@ -4020,9 +4279,16 @@ def board(
     `None` renders nothing: it is the only figure here that owes nothing to the
     broker, so a caller with no clock reading is a caller that did not ask,
     which is different from a market that could not be read.
+
+    **`loop` is whether the thing that trades is running at all**, read off the
+    audit log. Every other section on this page is a statement about the
+    ACCOUNT; this one is a statement about the process, and the two fail
+    independently — a healthy-looking account with a stopped loop is exactly
+    the state the deck could not previously show. `None` means it was not read
+    for this render, which is its own answer and not a clean one.
     """
     if account is None:
-        return _board_waiting(env, market)
+        return _board_waiting(env, market, loop)
 
     equity = account.equity_usd
     open_risk_pct = (account.open_risk_usd / equity * 100) if equity else 0.0
@@ -4119,6 +4385,11 @@ def board(
         )
         + f'<div class="grid g4">{tiles}</div>'
         + gate_stance(market)
+        # Directly under the account figures and above everything derived from
+        # them, because it is what says whether those figures are being acted
+        # on. A stopped loop leaves every tile above looking exactly as healthy
+        # as a running one does.
+        + loop_activity(loop)
         + '<section class="block"><h2>Equity</h2>'
         + _curve(curve)
         + "</section>"
@@ -4176,6 +4447,40 @@ def _fixed_reading_note(read_at: datetime | None) -> str:
     )
 
 
+def _trail(o: WorkingOrder) -> str:
+    """What a trailing leg follows the price by, or that nobody can say.
+
+    Two facts, and the second is the one that has to be loud. The trail SIZE is
+    what turns a moving number into an exit somebody chose: 1.50% behind the
+    high-water mark is a decision, and a level that was 820 yesterday and is 815
+    today with no size beside it is a mystery. `trail_is_unreadable` is the
+    broker having reported the leg as trailing and named neither a percentage
+    nor an amount, which leaves the current trigger readable and where it goes
+    next unknowable — so it takes the alert colour, exactly as
+    `trigger_price_unknown` does one level up.
+
+    The high-water mark is shown where the broker gave one, because it is what
+    the trail is measured FROM. Without it the size is a distance from a point
+    that appears nowhere on the page.
+    """
+    if o.trail_is_unreadable:
+        return (
+            '<span class="alert">trailing stop &mdash; trail size unknown</span>'
+        )
+    if o.trail_percent is not None:
+        behind = f"{o.trail_percent:g}% behind"
+    elif o.trail_price is not None:
+        behind = f"{o.trail_price:,.4f} behind"
+    else:  # pragma: no cover - `trail_is_unreadable` covers this above
+        behind = "trail unstated"
+    mark = (
+        f", high water {o.high_water_mark:,.4f}"
+        if o.high_water_mark is not None
+        else ""
+    )
+    return f'<span class="muted">trailing stop, {behind}{mark}</span>'
+
+
 def _order_level(o: WorkingOrder) -> str:
     """The price this order is waiting on, named for what kind of price it is.
 
@@ -4193,10 +4498,25 @@ def _order_level(o: WorkingOrder) -> str:
     third rule depends on and nobody can read its level". The second is the one
     worth saying loudly, so it says `unknown` in the alert colour rather than
     disappearing into a muted blank.
+
+    **A trailing leg had the same defect one level in.** A real trailing stop
+    rendered as `815.0000 stop` — every figure correct, and the cell said the
+    operator had chosen 815 when the broker had trailed to it and would be
+    somewhere else by the next reading. So the word is "trailing stop" and the
+    trail travels with it: without the size, a level that moves on its own is
+    indistinguishable from a fixed level moving for reasons nobody recorded,
+    which is precisely the reading `detect_unexplained_moves` used to take.
+
+    And `trail_is_unreadable` gets `trigger_price_unknown`'s alert treatment,
+    for the reason that one has it: a resting stop whose level nobody can read
+    is most of the way to no stop, and a trailing leg with no trail on it is a
+    level nobody can read one reading ahead.
     """
     if o.trigger_price_unknown:
         return '<span class="alert">unknown</span> <span class="muted">stop</span>'
     if o.is_stop and o.stop_price is not None:
+        if o.is_trailing:
+            return f"{o.stop_price:,.4f} {_trail(o)}"
         return f'{o.stop_price:,.4f} <span class="muted">stop</span>'
     if o.limit_price is not None:
         return f"{o.limit_price:,.4f}"
@@ -4508,8 +4828,12 @@ def _order_table(
         '&ldquo;Needs&rdquo; is how far the market still has to move to the '
         "trigger; a trigger reading &ldquo;unknown&rdquo; means the broker did "
         "not report the level, so nobody can say where the stop is and it "
-        "cannot be checked against the journal. There is no way to cancel one "
-        "from here, deliberately."
+        "cannot be checked against the journal. A leg marked "
+        "&ldquo;trailing stop&rdquo; sets its own trigger as the price runs in "
+        "its favour, so the level beside it is where the broker has trailed to "
+        "on THIS reading rather than a level anyone chose &mdash; and it is not "
+        "compared against the journal for that reason. There is no way to "
+        "cancel one from here, deliberately."
         if kind == "protective"
         else "Entries that have not filled and would become positions. "
         "&ldquo;Needs&rdquo; is how far the market still has to move to the "
@@ -4620,6 +4944,13 @@ def _position_tags(
     read as "nothing has moved". Same rule as `stops_unchecked` beside
     `stops_breached`, and it is the whole reason the inverse tag exists at all:
     a record that only showed the moves it captured would hide its own failures.
+
+    A fourth and a fifth arrived with trailing legs, and they are the same rule
+    again. `trailing_stops` is a level that MOVES BY DESIGN and is deliberately
+    not compared — without the tag, "nothing differed" and "this one is not
+    checked" are the same silence. `unreadable_trails` is a trailing leg with
+    no trail size, which is an unknown and takes the warning colour;
+    `trailing_stops` is the exit working and does not.
     """
     pills: list[str] = []
     notes: list[tuple[str, bool]] = []
@@ -4656,6 +4987,39 @@ def _position_tags(
                 f"A stop leg is resting on {symbol} and the broker reported no "
                 "trigger price, so whether it has moved is UNKNOWN rather than "
                 "fine. Nothing here can state the level it would fire at.",
+                True,
+            )
+        )
+
+    if symbol in unexplained.trailing_stops:
+        # Not a warning. A trail moving is the exit working, and colouring it
+        # amber beside the two real unknowns above would spend the alert colour
+        # on the feature doing its job — after which it stops meaning anything
+        # on the row where it does not. The pill exists because the ABSENCE of
+        # an unexplained-move tag on a level that visibly moves needs an
+        # account of itself: without it, "nothing was found to differ" and
+        # "this one is not compared" look identical.
+        pills.append('<span class="pill" data-stop="trailing">trailing stop</span>')
+        notes.append(
+            (
+                f"The stop resting on {symbol} is a TRAILING leg, so its trigger "
+                "is where the broker has trailed to on this reading rather than "
+                "a level anybody chose. It is deliberately not compared against "
+                "the journal's stop — a trail moving is the exit working, and "
+                "reporting it as an unexplained move would tag it on every "
+                "cycle it trailed.",
+                False,
+            )
+        )
+
+    if symbol in unexplained.unreadable_trails:
+        pills.append('<span class="pill unreadable">trail unreadable</span>')
+        notes.append(
+            (
+                f"The trailing leg on {symbol} was reported with no trail size — "
+                "neither a percentage nor an amount — so its current trigger can "
+                "be read and where that trigger moves to next cannot. The level "
+                "on screen is true for this reading only.",
                 True,
             )
         )
@@ -5514,7 +5878,174 @@ def _cycle(
 # ------------------------------------------------------------------- trades
 
 
-def trades_page(recent: list[Trade], report: JournalReport) -> str:
+#: The word for each exit verdict, in the reader's language rather than the
+#: enum's. Every member is here: `ExitReport.counts` includes the zeros on
+#: purpose, so a bucket that renders as absent rather than as `0` would undo
+#: that at the last step.
+EXIT_WORDS: dict[ExitReason, str] = {
+    ExitReason.STOP_HIT: "stop hit",
+    ExitReason.TARGET_HIT: "target hit",
+    ExitReason.CLOSED_EARLY: "plan abandoned",
+    ExitReason.CLOSED_AT_LEVEL: "closed at a level",
+    ExitReason.EXPIRY: "resolved by the broker",
+    ExitReason.UNKNOWN: "could not be established",
+}
+
+
+def exit_reviews(report: ExitReport | None, *, never_classified: int = 0) -> str:
+    """Why each position ended — the PLAN graded, and never the profit.
+
+    `exit_review.py` has classified every close since it shipped and nothing
+    rendered a word of it, so stop-hit, target-hit, closed-by-hand and expiry
+    were as indistinguishable to an operator as they were in the journal before
+    the module existed. This is the surface.
+
+    **No realised figure appears in this section, and none may be added.** The
+    module's own boundary is structural — a test parses its AST and fails if it
+    reads any P&L or risk field — and putting a result beside a reason here
+    would undo that at the presentation layer, which is the only place left
+    that can. The table below carries the money; this carries the plan; the two
+    are separate sections and the note says why. A reader who wants to
+    correlate them can, and nothing on the page invites it.
+
+    Three distinctions have to survive the render, and each is a rule this
+    repository already holds elsewhere:
+
+    - **`None` is not an empty report.** No classification was run for this
+      render, so the absence of verdicts says nothing at all. Same shape as
+      `unexplained=None` on the Board.
+    - **`can_grade_anything` is not "the list is empty".** Nothing closed and
+      everything closed unestablishable are opposite findings.
+    - **A row the journal never classified is not `UNKNOWN`.** One predates the
+      review and was never asked; the other was asked and could not be
+      answered. `never_classified` counts the first.
+
+    Rows render in the order they arrive, which the caller is expected to hand
+    over newest first — the order every other reader in this repository uses,
+    and the order the table under this section renders in.
+    """
+    if report is None:
+        return (
+            '<section class="block"><h2>Why each position ended</h2>'
+            '<p class="note">Exits were not classified for this render, so '
+            "nothing below grades a close and the absence of verdicts says "
+            "nothing.</p></section>"
+        )
+
+    lede = (
+        '<p class="note" style="max-width:72ch">Whether each trade ended the way '
+        "it was designed to. This grades the PLAN and carries no result figure "
+        "at all &mdash; deliberately, and the money is in the table below "
+        "instead. A track record is what a model overfits to on a sample this "
+        "small, which is why nothing here reaches the prompt either.</p>"
+    )
+
+    if not report.reviews:
+        return (
+            '<section class="block"><h2>Why each position ended</h2>'
+            + lede
+            + '<p class="empty">No closed trades, so nothing is graded. That is '
+            "not the same as every trade having ended as designed.</p></section>"
+        )
+
+    tally = "".join(
+        f'<li data-exit="{_e(reason.value)}"><b>{count}</b>'
+        f"<span>{_e(EXIT_WORDS[reason])}</span></li>"
+        for reason, count in report.counts.items()
+    )
+
+    notes = ""
+    abandoned = report.plan_abandoned
+    if abandoned:
+        names = ", ".join(sorted({r.symbol for r in abandoned}))
+        notes += (
+            '<p class="note"><span class="alert">'
+            f"{_e(names)} closed by hand with the price at neither level. That "
+            "is the plan being abandoned rather than completed, and it is the "
+            "one bucket here that says something about the operator or the "
+            "agent rather than about the market.</span></p>"
+        )
+    if not report.can_grade_anything:
+        notes += (
+            '<p class="note"><span class="alert">'
+            f"{_count(report.reviewed, 'trade')} closed and not one exit could "
+            "be established. That is a finding about the record rather than "
+            "about the trading &mdash; it is not a clean sheet.</span></p>"
+        )
+    if report.exits_without_price_provenance:
+        notes += (
+            f'<p class="note">{report.exits_without_price_provenance} of these '
+            "predate the recording of whether the exit price was a broker "
+            "reading or the fallback to the entry price, so their price is not "
+            "treated as evidence about a level.</p>"
+        )
+    if never_classified:
+        notes += (
+            f'<p class="note">{never_classified} closed row(s) carry no reason '
+            "recorded at the time they closed and were graded here from what "
+            "the row holds. Never classified is NOT the same as "
+            "&ldquo;could not be established&rdquo;: one was never asked, the "
+            "other was asked and had no answer.</p>"
+        )
+    # Once, above the list, rather than as a paragraph on every row. Measured on
+    # the rendered page: a caveat true of every trade in the set repeated itself
+    # down the whole section and stopped being read by the third one. The pill
+    # on each row still says WHICH; the sentence explaining it lives here.
+    unconfirmed = sorted({r.symbol for r in report.reviews if r.entry_never_confirmed})
+    if unconfirmed:
+        notes += (
+            f'<p class="note">{_e(", ".join(unconfirmed))} '
+            f"{_word(len(unconfirmed), 'was', 'were')} graded against what was "
+            "SUBMITTED rather than what filled: the entry was never confirmed "
+            "against the broker, so the levels each verdict is measured from "
+            "are the proposal's.</p>"
+        )
+
+    rows = "".join(_exit_row(r) for r in report.reviews)
+    return (
+        '<section class="block"><h2>Why each position ended</h2>'
+        + lede
+        + f'<ul class="tally">{tally}</ul>'
+        + notes
+        + f'<ul class="exits">{rows}</ul></section>'
+    )
+
+
+def _exit_row(review: ExitReview) -> str:
+    """One graded exit. The words recorded at the close are quoted, never paraphrased."""
+    said = (
+        f'<p class="said">Recorded at the close: <q>{_e(review.close_reason)}</q></p>'
+        if review.close_reason
+        else ""
+    )
+    hand = (
+        '<span class="pill" data-exit="by_hand">closed by hand</span>'
+        if review.closed_by_hand
+        else ""
+    )
+    # A pill and not a sentence: the sentence is true of every row in most
+    # sets, so it is said once above the list. See `exit_reviews`.
+    unconfirmed = (
+        '<span class="pill" data-exit="unconfirmed_entry">entry unconfirmed</span>'
+        if review.entry_never_confirmed
+        else ""
+    )
+    return (
+        f'<li data-exit="{_e(review.reason.value)}">'
+        f'<p class="hdr"><b>{_e(review.symbol)}</b> '
+        f'<span class="pill" data-exit="{_e(review.reason.value)}">'
+        f"{_e(EXIT_WORDS[review.reason])}</span> {hand}{unconfirmed}</p>"
+        f'<p class="what">{_e(review.detail)}</p>{said}</li>'
+    )
+
+
+def trades_page(
+    recent: list[Trade],
+    report: JournalReport,
+    exits: ExitReport | None = None,
+    *,
+    never_classified: int = 0,
+) -> str:
     body = head(
         "Journal",
         "Trades",
@@ -5524,6 +6055,11 @@ def trades_page(recent: list[Trade], report: JournalReport) -> str:
         "its R: the outcome as a multiple of what the trade was designed to "
         "lose, so -1R is the stop doing its job and +2R is twice that back.",
     )
+
+    # Above the table, because it is the verdict and the table is the detail —
+    # and because the two are separate sections rather than one row carrying a
+    # reason next to a result. See `exit_reviews`.
+    body += exit_reviews(exits, never_classified=never_classified)
 
     if not recent:
         body += (

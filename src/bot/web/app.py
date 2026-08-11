@@ -44,7 +44,7 @@ from urllib.parse import quote
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 
-from .. import news_history
+from .. import jobs, news_history
 from ..audit import AuditLog
 from ..config import DEFAULT_RULES_PATH, Env, Rules, load_rules
 from ..dreaming import (
@@ -54,6 +54,7 @@ from ..dreaming import (
     DreamStore,
     DreamSummary,
 )
+from ..exit_review import review_closed_trades
 from ..journal import Journal
 from ..market_clock import MarketState, market_state
 from ..metrics import build_report
@@ -104,6 +105,14 @@ NEWS_WINDOW_CYCLES = 400
 #: so a dream whose last exchange predates this window still renders it rather
 #: than reading as never conferred.
 CONFERENCE_FEED_ROWS = 30
+
+#: How far back the Board looks when asking whether the loop is running.
+#:
+#: A day, so a morning load can still see yesterday afternoon's passes and a
+#: weekend does not read as an outage. `jobs.read` carries its own limit and
+#: reports when it binds, so a busier window is short rather than silently
+#: wrong.
+LOOP_WINDOW_HOURS = 24.0
 
 
 def build_app(
@@ -476,6 +485,13 @@ def build_app(
         open_trades = resolved_journal.open_trades()
         # One reading for the strip and for the card below it. See `_market_now`.
         market = _market_now()
+        # Whether the thing that trades is running, off the audit log rather
+        # than off the broker — so it is answerable on a cold start, and it is
+        # answerable on a box where the web unit is up and the loop unit is
+        # not, which is the state this page could not previously show at all.
+        # `jobs.read` reports its own truncation, so a short read cannot be
+        # mistaken here for a quiet loop.
+        loop_history = jobs.read(audit, hours=LOOP_WINDOW_HOURS)
 
         if account is None:
             # Cold start: no reading yet, so there is nothing to reconcile the
@@ -496,7 +512,7 @@ def build_app(
                 + render.board(
                     None, resolved_rules, [], open_trades,
                     resolved_journal.get_stand_down(), 0, env=resolved_env,
-                    market=market,
+                    market=market, loop=loop_history,
                 ),
                 market,
             )
@@ -563,6 +579,7 @@ def build_app(
                 orders_degraded=orders_unavailable,
             ),
             market=market,
+            loop=loop_history,
         )
         return _page("Board", "/", body, market)
 
@@ -600,8 +617,37 @@ def build_app(
     @app.get("/trades", response_class=HTMLResponse)
     def trades() -> str:
         closed = resolved_journal.closed_trades()
+        shown = closed[-100:]
+        # Classified for the rows actually on the page, so the tally and the
+        # table describe the same set. Grading all of history and rendering a
+        # hundred rows would put a count above a table that cannot account for
+        # it — the `decisions` header defect, in a new place.
+        #
+        # `classify_exit` is pure and reads no network, so this costs one
+        # bounded journal read on top of the one the page already makes.
+        #
+        # Newest first, because `closed_trades` returns exit_time ASCENDING and
+        # the table below it renders reversed. Left alone, the two lists on one
+        # page ran in opposite directions — found by reading the rendered page,
+        # where the verdicts started at the oldest trade and the table under
+        # them started at the newest.
+        exits = review_closed_trades(
+            list(reversed(shown)), resolved_journal.position_actions(limit=200)
+        )
+        # Rows the journal never classified at all. Deliberately NOT folded
+        # into `ExitReason.UNKNOWN`, which is the question having been asked
+        # and had no answer: this is the question never having been asked,
+        # because the row predates the exit review.
+        never_classified = sum(1 for t in shown if t.exit_reason is None)
         return _page(
-            "Trades", "/trades", render.trades_page(closed[-100:], build_report(closed))
+            "Trades",
+            "/trades",
+            render.trades_page(
+                shown,
+                build_report(closed),
+                exits,
+                never_classified=never_classified,
+            ),
         )
 
     @app.get("/analytics", response_class=HTMLResponse)

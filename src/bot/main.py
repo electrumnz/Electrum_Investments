@@ -531,6 +531,20 @@ def cmd_loop(
                     if stand_down_state.is_active(now)
                     else 0,
                     risk_understated=recon.risk_is_understated,
+                    # Reconcile runs ABOVE this skip, so these are established
+                    # on a shut-market cycle exactly as they are on a full one
+                    # — and this is the cycle they matter most on. An entry
+                    # placed out of hours rests until the next regular open, so
+                    # `entries_resting` and `closes_deferred` are at their most
+                    # populated precisely while the market is closed. Carrying
+                    # them only on `cycle_complete` would leave the field
+                    # absent for the whole stretch it describes, and an absent
+                    # field is what an outage looks like.
+                    entries_corrected=len(recon.entries_corrected),
+                    entries_resting=recon.entries_resting,
+                    entries_mid_fill=recon.entries_mid_fill,
+                    closes_deferred=recon.closes_deferred,
+                    plan_abandoned=len(recon.plan_abandoned),
                     next_cycle_seconds=env.decision_interval_seconds,
                 )
                 # The durable half of the line above. `record_skipped` has no
@@ -888,6 +902,31 @@ def cmd_loop(
                         m.describe() for m in recon.unexplained.moves
                     ],
                     "unexplained_check_ran": recon.unexplained.can_check,
+                    # A resting leg that moves its own trigger by design. Not a
+                    # finding, and named anyway: without it, "nothing differed"
+                    # and "this one is deliberately not compared" are the same
+                    # silence in the record.
+                    "trailing_stops": recon.unexplained.trailing_stops,
+                    "unreadable_trails": recon.unexplained.unreadable_trails,
+                    # The corrections themselves, in full rather than as a
+                    # count, for the reason `unexplained_moves` is: the cycle
+                    # line is the pointer, this is where a reader finds WHICH
+                    # entry was rewritten and from what to what.
+                    "entries_corrected": [
+                        c.describe() for c in recon.entries_corrected
+                    ],
+                    "entries_resting": recon.entries_resting,
+                    "entries_mid_fill": recon.entries_mid_fill,
+                    "entries_unchecked": recon.entries_unchecked,
+                    "entries_ambiguous": recon.entries_ambiguous,
+                    "closes_deferred": recon.closes_deferred,
+                    # Why each position that closed this cycle closed — the
+                    # PLAN, never the profit. `exit_review` carries no P&L
+                    # figure and none is added here.
+                    "exits_reviewed": [
+                        f"{r.symbol}: {r.reason.value} — {r.detail}"
+                        for r in recon.exits_reviewed
+                    ],
                 },
             )
 
@@ -935,6 +974,38 @@ def cmd_loop(
                 positions_without_a_resting_stop=(
                     recon.unexplained.positions_without_a_resting_stop
                 ),
+                # A leg that sets its own trigger as price runs in its favour.
+                # Its level differs from the journal's every cycle it trails,
+                # and that is the exit working — so it is stated here rather
+                # than counted as an unexplained move above. `unreadable_trails`
+                # is the other half: trailing, with no trail size reported, so
+                # where the level goes next cannot be read.
+                trailing_stops=recon.unexplained.trailing_stops,
+                unreadable_trails=recon.unexplained.unreadable_trails,
+                # What reconcile found when it squared the journalled ENTRY
+                # against what the broker actually did. Every one of these is
+                # on the line for the same reason `stops_breached` is: a stated
+                # zero each cycle is a fact, and an absent field is what an
+                # outage looks like.
+                #
+                # `record_fill` writes the proposal's quantity and limit price,
+                # so until a correction lands the open-risk figure describes
+                # what was asked for rather than what filled. Corrected is the
+                # ordinary outcome; resting and mid-fill are the two states
+                # where that figure is still the proposal — and mid-fill is a
+                # READING rather than an outcome, so nothing is written from it.
+                entries_corrected=len(recon.entries_corrected),
+                entries_resting=recon.entries_resting,
+                entries_mid_fill=recon.entries_mid_fill,
+                # A close withheld because the entry may still be resting. An
+                # out-of-hours order rests until the next open, and without this
+                # it was closed as a trade on the very next cycle.
+                closes_deferred=recon.closes_deferred,
+                # Closed by hand with the price at neither level: the plan
+                # ABANDONED rather than completed. A count, never a P&L figure —
+                # this grades the plan and `exit_review` reads no realised
+                # number to grade it with.
+                plan_abandoned=len(recon.plan_abandoned),
                 # What the loop DID about its own position plans, and what it
                 # deliberately did not. Both switches are off by default, so
                 # two empty lists is the ordinary reading — and it has to be
