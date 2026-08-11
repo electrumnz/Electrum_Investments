@@ -232,9 +232,82 @@ Measure before adding a sixth.
 
 ---
 
-## 0b. An honest dreamer can never leave the workbench
+## 0b. RESOLVED — a second SHAPE of pre-registration, settled by a person
 
-Not a bug — a conflict between two rules, and the honest one is losing.
+**Shipped.** A `DreamCondition` can now be pre-registered two ways, and
+`is_pre_registered` is the union: a THRESHOLD (`symbol`/`field`/`op`/`value`,
+settled by code against figures the loop records) or an OBSERVATION
+(`subject`/`observable`/`observe_by` — the findable thing, what it must show,
+and the date the answer should exist by, settled by the **operator**).
+`promotion_for` keeps its shape and only what counts as pre-registered grew.
+
+`ConditionState` is five-valued because a boolean cannot hold it: `MET`,
+`RULED_OUT`, `AWAITING`, `OVERDUE`, `UNSETTLEABLE`. **Overdue is a fact about
+the LOOKING, never about the world** — an unopened dashboard must not read as a
+refuted prophecy.
+
+**No migration.** Conditions are JSON in a TEXT column and `from_row` reads an
+absent key as "not an observation". A test builds the OLD row shape through raw
+SQL and asserts it comes back as a threshold rather than a half-formed
+observation.
+
+Measured on eleven live steps against the real model: **0 checkable conditions
+(unchanged — honesty still wins), 17 pre-registered, all observations, weakest
+hop pinned on 10 of 11**, and a second-model judge found no invented figure on
+any of them.
+
+### What was rejected, and each is a rule this repository already holds
+
+- **New `TriggerField` members** for the things a dreamer reasons about
+  (`wholesale_egg_price`, `smelter_restart`). That makes the shelf reachable
+  and every prophecy on it permanently `unknown`, which is worse than an empty
+  shelf. `tests/test_triggers.py::test_every_trigger_field_is_a_figure_the_loop_actually_records`
+  pins `TriggerField` as a subset of `IndicatorSnapshot`'s fields, so the
+  tempting repair is now a red build.
+- **Exempting a dream where "no field measures this".** That sentence is always
+  the cheapest true one, so the exemption becomes the default path and the shelf
+  fills with conclusions nobody committed to anything about. It also dead-ends:
+  a dream with nothing settleable can never reach the VAULT either, so the
+  conference still starves.
+- **Letting the model answer.** `settle_condition` refuses every actor but the
+  operator, and `dreamer.StepCondition` has no field that could carry an answer
+  — structural, and tested. A vaulted dream is what an adoption is taken from
+  and an adoption is a live symbol permission, so this route is *stricter* than
+  the graded one.
+
+### The operator surface, which is what made it reachable rather than one step longer
+
+`settle_condition` was the only writer of an answer and had no caller, so an
+observation-only prophecy reached PROPHECY and stopped there for ever.
+
+- `electrum-bot observations` — the worklist, oldest review date first.
+- `electrum-bot settle <handle> --met|--ruled-out --note "..."` — the answer.
+
+Both are terminal commands **on the box**, not a control on the deck, for the
+reason above: an answer can end in a live symbol permission, and that write
+belongs behind the shell rather than behind one shared password on a surface
+that may be exposed. The Dreaming page carries a read-only **Waiting on you**
+card that shows the questions and names the command — the same shape as
+Settings showing the limits and naming the file that owns each.
+
+The handle is `dreaming.observation_handle`: six hex characters over the dream
+id and the claim's key, **derived and never stored**, so it changes when the
+claim changes. A dreamer that restates its conditions between the operator
+reading the list and answering it produces a different handle, and the answer
+lands nowhere rather than on a claim nobody was shown.
+
+Driven end to end: workbench → prophecy on the first answer, prophecy → vault
+on the second, with the grant offered to the trading agent.
+
+**Three surfaces still called an observation prose, and all three are fixed.**
+`render._conditions` said *"No number in this one, so nothing can settle it"*
+— the worst place for it, since the claim is addressed to the person reading.
+`confer.render_dream` labelled it "prose only" to the trading agent. The MCP
+dream payload exposed `is_checkable`/`fulfilled` and nothing else.
+
+The original problem, kept because the reasoning is what produced the design:
+
+Not a bug — a conflict between two rules, and the honest one was losing.
 
 `promotion_for` needs a `keep`, at least one `is_checkable` condition, and one of
 those pinned to the weakest hop. Every `TriggerField` is price or technical —
@@ -262,19 +335,17 @@ transport. `symbols` filled on every step (`AA`, `CENX`, `WST`, `BDX`, `LNG`)
 and the judge found no invented statistic anywhere, so the dreamer is working
 well and still cannot reach the shelf.
 
-Two directions, and this is a design decision rather than a patch:
+Two directions were on the table, and the answer turned out to be neither: not
+a wider set of gradeable figures (every one would have to be a figure the loop
+already records, or the model is deriving again), and not accepting an
+almost-always-empty shelf. The third option — a claim a person settles — keeps
+the pre-registration and changes only who answers it.
 
-- **Widen what a condition may be measured against**, so a supply-chain claim
-  can be settled by something that is not a share price. That means a new source
-  of gradeable facts, and every one of them has to be a figure the loop already
-  records — the `indicators.py` rule, or the model is deriving again.
-- **Accept that most dreams stay on the workbench** and make the prophecy shelf
-  the rare case it then is. Defensible, but it should be a stated choice rather
-  than an accident of the field list.
-
-Do not "fix" this by loosening the number-not-a-name rule. A threshold that
-names another figure tests a level nobody ever saw, which is the failure the
-rule exists to prevent.
+Do not "fix" the remaining half by loosening the number-not-a-name rule. A
+threshold that names another figure tests a level nobody ever saw, which is the
+failure the rule exists to prevent. An observation is not that loosening: it
+names a subject, a claim and a date, and nobody's opinion converts it into a
+number.
 
 ---
 
@@ -1199,7 +1270,16 @@ already opened.
 
 ---
 
-## 12. yfinance for the tape, and ONLY the tape
+## 12. CLOSED as a decided NO — yfinance for the tape
+
+**The problem it was proposed for has gone away.** It was suggested when the
+tape had no live prices; that turned out to be a stale deployment (item 7,
+RESOLVED) and the tape carries live Alpaca prices now. Adding a dependency to
+the box that runs the trading loop to fix something that is no longer broken is
+the trade this repository declines. Reopen only if a specific cell has no
+Alpaca price and somebody has said which.
+
+The reasoning, kept because the conditions would still apply if it is reopened:
 
 Agreed in principle. The tape gates nothing, so a Yahoo price breaks no rule.
 
@@ -1210,10 +1290,7 @@ context. A price from a venue you cannot trade at is real and is not your price.
 Not installed; needs a `pyproject.toml` entry.
 
 **It is NOT the answer to item 14**, despite being the obvious guess: yfinance
-serves quotes, not calendars. Whether it is even needed is worth re-asking now
-that the tape carries live Alpaca prices — the problem it was proposed for
-turned out to be a stale deployment (item 7, RESOLVED). Do not add a dependency
-to the box that runs the trading loop for a problem that has already gone away.
+serves quotes, not calendars.
 
 ---
 
@@ -1363,15 +1440,17 @@ Two that are worth stating as rules rather than as tests:
   winter, opening 03:00 New York instead of 04:00. Harmless in the direction it
   errs — the extra hour is the overnight session, which Alpaca will also take —
   but nothing in the code can detect it. Diary entry, twice a year.
-- **`LivePoller` fills `open_risk_usd` and not the two new per-symbol fields.**
-  `apply_journal_state` now derives three figures from one `open_trades()` read
-  — the total, `open_risk_by_symbol` and `symbols_with_unknown_risk` — and
-  `src/bot/web/live.py` still populates only the total, leaving the other two
-  at their defaults. Nothing there gates and no cap is affected, so this is not
-  a live fault. It becomes one the moment a surface renders per-class risk: an
-  empty breakdown reads as "this class risks nothing", which is the missing-vs-
-  zero rule again. Any Board tag showing a class's risk needs the poller moved
-  onto the same three-figure read first.
+- **DONE — `LivePoller` fills every figure the journal owns.** It called
+  `journal.open_risk_usd` and assigned the total by hand, leaving
+  `open_risk_by_symbol`, `planned_stop_by_symbol` and
+  `symbols_with_unknown_risk` at their empty defaults. Nothing in `web/` read
+  those three, so it was not a live fault — it becomes one the first time a
+  surface renders a class's risk, because an empty breakdown reads as "this
+  class risks nothing". The fix is structural rather than three more
+  assignments: the poller takes `reconcile.apply_journal_state` bound to the
+  journal and hands over the whole snapshot, which is the one function that
+  derives all four figures from ONE journal read. The no-default property is
+  preserved, so a caller that omits it still raises at wiring time.
 - **The `mudhorn-capital` Vercel project is real and deploying — the CONNECTOR
   is what could not see it.** Previously recorded as a 404 with the cause
   unconfirmed. Settled from the other direction: the Vercel bot posted a Ready
@@ -1448,44 +1527,61 @@ each is a bug that reached a user once:
   mouse drag instead and got "moved 0" on a 9,146px page, which would have been
   a fabricated bug had it been reported; a mouse drag selects text, it does not
   scroll.
-- **The fusion card.** Symbiosis has a backend; what the operator asked for is
-  the moment two dreams become one thing — *"like a cartoon where two creatures
-  would combine into a special creature"* — with the **animation paused until
-  next viewed** while the joining happens in the backend regardless. That
-  pairing is the interesting constraint: the state change must not wait on
-  somebody looking at it, and the reveal must not be missed because nobody was.
-- **The vault surfaces.** Prophecy vault with Grogu and the crystal ball, the
-  dream vault, the adopted shelf, the A2A transcript, the wisp left behind on
-  adoption, and the orb treatment on a trade that came from a dream.
+- **DONE — the fusion card.** `src/bot/web/dream_fx.py`. The state change and
+  the animation announcing it run on different clocks, which was the
+  interesting constraint: two dreams fuse in the backend whenever they fuse — a
+  vault that only joined while a browser was open would make the feature a
+  function of the operator's attention — and the *reveal* waits, because an
+  animation that played at 3am played to an empty room. `seen.py` answers which
+  view this is, and its marker advances to the PREVIOUS request rather than to
+  now, so nothing is marked seen that was not on screen.
+
+  The trap underneath is the fail-to-visible rule in its least obvious costume:
+  it is very natural to draw two cards and have JavaScript merge them, and
+  **that fails to two cards and a lie.** The card is rendered fused; the
+  animation is the arrival of something already true. The client may only ever
+  add the transient `joining` class, never `fused` itself, and a test pins it.
+- **DONE — the vault surfaces.** Prophecy vault with the oracle mark, the dream
+  vault, the adopted shelf, the A2A transcript with its recorded verdict, the
+  wisp left behind on adoption, and the orb treatment on a trade that came from
+  a dream. `.from-dream` is tested for surviving `prefers-reduced-motion`, for
+  the same reason the treatment exists at all: a marking that cannot be traced
+  back to a record is decoration pretending to be provenance.
+- **DONE — "Waiting on you".** The Dreaming page's read-only worklist of
+  operator-settled observations. See item 0b.
 
 ---
 
-## Measured accessibility failures in the shipped palette
+## DONE — measured accessibility failures in the shipped palette
 
-Computed WCAG 2.1 relative-luminance ratios, not eyeballed. Three fail.
+Computed WCAG 2.1 relative-luminance ratios, not eyeballed. Three failed and
+all three are fixed; `tests/test_web.py` pins each.
 
-- **`--rust #B3524A` on graphite is 3.48:1 and fails AA for text** — and it is
-  the colour of `.banner.crit b`, at 11px uppercase mono with wide tracking.
-  **The most severe state on the deck has the least readable heading**, which
-  is a warning that did not happen. Split the token: keep `--rust` for borders
-  and rails, add `--rust-text #CF7A70` (5.50:1) for the label.
-- **An inline link is invisible as a link.** `a{color:var(--bone)}` is the body
-  colour and `text-decoration-color:var(--slate)` is 1.47:1. That is WCAG 1.4.1
-  failing in the direction where there is no colour channel either. Use
-  `--pewter` for the underline (5.37:1) with `text-underline-offset`.
-- **`--pewter` at 10px is thin.** 4.81:1 clears WCAG 2, but WCAG 2 is known to
-  overstate contrast in dark mode and APCA would score a 10px weight-400 face
-  well under its body minimum. Lift the token to `#8B96A4` (5.76:1) rather than
-  auditing the forty rules that use it.
+- **`--rust #B3524A` on graphite was 3.48:1 and failed AA for text** — and it
+  was the colour of `.banner.crit b`, at 11px uppercase mono with wide
+  tracking, so **the most severe state on the deck had the least readable
+  heading**. The token is split: `--rust` keeps the borders and rails, which
+  are non-text, and `--rust-text #CF7A70` (5.50:1) carries the label.
+- **An inline link was invisible as a link.** `a{color:var(--bone)}` is the
+  body colour and `text-decoration-color:var(--slate)` was 1.47:1 — WCAG 1.4.1
+  failing in the direction where there is no colour channel either. The
+  underline is `--pewter` now, with `text-underline-offset`.
+- **`--pewter` at 10px was thin.** 4.81:1 clears WCAG 2, but WCAG 2 overstates
+  contrast in dark mode and APCA scores a 10px weight-400 face well under its
+  body minimum. The token is `#8B96A4` (5.76:1), which fixes it once rather
+  than auditing the forty rules that use it.
 
-**And `color-scheme: dark` is absent entirely**, so every native control —
-the chat textarea, the password field, scrollbars, and the paint that happens
-before the stylesheet applies — renders in light chrome inside a graphite deck.
-One declaration fixes all of it. `theme-color` and `viewport-fit=cover` belong
-in the same edit, and `overscroll-behavior: contain` on `.scroll` and
-`.chat .log` is very likely a **second, separate cause** of the reported
-scrolling trouble: a horizontal table scroll chaining into a page scroll on
-touch is a different fault from the 1px bracket overflow.
+`color-scheme: dark` is present, so native controls — the chat textarea, the
+password field, scrollbars, and the paint that happens before the stylesheet
+applies — no longer render in light chrome inside a graphite deck.
+`theme-color` and `viewport-fit=cover` are on both the shell and `login_page`,
+which does not come through the shell and is the first thing a phone loads.
+`overscroll-behavior: contain` is on `.scroll` and `.chat .log`, which was the
+second and separate cause of the reported scrolling trouble — a horizontal
+table scroll chaining into a page scroll on touch is a different fault from the
+1px bracket overflow.
+
+The eight nav links now clear the 44px touch minimum inside the 760px block.
 
 Full research pass with sources, ranked and costed, is in the session
 scratchpad as `inspiration.md` — including cross-document view transitions for

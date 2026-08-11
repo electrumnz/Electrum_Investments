@@ -569,6 +569,19 @@ the broker cannot report it.
 Every path that hands an account snapshot to the risk gate must populate it:
 - CLI: `reconcile()` then `apply_journal_state()` in `src/bot/main.py`
 - MCP: `_Session.account()` in `src/bot/mcp_server.py`
+- Web: `LivePoller._read()` in `src/bot/web/live.py`
+
+**All three go through `apply_journal_state` and hand it the whole snapshot,
+which is deliberate rather than uniform for its own sake.** That function
+derives FOUR figures from one journal read — the total, `open_risk_by_symbol`,
+`planned_stop_by_symbol` and `symbols_with_unknown_risk` — and the poller used
+to call `journal.open_risk_usd` and assign the total by hand, leaving the other
+three at their empty defaults. Nothing in `web/` read them, so it was not a live
+fault; it becomes one the first time a surface renders a class's risk, because
+an empty breakdown reads as *this class risks nothing*. Passing the snapshot in
+rather than taking one number out means a caller structurally cannot fill one
+figure and forget the rest, and it keeps the total and the breakdown describing
+the same set of open trades.
 
 Miss it and the cap silently has nothing to count. This was a real bug, fixed in
 `14b88c8`. A held position with no journal entry has an unknowable stop, so its
@@ -1880,6 +1893,120 @@ A restated condition keeps the grade it earned (`carry_forward_grading`) — a
 grading that reset on every step would make the vault unreachable — but a MOVED
 threshold is a new claim and starts ungraded, because inheriting the old
 verdict would be back-dating a prediction.
+
+### There are TWO shapes of pre-registration, and a person settles the second
+
+**An honest dreamer could not reach the prophecy shelf at all**, and that was a
+conflict between two rules rather than a bug. Promotion needed a condition with
+a NUMBER in it; every `TriggerField` is a price or a technical figure; and the
+weakest hop of a second-order supply-chain chain never is. Measured over eleven
+live steps: **zero checkable conditions, and a second-model judge found no
+invented figure anywhere.** The dreamer was obeying the rule that says do not
+state a number you did not read, and the shelf was unreachable by construction.
+
+So `DreamCondition` carries two ways to pre-register and `is_pre_registered` is
+the **union**:
+
+- **A THRESHOLD** — `symbol`/`field`/`op`/`value`, settled by code against the
+  figures the loop records. Unchanged.
+- **AN OBSERVATION** — `subject` (the findable thing to look at) / `observable`
+  (what it must show) / `observe_by` (the date the answer should exist by),
+  settled by the **operator**. All three are required, in the same
+  all-or-nothing shape as the triple: a subject with no claim is a thing to
+  look at with no question, and a claim with no date never comes due and so
+  never reaches anybody's list.
+
+A threshold and an observation are pre-registrations of the same kind — a
+falsifiable claim, written before the fact, with the means of settling it named.
+What differs is who settles it, and that is not a difference the promotion rule
+has any business caring about. **Prose with neither is still not pre-registered
+and is still unpromotable.**
+
+`ConditionState` is five-valued because a boolean cannot hold it: `MET`,
+`RULED_OUT`, `AWAITING`, `OVERDUE`, `UNSETTLEABLE`. **`OVERDUE` is a fact about
+the LOOKING and never about the world** — an unopened dashboard must not read
+as a refuted prophecy. `RULED_OUT` is a real answer and must never collapse
+into "not met", or a claim somebody looked at and refuted reads as one nobody
+has got to yet. Same rule as `has_cycles`, `can_grade_anything` and first-visit.
+
+**Three repairs were rejected, and each one is a rule already held here.**
+
+- **New `TriggerField` members** for what a dreamer reasons about
+  (`wholesale_egg_price`, `smelter_restart`). That makes the shelf reachable
+  and every prophecy on it permanently `unknown`, which is worse than an empty
+  shelf: `get` resolves a trigger by attribute name, so a member with no field
+  behind it silently reads `None` for ever. `TriggerField` is now pinned as a
+  **subset of `IndicatorSnapshot`'s fields** by a test, so the tempting repair
+  is a red build. **Do not widen that enum.**
+- **Exempting a dream where "no field measures this".** That is always the
+  cheapest true sentence, so the exemption becomes the default path and the
+  shelf fills with conclusions nobody committed to anything about. It also
+  dead-ends: a dream with nothing settleable can never reach the VAULT either,
+  so the conference still starves.
+- **Letting the model answer its own condition.** `settle_condition` refuses
+  every actor but the operator, and `dreamer.StepCondition` has no field that
+  could carry an answer, so there is nothing for a model to say even before the
+  check runs. A vaulted dream is what an adoption is taken from and an adoption
+  is a live symbol permission, so a model settling its own condition would be
+  writing itself a permission.
+
+**No schema migration was needed and that is a fact rather than an oversight.**
+Conditions are JSON in a TEXT column, so there is no column to add, and
+`from_row` reads an absent key as "not an observation". The test builds the OLD
+row shape through raw SQL, which is the only way to exercise it — every other
+test constructs a current `DreamCondition` and so always gets the new keys.
+
+`carry_forward_grading` keys on **`is_answered`**, not on `fulfilled`. A dreamer
+restating its list would otherwise erase the operator's "no" and put a refuted
+claim back on the worklist as though nobody had looked. A moved `subject` or
+`observable` is a NEW claim and starts unanswered — the observation equivalent
+of moving a threshold — while a moved review date is not, because the date says
+when to look and not what is claimed.
+
+### The answer is typed at a terminal, and that is where it belongs
+
+`settle_condition` is the only writer of an operator's answer, and it shipped
+with no caller — so an observation-only prophecy reached PROPHECY and stopped
+there for ever. `electrum-bot observations` is the worklist and `electrum-bot
+settle` is the answer.
+
+**Both are commands on the box rather than a control on the deck**, and the
+reason is the chain they sit on: a fulfilled condition can carry a dream to the
+VAULT, a vaulted dream is what an adoption is taken from, and an adoption is a
+live permission to trade a symbol that is not in `config/rules.yaml`. That write
+belongs behind the shell, not behind one shared password on a surface that may
+be exposed. Every gate still runs on anything traded under a grant; what this
+changes is the allowlist, not the limits.
+
+The Dreaming page carries a read-only **Waiting on you** card, which shows the
+questions and names the command that answers them — the same shape as Settings
+showing the limits and naming the file that owns each. It is **absent rather
+than empty** when nothing is due: a panel announcing zero trains an operator to
+stop reading the one thing on that page addressed to them.
+
+Three properties of the surface:
+
+- **The handle is derived, never stored.** `observation_handle` is six hex
+  characters over the dream id and the claim's key. The important property is
+  the one that looks like a drawback: **it changes when the claim changes**, so
+  a dreamer that restates its conditions between the operator reading the list
+  and answering it produces a different handle and the answer lands nowhere,
+  rather than landing on a claim nobody was shown.
+- **There is no default answer.** A default of `--met` manufactures
+  confirmations; a default of `--ruled-out` refutes claims nobody meant to.
+  There is no safe guess between them, so the command refuses and says so.
+- **"Nothing waiting on you" is not "nothing stuck"**, and the empty worklist
+  says both. A dream can equally be held by a threshold the market has not
+  reached, which no amount of looking settles.
+
+**An observation is settleable, so nothing may describe one as prose.** That
+was wrong in three places at once — `render._conditions` said *"No number in
+this one, so nothing can settle it"*, which is the worst place for it because
+the claim is addressed to the person reading; `confer.render_dream` labelled it
+"prose only" to the trading agent; and the MCP dream payload exposed
+`is_checkable` and nothing else. All three report the shape now, and the
+sentence about nothing being able to settle it is kept only where it is still
+true.
 
 ### The two agents may talk, once a day, and the fifth cap is the one that works
 
