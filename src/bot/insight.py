@@ -61,6 +61,94 @@ the failure `indicators.py` exists to prevent, arriving from the other
 direction. If numeric history is wanted, the fix is to record the numbers in
 `MarketInputs` — a change to what gets written, which no amount of cleverness
 here can substitute for, and which only starts paying from the day it ships.
+
+## Full-text search, and why it is FTS5 rather than embeddings
+
+`docs/HUGGINGFACE.md` measured both on this box. FTS5 is already compiled into
+the stdlib `sqlite3`, indexes 50,000 documents in 0.30 s and answers a BM25
+query in 23.9 ms at **30 MB RSS**; the obvious embedding default measured 97
+documents a second at **477 MB peak RSS**, on a 2 GB droplet that is also
+running the trading loop, the web unit and a Hermes process per chat message.
+So this is full text and there is no model. The trigger for revisiting is a
+*recorded* question that FTS5 answered badly, which the audit log makes
+checkable.
+
+`documents` is the corpus and `search` is an FTS5 index over it with
+`content='documents'`, so the text is stored once and the virtual table holds
+only the inverted index.
+
+**An FTS5 table is not naturally idempotent, and that is the trap here.** The
+rest of this module survives a re-read because every row has a natural key and
+`INSERT OR REPLACE` lands on it. An FTS5 index has no natural key: insert the
+same document twice and it is in there twice, ranked twice, counted twice.
+Three things hold that shut and none of them is decoration:
+
+- **`documents` carries the natural key** (`doc_id`) and `search` is derived
+  from it by trigger, so there is exactly one FTS entry per document by
+  construction rather than by care.
+- **The upsert is `ON CONFLICT ... DO UPDATE`, never `INSERT OR REPLACE`.**
+  `REPLACE` resolves a conflict by deleting the old row, and a `BEFORE`/`AFTER
+  DELETE` trigger **does not fire** for that delete unless
+  `PRAGMA recursive_triggers` is on. The old FTS entry would survive, the new
+  one would be added beside it, and the count would double silently. This is
+  the one place in this module where the usual idiom is wrong.
+- **The update is skipped when the body is unchanged**, which is every re-read,
+  so a repeated pass costs one failed insert per document and no index churn.
+
+## What is searchable, and what deliberately is not
+
+The corpus is the text somebody could remember a PHRASE from: the model's
+rationales, its assessment and position-plan prose, the gate's rejection
+reasons, cycle notes, headlines, social posts, blackout windows and audit-event
+payloads.
+
+**`readings.summary` is excluded**, and it is the interesting exclusion. It is
+searchable text and always was — nothing here parses it back into numbers, that
+rule is untouched — but it is a TEMPLATE with figures substituted, so every row
+carries the same words and none of them tells one row from another. It is also
+the largest thing in the index by volume: two rendered lines per symbol per
+cycle against roughly one prose document per symbol per cycle. Indexing it
+would spend most of the corpus on rows that discriminate nothing, and the
+questions it answers — "when was the close below 641.20", "when was sma200
+unavailable" — are answered EXACTLY by `numeric_readings`, and approximately by
+searching prose. That is the same finding `docs/HUGGINGFACE.md` reached about
+embeddings, one layer down: where SQL answers a question exactly, a ranked
+search is a worse tool for it. `readings` is still queryable with `LIKE`
+through `run_query`.
+
+Dreams are not here either, and cannot be: this index is derived from
+`audit/*.jsonl` and nothing else, and a dream lives in `data/dreams.db`. What
+DOES reach the corpus is a consideration, because `raise_consideration` writes
+an audit event — which is the whole point of it being an event.
+
+## What it costs, measured against the same log without it
+
+14 days of 96-cycle days — 1,344 cycles, 13,376 documents — with the corpus
+switched off and on, so the comparison is this feature and nothing else:
+
+| | without | with |
+|---|---:|---:|
+| cold build (full replay) | 422 ms | **1,111 ms** |
+| no-op refresh | 1.15 ms | 0.81 ms |
+| delta, one cycle appended | 3.11 ms | 4.87 ms |
+| database | 11.0 MB | 16.8 MB |
+
+Searches over that corpus run 1.1-10.9 ms, which is the band the existing SQL
+queries already sit in; the 10.9 ms is a term appearing in nearly every
+document, and it is the worst case rather than the normal one. At 90 days and
+77,132 documents a search is 2.7-65 ms and the one-cycle delta is unchanged at
+5.9 ms — the number that matters, because every tool call pays it and a full
+replay happens only on `electrum-bot reindex` or a `SCHEMA_VERSION` bump.
+
+**The cold build is the regression, at 2.6x, and there is a measured fix that
+is deliberately not taken.** Populating `documents` with the triggers dropped
+and then issuing FTS5's bulk `INSERT INTO search(search) VALUES('rebuild')` is
+**4x faster** on 77k documents (2,509 ms against 594 ms) and produces a
+byte-comparable index, because both routes derive `search` from `documents`.
+It is not here because it is a second population path for a cost paid on an
+explicit command, and a second path is a second thing that can disagree with
+the first. Revisit if a replay ever runs inside something a person is waiting
+on. (`automerge` was tried and is worth about 10%: not worth a knob.)
 """
 
 from __future__ import annotations
@@ -95,7 +183,7 @@ DEFAULT_AUDIT_DIR = Path("audit")
 # Bump this on any schema change. There is no migration path and there is not
 # meant to be one: a mismatch drops every table and replays the audit log,
 # which is cheap and cannot lose anything the log still holds.
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -246,6 +334,58 @@ SELECT kind,
        COUNT(*) AS cycles
 FROM news_sightings
 GROUP BY kind, text;
+
+-- One row per searchable document, with a natural key in `doc_id` exactly like
+-- every other table here. `body` is a search COPY rather than a source: its
+-- whitespace is normalised and several fields may be joined into one document.
+-- The authoritative text is in the table the `kind` names.
+CREATE TABLE IF NOT EXISTS documents (
+    id     INTEGER PRIMARY KEY,
+    doc_id TEXT NOT NULL UNIQUE,
+    kind   TEXT NOT NULL,
+    ts     TEXT NOT NULL,
+    symbol TEXT NOT NULL DEFAULT '',
+    body   TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_documents_kind ON documents (kind, ts);
+CREATE INDEX IF NOT EXISTS idx_documents_symbol ON documents (symbol, ts);
+
+-- EXTERNAL CONTENT, so the text lives once in `documents` and this holds only
+-- the inverted index. Porter stemming because the corpus is English prose and
+-- somebody looking for "reclaimed" means "reclaim" too; the metadata columns
+-- are UNINDEXED because they are filters rather than text, and an exact filter
+-- beats a token match for a ticker.
+CREATE VIRTUAL TABLE IF NOT EXISTS search USING fts5(
+    body,
+    doc_id UNINDEXED,
+    kind   UNINDEXED,
+    ts     UNINDEXED,
+    symbol UNINDEXED,
+    content='documents',
+    content_rowid='id',
+    tokenize='porter unicode61'
+);
+
+-- The documented external-content maintenance pattern. `documents` is written
+-- with an upsert and NEVER with INSERT OR REPLACE: REPLACE resolves a conflict
+-- by deleting the old row without firing this DELETE trigger, which would
+-- strand the old index entry beside the new one and double the document.
+CREATE TRIGGER IF NOT EXISTS documents_ai AFTER INSERT ON documents BEGIN
+    INSERT INTO search (rowid, body, doc_id, kind, ts, symbol)
+    VALUES (new.id, new.body, new.doc_id, new.kind, new.ts, new.symbol);
+END;
+
+CREATE TRIGGER IF NOT EXISTS documents_ad AFTER DELETE ON documents BEGIN
+    INSERT INTO search (search, rowid, body, doc_id, kind, ts, symbol)
+    VALUES ('delete', old.id, old.body, old.doc_id, old.kind, old.ts, old.symbol);
+END;
+
+CREATE TRIGGER IF NOT EXISTS documents_au AFTER UPDATE ON documents BEGIN
+    INSERT INTO search (search, rowid, body, doc_id, kind, ts, symbol)
+    VALUES ('delete', old.id, old.body, old.doc_id, old.kind, old.ts, old.symbol);
+    INSERT INTO search (rowid, body, doc_id, kind, ts, symbol)
+    VALUES (new.id, new.body, new.doc_id, new.kind, new.ts, new.symbol);
+END;
 """
 
 _TABLES = [
@@ -260,7 +400,30 @@ _TABLES = [
     "numeric_readings",
     "news_sightings",
     "events",
+    "documents",
 ]
+
+# Dropped separately, because an FTS5 table owns four shadow tables of its own
+# and a `DROP TABLE documents` leaves every one of them behind. The triggers
+# need no list: SQLite drops a table's triggers with the table.
+_VIRTUAL_TABLES = ["search"]
+
+# The `kind` of every document in the corpus. Named rather than inferred, so a
+# search for an unknown kind can be REFUSED instead of silently matching
+# nothing — an empty result must never be the way a caller learns it typed the
+# wrong word. `headline`, `social` and `window` deliberately reuse the
+# `news_sightings` vocabulary rather than inventing a second one.
+SEARCHABLE_KINDS: tuple[str, ...] = (
+    "rationale",
+    "rejection",
+    "assessment",
+    "position_plan",
+    "note",
+    "event",
+    "headline",
+    "social",
+    "window",
+)
 
 
 @dataclass
@@ -279,6 +442,47 @@ class IndexReport:
     @property
     def changed(self) -> bool:
         return self.files_updated > 0 or self.rebuilt
+
+
+def _add_document(
+    conn: sqlite3.Connection,
+    *,
+    doc_id: str,
+    kind: str,
+    ts: str,
+    symbol: str,
+    parts: tuple[str | None, ...],
+) -> None:
+    """Put one searchable document into the corpus, idempotently.
+
+    `parts` are joined and their whitespace normalised, so a body is one tidy
+    passage rather than several fields with ragged formatting. Empty parts are
+    dropped, and a document with nothing left to say is not stored at all —
+    an empty row would be a hit that carries no information.
+
+    **The upsert is deliberately not `INSERT OR REPLACE`.** REPLACE deletes the
+    conflicting row without firing the DELETE trigger, so the old FTS entry
+    would survive beside the new one and the document would be in the index
+    twice. `ON CONFLICT ... DO UPDATE` fires the UPDATE trigger, which removes
+    the old entry before adding the new one.
+
+    The `WHERE` on the update is what makes a re-read cheap: an unchanged body
+    is the normal case — the audit log is append-only, so a line re-read says
+    exactly what it said before — and skipping the update skips the trigger,
+    the delete and the re-index with it.
+    """
+    cleaned = [" ".join(part.split()) for part in parts if part]
+    body = "\n".join(p for p in cleaned if p)
+    if not body:
+        return
+    conn.execute(
+        "INSERT INTO documents (doc_id, kind, ts, symbol, body) VALUES (?, ?, ?, ?, ?) "
+        "ON CONFLICT(doc_id) DO UPDATE SET "
+        "kind = excluded.kind, ts = excluded.ts, symbol = excluded.symbol, "
+        "body = excluded.body "
+        "WHERE documents.body <> excluded.body",
+        (doc_id, kind, ts, symbol, body),
+    )
 
 
 class InsightIndex:
@@ -335,6 +539,14 @@ class InsightIndex:
     def _drop_all(self) -> None:
         with self._connect() as conn:
             conn.execute("DROP VIEW IF EXISTS news")
+            # The FTS index before the corpus underneath it. Leaving `search`
+            # standing is not a tidiness problem: `documents.id` restarts at 1
+            # after a rebuild, so a surviving entry is filed against a REUSED
+            # rowid and the old term answers with the new document's text.
+            # `tests/test_insight.py` pins it, and FTS5's own integrity-check
+            # does not catch it.
+            for virtual in _VIRTUAL_TABLES:
+                conn.execute(f"DROP TABLE IF EXISTS {virtual}")
             for table in _TABLES:
                 conn.execute(f"DROP TABLE IF EXISTS {table}")
 
@@ -457,9 +669,22 @@ class InsightIndex:
         if not isinstance(stamp, str):
             return False
         body = payload.get("payload")
+        kind = str(payload["kind"])
+        rendered = json.dumps(body) if body is not None else ""
         conn.execute(
             "INSERT OR REPLACE INTO events (ts, kind, payload) VALUES (?, ?, ?)",
-            (stamp, str(payload["kind"]), json.dumps(body) if body is not None else ""),
+            (stamp, kind, rendered),
+        )
+        # The kind goes into the body as well as into its own column: an event
+        # is often all name and no payload (`loop_end`), and a corpus that could
+        # not find one by name would be missing the only word it has.
+        _add_document(
+            conn,
+            doc_id=f"event:{stamp}:{kind}",
+            kind="event",
+            ts=stamp,
+            symbol="",
+            parts=(kind, rendered),
         )
         return True
 
@@ -500,8 +725,25 @@ class InsightIndex:
             ),
         )
 
+        _add_document(
+            conn,
+            doc_id=f"note:{ts}",
+            kind="note",
+            ts=ts,
+            symbol="",
+            parts=(decision.notes,),
+        )
+
         for a in decision.assessments:
             trigger = a.trigger
+            _add_document(
+                conn,
+                doc_id=f"assessment:{ts}:{a.symbol}",
+                kind="assessment",
+                ts=ts,
+                symbol=a.symbol,
+                parts=(a.reasoning, a.waiting_for),
+            )
             conn.execute(
                 "INSERT OR REPLACE INTO assessments (ts, symbol, stance, "
                 "reasoning, waiting_for, trigger_field, trigger_op, trigger_value) "
@@ -516,6 +758,14 @@ class InsightIndex:
 
         for i, p in enumerate(decision.proposals):
             verdict = verdicts[i] if paired and i < len(verdicts) else None
+            _add_document(
+                conn,
+                doc_id=f"rationale:{ts}:{i}",
+                kind="rationale",
+                ts=ts,
+                symbol=p.symbol,
+                parts=(p.rationale,),
+            )
             conn.execute(
                 "INSERT OR REPLACE INTO proposals (ts, idx, symbol, direction, qty, "
                 "limit_price, stop_loss_price, take_profit_price, risk_usd, "
@@ -535,6 +785,14 @@ class InsightIndex:
                         "(ts, idx, reason_idx, symbol, reason) VALUES (?, ?, ?, ?, ?)",
                         (ts, i, j, p.symbol, reason),
                     )
+                    _add_document(
+                        conn,
+                        doc_id=f"rejection:{ts}:{i}:{j}",
+                        kind="rejection",
+                        ts=ts,
+                        symbol=p.symbol,
+                        parts=(reason,),
+                    )
 
         # A verdict list that could not be paired still carries reasons, and
         # they are the only record of why the gate refused. Filed against the
@@ -549,8 +807,24 @@ class InsightIndex:
                         "(ts, idx, reason_idx, symbol, reason) VALUES (?, ?, ?, ?, ?)",
                         (ts, -1 - i, j, "", reason),
                     )
+                    _add_document(
+                        conn,
+                        doc_id=f"rejection:{ts}:{-1 - i}:{j}",
+                        kind="rejection",
+                        ts=ts,
+                        symbol="",
+                        parts=(reason,),
+                    )
 
         for plan in decision.position_plans:
+            _add_document(
+                conn,
+                doc_id=f"position_plan:{ts}:{plan.symbol}",
+                kind="position_plan",
+                ts=ts,
+                symbol=plan.symbol,
+                parts=(plan.reasoning, plan.waiting_for, plan.invalidation),
+            )
             conn.execute(
                 "INSERT OR REPLACE INTO position_plans (ts, symbol, action, "
                 "thesis_intact, reasoning, waiting_for, invalidation) "
@@ -597,12 +871,27 @@ class InsightIndex:
         ):
             for text in items:
                 cleaned = text.strip()
-                if cleaned:
-                    conn.execute(
-                        "INSERT OR REPLACE INTO news_sightings (ts, kind, text) "
-                        "VALUES (?, ?, ?)",
-                        (ts, kind, cleaned),
-                    )
+                if not cleaned:
+                    continue
+                conn.execute(
+                    "INSERT OR REPLACE INTO news_sightings (ts, kind, text) "
+                    "VALUES (?, ?, ?)",
+                    (ts, kind, cleaned),
+                )
+                # Keyed on the TEXT and not on the cycle, unlike the sighting
+                # above. The 30-minute cache re-serves a headline every cycle,
+                # so a per-cycle document would put the same story in the index
+                # ninety-six times over — ranked ninety-six times, and crowding
+                # out everything said once. `ts` therefore stays at the FIRST
+                # sighting, because an unchanged body skips the update.
+                _add_document(
+                    conn,
+                    doc_id=f"news:{kind}:{' '.join(cleaned.split())}",
+                    kind=kind,
+                    ts=ts,
+                    symbol="",
+                    parts=(cleaned,),
+                )
 
     # -------------------------------------------------------------- reading
 
@@ -678,7 +967,7 @@ class InsightIndex:
         """Schema and row counts, so a caller can write a query without guessing."""
         with self._connect() as conn:
             tables: dict[str, list[str]] = {}
-            for name in [*_TABLES, "news"]:
+            for name in [*_TABLES, *_VIRTUAL_TABLES, "news"]:
                 if name in {"meta", "source_files"}:
                     continue
                 cols = conn.execute(f"PRAGMA table_info({name})").fetchall()
@@ -687,6 +976,10 @@ class InsightIndex:
             counts = {
                 name: int(conn.execute(f"SELECT COUNT(*) c FROM {name}").fetchone()["c"])
                 for name in tables
+                # `search` is external-content, so counting it means
+                # reconstructing every row out of `documents` — the same number
+                # `documents` answers with an index lookup.
+                if name not in _VIRTUAL_TABLES
             }
             span = conn.execute(
                 "SELECT MIN(day) lo, MAX(day) hi FROM cycles"
@@ -696,11 +989,17 @@ class InsightIndex:
             "tables": tables,
             "row_counts": counts,
             "covers_days": {"first": span["lo"], "last": span["hi"]},
+            "searchable_kinds": list(SEARCHABLE_KINDS),
             "note": (
                 "Derived from audit/*.jsonl and rebuilt from it, so it is a "
                 "cache rather than a source. `readings.summary` is the rendered "
                 "text the loop recorded, not parseable numbers. Use the `news` "
-                "view for deduped items with first_seen/last_seen."
+                "view for deduped items with first_seen/last_seen. For prose, "
+                "prefer the full-text search tool over LIKE: `documents` is the "
+                "corpus and `search` is an FTS5 index over it. `readings` is "
+                "deliberately NOT in that corpus — it is a rendered template, "
+                "so every row shares its words; ask `numeric_readings` for a "
+                "figure instead."
             ),
         }
 
@@ -795,6 +1094,28 @@ MAX_ROWS = 200
 QUERY_STEP_LIMIT = 5_000_000
 
 
+def _read_only_connection(db_path: Path) -> sqlite3.Connection:
+    """A connection that cannot write and cannot run forever.
+
+    `mode=ro` is the actual guarantee — SQLite refuses the write at the file
+    layer, whatever a statement says — and the progress handler bounds runtime
+    so a bad query returns an error instead of hanging a chat turn. Both
+    reading paths share this, so neither can be given one lock and not the
+    other.
+    """
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=10.0)
+    conn.row_factory = sqlite3.Row
+    steps = {"n": 0}
+
+    def _guard() -> int:
+        steps["n"] += 1
+        return 1 if steps["n"] > QUERY_STEP_LIMIT // 1000 else 0
+
+    # Fires every 1000 VM instructions; returning non-zero aborts the query.
+    conn.set_progress_handler(_guard, 1000)
+    return conn
+
+
 def run_query(
     db_path: Path,
     sql: str,
@@ -833,19 +1154,10 @@ def run_query(
 
     capped = max(1, min(limit, MAX_ROWS))
     try:
-        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=10.0)
+        conn = _read_only_connection(db_path)
     except sqlite3.Error as exc:
         return QueryResult(error=f"could not open the index: {exc}")
 
-    conn.row_factory = sqlite3.Row
-    steps = {"n": 0}
-
-    def _guard() -> int:
-        steps["n"] += 1
-        return 1 if steps["n"] > QUERY_STEP_LIMIT // 1000 else 0
-
-    # Fires every 1000 VM instructions; returning non-zero aborts the query.
-    conn.set_progress_handler(_guard, 1000)
     try:
         cursor = conn.execute(text, tuple(params or ()))
         fetched = cursor.fetchmany(capped + 1)
@@ -866,4 +1178,208 @@ def run_query(
         columns=columns,
         rows=[dict(r) for r in fetched[:capped]],
         truncated=truncated,
+    )
+
+
+# ---------------------------------------------------------- full-text search
+
+
+@dataclass(frozen=True)
+class SearchHit:
+    """One matching document, with where it came from attached.
+
+    `body` is the search copy — whitespace normalised, several fields possibly
+    joined — so quote `snippet` or `body` as an extract and go to the table
+    `kind` names for the authoritative text.
+    """
+
+    doc_id: str
+    kind: str
+    ts: str
+    symbol: str
+    body: str
+    snippet: str
+    score: float
+
+
+@dataclass(frozen=True)
+class SearchResult:
+    hits: list[SearchHit] = field(default_factory=list)
+    # How many documents the non-text filters left for the search to run over.
+    # No hits in a corpus of 12,000 and no hits in a corpus of 0 are opposite
+    # findings, and a caller handed only an empty list reaches for the wrong
+    # one every time. Same rule as `has_cycles` and `can_grade_anything`.
+    documents_searched: int = 0
+    kinds_searched: list[str] = field(default_factory=list)
+    # What was actually handed to FTS5 after the terms were quoted, so an
+    # unexpected result can be explained rather than guessed at.
+    match_expression: str = ""
+    truncated: bool = False
+    error: str = ""
+
+    @property
+    def ok(self) -> bool:
+        return not self.error
+
+
+DEFAULT_HITS = 20
+MAX_HITS = 100
+# 12 tokens of context. Long enough to read as a sentence, short enough that a
+# page of hits is still a page.
+SNIPPET_TOKENS = 12
+
+
+def _match_expression(query: str) -> tuple[str, str]:
+    """Turn ordinary words into an FTS5 expression. Returns (expression, error).
+
+    Every term is quoted, so a colon, a hyphen or a stray bracket is searched
+    for rather than read as syntax — the same reasoning as binding a parameter
+    instead of interpolating it. Terms are ANDed, and a trailing `*` survives
+    as a prefix search because that is the one operator worth having by
+    default.
+
+    A term with no letter or digit in it is dropped: it tokenises to nothing,
+    and FTS5 answers an empty phrase with a syntax error that tells a reader
+    nothing about what they typed.
+    """
+    terms: list[str] = []
+    for token in query.split():
+        prefix = token.endswith("*")
+        core = token[:-1] if prefix else token
+        if not any(ch.isalnum() for ch in core):
+            continue
+        escaped = core.replace('"', '""')
+        terms.append(f'"{escaped}"*' if prefix else f'"{escaped}"')
+    if not terms:
+        return "", "no searchable words in that query"
+    return " ".join(terms), ""
+
+
+def search_history(
+    db_path: Path,
+    query: str,
+    *,
+    kinds: tuple[str, ...] | list[str] = (),
+    symbol: str = "",
+    days: int = 0,
+    limit: int = DEFAULT_HITS,
+    raw: bool = False,
+) -> SearchResult:
+    """Full-text search over everything the bot has written down.
+
+    `run_query` answers a question that can be written as SQL — a symbol, a
+    date range, a GROUP BY. This answers the other kind: "where did we ever
+    talk about a supply chain", "what did the gate say about buying power",
+    where the wanted thing is a phrase and the table it lives in is the part
+    nobody knows.
+
+    Safe for the same reasons open SQL is: the index is derived, rebuildable,
+    holds no credentials and is read by nothing that trades, and the connection
+    is opened read-only with a step limit. This builds its own SQL with bound
+    parameters, so a search term never reaches the statement guard — searching
+    for the word "delete" is a search, not a write.
+
+    Args:
+        query: Words to look for. Quoted and ANDed unless `raw`.
+        kinds: Restrict to these document kinds. An unknown one is an ERROR
+            rather than an empty result — a typo must not look like silence.
+        symbol: Restrict to documents filed against this symbol. Documents with
+            no symbol (headlines, cycle notes, events) are excluded by it.
+        days: Only documents stamped within the last N days. 0 means all
+            history, which is the point of the index existing.
+        limit: Maximum hits (default 20, capped at 100).
+        raw: Hand `query` to FTS5 as written, for `OR`, `NEAR` and explicit
+            phrases. A malformed expression comes back as an error.
+    """
+    if raw:
+        expression, problem = query.strip(), ""
+        if not expression:
+            problem = "empty search"
+    else:
+        expression, problem = _match_expression(query)
+    if problem:
+        return SearchResult(error=problem)
+
+    wanted = [k.strip().lower() for k in kinds if k.strip()]
+    unknown = [k for k in wanted if k not in SEARCHABLE_KINDS]
+    if unknown:
+        return SearchResult(
+            error=(
+                f"unknown document kind(s): {', '.join(unknown)}. "
+                f"Known kinds: {', '.join(SEARCHABLE_KINDS)}"
+            )
+        )
+
+    if not db_path.exists():
+        return SearchResult(error=f"no index at {db_path}; run `electrum-bot reindex`")
+
+    where: list[str] = []
+    params: list[Any] = []
+    if wanted:
+        where.append(f"d.kind IN ({','.join('?' * len(wanted))})")
+        params.extend(wanted)
+    if symbol.strip():
+        where.append("d.symbol = ?")
+        params.append(symbol.strip().upper())
+    if days > 0:
+        where.append("d.ts >= ?")
+        params.append((datetime.now(UTC) - timedelta(days=days)).isoformat())
+    clause = f" AND {' AND '.join(where)}" if where else ""
+
+    capped = max(1, min(limit, MAX_HITS))
+    try:
+        conn = _read_only_connection(db_path)
+    except sqlite3.Error as exc:
+        return SearchResult(error=f"could not open the index: {exc}")
+
+    try:
+        # bm25() is negative and more negative is a better match, which reads
+        # backwards to everyone. Negated here so `score` means what a reader
+        # assumes it means, and the ordering stays FTS5's own.
+        rows = conn.execute(
+            "SELECT d.doc_id, d.kind, d.ts, d.symbol, d.body, "
+            f"snippet(search, 0, '[', ']', '…', {SNIPPET_TOKENS}) AS snippet, "
+            "-bm25(search) AS score "
+            "FROM search JOIN documents d ON d.id = search.rowid "
+            f"WHERE search MATCH ?{clause} "
+            "ORDER BY score DESC LIMIT ?",
+            (expression, *params, capped + 1),
+        ).fetchall()
+        corpus = int(
+            conn.execute(
+                "SELECT COUNT(*) c FROM documents d"
+                + (f" WHERE {' AND '.join(where)}" if where else ""),
+                tuple(params),
+            ).fetchone()["c"]
+        )
+    except sqlite3.OperationalError as exc:
+        detail = str(exc)
+        if "interrupted" in detail.lower():
+            detail = "search took too long and was stopped"
+        elif detail.startswith("fts5:"):
+            detail = f"{detail} — see the FTS5 query syntax, or set raw=False"
+        return SearchResult(error=detail, kinds_searched=wanted or list(SEARCHABLE_KINDS))
+    except sqlite3.Error as exc:
+        return SearchResult(error=str(exc))
+    finally:
+        conn.set_progress_handler(None, 0)
+        conn.close()
+
+    return SearchResult(
+        hits=[
+            SearchHit(
+                doc_id=str(r["doc_id"]),
+                kind=str(r["kind"]),
+                ts=str(r["ts"]),
+                symbol=str(r["symbol"]),
+                body=str(r["body"]),
+                snippet=str(r["snippet"]),
+                score=float(r["score"]),
+            )
+            for r in rows[:capped]
+        ],
+        documents_searched=corpus,
+        kinds_searched=wanted or list(SEARCHABLE_KINDS),
+        match_expression=expression,
+        truncated=len(rows) > capped,
     )

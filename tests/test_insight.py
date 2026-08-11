@@ -19,7 +19,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from bot.audit import AuditLog
-from bot.insight import InsightIndex, run_query
+from bot.insight import InsightIndex, run_query, search_history
 from bot.models import (
     Decision,
     Direction,
@@ -636,3 +636,373 @@ def test_an_empty_watch_report_does_not_read_as_a_clean_record(tmp_path):
 
     assert report.can_grade_anything is False
     assert report.graded == 0
+
+
+# --------------------------------------------------------- full-text search
+
+
+def _fts_rows(index: InsightIndex, expression: str) -> int:
+    """Count index entries directly, which is the only way to see a double."""
+    with index._connect() as conn:
+        return int(
+            conn.execute(
+                "SELECT COUNT(*) c FROM search WHERE search MATCH ?", (expression,)
+            ).fetchone()["c"]
+        )
+
+
+def _integrity(index: InsightIndex) -> None:
+    """FTS5's own check that the index matches the content table.
+
+    Stronger than counting rows: it verifies every term position, so an entry
+    left behind by a mishandled update fails here even when the totals happen
+    to agree.
+    """
+    with index._connect() as conn:
+        conn.execute("INSERT INTO search(search) VALUES('integrity-check')")
+
+
+def _searched(index: InsightIndex, query: str, **kwargs: Any):
+    return search_history(index._path, query, **kwargs)
+
+
+def test_the_prose_of_a_cycle_is_searchable(tmp_path):
+    """One phrase from each kind of thing the loop writes down."""
+    index = build(
+        tmp_path,
+        cycle(
+            proposals=[proposal()],
+            verdicts=[RiskVerdict.reject("risk 1,131.00 exceeds the per-trade cap")],
+            assessments=[
+                SymbolAssessment(
+                    symbol="SPY",
+                    stance=Stance.WATCH,
+                    reasoning="Stretched below the 20-day on a tungsten squeeze.",
+                    waiting_for="SPY closing above 574.30",
+                )
+            ],
+            position_plans=[
+                PositionPlan(
+                    symbol="SPY",
+                    action=PositionAction.HOLD,
+                    reasoning="The thesis is intact while freight rates hold.",
+                    invalidation="A daily close below 561.20.",
+                )
+            ],
+            notes="Nothing else met the conditions.",
+            inputs=MarketInputs(headlines=["Cicada brood damages sesame producers"]),
+        ),
+    )
+
+    for phrase, kind in (
+        ("invalidated", "rationale"),
+        ("per-trade cap", "rejection"),
+        ("tungsten", "assessment"),
+        ("freight", "position_plan"),
+        ("conditions", "note"),
+        ("sesame", "headline"),
+    ):
+        result = _searched(index, phrase)
+        assert result.ok, result.error
+        assert [h.kind for h in result.hits] == [kind], phrase
+
+
+def test_an_event_is_searchable_by_its_name_as_well_as_its_payload(tmp_path):
+    """An event is often all name and no payload, and a corpus that could not
+    find one by name would be missing the only word it has."""
+    log = AuditLog(tmp_path / "audit")
+    log.record(cycle())
+    log.record_event("model_call_failed", {"error": "rationale ran 34 over the cap"})
+    log.record_event("loop_end", {})
+
+    index = InsightIndex(tmp_path / "insight.db", audit_dir=tmp_path / "audit")
+    index.refresh()
+
+    assert _searched(index, "loop_end").hits[0].kind == "event"
+    assert "34 over" in _searched(index, "rationale ran").hits[0].body
+
+
+def test_a_re_read_does_not_double_a_document(tmp_path):
+    """The load-bearing one for FTS.
+
+    Every other table here survives a re-read because it has a natural key and
+    `INSERT OR REPLACE` lands on it. An FTS5 index has no natural key: index
+    the same document twice and it is in there twice, ranked twice, counted
+    twice. `documents` carries the key and the index is derived from it by
+    trigger, which is what makes the offset an optimisation here too.
+    """
+    index = build(
+        tmp_path,
+        cycle(
+            30,
+            assessments=[
+                SymbolAssessment(
+                    symbol="SPY",
+                    stance=Stance.WATCH,
+                    reasoning="A distinctive phrase about tungsten.",
+                )
+            ],
+        ),
+    )
+    assert _fts_rows(index, "tungsten") == 1
+
+    # Forget the offsets, keep the rows: every line is read a second time.
+    with index._connect() as conn:
+        conn.execute("DELETE FROM source_files")
+    index.refresh()
+
+    assert _fts_rows(index, "tungsten") == 1
+    assert len(rows(index, "SELECT id FROM documents")) == 1
+    _integrity(index)
+
+
+def test_a_changed_body_replaces_its_index_entry_rather_than_joining_it(tmp_path):
+    """The trap the upsert exists for.
+
+    `INSERT OR REPLACE` resolves a conflict by DELETING the old row, and the
+    delete trigger does not fire for it unless recursive triggers are on — so
+    the old index entry would survive beside the new one, and the document
+    would answer to text it no longer contains.
+    """
+    index = build(
+        tmp_path,
+        cycle(assessments=[
+            SymbolAssessment(symbol="SPY", stance=Stance.PASS, reasoning="about tungsten"),
+        ]),
+    )
+    with index._connect() as conn:
+        conn.execute("UPDATE documents SET body = 'about lithium' WHERE body LIKE '%tungsten%'")
+
+    assert _fts_rows(index, "tungsten") == 0
+    assert _fts_rows(index, "lithium") == 1
+    _integrity(index)
+
+
+def test_a_headline_seen_every_cycle_is_one_document_stamped_when_it_arrived(tmp_path):
+    """The 30-minute cache re-serves a story, so a per-cycle document would put
+    it in the index ninety-six times over — ranked ninety-six times, crowding
+    out everything said once."""
+    headline = "[SPY] Tungsten shortage widens"
+    index = build(
+        tmp_path,
+        cycle(45, inputs=MarketInputs(headlines=[headline])),
+        cycle(30, inputs=MarketInputs(headlines=[headline])),
+        cycle(15, inputs=MarketInputs(headlines=[headline])),
+    )
+
+    hits = _searched(index, "tungsten").hits
+    assert len(hits) == 1
+    assert hits[0].ts == (NOW - timedelta(minutes=45)).isoformat()
+    # The sighting count is untouched by any of this.
+    assert rows(index, "SELECT cycles FROM news")[0]["cycles"] == 3
+
+
+def test_a_rendered_reading_line_is_deliberately_not_in_the_corpus(tmp_path):
+    """It is searchable text and always was — but it is a TEMPLATE with figures
+    substituted, so every row carries the same words and none of them tells one
+    row from another, while being the largest thing in the index by volume. The
+    question it answers is answered EXACTLY by `numeric_readings`."""
+    index = build(
+        tmp_path,
+        cycle(
+            inputs=MarketInputs(
+                indicators={"SPY": "close 580.12, sma20 574.30, atr 6.41"},
+                readings={"SPY": _readings("SPY", 580.12).readings["SPY"]},
+            )
+        ),
+    )
+
+    assert _searched(index, "sma20").hits == []
+    # Still there, and still queryable the exact way.
+    assert rows(index, "SELECT summary FROM readings")[0]["summary"].startswith("close")
+    assert rows(index, "SELECT close FROM numeric_readings")[0]["close"] == 580.12
+
+
+def test_a_search_term_is_a_word_and_never_syntax(tmp_path):
+    """`run_query`'s statement guard refuses the token `delete` anywhere in a
+    query, which is right for open SQL and would be absurd here. This builds
+    its own SQL with bound parameters, so the guard never sees a search term."""
+    index = build(
+        tmp_path,
+        cycle(notes="The operator asked us to delete the resting order."),
+    )
+
+    result = _searched(index, "delete")
+    assert result.ok, result.error
+    assert len(result.hits) == 1
+
+    # And a term full of syntax is a miss rather than an error or a write.
+    hostile = _searched(index, "'; DROP TABLE cycles; --")
+    assert hostile.ok, hostile.error
+    assert hostile.hits == []
+    assert len(rows(index, "SELECT ts FROM cycles")) == 1
+
+
+def test_matching_is_stemmed_and_prefixes_are_honoured(tmp_path):
+    index = build(
+        tmp_path,
+        cycle(assessments=[
+            SymbolAssessment(symbol="SPY", stance=Stance.PASS,
+                             reasoning="Price reclaimed the level it lost."),
+        ]),
+    )
+    assert len(_searched(index, "reclaim").hits) == 1     # porter stemming
+    assert len(_searched(index, "reclaim*").hits) == 1    # explicit prefix
+
+
+def test_a_query_with_no_words_in_it_is_refused(tmp_path):
+    """An all-punctuation term tokenises to nothing, and FTS5 answers an empty
+    phrase with a syntax error that tells a reader nothing about what they
+    typed."""
+    index = build(tmp_path, cycle(notes="anything"))
+    result = _searched(index, "!!! ???")
+    assert not result.ok
+    assert "no searchable words" in result.error
+
+
+def test_a_malformed_raw_expression_is_reported_rather_than_raised(tmp_path):
+    """FTS5 has its own syntax, and a chat surface must not render a stack
+    trace at somebody who typed a stray quote."""
+    index = build(tmp_path, cycle(notes="anything"))
+
+    for expression in ('nope:', 'unbalanced "', "NEAR("):
+        result = _searched(index, expression, raw=True)
+        assert not result.ok, expression
+        assert result.error
+
+    # And the operators raw mode exists for do work.
+    index2 = build(
+        tmp_path / "two",
+        cycle(notes="tungsten"),
+        cycle(15, notes="sesame"),
+    )
+    both = _searched(index2, "tungsten OR sesame", raw=True)
+    assert both.ok, both.error
+    assert len(both.hits) == 2
+
+
+def test_an_unknown_kind_is_refused_rather_than_matching_nothing(tmp_path):
+    """A typo must not be indistinguishable from silence. Same rule as
+    `has_cycles`: an empty result is a finding, not an error message."""
+    index = build(tmp_path, cycle(notes="tungsten"))
+
+    result = _searched(index, "tungsten", kinds=["dreams"])
+    assert not result.ok
+    assert "dreams" in result.error
+    assert "rationale" in result.error  # it names what IS known
+
+    narrowed = _searched(index, "tungsten", kinds=["note"])
+    assert narrowed.ok
+    assert narrowed.kinds_searched == ["note"]
+
+
+def test_an_empty_result_says_how_big_the_corpus_was(tmp_path):
+    """No hits in a corpus of thousands and no hits in a corpus of nothing are
+    opposite findings, and a caller handed only an empty list reaches for the
+    wrong one every time."""
+    empty = InsightIndex(tmp_path / "insight.db", audit_dir=tmp_path / "nothing")
+    result = search_history(empty._path, "tungsten")
+    assert result.ok
+    assert result.hits == []
+    assert result.documents_searched == 0
+
+    index = build(tmp_path / "two", cycle(notes="something else entirely"))
+    miss = _searched(index, "tungsten")
+    assert miss.ok
+    assert miss.hits == []
+    assert miss.documents_searched == 1
+
+
+def test_a_symbol_filter_is_exact_and_excludes_the_unattributed(tmp_path):
+    index = build(
+        tmp_path,
+        cycle(
+            proposals=[proposal("AAPL")],
+            verdicts=[RiskVerdict.approve()],
+            notes="A tungsten note filed against no symbol.",
+            inputs=MarketInputs(headlines=["Tungsten shortage widens"]),
+            assessments=[
+                SymbolAssessment(symbol="MSFT", stance=Stance.PASS,
+                                 reasoning="Tungsten exposure is small here."),
+            ],
+        ),
+    )
+
+    assert len(_searched(index, "tungsten").hits) == 3
+    only = _searched(index, "tungsten", symbol="msft")  # case is forgiven
+    assert [h.symbol for h in only.hits] == ["MSFT"]
+
+
+def test_search_results_are_bounded_and_say_when_they_were_cut(tmp_path):
+    index = build(
+        tmp_path,
+        *[cycle(m, notes=f"tungsten cycle {m}") for m in range(1, 11)],
+    )
+    result = _searched(index, "tungsten", limit=3)
+    assert len(result.hits) == 3
+    assert result.truncated is True
+
+
+def test_search_reports_a_missing_index_rather_than_raising(tmp_path):
+    result = search_history(tmp_path / "absent.db", "tungsten")
+    assert not result.ok
+    assert "reindex" in result.error
+
+
+def test_a_schema_bump_drops_the_search_index_rather_than_leaving_it_stale(tmp_path):
+    """The FTS table owns four shadow tables of its own, so dropping the corpus
+    out from under it is not enough — and the failure is subtle rather than
+    loud.
+
+    `documents.id` restarts at 1 after a rebuild, so a surviving index entry
+    ends up filed against a REUSED rowid. The old term then answers with the
+    new document's text: a phrase attributed to a record that never contained
+    it, which is the confident-wrong-answer failure this repository exists to
+    refuse. Measured: FTS5's own `integrity-check` does NOT catch it, so this
+    test is the only thing standing there.
+    """
+    log = AuditLog(tmp_path / "audit")
+    log.record(cycle(30, notes="A tungsten cycle."))
+    index = InsightIndex(tmp_path / "insight.db", audit_dir=tmp_path / "audit")
+    index.refresh()
+    assert len(_searched(index, "tungsten").hits) == 1
+
+    # The log is replaced by different text and the schema version moves, which
+    # is exactly what a version bump is for.
+    for path in (tmp_path / "audit").glob("*.jsonl"):
+        path.unlink()
+    AuditLog(tmp_path / "audit").record(cycle(15, notes="A lithium cycle."))
+    with index._connect() as conn:
+        conn.execute("UPDATE meta SET value = '0' WHERE key = 'schema_version'")
+
+    reopened = InsightIndex(tmp_path / "insight.db", audit_dir=tmp_path / "audit")
+    assert _searched(reopened, "lithium").hits == []  # dropped with the rest
+    reopened.refresh()
+
+    assert len(_searched(reopened, "lithium").hits) == 1
+    assert _searched(reopened, "tungsten").hits == []
+    _integrity(reopened)
+
+
+def test_a_rebuild_produces_the_same_index_as_an_incremental_pass(tmp_path):
+    index = build(tmp_path, cycle(30, notes="tungsten"), cycle(15, notes="sesame"))
+    before = {(h.doc_id, h.body) for h in _searched(index, "tungsten OR sesame", raw=True).hits}
+
+    index.rebuild()
+
+    after = {(h.doc_id, h.body) for h in _searched(index, "tungsten OR sesame", raw=True).hits}
+    assert after == before
+    _integrity(index)
+
+
+def test_the_corpus_is_described_so_a_caller_can_narrow_a_search(tmp_path):
+    index = build(tmp_path, cycle(notes="tungsten"))
+    described = index.describe()
+
+    assert "documents" in described["tables"]
+    assert "search" in described["tables"]
+    assert described["row_counts"]["documents"] == 1
+    # Counting an external-content FTS table means reconstructing every row out
+    # of `documents`, which already answers it.
+    assert "search" not in described["row_counts"]
+    assert "assessment" in described["searchable_kinds"]
