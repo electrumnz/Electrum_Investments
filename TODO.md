@@ -321,7 +321,7 @@ Windows to test in: after hours 16:00–20:00 New York, pre-market 04:00–09:30
 
 ---
 
-## 2. The dream vault — commissioned, and the permission half is the risky half
+## 2. LARGELY BUILT — the dream vault, and the permission half is the risky half
 
 The dreamer produces hypotheses and they currently reach nobody. The operator
 wants them to become something the trading agent can take up, with the two
@@ -783,7 +783,15 @@ closed and nothing about the exposure changed.
 
 ---
 
-## 3. Crypto's own total-risk ceiling
+## 3. BUILT — crypto's own total-risk ceiling
+
+**Shipped.** `max_class_total_risk_pct`, set to 0.5% for crypto, with three
+properties each pinned by a test that proves it REJECTS: unrealised profit does
+not offset open risk; at the cap an existing position must be CLOSED rather than
+the new one sized down; and an unknown in the class REFUSES rather than counting
+as zero. That last one is the first gate in the repo that fails closed on
+missing data, and it is a deliberate departure from the usual "report the gap".
+
 
 The operator's rule, verbatim: *"if crypto is enabled. crypto shall not consume
 more that 0.5% of equity in risk. shall not hold more than 0.5% of risk in
@@ -814,7 +822,7 @@ Fails closed.
 
 ---
 
-## 4. The trading agent is in control of the live position, and its moves are recorded
+## 4. BUILT — the agent controls the live position, and its moves are recorded
 
 Two halves, and only the second is new ground.
 
@@ -951,7 +959,7 @@ acting**, which needs item 6 to be worth reading at all.
 
 ---
 
-## 6. `WorkingOrder` has no `stop_price`, so a resting stop cannot be read
+## 6. RESOLVED — `WorkingOrder.stop_price`, and the stop is readable now
 
 Promoted out of CURRENT STATE because it now blocks item 5.
 
@@ -1044,7 +1052,7 @@ a mock broker, and the next person to see it should not chase that.
 
 ---
 
-## 8. The Board's scrolling, and the rest of the UI audit
+## 8. LARGELY DONE — the Board's scrolling, and the rest of the UI audit
 
 *"on board page we have this weird scrolling stuff where open positions and
 pending orders are."*
