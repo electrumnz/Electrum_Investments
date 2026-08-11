@@ -53,7 +53,7 @@ rather than at read time. A stale figure presented as current is the failure
 this repository exists to prevent, and a page that has to work out for itself
 how old its numbers are will eventually get it wrong.
 
-## Open risk still comes from the journal
+## Open risk still comes from the journal, and so do the three figures beside it
 
 `AccountSnapshot.open_risk_usd` is what the 2% total-risk cap counts against and
 the broker cannot report it — Alpaca holds stop-losses as separate orders, so it
@@ -62,6 +62,19 @@ snapshot has to fill it in from the journal, and this is now one of those paths.
 `LivePoller` therefore takes its source as a **required** argument with no
 default, because a default of zero is precisely the bug the argument exists to
 prevent.
+
+**It takes `reconcile.apply_journal_state` rather than `Journal.open_risk_usd`,
+and the difference is structural rather than tidiness.** That function derives
+four figures from ONE journal read — the portfolio total, the per-symbol
+breakdown the class caps need, the planned stop level per symbol, and the list
+of held positions whose risk is unknowable. This poller used to call
+`journal.open_risk_usd` and fill in the total alone, leaving the other three at
+their empty defaults. Nothing here gated and no cap was affected, so it was not
+a live fault — it becomes one the moment a surface renders a class's risk,
+because an empty breakdown reads as *this class risks nothing*, which is the
+missing-versus-zero rule this repository keeps re-learning. Handing over the
+whole snapshot means the poller structurally cannot fill one figure and forget
+the rest.
 
 ## A failed read degrades, it never ends the loop
 
@@ -519,7 +532,7 @@ class LivePoller:
         self,
         *,
         broker_factory: Callable[[], Broker],
-        open_risk_usd: Callable[[], float],
+        apply_journal_state: Callable[[AccountSnapshot], AccountSnapshot],
         interval_seconds: float = POLL_INTERVAL_SECONDS,
         slow_after_seconds: float = SLOW_AFTER_SECONDS,
         stale_after_seconds: float = STALE_AFTER_SECONDS,
@@ -529,16 +542,21 @@ class LivePoller:
         tradeable: Sequence[str] = (),
         ticker_refresh_seconds: float = 60.0,
     ) -> None:
-        """`open_risk_usd` has no default, and that is the point.
+        """`apply_journal_state` has no default, and that is the point.
 
-        It is `Journal.open_risk_usd` in every real deployment. Giving it a
-        default would mean a caller that forgot it still worked, producing
-        snapshots whose open risk was silently zero — which is the bug fixed in
-        `14b88c8` arriving in a new place. With no default the constructor
-        raises instead, at import-and-wire time, where it is cheap to notice.
+        It is `reconcile.apply_journal_state` bound to the journal in every real
+        deployment. Giving it a default would mean a caller that forgot it still
+        worked, producing snapshots whose open risk was silently zero — which is
+        the bug fixed in `14b88c8` arriving in a new place. With no default the
+        constructor raises instead, at import-and-wire time, where it is cheap
+        to notice.
+
+        It takes the whole snapshot rather than returning one number so that
+        every figure the journal owns arrives together. See the module
+        docstring.
         """
         self._broker_factory = broker_factory
-        self._open_risk_usd = open_risk_usd
+        self._apply_journal_state = apply_journal_state
         self._interval_seconds = interval_seconds
         self._idle_stop_after_seconds = idle_stop_after_seconds
         self._clock = clock
@@ -688,12 +706,16 @@ class LivePoller:
         broker = self._connected_broker()
         account = broker.get_account()
 
-        # The one figure on this snapshot that cannot come from the broker.
-        # Alpaca holds stop-losses as separate orders, so it does not know what
-        # an open position was designed to lose; the journal recorded the
-        # planned stop and is the only place that does. Left unset, the 2%
-        # total-risk cap has nothing to count and the page reports a risk of
-        # zero against a portfolio that has plenty.
+        # The figures on this snapshot that cannot come from the broker. Alpaca
+        # holds stop-losses as separate orders, so it does not know what an open
+        # position was designed to lose; the journal recorded the planned stop
+        # and is the only place that does. Left unset, the 2% total-risk cap has
+        # nothing to count and the page reports a risk of zero against a
+        # portfolio that has plenty.
+        #
+        # The whole snapshot goes in rather than one number coming out, so the
+        # per-symbol breakdown, the planned stops and the unknown-risk list
+        # arrive with the total instead of staying empty behind it.
         #
         # A failure here fails the WHOLE read rather than degrading like the
         # orders below, and that is deliberate. `open_risk_usd` is a plain
@@ -701,7 +723,7 @@ class LivePoller:
         # zero and hoping every renderer checks a flag beside it — and a leaked
         # zero here is the exact figure that must never be invented. No board at
         # all, clearly labelled, beats a board reporting no risk.
-        account.open_risk_usd = self._open_risk_usd()
+        account = self._apply_journal_state(account)
 
         orders: list[WorkingOrder] = []
         orders_unavailable = False
@@ -1065,9 +1087,17 @@ def build_poller(
     # `WatchlistRules`. No rules means no tape rather than a guessed one.
     watch = getattr(getattr(rules, "watchlist", None), "symbols", []) or []
     enabled = getattr(getattr(rules, "watchlist", None), "enabled", False)
+    def journal_state(snapshot: AccountSnapshot) -> AccountSnapshot:
+        # Imported here rather than at module scope: `..reconcile` pulls in the
+        # broker adapters and the journal writer, and this module is imported by
+        # every web process whether or not a browser ever subscribes.
+        from ..reconcile import apply_journal_state
+
+        return apply_journal_state(snapshot, journal)
+
     return LivePoller(
         broker_factory=factory,
-        open_risk_usd=journal.open_risk_usd,
+        apply_journal_state=journal_state,
         interval_seconds=interval_seconds,
         clock=clock,
         watchlist=watch if enabled else [],

@@ -35,6 +35,7 @@ from bot.models import (
     Trade,
     WorkingOrder,
 )
+from bot.reconcile import apply_journal_state
 from bot.web import live
 from bot.web.live import LivePoller, LiveSnapshot, LiveState, LiveStatus
 
@@ -103,10 +104,15 @@ def journal(tmp_path) -> Journal:
     return Journal(tmp_path / "journal.db")
 
 
+def _with_risk(snapshot: AccountSnapshot, open_risk: float) -> AccountSnapshot:
+    snapshot.open_risk_usd = open_risk
+    return snapshot
+
+
 def _poller(broker: MockBroker, *, open_risk: float = 0.0, **kwargs: Any) -> LivePoller:
     return LivePoller(
         broker_factory=lambda: broker,
-        open_risk_usd=lambda: open_risk,
+        apply_journal_state=lambda s: _with_risk(s, open_risk),
         **kwargs,
     )
 
@@ -215,7 +221,7 @@ def test_open_risk_comes_from_the_journal_not_the_broker(broker, journal):
 
     poller = LivePoller(
         broker_factory=lambda: broker,
-        open_risk_usd=journal.open_risk_usd,
+        apply_journal_state=lambda s: apply_journal_state(s, journal),
     )
     poller.poll_once()
 
@@ -223,6 +229,36 @@ def test_open_risk_comes_from_the_journal_not_the_broker(broker, journal):
     assert snapshot is not None
     assert snapshot.account.open_risk_usd == pytest.approx(50.0)
     assert poller.payload()["account"]["open_risk_usd"] == pytest.approx(50.0)
+
+
+def test_the_poller_fills_every_figure_the_journal_owns(broker, journal):
+    """One journal read, four figures, and the other three used to stay empty.
+
+    The poller called `journal.open_risk_usd` and assigned the total alone,
+    leaving `open_risk_by_symbol`, `planned_stop_by_symbol` and
+    `symbols_with_unknown_risk` at their defaults. Nothing on the web side reads
+    them yet, so it was not a live fault — it becomes one the first time a
+    surface renders a class's risk, because an empty breakdown reads as *this
+    class risks nothing*. That is the missing-versus-zero rule, and the fix is
+    structural: the poller hands over the whole snapshot, so it cannot fill one
+    figure and forget the rest.
+    """
+    _open_trade(journal, risk_per_share=5.0, qty=10)
+
+    poller = LivePoller(
+        broker_factory=lambda: broker,
+        apply_journal_state=lambda s: apply_journal_state(s, journal),
+    )
+    poller.poll_once()
+
+    snapshot = poller.latest()
+    assert snapshot is not None
+    account = snapshot.account
+    assert account.open_risk_by_symbol == {"SPY": pytest.approx(50.0)}
+    assert account.planned_stop_by_symbol == {"SPY": pytest.approx(575.0)}
+    # The total is the sum of the breakdown rather than a second reading of the
+    # journal, so the two can never describe different sets of open trades.
+    assert account.open_risk_usd == pytest.approx(sum(account.open_risk_by_symbol.values()))
 
 
 def test_the_open_risk_source_cannot_be_forgotten(broker):
@@ -246,10 +282,10 @@ def test_an_unreadable_journal_fails_the_whole_read_rather_than_showing_no_risk(
     labelled, is the better failure.
     """
 
-    def locked() -> float:
+    def locked(snapshot: AccountSnapshot) -> AccountSnapshot:
         raise RuntimeError("database is locked")
 
-    poller = LivePoller(broker_factory=lambda: broker, open_risk_usd=locked)
+    poller = LivePoller(broker_factory=lambda: broker, apply_journal_state=locked)
     poller.poll_once()
 
     payload = poller.payload()
