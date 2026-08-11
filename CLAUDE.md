@@ -2654,10 +2654,24 @@ for a while and agree with them.
 
 ## What is next
 
-`TODO.md` holds it, ordered by what is actually blocking. The top item is the
-one that cost this session: **an entry cannot both carry a broker-side stop and
-fill outside the regular session**, so "get a position on now" during the
-pre-market needs an unbracketed execution path that does not exist yet.
+`TODO.md` holds it, ordered by what is actually blocking.
+
+**Every code item on it is now closed.** What is left needs something a session
+in a container does not have:
+
+- **A deploy.** The droplet still runs code from partway through the session,
+  and `deploy/bootstrap.sh` also closes the `souls/` ownership gap — the safety
+  rails were writable by the service account they restrain.
+- **A live pre-market window**, to verify the one documented-but-untested claim
+  in the order path: Alpaca's docs say `extended_hours` is refused on a bracket
+  and an OTO, and no such order has ever been sent from here to watch it be
+  refused. `allow_extended_hours_fills` is built and off on every class; that
+  check comes before it is ever turned on. If Alpaca **downgrades** rather than
+  rejecting, a stop goes missing with no error.
+- **A subscription** (item 11, the X feed) and **a control panel** (the
+  DigitalOcean tier question).
+- **One open design question** — whether a dream is gradeable after adoption,
+  and how to do that without grading P&L by accident.
 
 The list below is the older deferred set and is duplicated there.
 

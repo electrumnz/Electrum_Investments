@@ -349,7 +349,31 @@ number.
 
 ---
 
-## 1. Fill an entry OUT OF HOURS — the blocking one
+## 1. BUILT and shipped OFF — fill an entry OUT OF HOURS
+
+**Shipped in `40b25c4`.** `broker.plan_extended_hours_fill` decides from config
+plus the clock, `config/rules.yaml` carries `allow_extended_hours_fills` per
+instrument class, and it is **false** on every class. Throwing the switch is a
+config edit and a deliberate one, which is the whole point: it trades away rule
+3's broker-side guarantee, and that is the operator's call to make knowingly.
+
+`ExtendedHoursPlan` has **three** states rather than two, and the third is what
+stops the switch being inert. `opted_in` is true the moment a class carries the
+flag, whether or not this particular moment qualifies — so an operator who
+turned it on and saw nothing happen is told the session is the reason, instead
+of being left to wonder whether the flag works.
+
+**One thing is still unverified and it is the documented half.** Alpaca's docs
+say `extended_hours` is not accepted on a bracket or an OTO, and no
+extended-hours bracket has ever been sent from here to watch it be refused.
+Before anyone turns the flag on for real, send one and confirm Alpaca
+**rejects** it rather than silently dropping the flag. If it downgrades instead,
+everything below is still true and the failure mode is worse, because a stop
+would go missing with no error. That needs a live pre-market window and the
+operator's account, so it cannot be done from a container.
+
+The reasoning behind the design, kept because it is what makes the trade-off
+legible:
 
 **The operator asked for a position ON in the pre-market and got a resting
 order instead, which then filled after the 09:30 open.** That is not a bug in
@@ -363,13 +387,7 @@ from this codebase to watch it be refused. **The consequence is measured:** 21
 SPY went in at 09:23:47 New York and sat at `filled_qty=0.0` through the
 pre-market, then filled in the regular session.
 
-First thing to do when building this is verify the documented half: send one
-extended-hours bracket and confirm Alpaca rejects it rather than silently
-dropping the flag. If it downgrades instead of rejecting, everything above is
-still true and the failure mode is worse, because a stop would go missing with
-no error.
-
-**What to build:** a second execution path. Plain `LimitOrderRequest` with
+**What was built:** a second execution path. Plain `LimitOrderRequest` with
 `extended_hours=True` and **no bracket**, gated by a per-instrument
 `allow_extended_hours_fills` flag in `config/rules.yaml`, default off.
 
@@ -388,7 +406,8 @@ when the regular session reopens.
 config plus the clock, not a property of a proposal. `OrderProposal` should gain
 no field for it.
 
-Windows to test in: after hours 16:00–20:00 New York, pre-market 04:00–09:30.
+Windows to test in when the flag is first turned on: after hours 16:00–20:00
+New York, pre-market 04:00–09:30.
 
 ---
 
@@ -841,16 +860,50 @@ is one of its two powers. Handing a dream back moved $1,200 of live class risk
 out of a $1,500 class cap and turned a rejection into an approval with nothing
 closed and nothing about the exposure changed.
 
-### Still to decide
+### DECIDED — the reasoning does reach the prompt, last, and always with its badge
 
-- Whether an adopted dream's reasoning should reach the trading model's
-  **prompt** as context, or only its symbol permission. Feeding a speculative
-  chain into the thing that sizes positions is the direction the whole repo
-  leans away from; feeding it nothing makes the adoption invisible to the
-  reasoner acting on it. Not resolved.
-- Whether a dream should be gradeable after adoption — did the prophecy come
-  true? — and if so, that it grades the PLAN and never the P&L, beside
-  `triggers.py` and `DreamLedger` rather than beside `metrics.py`.
+The question was whether an adopted dream's chain should reach the trading
+model's **prompt** or only its symbol permission. Feeding a speculative chain
+into the thing that sizes positions is the direction this repository leans away
+from; feeding it nothing leaves the adoption invisible to the reasoner acting
+on it — a symbol the gate permits, with no quote, no history and no explanation.
+That second failure is the one that actually happened, and it made the whole
+feature inert.
+
+`grants.brief_grants` is the answer, with four properties holding it:
+
+- **The system prompt carries the RULE and never the symbols.** It is cached
+  for an hour and built once at loop start, so an interpolated grant would be
+  stale within the day. The per-cycle context is the only place that can be
+  current.
+- **The chain never appears without its badge.** `Verification` and
+  `weakest_hop` render adjacent to the hops. An unqualified causal chain in a
+  prompt reads as established fact, and `Hop.checked` exists because some of
+  those sentences were invented.
+- **The grant block renders LAST**, after every measured figure. It is the one
+  speculative section in the document, and a model that reads a story before it
+  has seen a number anchors on the story.
+- **It fails in the opposite direction to everything else here**: on a store
+  failure it keeps the symbols and drops only the reasoning, because the
+  symbols come from the resolution the gate already holds. Dropping them would
+  leave the gate permitting something the model was never told about.
+
+### Still to decide — one question
+
+- **Whether a dream should be gradeable after adoption.** Did the prophecy come
+  true? If it is built, it grades the PLAN and never the P&L, and it belongs
+  beside `triggers.py` and `DreamLedger` rather than beside `metrics.py` — those
+  measure reasoning quality, which is true regardless of how a trade went and
+  has no outcome sample to overfit to.
+
+  **Item 0b changed the shape of this rather than answering it.** A prophecy's
+  conditions are now settled either by code or by a person, and both answers
+  are recorded with who said it and when — so "did the claim hold" is already
+  on file for every condition. What is missing is the question one level up:
+  the dream's own claim, after the position it justified has been and gone.
+  Note the trap before building it: an adopted dream that was handed back
+  because the trade went badly would grade as a failed prophecy, which is P&L
+  wearing a plan's clothes.
 
 ---
 
