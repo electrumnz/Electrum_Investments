@@ -55,7 +55,7 @@ from ..dreaming import (
     DreamSummary,
 )
 from ..journal import Journal
-from ..market_clock import market_state
+from ..market_clock import MarketState, market_state
 from ..metrics import build_report
 from ..models import AccountSnapshot, WorkingOrder
 from ..options import alerts_for_positions
@@ -324,7 +324,21 @@ def build_app(
             snapshot.orders_unavailable,
         )
 
-    def _tape() -> str:
+    def _market_now() -> MarketState:
+        """The venue's phase and the gate's window, resolved once.
+
+        The tape and the Board's "what it will do right now" both need it, and
+        both must get the SAME reading — two `market_state` calls a few
+        milliseconds apart can straddle a boundary and put a strip saying the
+        session opens in a moment above a card saying it has opened.
+        """
+        equities = resolved_rules.instruments.get("us_equity")
+        return market_state(
+            datetime.now(UTC),
+            windows_by_day=equities.windows_by_day if equities else None,
+        )
+
+    def _tape(market: MarketState) -> str:
         """The ticker strip, on EVERY page rather than only the Board.
 
         That is a deliberate change to a property this module used to have: a
@@ -342,13 +356,9 @@ def build_app(
         watchlist = resolved_rules.watchlist
         if not watchlist.enabled or not watchlist.symbols:
             return ""
-        equities = resolved_rules.instruments.get("us_equity")
         snapshot = resolved_poller.latest()
         return render.ticker_tape(
-            market_state(
-                datetime.now(UTC),
-                windows_by_day=equities.windows_by_day if equities else None,
-            ),
+            market,
             # No reading yet renders the symbols with no quote rather than an
             # empty strip: a cold start should look like a tape waiting for
             # prices, not like a watchlist nobody configured.
@@ -365,10 +375,12 @@ def build_app(
             calendar=resolved_poller.calendar,
         )
 
-    def _page(title: str, active: str, body: str) -> str:
+    def _page(
+        title: str, active: str, body: str, market: MarketState | None = None
+    ) -> str:
         return render.shell(
             title, active, body, env=resolved_env, exposed=sessions.required,
-            tape=_tape(),
+            tape=_tape(market or _market_now()),
         )
 
     @app.get("/login", response_class=HTMLResponse)
@@ -462,6 +474,8 @@ def build_app(
             orders_unavailable,
         ) = _account_orders_prices()
         open_trades = resolved_journal.open_trades()
+        # One reading for the strip and for the card below it. See `_market_now`.
+        market = _market_now()
 
         if account is None:
             # Cold start: no reading yet, so there is nothing to reconcile the
@@ -482,7 +496,9 @@ def build_app(
                 + render.board(
                     None, resolved_rules, [], open_trades,
                     resolved_journal.get_stand_down(), 0, env=resolved_env,
+                    market=market,
                 ),
+                market,
             )
 
         journalled = {t.symbol for t in open_trades}
@@ -546,8 +562,9 @@ def build_app(
                 actions=resolved_journal.position_actions(limit=200),
                 orders_degraded=orders_unavailable,
             ),
+            market=market,
         )
-        return _page("Board", "/", body)
+        return _page("Board", "/", body, market)
 
     @app.get("/decisions", response_class=HTMLResponse)
     def decisions(page: str = "1") -> str:

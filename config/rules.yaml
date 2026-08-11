@@ -186,15 +186,85 @@ instruments:
     # the operator's job and is the genuinely hard part.
     strategy: mean_reversion
 
-    # Liquid, heavily covered US large caps and index ETFs. ETFs are the same
-    # asset class as equities at Alpaca, so they need no separate entry.
+    # ---------------------------------------------------------------------
+    # WHAT THE BOT MAY OPEN A POSITION IN. This is a PERMISSION, not a view.
+    #
+    # Widened from six names to twenty on the operator's decision: *"16 symbols
+    # was just for the ticker tape, 16 favourite symbols, we can open the
+    # approved instruments up way more than that."* It is a deliberate edit to
+    # a permission and belongs in a commit of its own, never as a side effect of
+    # a display change — and it is deliberately NOT the tape's list. See the
+    # rule below and the `watchlist:` block at the foot of this file.
+    #
+    # WHAT IT COSTS, because the cost is linear and somebody has to say the
+    # number. The loop runs ONE network call per symbol per feed per cycle:
+    # `fetch_market_ticks` on every cycle, `fetch_indicators` and
+    # `fetch_intraday` on the cycles that ask the model. Measured, on the
+    # 15-minute interval and this class's 16-hour weekday window:
+    #
+    #   quotes    20 x 96 = 1,920 calls a day, every day
+    #   bars      2 x 20 x 64 = 2,560 calls a weekday, none at the weekend
+    #   prompt    ~222 input tokens per symbol per call, measured by rendering
+    #             `build_market_context` over 1..24 synthetic symbols
+    #
+    # So the fourteen extra names cost roughly 3,100 extra input tokens on each
+    # of ~64 model calls a weekday. Marketaux and Finnhub do NOT scale with
+    # this — both send the symbol list as one query parameter — but the ten
+    # headlines Marketaux returns now cover twenty names instead of six, so
+    # per-symbol news coverage genuinely thins. That is a real cost, not a
+    # rounding error, and it is the reason this list is not fifty.
+    #
+    # THE RULE A NAME HAS TO MEET, which is the durable half of this block:
+    #
+    #   1. It is a bare US ticker, so `models.class_key_for_symbol` files it
+    #      under `us_equity` — the same rule `AlpacaBroker.place_order` routes
+    #      on. A symbol listed under a class it cannot belong to is the audited
+    #      bypass in `grants.py` arriving through the config file instead, so
+    #      `tests/test_config.py` fails the build if any entry here disagrees
+    #      with its own block. A test rather than a load-time refusal: refusing
+    #      to start denies at the least useful moment.
+    #   2. Deep, continuous liquidity. Alpaca's free feed is an IEX sample
+    #      rather than consolidated tape, so a thin name gives a thin sample and
+    #      the spread becomes the trade.
+    #   3. At least 200 sessions of history, or `sma_200` renders `unavailable`
+    #      and half the indicator block is missing on every cycle.
+    #   4. NO STRUCTURAL DECAY. This class trades `mean_reversion`, and a
+    #      volatility ETF rolling down the futures curve or a commodity fund
+    #      bleeding in contango is not cheap because it overshot — it is cheap
+    #      because that is what it does. VIXY and USO are on the tape for
+    #      exactly that reason and are deliberately absent here.
+    #   5. The LIQUID CORE only. Thematic, single-supplier and second-order
+    #      names are the dream vault's route: an adopted dream grants one symbol,
+    #      with a chain that argued for it and a clock that withdraws it. Adding
+    #      such a name here would be adoption with no argument and no expiry,
+    #      which is the interaction item 9 in TODO.md asks to be decided rather
+    #      than stumbled into. Decided: the static list is the liquid core, and
+    #      adoption stays the only way to reach outside it.
+    #
+    # Broad index and sector ETFs. ETFs are the same asset class as equities at
+    # Alpaca, so they need no separate entry.
     allowed_symbols:
-      - SPY
-      - QQQ
+      - SPY        # S&P 500
+      - QQQ        # Nasdaq 100
+      - IWM        # small caps: leads the others at turns
+      - DIA        # Dow 30
+      - GLD        # gold, physically backed — no roll, unlike USO
+      - TLT        # 20-year Treasuries: the other side of a risk-off day
+      - EEM        # emerging markets
+      - XLE        # energy sector
+      # Mega-cap US equities, heavily covered and continuously quoted.
       - AAPL
       - MSFT
+      - NVDA
+      - AMZN
+      - GOOGL
+      - META
+      - JPM
+      - XOM
+      - UNH
       - JNJ
       - KO
+      - PG
 
     # US regular session is 09:30-16:00 ET = 13:30-20:00 UTC (14:30-21:00 EDT).
     # Deliberately skips the first 30 minutes of the open, the noisiest period.

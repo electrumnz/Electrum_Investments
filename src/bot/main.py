@@ -15,7 +15,7 @@ from pathlib import Path
 
 import structlog
 
-from . import stop_watch
+from . import jobs, stop_watch
 from .audit import AuditLog, AuditView
 from .broker import AlpacaBroker, Broker, MockBroker
 from .claude_client import ClaudeClient, build_system_prompt
@@ -51,11 +51,13 @@ from .indicators import summarise as summarise_indicators
 from .intraday import summarise as summarise_intraday
 from .journal import Journal
 from .models import (
+    AccountSnapshot,
     Decision,
     MarketInputs,
     OrderProposal,
     PositionAction,
     RiskVerdict,
+    StandDownState,
     SymbolAssessment,
 )
 from .options import alerts_for_positions
@@ -180,6 +182,24 @@ def cmd_smoketest(env: Env, rules: Rules, *, force_mock: bool = False) -> int:
         return 0
     finally:
         broker.disconnect()
+
+
+def _standing(
+    account: AccountSnapshot, stand_down: StandDownState, moment: datetime
+) -> jobs.Standing:
+    """The account figures a job record carries, on any of the three outcomes.
+
+    Established above the point where a cycle can be skipped or a model call can
+    fail, so a skipped pass reports the same account state a completed one does.
+    That is what makes a skip legible as "the market was shut" rather than as a
+    blank record.
+    """
+    return jobs.Standing(
+        equity_usd=round(account.equity_usd, 2),
+        open_positions=len(account.open_positions),
+        open_risk_usd=round(account.open_risk_usd, 2),
+        stand_down_stage=stand_down.stage if stand_down.is_active(moment) else 0,
+    )
 
 
 def cmd_loop(
@@ -389,9 +409,24 @@ def cmd_loop(
                 )
                 feed_symbols = tuple(symbols_in_play)
 
+            # **Quotes stay above the market-closed skip and the bars do not**,
+            # and the split is the reason the allowlist can be widened at all.
+            #
+            # Each of the three feeds costs ONE network call PER SYMBOL PER
+            # CYCLE, so the loop's data bill is linear in `allowed_symbols`.
+            # The ticks have to be paid on every cycle whatever the market is
+            # doing: `alerts_for_positions` prices an option expiry from them
+            # and `stop_watch` checks whether an open position is already
+            # through its stop — and out-of-hours is precisely the case that
+            # backstop exists for, since a resting stop leg cannot fire there.
+            #
+            # The daily and intraday bars buy nothing on a cycle that will not
+            # ask the model. They feed `build_market_context` and `MarketInputs`
+            # and nothing above this line reads either, so on a skipped cycle
+            # they were fetched, rendered into no prompt and discarded. They are
+            # fetched below the skip now, which takes two thirds of the
+            # per-symbol cost off roughly half the cycles in a week.
             ticks = fetch_market_ticks(broker, symbols_in_play)
-            indicators, no_history = fetch_indicators(broker, symbols_in_play)
-            intraday, no_intraday = fetch_intraday(broker, symbols_in_play)
             news_windows = calendar.upcoming_windows(lookahead_minutes=60)
 
             # Bring the journal in step before anything is evaluated: this is
@@ -498,8 +533,29 @@ def cmd_loop(
                     risk_understated=recon.risk_is_understated,
                     next_cycle_seconds=env.decision_interval_seconds,
                 )
+                # The durable half of the line above. `record_skipped` has no
+                # parameter for a proposal count, so this pass cannot be written
+                # down as one that looked and found nothing — which is the whole
+                # distinction the job record exists to keep.
+                jobs.record_skipped(
+                    audit,
+                    started_at=now,
+                    interval_seconds=env.decision_interval_seconds,
+                    standing=_standing(account, stand_down_state, now),
+                    detail=(
+                        "No enabled instrument class was in session, so the "
+                        "model was not asked. Reconcile, the stand-down state, "
+                        "the expiry alerts and the stop watch all still ran."
+                    ),
+                )
                 time.sleep(env.decision_interval_seconds)
                 continue
+
+            # Below the skip, deliberately. See the note beside `fetch_market_ticks`
+            # above: these two are the per-symbol cost that a cycle which will
+            # not ask the model has no use for.
+            indicators, no_history = fetch_indicators(broker, symbols_in_play)
+            intraday, no_intraday = fetch_intraday(broker, symbols_in_play)
 
             headlines = news.recent_headlines(symbols_in_play)
             posts = [p.render() for p in social.recent_posts()] if social else []
@@ -562,6 +618,18 @@ def cmd_loop(
                 detail = f"{type(exc).__name__}: {exc}"
                 log.error("model_call_failed", error=detail)
                 audit.record_event("model_call_failed", {"error": detail})
+                # And as a job, so the pass appears in the loop's own run
+                # history rather than only as an error nobody is counting.
+                # `record_failed` has no parameter for a proposal count either:
+                # a cycle that could not get a decision must never be readable
+                # as one that decided to do nothing.
+                jobs.record_failed(
+                    audit,
+                    started_at=now,
+                    interval_seconds=env.decision_interval_seconds,
+                    standing=_standing(account, stand_down_state, now),
+                    detail=detail,
+                )
                 time.sleep(env.decision_interval_seconds)
                 continue
 
@@ -905,6 +973,26 @@ def cmd_loop(
                 symbols_without_intraday=no_intraday,
                 cost_usd=round(usage.estimated_cost_usd, 6),
                 next_cycle_seconds=env.decision_interval_seconds,
+            )
+            # The same pulse, made durable. The line above goes to the systemd
+            # journal, which is rotated and which nothing in this repository can
+            # read; this goes to the audit log beside the decision it belongs
+            # to, so "did the loop run at 14:15 and what happened" is a query
+            # rather than a grep. Written AFTER the log line on purpose: the
+            # proven channel emits first, so a disk problem here cannot take the
+            # heartbeat with it.
+            #
+            # `proposals=0` here is a real reading — the loop looked and stood
+            # pat. That is what makes it different from the skip above, which
+            # has no count at all.
+            jobs.record_ran(
+                audit,
+                started_at=now,
+                interval_seconds=env.decision_interval_seconds,
+                standing=_standing(account, stand_down_state, datetime.now(UTC)),
+                proposals=len(decision.proposals),
+                approved=sum(1 for v in verdicts if v.approved),
+                executed=len(executed),
             )
             time.sleep(env.decision_interval_seconds)
     except KeyboardInterrupt:
@@ -1616,6 +1704,51 @@ def cmd_reindex() -> int:
     return 0
 
 
+def cmd_jobs(*, hours: float, at: str | None) -> int:
+    """Print the loop's recorded passes, or say what it was doing at one moment.
+
+    The command that replaces `journalctl | grep cycle_complete`, and it can
+    answer two things that grep never could: a pass that was SKIPPED because
+    the market was shut, and a pass that FAILED to get a decision. Neither ever
+    reached the audit log before, so both were invisible to everything except
+    the systemd journal.
+
+    Reads the log and nothing else. No broker, no credential, no network.
+    """
+    audit = AuditLog()
+    result = jobs.read(audit, hours=hours)
+
+    for line in jobs.render(result):
+        print(line)
+
+    if at is not None:
+        try:
+            moment = datetime.fromisoformat(at)
+        except ValueError:
+            print(f"\nCould not read '{at}' as a time. Use ISO-8601, e.g. 2026-08-11T14:15.")
+            return 2
+        print()
+        print(result.at(moment).describe())
+        return 0
+
+    if not result.has_jobs:
+        return 0
+
+    print()
+    for job in result.jobs:
+        counts = (
+            f"{job.proposals} proposed, {job.approved} approved, {job.executed} executed"
+            if job.decided
+            # Never a zero. This pass did not look, so there is nothing to count.
+            else job.detail.split(".")[0]
+        )
+        print(
+            f"{job.started_at.isoformat(timespec='seconds')}  "
+            f"{job.outcome.value:<7}  {counts}"
+        )
+    return 0
+
+
 def main() -> int:
     structlog.configure(processors=[structlog.processors.JSONRenderer()])
     parser = argparse.ArgumentParser(prog="electrum-bot")
@@ -1628,6 +1761,7 @@ def main() -> int:
             "confer",
             "vault",
             "vault-expire",
+            "jobs",
             "reindex",
             "settings-apply",
             "settings-revert",
@@ -1642,6 +1776,10 @@ def main() -> int:
             "grants and anything expiring — read-only. vault-expire: mark "
             "dreams past their shelf's TTL and withdraw the grants that "
             "lapsed; it marks and never deletes, and never closes a position. "
+            "jobs: what the loop actually did, pass by pass, out of the audit "
+            "log — including the passes that were SKIPPED with the market shut "
+            "and the ones that FAILED to get a decision, neither of which is a "
+            "cycle that ran and stood pat. "
             "reindex: rebuild the searchable history from audit/. "
             "settings-apply: apply a change the settings agent argued — RUN AS "
             "ROOT, because config/ is root-owned so the service account cannot "
@@ -1677,6 +1815,24 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--hours",
+        type=float,
+        default=jobs.DEFAULT_WINDOW_HOURS,
+        help=(
+            f"jobs only: how far back to read, in hours (default: "
+            f"{jobs.DEFAULT_WINDOW_HOURS:g})."
+        ),
+    )
+    parser.add_argument(
+        "--at",
+        default=None,
+        help=(
+            "jobs only: an ISO-8601 moment to ask about, e.g. 2026-08-11T14:15. "
+            "Answers what the loop was doing then — including that it recorded "
+            "nothing, which is its own state and not a quiet cycle."
+        ),
+    )
+    parser.add_argument(
         "--rules",
         default="config/rules.yaml",
         help="Path to rules.yaml (default: config/rules.yaml)",
@@ -1698,6 +1854,20 @@ def main() -> int:
     # because Alpaca is unconfigured would be a check protecting nothing.
     if args.command == "reindex":
         return cmd_reindex()
+
+    # Before the credential check for the same reason, and with one of its own.
+    # This reads dated files already on disk and touches no broker, so gating it
+    # behind an Alpaca key would protect nothing — and the moment somebody most
+    # wants to ask "was the loop running at 14:15" is a moment when the loop is
+    # not running, which is frequently a moment when its credentials are the
+    # thing that broke.
+    #
+    # It is also dispatched HERE rather than at the foot with the other
+    # read-only commands, because the foot of this function falls through to
+    # `cmd_loop`: a command in `choices` with no branch of its own does not
+    # error, it silently starts the decision loop.
+    if args.command == "jobs":
+        return cmd_jobs(hours=args.hours, at=args.at)
 
     # Also before the credential check, and for a stronger reason than reindex's.
     # This is meant to be run as root on a box that may be halfway through a

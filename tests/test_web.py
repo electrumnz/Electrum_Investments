@@ -147,7 +147,41 @@ def test_board_renders_on_an_empty_journal(client):
 
 
 def test_trades_page_says_so_when_there_are_none(client):
-    assert "No closed trades yet" in client.get("/trades").text
+    body = client.get("/trades").text
+    assert "Nothing has closed yet" in body
+    # And says where the open ones are, rather than leaving an empty page to
+    # read as "there is nothing anywhere".
+    assert "on the Board" in body
+
+
+def test_a_lede_answers_rather_than_apologises(client):
+    """The copy fault the operator named, pinned as a shape rather than as a
+    wording.
+
+    *"Super sterile and logical, the agent is doing the work the user doesn't
+    need to read an essay."* The cause was identifiable: every lesson about not
+    overclaiming a FIGURE got applied to the page copy too, so a sentence
+    introducing a panel was written with the caution owed to a measurement.
+
+    The rule that actually applies is narrower — a figure may never be stated
+    more confidently than it was measured, and a heading is not a figure. So
+    what is asserted here is that the three ledes open by saying what the page
+    is FOR, and that none of them opens by qualifying itself. Every caveat that
+    qualifies a number is pinned by its own test elsewhere and none is touched.
+    """
+    for path, opening in (
+        ("/decisions", "The loop wakes every fifteen minutes"),
+        ("/trades", "What actually happened"),
+        ("/analytics", "How it has actually gone"),
+    ):
+        body = client.get(path).text
+        assert opening in body, path
+
+    # The specific sentences that were cut, kept out. Each was true, and each
+    # spent the page's opening line on the page rather than on the account.
+    trail = client.get("/decisions").text
+    assert "folded behind its head line" not in trail
+    assert "A wrong metric is worse than no metric" not in client.get("/analytics").text
 
 
 def test_healthz(client):
@@ -552,8 +586,9 @@ def _proposal(symbol: str = "SPY") -> OrderProposal:
 
 def test_decisions_page_is_empty_but_explains_itself(client):
     body = client.get("/decisions").text
-    assert "No decisions recorded yet" in body
+    assert "Nothing recorded yet" in body
     assert "audit/" in body
+    assert "electrum-bot loop" in body
 
 
 def test_a_rejection_shows_every_reason_the_gate_gave(audited):
@@ -970,7 +1005,7 @@ def test_an_empty_post_list_does_not_claim_the_feed_was_even_running(audited):
 
     body = client.get("/decisions").text
 
-    assert "an unconfigured feed and a quiet one look identical" in body
+    assert "An unconfigured feed and a quiet one look identical" in body
 
 
 def test_a_headline_already_on_file_is_not_presented_as_new(audited):
@@ -1700,6 +1735,76 @@ def test_a_quote_that_could_not_be_read_never_renders_as_flat():
     assert "▲1.05%" in body
 
 
+def test_a_cell_carries_one_vertical_mark_and_it_is_the_one_that_means_something():
+    """Every cell used to draw two, doing unrelated jobs.
+
+    The rail on the left is coloured by direction and scaled by `--mag`, so it
+    carries information. The `border-right` on the other edge was a flat grey
+    line meaning nothing, and adjacent cells therefore rendered a grey mark and
+    a coloured one a few pixels apart with no way to tell which was which.
+
+    Padding divides a list perfectly well and cannot be mistaken for a gauge.
+    """
+    from bot.web.render import STYLES
+
+    cell_rule = STYLES[STYLES.index(".tape .cell{") : STYLES.index(".tape .cell::before")]
+
+    assert "border-right" not in cell_rule
+    assert "padding:0 1.1rem" in cell_rule
+
+
+def test_a_cell_with_nothing_to_measure_draws_no_gauge():
+    """`--mag:0` left a 28% pewter stub, which reads as a tiny move rather than
+    as an absent one — a plausible wrong figure drawn in two pixels, in the
+    least conspicuous place on the deck to put one.
+
+    Both no-reading cases: nothing came back at all, and a real price with no
+    yesterday to compare it against."""
+    from bot.market_clock import market_state
+    from bot.web.render import STYLES
+
+    body = render.ticker_tape(
+        market_state(datetime(2026, 8, 10, 15, 0, tzinfo=UTC)),
+        [
+            _quote("GLD"),                                   # no quote
+            _quote("TLT", last=91.2),                        # no prior close
+            _quote("SPY", last=580.0, prev=574.0),           # a real move
+        ],
+    )
+
+    def classes_of(symbol: str) -> set[str]:
+        cell = body.split(f'data-tick="{symbol}"')[0].rsplit('<span class="', 1)[-1]
+        return set(cell.split('"')[0].split())
+
+    assert "norail" in classes_of("GLD")
+    assert "norail" in classes_of("TLT")
+    assert "norail" not in classes_of("SPY")
+    assert ".tape .cell.norail::before{display:none}" in STYLES
+    # The painter has to take it off again when a percentage arrives, or a cell
+    # the server rendered without a move keeps its gauge suppressed for the life
+    # of the tab — the mirror of the stub.
+    assert "cell.classList.remove('norail')" in render.SCRIPT
+
+
+def test_a_clock_is_not_framed_in_the_same_line_a_cell_is_divided_by():
+    """Contrast alone could never fix this while the frame was shared.
+
+    `.clk` was bounded left and right by `1px solid var(--slate)` — the exact
+    line the cells used between one another — so a clock read as one more cell
+    with a darker fill. It is a module set INTO the band now: inset on all four
+    sides, recessed, and carrying the deck's own bracket corners, none of which
+    any cell has.
+    """
+    from bot.web.render import STYLES
+
+    clk = STYLES[STYLES.index(".tape .clk{") : STYLES.index(".tape .clk::before")]
+
+    assert "border-left" not in clk and "border-right" not in clk
+    assert "margin:" in clk                       # inset from the strip
+    assert ".tape .clk::before{top:0;left:0" in STYLES     # bracket corners
+    assert ".tape .clk::after{bottom:0;right:0" in STYLES
+
+
 def test_the_tape_marks_which_symbols_the_gate_would_actually_allow():
     """`watchlist.symbols` is a view; `allowed_symbols` is a permission. The
     tape is the one surface where they sit side by side, so the difference is
@@ -1845,7 +1950,20 @@ def test_the_watchlist_is_not_a_trading_permission():
     watch_only = set(rules.watchlist.symbols) - set(rules.allowed_symbols)
 
     assert watch_only, "the two lists have converged; the distinction is gone"
-    assert "NVDA" in watch_only
+    # Not a named symbol. This asserted "NVDA" and went red the day
+    # `allowed_symbols` was widened from six names to twenty — which is a
+    # change to what may be traded, made deliberately in its own commit, and
+    # exactly the change this test exists to let through. A membership check on
+    # one ticker tests where that ticker happens to be filed; the property is
+    # that the two lists are different things.
+    #
+    # An EQUITY has to be watch-only, because the crypto pair on the tape is
+    # watch-only for a second reason entirely — its class is disabled — and a
+    # test satisfied by that alone would go quiet the moment crypto was enabled
+    # while still reading as though it had checked something.
+    assert any("/" not in symbol for symbol in watch_only), (
+        "only the disabled crypto class keeps these lists apart"
+    )
 
     # And the reverse, which is the half that actually matters: the gate's list
     # is exactly the union of the enabled instrument classes, so nothing can
@@ -1917,13 +2035,18 @@ def test_a_clock_that_is_not_ticking_says_so(client):
     )
 
 
-def test_the_clock_states_the_venue_and_the_gate_separately(client):
+def test_the_deck_states_the_venue_and_the_gate_separately(client):
     """"The market is open" and "this bot will trade" are different claims.
 
     They were confused once already, at 04:49 New York time on a Monday:
     Alpaca's pre-market genuinely was running, four and a half hours before the
     window `config/rules.yaml` permits. Merging them into one green light is
     how that happens again.
+
+    The claim now lives on the Board rather than pinned to the tape — the
+    operator flagged the badge twice, three words could never carry the middle
+    state, and a card has room for what it costs. What must not change is that
+    the middle state exists at all and is neither of its neighbours.
     """
     from datetime import datetime
 
@@ -1941,8 +2064,46 @@ def test_the_clock_states_the_venue_and_the_gate_separately(client):
     assert state.bot_window_open is True
     assert state.is_tradeable_by_bot is False
 
-    body = render.ticker_tape(state, [])
-    assert "armed · orders rest until open" in body
+    card = render.gate_stance(state)
+    assert "It will place. The order will wait." in card
+    # And it says WHY, which is the half the badge never had room for.
+    assert "rests at the broker" in card
+
+    # The two neighbours are different answers, not degrees of this one.
+    trading = render.gate_stance(
+        market_state(datetime(2026, 8, 10, 15, 0, tzinfo=UTC), windows_by_day=windows)
+    )
+    assert "It will trade." in trading
+    shut = render.gate_stance(
+        market_state(datetime(2026, 8, 15, 15, 0, tzinfo=UTC), windows_by_day=windows)
+    )
+    assert "It will not trade." in shut
+
+
+def test_a_caller_with_no_clock_reading_gets_no_verdict():
+    """Same rule as the reading stamp: a caller that did not ask is not a
+    market that could not be read, and neither is a licence to state one."""
+    assert render.gate_stance(None) == ""
+
+
+def test_the_gate_verdict_reaches_the_board_and_has_left_the_tape(client):
+    """The route has to supply it, or the card is a function nobody calls.
+
+    That is the failure mode this project has hit twice — `Dream.is_offerable`
+    defined and never invoked, and the `.until` countdown the script still
+    looks for. A rendering helper with no caller is invisible to every test
+    that exercises the helper.
+    """
+    body = client.get("/").text
+    # The strip sits between the header and `<main>`. Sliced in that order, or
+    # a reversed slice comes back empty and the assertion below passes for
+    # having tested nothing.
+    tape = body[body.index('<div class="tape"') : body.index("<main")]
+    assert 'class="until"' in tape, "sliced the wrong region"
+
+    assert "What it will do right now" in body
+    # And the strip it came off does not still carry it.
+    assert "verdict" not in tape
 
 
 def test_the_console_returns_focus_somewhere_reachable():
@@ -2274,14 +2435,22 @@ def test_a_weekend_shuts_every_exchange():
         assert face.is_open(saturday) in (False, None)
 
 
-def test_the_global_session_banner_is_gone_from_the_tape():
-    """It said nothing the strip did not already say better, and what it did
-    say was wrong for crypto."""
+def test_whatever_is_pinned_to_the_tape_names_the_exchange_it_speaks_for():
+    """Two things have been thrown off that slot for the same reason.
+
+    "PRE-MARKET" was a claim about every cell beneath it and false for the
+    crypto trading right beside it. The gate verdict — `trading` / `armed` /
+    `idle` — was account-wide and therefore true, and read as a status light
+    with nothing in it to act on; it is on the Board now, where the middle
+    state has room to say what it costs.
+
+    What is pinned there has to be something no cell can contradict, so it
+    names its exchange.
+    """
     from bot.market_clock import market_state
 
     # With the real windows, so the gate genuinely IS open here — without them
-    # `market_state` reports the cautious reading and the verdict would be
-    # "bot idle" for a reason that has nothing to do with what is being tested.
+    # `market_state` reports the cautious reading, which is a different case.
     windows = load_rules().instruments["us_equity"].windows_by_day
     body = render.ticker_tape(
         market_state(
@@ -2289,13 +2458,41 @@ def test_the_global_session_banner_is_gone_from_the_tape():
         ),
         [_quote("SPY", last=580.0, prev=574.0, tradeable=True)],
     )
-    fixed = body.split('<div class="view">')[0]
+    fixed = body.split('<div class="view"')[0]
 
     assert "Pre-market" not in fixed
-    # The gate verdict stays: RiskGate IS account-wide, so it is true of the
-    # bot whichever instrument you are looking at. In plain words now — the
-    # middle state is exactly the session work's point, so it says it.
-    assert "armed · orders rest until open" in fixed
+    assert "armed" not in fixed and "idle" not in fixed
+    # 12:00 UTC is 08:00 New York, and the regular session opens at 13:30 UTC.
+    assert "NYSE open in 1h 30m" in fixed
+
+
+def test_the_pinned_countdown_is_wired_to_the_script_that_updates_it():
+    """The countdown element was deleted with the phase block it sat in, and
+    the script that paints it was left behind.
+
+    `bar.querySelector('.until')` returned null on every load from that day, so
+    `tick()` bailed one line later — and the session-boundary spin, the whole
+    `turn-up`/`turn-down`/`turn-side` apparatus with its own tests, has not
+    fired since. Nothing warned: the clocks kept ticking, because painting them
+    happens above the bail-out.
+
+    So the two halves are pinned together. A countdown with no script is a
+    frozen figure that looks live; a script with no countdown is dead code
+    holding a feature hostage.
+    """
+    from bot.market_clock import market_state
+
+    body = render.ticker_tape(
+        market_state(datetime(2026, 8, 10, 15, 0, tzinfo=UTC)), []
+    )
+
+    assert 'class="until"' in body
+    assert "bar.querySelector('.until')" in render.SCRIPT
+    # And it must render the same WORDS the server did. `data-next-phase`
+    # carries the enum value, so formatting it raw would rewrite "NYSE after
+    # hours in 3h 12m" as "post in 3h 11m" one second after load.
+    assert "post: 'after hours'" in render.SCRIPT
+    assert "'NYSE ' + phaseWord(nextPhase)" in render.SCRIPT
 
 
 def test_the_tape_is_a_band_rather_than_the_same_colour_as_the_page():
@@ -2697,6 +2894,54 @@ def test_a_cold_start_still_renders_unknown_rather_than_zero():
 
     assert 'class="pending"' in body
     assert "it is unknown" in body
+
+
+def test_a_board_with_no_read_time_says_unknown_rather_than_now():
+    """The stamp describes the READING, never the render.
+
+    This page printed `as at <now>` above figures the poller had read overnight
+    — every one a present-tense claim about an account nobody had looked at
+    since the previous evening, with the one element a reader checks to find
+    out saying it was current. A caller that cannot say when the broker was
+    read must not be handed a timestamp by default.
+
+    Pinned because it is prose, and a copy pass over prose is exactly how a
+    sentence like this gets tidied into a default.
+    """
+    from datetime import datetime
+
+    body = render.board(
+        _held(), load_rules(), [], [], StandDownState(), 0, read_at=None
+    )
+
+    assert "read time unknown" in body
+    assert f"{datetime.now(UTC):%d %b %Y}" not in body
+    # And the stream says the same words when the payload carries no `as_of`,
+    # rather than leaving the server's honest answer to be overwritten.
+    assert "'read time unknown'" in render.SCRIPT
+
+
+def test_a_cold_start_can_still_say_what_the_bot_will_do():
+    """The one figure on this page that owes nothing to the broker.
+
+    "Nothing has been read yet" is a statement about the account, and it was
+    being applied to a question that is pure clock arithmetic against
+    `config/rules.yaml`. Withholding the answer there treats "not read yet" as
+    though it meant "nothing can be said".
+    """
+    from bot.market_clock import market_state
+
+    windows = load_rules().instruments["us_equity"].windows_by_day
+    body = render.board(
+        None, load_rules(), [], [], StandDownState(), 0,
+        market=market_state(
+            datetime(2026, 8, 10, 15, 0, tzinfo=UTC), windows_by_day=windows
+        ),
+    )
+
+    assert "not read yet" in body          # still honest about the figures
+    assert "What it will do right now" in body
+    assert "It will trade." in body
 
 
 def test_the_palette_hands_focus_back_without_scrolling_the_page():
@@ -3259,7 +3504,10 @@ def test_analytics_never_prints_a_dollar_result_with_no_closed_trades(client):
     read as a flat month rather than as an empty journal.
     """
     body = client.get("/analytics").text
-    tiles = body[body.index("Expectancy") : body.index("Headline")]
+    # Sliced on the structure rather than on a heading's wording. It used to cut
+    # at the word "Headline" and went red when that heading was reworded, which
+    # says nothing whatever about whether an empty sample printed a dollar.
+    tiles = body[body.index("Expectancy") : body.index('<section class="block"')]
 
     assert "$0.00" not in tiles, "an empty sample rendered a dollar result"
     assert "+$0.00" not in tiles

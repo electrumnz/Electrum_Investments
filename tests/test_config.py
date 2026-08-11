@@ -855,3 +855,204 @@ def test_the_shipped_config_leaves_unattended_execution_off():
     rules = Rules.load(REPO_ROOT / "config" / "rules.yaml")
 
     assert rules.position_actions.enabled is False
+
+
+# ---------------------------------------------------------------------------
+# The widened allowlist
+#
+# `instruments.us_equity.allowed_symbols` went from six names to twenty on the
+# operator's decision. It is a PERMISSION, so every test here proves what the
+# gate still REFUSES rather than what it now admits — a widened allowlist that
+# only ever gets tested for the names it added is a widened allowlist nobody has
+# checked the edges of.
+
+
+def _shipped() -> Rules:
+    return Rules.load(REPO_ROOT / "config" / "rules.yaml")
+
+
+def _gate_for(rules: Rules):
+    from bot.risk import RiskGate
+
+    return RiskGate(
+        rules,
+        equity_at_session_start=100_000.0,
+        now=datetime(2026, 5, 4, 15, 0, tzinfo=UTC),  # a Monday, inside session
+    )
+
+
+def _snapshot(**overrides: Any):
+    from bot.models import AccountSnapshot
+
+    return AccountSnapshot(
+        equity_usd=100_000.0,
+        cash_usd=100_000.0,
+        buying_power_usd=100_000.0,
+        open_positions=[],
+        **overrides,
+    )
+
+
+def _proposal(symbol: str, **overrides: Any):
+    from bot.models import Direction, OrderProposal
+
+    fields: dict[str, Any] = {
+        "symbol": symbol,
+        "direction": Direction.BUY,
+        "qty": 3,
+        "limit_price": 580.00,
+        "stop_loss_price": 575.00,
+        "take_profit_price": 590.00,
+        "rationale": "Shape only; every figure here exists to exercise a gate.",
+    }
+    fields.update(overrides)
+    return OrderProposal(**fields)
+
+
+def _tick(symbol: str):
+    from bot.models import Tick
+
+    return Tick(
+        symbol=symbol, bid=579.98, ask=580.02,
+        timestamp=datetime(2026, 5, 4, 15, 0, tzinfo=UTC),
+    )
+
+
+def _reasons(verdict) -> str:
+    return " | ".join(verdict.reasons).lower()
+
+
+def test_every_listed_symbol_agrees_with_the_block_that_lists_it():
+    """The audited `grants.py` bypass, arriving through the config file instead.
+
+    A symbol filed under a class it cannot belong to is a live permission under
+    the WRONG class's limits: `BTC/USD` under `us_equity` would be routed by
+    `AlpacaBroker` as crypto — unbracketed, so with no broker-side stop at all —
+    while facing the equity book's caps. `true_class_key` derives the class from
+    the same rule the broker routes on, and this fails the build if the file
+    disagrees with it.
+
+    A test rather than a load-time validator, deliberately: refusing to start is
+    a denial at the least useful moment, and the commented-out `futures:`
+    template resolves to `""` on purpose while no second broker exists.
+    """
+    rules = _shipped()
+    for key, instrument in rules.instruments.items():
+        for symbol in instrument.allowed_symbols:
+            assert rules.true_class_key(symbol) == key, (
+                f"{symbol} is listed under {key} but its true class is "
+                f"{rules.true_class_key(symbol)!r}"
+            )
+
+
+def test_the_widened_list_still_refuses_everything_outside_it():
+    """Twenty names is not "most large caps". The gate refuses by list, not by
+    resemblance, and it says so in the rejection."""
+    rules = _shipped()
+    verdict = _gate_for(rules).evaluate(
+        _proposal("GME"), account=_snapshot(), tick=_tick("GME")
+    )
+    assert not verdict.approved
+    assert "not in the allowed list" in _reasons(verdict)
+
+
+def test_a_disabled_class_is_still_never_crossed():
+    """Crypto is configured-but-off on purpose, and widening the equity book
+    does not reach it. Enabling it is still a one-word edit and nothing else."""
+    rules = _shipped()
+    assert rules.instruments["crypto"].enabled is False
+    assert "BTC/USD" not in rules.allowed_symbols
+
+    verdict = _gate_for(rules).evaluate(
+        _proposal("BTC/USD", limit_price=60_000.0, stop_loss_price=59_000.0,
+                  take_profit_price=61_000.0, qty=0.01),
+        account=_snapshot(),
+        tick=_tick("BTC/USD"),
+    )
+    assert not verdict.approved
+    assert "not in the allowed list" in _reasons(verdict)
+
+
+def test_a_dream_grant_cannot_reach_a_class_the_operator_shut():
+    """The other door into the same room, checked against the SHIPPED config.
+
+    An adopted dream widens `allowed_symbols` at runtime, so widening the static
+    list must not have made that path inconsistent. The enabled-class hard block
+    still refuses crypto whatever key the adoption row claims — and the same
+    resolution still grants an equity outside the twenty, which is what keeps
+    adoption the interesting route rather than a dead one.
+    """
+    from bot.grants import resolve_granted_symbols
+
+    class _Store:
+        def __init__(self, granted: dict[str, str]) -> None:
+            self._granted = granted
+
+        def granted_symbols(self, now: datetime) -> dict[str, str]:
+            return dict(self._granted)
+
+    rules = _shipped()
+    moment = datetime(2026, 5, 4, 15, 0, tzinfo=UTC)
+
+    # Honestly filed, and still refused: the class is switched off.
+    assert resolve_granted_symbols(_Store({"BTC/USD": "crypto"}), rules, now=moment) == {}
+    # Mislabelled to dodge that, and refused by the class the SYMBOL is, which
+    # is the rule `AlpacaBroker.place_order` routes on.
+    assert resolve_granted_symbols(_Store({"BTC/USD": "us_equity"}), rules, now=moment) == {}
+    # An equity outside the twenty is still granted, so the block above is doing
+    # work rather than refusing everything.
+    assert resolve_granted_symbols(_Store({"TSLA": "us_equity"}), rules, now=moment) == {
+        "TSLA": "us_equity"
+    }
+    assert "TSLA" not in rules.allowed_symbols
+
+
+def test_the_tape_and_the_allowlist_are_different_lists_in_BOTH_directions():
+    """`watchlist:` is DISPLAY ONLY and must never be merged into this.
+
+    Pinned as a shape rather than as two fixed lists: the tape carries names the
+    bot may not trade AND the allowlist carries names the tape does not show, so
+    a later "tidy-up" that made one derive from the other fails here. The
+    selection criteria genuinely differ — VIXY and USO are informative to watch
+    and structurally decaying to mean-revert.
+    """
+    rules = _shipped()
+    tape = set(rules.watchlist.symbols)
+    allowed = set(rules.allowed_symbols)
+
+    assert tape - allowed, "the tape must carry at least one watch-only symbol"
+    assert allowed - tape, "the allowlist must not be a subset of the tape"
+    for watch_only in ("VIXY", "USO", "BTC/USD", "ETH/USD"):
+        assert watch_only in tape
+        assert not rules.is_symbol_allowed(watch_only)
+
+
+def test_widening_the_list_widened_no_limit():
+    """A permission is not a limit. A newly admitted symbol is sized by exactly
+    the same arithmetic as SPY was, and a proposal over the per-trade cap is
+    refused with the cap named."""
+    rules = _shipped()
+    assert rules.account.max_risk_per_trade_pct == 1.0
+    assert rules.instruments["us_equity"].max_concurrent_positions == 3
+    assert rules.frequency.max_trades_per_day == 5
+
+    # 250 shares risking $5 each is $1,250 — 1.25% of a $100k account.
+    verdict = _gate_for(rules).evaluate(
+        _proposal("AMZN", qty=250), account=_snapshot(), tick=_tick("AMZN")
+    )
+    assert not verdict.approved
+    assert "risk" in _reasons(verdict)
+
+
+def test_the_widened_list_is_still_DERIVED_and_not_a_second_copy():
+    """Disabling the class removes all twenty at once, which is only true while
+    `Rules.allowed_symbols` is derived from the enabled blocks. A hand-maintained
+    list somewhere else would survive this."""
+    rules = _shipped()
+    assert len(rules.allowed_symbols) == 20
+
+    off = rules.model_copy(deep=True)
+    off.instruments["us_equity"].enabled = False
+    assert off.allowed_symbols == []
+    for symbol in rules.allowed_symbols:
+        assert not off.is_symbol_allowed(symbol)

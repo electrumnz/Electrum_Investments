@@ -35,6 +35,20 @@ from .conftest import RULES_PATH
 
 NOW = datetime(2026, 6, 1, tzinfo=UTC)
 
+#: Symbols these tests use to stand for "not in `config/rules.yaml`".
+#:
+#: A grant naming a symbol the allowlist ALREADY carries widens nothing, and
+#: `_resolve` drops it as redundant — correctly, because a listed symbol a stale
+#: grant also names is an ordinary trade. The consequence is that a cap test
+#: built on such a symbol stops testing the cap and passes anyway, which is
+#: precisely what happened when `us_equity.allowed_symbols` grew from six names
+#: to twenty and NVDA became listed.
+#:
+#: So they are named once, and `test_the_unlisted_symbols_really_are_unlisted`
+#: fails the build the next time the allowlist reaches one of them, instead of
+#: letting a rule quietly stop being exercised.
+UNLISTED = ("TSLA", "RIVN", "GME")
+
 
 @pytest.fixture
 def rules() -> Rules:
@@ -260,7 +274,7 @@ def test_over_the_cap_nothing_is_granted_rather_than_a_subset(rules):
     allowed to trade.
     """
     rules.dreaming.max_granted_symbols = 2
-    store = _Store({"TSLA": "us_equity", "NVDA": "us_equity", "GME": "us_equity"})
+    store = _Store(dict.fromkeys(UNLISTED, "us_equity"))
 
     assert resolve_granted_symbols(store, rules, now=NOW) == {}
 
@@ -280,9 +294,24 @@ def test_the_cap_measures_what_is_actually_widened(rules):
 
 def test_exactly_at_the_cap_is_allowed(rules):
     rules.dreaming.max_granted_symbols = 2
-    store = _Store({"TSLA": "us_equity", "NVDA": "us_equity"})
+    store = _Store(dict.fromkeys(UNLISTED[:2], "us_equity"))
 
     assert len(resolve_granted_symbols(store, rules, now=NOW)) == 2
+
+
+def test_the_unlisted_symbols_really_are_unlisted(rules):
+    """The guard on the two cap tests above, and on nothing else.
+
+    Both of them measure what a grant WIDENS, so both are silently disarmed by a
+    symbol the allowlist has since grown to include. This states the assumption
+    where it can fail rather than leaving it in a fixture nobody re-reads.
+    """
+    for symbol in UNLISTED:
+        assert not rules.is_symbol_allowed(symbol), (
+            f"{symbol} is now in config/rules.yaml, so a grant naming it widens "
+            "nothing and the cap tests above stop exercising the cap. Pick "
+            "another symbol for UNLISTED."
+        )
 
 
 # ------------------------------------------------------------- the provenance

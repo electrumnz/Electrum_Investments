@@ -325,10 +325,7 @@ section.block>h2{margin-bottom:.75rem}
   white-space:nowrap;border-right:1px solid var(--slate);background:var(--ink);
   font-family:var(--mono);font-size:.625rem;letter-spacing:.12em;
   text-transform:uppercase;color:var(--pewter);position:relative;z-index:1}
-.tape .fixed .name{color:var(--bone)}
-.tape .fixed .sep{color:var(--slate)}
-.tape .fixed .dot{width:6px;height:6px;border-radius:50%;background:var(--pewter);
-  display:inline-block;flex:none}
+.tape .fixed .until{color:var(--bone)}
 .tape .view{flex:1;overflow:hidden;position:relative}
 /* The view carries `tabindex="0"` because under `prefers-reduced-motion` it
    becomes a horizontal scroller with no focusable descendant, and Safari and
@@ -358,9 +355,15 @@ section.block>h2{margin-bottom:.75rem}
 /* Hovering is the gesture for "let me read that one". */
 .tape:hover .track{animation-play-state:paused}
 
-.tape .cell{display:flex;align-items:baseline;gap:.4rem;padding:0 .9rem;
-  white-space:nowrap;font-family:var(--mono);font-size:.75rem;
-  border-right:1px solid rgba(42,52,65,.5);height:100%;
+/* ONE vertical mark per cell, and it is the one that means something.
+   There used to be two: this rail on the left, coloured by direction and scaled
+   by `--mag`, and a flat grey `border-right` on the other edge meaning nothing
+   at all. Adjacent cells therefore drew a grey line and a coloured one a few
+   pixels apart, and a reader had no way to tell which of the two carried
+   information. The border is gone and the padding does its job — a gap divides
+   a list perfectly well, and it cannot be mistaken for a gauge. */
+.tape .cell{display:flex;align-items:baseline;gap:.4rem;padding:0 1.1rem;
+  white-space:nowrap;font-family:var(--mono);font-size:.75rem;height:100%;
   align-items:center;position:relative}
 /* The power rail: a HUD gauge rather than an arrow. Colour carries direction,
    and `--mag` (0..1, set per cell by the server) carries SIZE — so a 0.1% drift
@@ -368,6 +371,14 @@ section.block>h2{margin-bottom:.75rem}
 .tape .cell::before{content:"";position:absolute;left:0;top:50%;
   transform:translateY(-50%);width:2px;height:calc(28% + var(--mag,0) * 52%);
   background:var(--pewter);opacity:.5;border-radius:1px}
+/* No reading, no gauge. A cell with no quote — or a price with no prior close —
+   has `--mag:0`, and the rail collapsed to a 28% pewter stub that read as a
+   stray tick rather than as an absent measurement. A gauge showing its minimum
+   is a claim that the move is small; there is no move to be small.
+   Safe against the two-class trap that has bitten three times, because there is
+   no tie to lose: nothing else on this pseudo-element declares `display`, so
+   source order cannot decide this one. */
+.tape .cell.norail::before{display:none}
 .tape .cell.up::before{background:var(--gain);opacity:calc(.45 + var(--mag,0) * .55);
   box-shadow:0 0 calc(var(--mag,0) * 7px) var(--gain)}
 .tape .cell.down::before{background:var(--loss);opacity:calc(.45 + var(--mag,0) * .55);
@@ -412,10 +423,28 @@ section.block>h2{margin-bottom:.75rem}
 .tape .cell.shut::after{display:none}
 .tape .cell.shut .sym{border-bottom:none}
 
-.tape .clk{display:flex;align-items:center;gap:.5rem;padding:0 .7rem;
-  white-space:nowrap;font-family:var(--mono);font-size:.75rem;height:100%;
-  border-left:1px solid var(--slate);border-right:1px solid var(--slate);
-  background:var(--ink);box-shadow:inset 0 1px 3px rgba(0,0,0,.45)}
+/* A clock is a different KIND of object from a price, and it has to look like
+   one. It used to be framed in `border-left`/`border-right: var(--slate)` —
+   which was the exact line the cells used to divide themselves with, so the
+   frame said "here is another cell" and only the fill said otherwise. Contrast
+   alone could never fix that while the frame was shared.
+   So it is not framed at all now. It is a module set INTO the band: inset
+   from the strip on all four sides, recessed, rounded, and carrying the deck's
+   own bracket corners. Nothing else on the tape has any of those, and the cells
+   have no borders left to be confused with. */
+.tape .clk{display:flex;align-items:center;gap:.5rem;padding:0 .8rem;
+  white-space:nowrap;font-family:var(--mono);font-size:.75rem;
+  height:calc(100% - .7rem);margin:.35rem .6rem;border-radius:2px;
+  position:relative;
+  background:linear-gradient(180deg,rgba(5,8,11,.95),rgba(11,14,18,.95));
+  box-shadow:inset 0 1px 4px rgba(0,0,0,.6),0 0 0 1px rgba(42,52,65,.4)}
+/* The diagonal pair, same as `.card` and every other framed box on the deck —
+   half the pseudo-elements of four corners and it still reads as a frame. */
+.tape .clk::before,.tape .clk::after{content:"";position:absolute;
+  width:6px;height:6px;border:1px solid var(--holo);opacity:.5;
+  pointer-events:none}
+.tape .clk::before{top:0;left:0;border-right:0;border-bottom:0}
+.tape .clk::after{bottom:0;right:0;border-left:0;border-top:0}
 .tape .clk .city{font-size:.625rem;letter-spacing:.1em;text-transform:uppercase;
   color:var(--bone);opacity:.7;line-height:1}
 /* Larger than the instrument prices, deliberately. The hour in four zones
@@ -473,9 +502,6 @@ section.block>h2{margin-bottom:.75rem}
 /* No exchange in this zone. Dimmer than shut, because "there is nothing here"
    is a weaker statement than "this is closed right now". */
 .tape .clk .mkt-bare{color:var(--slate);text-shadow:none}
-.tape .fixed .verdict-on{color:var(--patina)}
-.tape .fixed .verdict-wait{color:var(--amber)}
-.tape .fixed .verdict-off{color:var(--pewter)}
 /* Present only while SCRIPT has not run. A frozen clock is the one plausible
    wrong figure a clock can be, so it says so rather than looking correct. */
 .tape .fixed .frozen{color:var(--amber);text-transform:none;letter-spacing:0}
@@ -543,15 +569,15 @@ section.block>h2{margin-bottom:.75rem}
    `turning` alone stays the fallback for a direction the script did not set. */
 @keyframes tape-flash{0%{background:rgba(111,211,232,.20)}100%{background:transparent}}
 .tape.turning{animation:tape-flash 1800ms ease-out}
-.tape[data-phase=open] .fixed .dot{background:var(--patina)}
-.tape[data-phase=open] .fixed .name{color:var(--patina)}
-.tape[data-phase=pre] .fixed .dot{background:var(--amber)}
-.tape[data-phase=pre] .fixed .name{color:var(--amber)}
-.tape[data-phase=post] .fixed .dot{background:var(--amber)}
-.tape[data-phase=weekend] .fixed .dot{background:var(--slate)}
-@keyframes tape-warm{0%,100%{opacity:.35}50%{opacity:1}}
-.tape[data-phase=pre] .fixed .dot{animation:tape-warm 2.8s ease-in-out infinite}
-.tape[data-phase=open] .fixed .dot{animation:tape-warm 1.6s ease-in-out infinite}
+/* There was a phase-coloured, pulsing dot here, and eleven rules driving it.
+   It went with the verdict badge and for the same reason: an unlabelled
+   coloured light is a claim nobody can read, and this one sat immediately
+   beside a sentence about the NEXT phase while being coloured by the CURRENT
+   one — so amber against "NYSE open in 3h 55m" invited exactly the wrong
+   reading. The state is on the clock, where it has a filled/half/hollow pip
+   and the word beside it, which survives greyscale and a screen reader.
+   `.fixed .name` went with it: nothing has rendered that class since the phase
+   block was removed, and a rule with no element is a rule nobody can check. */
 
 @media (prefers-reduced-motion:reduce){
   /* Switched OFF, not slowed. A strip of text sliding sideways forever is a
@@ -564,7 +590,6 @@ section.block>h2{margin-bottom:.75rem}
      translating here, so it is sixteen instruments and four clocks printed
      again at the end of a strip somebody is scrolling by hand. */
   .tape .track > .marquee-run.dup{display:none}
-  .tape .fixed .dot{animation:none}
   .tape .clk.turning .t,.tape.turning,
   .tape .clk.turn-up .t,.tape .clk.turn-down .t,
   .tape .clk.turn-side .t{animation:none}
@@ -574,8 +599,18 @@ section.block>h2{margin-bottom:.75rem}
   .tape .cell.pulse-up::before,.tape .cell.pulse-down::before{animation:none}
 }
 @media (max-width:640px){
-  .tape .fixed{font-size:.5625rem;padding:0 .6rem}
-  .tape .fixed .until,.tape .fixed .sep{display:none}
+  /* Tracking is what this panel actually costs at 320px. `.12em` on nineteen
+     uppercase characters is most of a 157px block, against a strip 320px wide —
+     so the letter-spacing goes and the padding tightens, and the words stay.
+     Shortening the text instead would mean dropping "NYSE", and the exchange
+     name is the whole reason this is allowed to be pinned at all. */
+  .tape .fixed{font-size:.5625rem;padding:0 .55rem;letter-spacing:.04em;
+    gap:.3rem}
+  /* The clock module keeps its inset but gives back the horizontal margin.
+     At 390px the strip is a hand-scroller and a 19px gap either side of four
+     clocks is a fifth of the visible width spent on air. */
+  .tape .clk{margin-left:.3rem;margin-right:.3rem;padding:0 .55rem}
+  .tape .cell{padding:0 .8rem}
 }
 
 .banner{border:1px solid var(--slate);border-left-width:3px;border-radius:2px;
@@ -2400,6 +2435,11 @@ SCRIPT = """
           cell.classList.add(row.change_pct >= 0 ? 'up' : 'down');
           var mag = Math.min(Math.abs(row.change_pct) / 3, 1);
           cell.style.setProperty('--mag', mag.toFixed(3));
+          /* The server withholds the rail where there was no move to measure.
+             A percentage has just arrived, so there is one — and leaving the
+             class on would show a figure with its gauge suppressed, which is
+             the mirror of the stub the class exists to prevent. */
+          cell.classList.remove('norail');
         }
         if (!moved) continue;
         /* Direction from the SIGN OF THE DELTA, never from the day's change:
@@ -2887,6 +2927,19 @@ SCRIPT = """
     return 'under a minute';
   }
 
+  /* The countdown beside the clocks, and the reason it needs a label map.
+     `data-next-phase` carries the ENUM VALUE — 'pre', 'post' — and the server
+     renders the human label. Formatting it here as the raw value would have the
+     line change from "NYSE after hours in 3h 12m" to "post in 3h 11m" one
+     second after load, which is the `_gmt_offset` lesson: two halves of one
+     figure formatted two ways eventually disagree, and here they disagree
+     visibly and immediately. */
+  var PHASE_WORDS = {
+    weekend: 'weekend', overnight: 'overnight', pre: 'pre-market',
+    open: 'open', post: 'after hours'
+  };
+  function phaseWord(v) { return PHASE_WORDS[v] || v; }
+
   var until = bar.querySelector('.until');
   var turned = 0;
 
@@ -2905,7 +2958,12 @@ SCRIPT = """
     if (!changeAt) return;
 
     var left = changeAt - now.getTime();
-    until.textContent = nextPhase + ' in ' + countdown(left);
+    /* The preposition belongs to the caller, not to `countdown`: it answers
+       "any moment" at zero, and "in any moment" is not English. Same split as
+       the server's, so the two never disagree mid-sentence. */
+    var gap = countdown(left);
+    until.textContent = 'NYSE ' + phaseWord(nextPhase) +
+      (gap === 'any moment' ? ' ' : ' in ') + gap;
 
     /* The moment worth watching. The digits spin up to a blur and settle into
        the new state, once — `turned` latches, because an animation that
@@ -2923,7 +2981,8 @@ SCRIPT = """
     if (left <= 0 && turned !== changeAt) {
       turned = changeAt;
       bar.setAttribute('data-phase', nextPhase);
-      until.textContent = nextPhase + ' now — reload for the next boundary';
+      until.textContent = 'NYSE ' + phaseWord(nextPhase) +
+        ' now — reload for the next boundary';
 
       /* The direction carries the meaning. A blur alone says "something
          changed" and makes the reader look for what; spinning UP into the
@@ -3535,6 +3594,11 @@ def _tape_cell(quote: TickerQuote, *, venue: VenueState, kind: str) -> str:
     if quote.last is None:
         body = '<span class="none">no quote</span>'
         mag = 0.0
+        # No reading, so no gauge. The rail measures the SIZE of the move, and
+        # at `--mag:0` it collapsed to a short pewter stub that reads as a tiny
+        # move rather than as an absent one — a plausible wrong figure drawn in
+        # 2 pixels. Missing stays missing here as everywhere else.
+        classes.append("norail")
     else:
         body = f'<span class="px" data-tick-px>{_tape_price(quote.last)}</span>'
         if pct is None:
@@ -3542,6 +3606,7 @@ def _tape_cell(quote: TickerQuote, *, venue: VenueState, kind: str) -> str:
             # Saying so beats implying the day is flat.
             body += '<span class="mv" data-tick-mv>no prior close</span>'
             mag = 0.0
+            classes.append("norail")
         else:
             classes.append("up" if pct >= 0 else "down")
             wedge = "▲" if pct >= 0 else "▼"
@@ -3652,9 +3717,9 @@ def ticker_tape(
     the loop seamless: at -50% the second copy sits exactly where the first
     began, so the animation restarting is invisible. One copy would snap back.
 
-    The phase block is pinned outside the scroller, because the one thing on
-    this strip that must never scroll out of view is whether the market is
-    open.
+    One thing is pinned outside the scroller: when New York's session next
+    changes, which is the fact a clock cannot give and a marquee would carry
+    out of sight every ninety seconds.
     """
     faces = clock_faces(state.now)
 
@@ -3708,38 +3773,40 @@ def ticker_tape(
     )
 
     run = "".join(groups)
-    # Plain words. "gate open, session shut" was accurate and told an operator
-    # nothing they could act on — it named two internal mechanisms and left the
-    # reader to work out what the bot would actually DO. The question this
-    # answers is "will it trade right now", so it answers that.
+    # What is pinned here is a fact about ONE exchange, and it says which one.
     #
-    # The middle state is the one worth spelling out, and it is the whole point
-    # of the session work: the bot will propose, the gate will approve, and the
-    # order will REST until the next regular open rather than filling now.
-    if state.is_tradeable_by_bot:
-        verdict, verdict_class = "trading", "verdict-on"
-    elif state.bot_window_open:
-        verdict, verdict_class = "armed · orders rest until open", "verdict-wait"
-    else:
-        verdict, verdict_class = "idle", "verdict-off"
+    # Two things have now been thrown off this slot for the same reason. The
+    # session phase went first — "PRE-MARKET" pinned over the strip was a claim
+    # about every cell beneath it and false for the crypto trading right beside
+    # it. The gate verdict went second: `trading` / `armed` / `idle` looked like
+    # a status light and told an operator nothing they could act on, and the
+    # clocks already answer whether New York is open. It now lives on the Board,
+    # under "What it will do right now", where there is room to say what each
+    # state actually costs.
+    #
+    # The countdown is what the strip is missing and no clock can give: WHEN the
+    # state changes. Naming NYSE is what keeps it out of the trap the phase
+    # label fell into — it is a claim about one exchange rather than about
+    # everything scrolling past it.
+    #
+    # "in any moment" is not English, and `_countdown` answers exactly that at
+    # zero — deliberately, because it describes something about to happen and a
+    # negative figure reads as a fault. So the preposition is the caller's, not
+    # the formatter's.
+    left = _countdown(state.seconds_to_change)
+    until = f"NYSE {state.next_label.lower()}" + (
+        f" {left}" if left == "any moment" else f" in {left}"
+    )
 
     return (
         f'<div class="tape" data-phase="{_e(state.phase.value)}" '
         f'data-change-at="{state.next_change.isoformat()}" '
         f'data-next-phase="{_e(state.next_phase.value)}">'
-        # The session phase used to sit here, and it was a claim about every
-        # cell under it — false for crypto, which trades while it read
-        # PRE-MARKET. The clocks already say what time it is where, and each
-        # cell now carries its own venue state, so the global label said
-        # nothing the strip did not already say better.
-        #
-        # The gate verdict stays, because `RiskGate` IS account-wide: "gate
-        # open, session shut" is true of the bot whichever instrument you are
-        # looking at.
-        '<div class="fixed"><span class="dot"></span>'
-        f'<span class="verdict {verdict_class}">{_e(verdict)}</span>'
+        '<div class="fixed">'
+        f'<span class="until">{_e(until)}</span>'
         # Removed by SCRIPT before its first tick, so its presence means the
-        # clocks below are frozen at page-load time.
+        # clocks below — and the countdown beside it — are frozen at page-load
+        # time.
         '<span class="frozen">not ticking</span>'
         "</div>"
         # The run twice, but the second copy in its own element and marked
@@ -3779,7 +3846,68 @@ def ticker_tape(
     )
 
 
-def _board_waiting(env: Env | None) -> str:
+def gate_stance(state: MarketState | None) -> str:
+    """Will it trade right now, and what does each answer cost.
+
+    This used to be three words pinned to the left of the ticker tape —
+    `trading` / `armed · orders rest until open` / `idle` — and the operator
+    flagged it twice. On the strip it read as a status light: it looked like
+    something to act on and there was nothing in it to act on, and the clocks
+    beside it already said whether New York was open.
+
+    Here there is room for the half that was missing. The middle state is the
+    one worth having at all, and three words could never carry it: the bot will
+    propose, the gate will approve, and the order will REST rather than fill.
+
+    `None` renders nothing. A caller that cannot say what time the market
+    thinks it is must not be handed a verdict — same rule as the reading stamp.
+    """
+    if state is None:
+        return ""
+
+    if state.is_tradeable_by_bot:
+        pill, answer = "ok", "It will trade."
+        because = (
+            "The window in config/rules.yaml is open and the regular session is "
+            "running, so an approved proposal reaches the broker and fills at "
+            "the price it was sized against."
+        )
+    elif state.bot_window_open:
+        pill, answer = "watch", "It will place. The order will wait."
+        because = (
+            "The window is open and the regular session is not. Every entry "
+            "carries its stop, and Alpaca refuses extended hours on a bracket, "
+            "so an approved order rests at the broker and becomes eligible at "
+            "the next open — at a price that appears nowhere in what the model "
+            "read when it proposed."
+        )
+    else:
+        pill, answer = "hold", "It will not trade."
+        because = (
+            "Now is outside the window in config/rules.yaml, so the gate "
+            "refuses on session grounds before it weighs anything else. "
+            "Nothing is wrong; this is the window doing its job."
+        )
+
+    return (
+        '<section class="block"><h2>What it will do right now</h2>'
+        f'<div class="card"><h3>{_e(answer)}'
+        f'<span class="pill {pill}">gate</span></h3>'
+        # `68ch`, the measure a lede gets. This card is full width where the
+        # risk cards beside it are half of a `g2`, so left alone the sentence
+        # set to about 150 characters a line — long enough that a reader loses
+        # the start of the next one.
+        f'<p class="note" style="max-width:68ch">{_e(because)}</p>'
+        # The tape carries the same boundary as a gap. This gives the CLOCK
+        # time, which the strip has no room for and which is the half an
+        # operator needs to plan an evening around.
+        '<p class="note" style="max-width:68ch;margin-top:.7rem">New York moves to '
+        f"{_e(state.next_label.lower())} at {_e(_when(state.next_change))}, "
+        f"{_e(_countdown(state.seconds_to_change))} from now.</p></div></section>"
+    )
+
+
+def _board_waiting(env: Env | None, market: MarketState | None = None) -> str:
     """The Board before the first reading has arrived.
 
     Same shape as the real thing, so nothing jumps when the figures land: four
@@ -3787,6 +3915,12 @@ def _board_waiting(env: Env | None) -> str:
     will occupy. `.pending` carries the shimmer; the text under each tile says
     what is being waited for rather than leaving a reader to guess whether the
     deck is broken.
+
+    `market` renders here too, and it is the one thing on this page that is
+    genuinely KNOWN on a cold start: it is clock arithmetic against
+    `config/rules.yaml` and needs no broker at all. Withholding it alongside
+    the figures would be treating "not read yet" as if it meant "nothing can be
+    said".
     """
     tiles = "".join(
         stat(label, '<span class="pending">000,000.00</span>', meta, live=key)
@@ -3828,6 +3962,7 @@ def _board_waiting(env: Env | None) -> str:
         "meters, which cannot be streamed into a page that never rendered them."
         "</div>"
         + f'<div class="grid g4">{tiles}</div>'
+        + gate_stance(market)
     )
 
 
@@ -3844,6 +3979,7 @@ def board(
     read_at: datetime | None = None,
     stale: bool = False,
     unexplained: UnexplainedMoveReport | None = None,
+    market: MarketState | None = None,
 ) -> str:
     """The account at a glance.
 
@@ -3879,9 +4015,14 @@ def board(
     third state rather than a clean one: it means this render was given nothing
     to compare, so the absence of a tag below says nothing at all. See
     `_unexplained_note`.
+
+    **`market` is the ticker tape's old verdict badge, rehoused.** Optional and
+    `None` renders nothing: it is the only figure here that owes nothing to the
+    broker, so a caller with no clock reading is a caller that did not ask,
+    which is different from a market that could not be read.
     """
     if account is None:
-        return _board_waiting(env)
+        return _board_waiting(env, market)
 
     equity = account.equity_usd
     open_risk_pct = (account.open_risk_usd / equity * 100) if equity else 0.0
@@ -3977,6 +4118,7 @@ def board(
             asof_live=True,
         )
         + f'<div class="grid g4">{tiles}</div>'
+        + gate_stance(market)
         + '<section class="block"><h2>Equity</h2>'
         + _curve(curve)
         + "</section>"
@@ -4756,10 +4898,10 @@ def decisions(view: AuditView, *, shown: int = DECISIONS_PER_PAGE, page: int = 1
     end = start + len(window)
 
     lede = (
-        "Every pass of the loop, newest first: what the model assessed, what it "
-        "proposed, what the risk gate ruled and on which grounds, and what "
-        "actually reached the broker. A rejected proposal appears here and "
-        "nowhere else."
+        "The loop wakes every fifteen minutes, and most of the time the right "
+        "answer is nothing. Both are here, newest first. Where it did propose, "
+        "so is the gate's ruling and every reason behind it — a refused "
+        "proposal never becomes a trade, so this is the only place one exists."
     )
     count = (
         f"{total} cycles"
@@ -4774,36 +4916,44 @@ def decisions(view: AuditView, *, shown: int = DECISIONS_PER_PAGE, page: int = 1
     if not view.decisions:
         body += (
             '<div class="card" style="margin-top:1.5rem"><p class="empty">'
-            "No decisions recorded yet. The loop writes one entry per cycle to "
-            "<code>audit/</code>, so this fills in once "
-            "<code>electrum-bot loop</code> has run.</p></div>"
+            "Nothing recorded yet. The loop writes an entry per cycle into "
+            "<code>audit/</code>; run <code>electrum-bot loop</code> and they "
+            "appear here.</p></div>"
         )
         return body
 
     body += '<section class="block">'
-    body += (
-        '<p class="note">Each cycle is folded behind its head line; open one to '
-        "read what it considered and how the gate ruled. The newest is open "
-        "already."
-        + (
-            ""
-            if total <= shown
-            else " Older cycles than the window above are still on disk in "
-            "<code>audit/</code> and reachable through the history tools."
+    # What was cut from here: a sentence explaining that a cycle is folded
+    # behind its head line and that clicking one opens it. A disclosure
+    # triangle already says that, and telling a reader how a `<details>` works
+    # is the page spending its opening line on itself.
+    #
+    # What was kept: the half naming what is NOT on screen. That qualifies a
+    # count, and a page whose whole reason to exist is that a rejection is
+    # visible nowhere else must never leave a reader thinking they have seen
+    # everything.
+    if total > shown:
+        body += (
+            '<p class="note" style="max-width:68ch">Older cycles than this '
+            "window are still on disk in <code>audit/</code>, and the history "
+            "tools reach them.</p>"
         )
-        + "</p>"
-    )
     # The legend for the feed markers, ONCE on the page rather than once per
     # cycle. It is a property of how the page reads, not of any one cycle, and
     # at ~380 bytes it would have been 15 KB across forty cycles saying the
     # same sentence forty times — on the page already measured at 269 KB.
+    #
+    # `68ch` is the measure `head` gives a lede, and this sits directly under
+    # one. Left at full width it set to about 150 characters a line beside a
+    # paragraph wrapping at 68, which reads as two different kinds of text
+    # rather than as one page talking.
     body += (
-        '<p class="note">Under &ldquo;what it read&rdquo;, an item marked as '
-        "already on file was in front of the model on an earlier pass too: the "
-        "headline cache is 30 minutes and the post cache 10, against a loop "
-        "that wakes every 15. Its age is measured to that cycle rather than to "
-        "now, and the trailing count is how many of the cycles read into this "
-        "page carried it.</p>"
+        '<p class="note" style="max-width:68ch">Under &ldquo;what it read&rdquo;, '
+        "an item marked as already on file was in front of the model on an "
+        "earlier pass too — the headline cache runs 30 minutes and the post "
+        "cache 10, against a loop that wakes every 15. Ages are measured to "
+        "that cycle, not to now, and the count is how many of the cycles on "
+        "this page carried it.</p>"
     )
     # Built ONCE over the whole view rather than per cycle, and over the whole
     # view rather than the page: paging back must not change whether a headline
@@ -4933,9 +5083,9 @@ def _held(entry: DecisionEntry) -> str:
     return (
         '<div class="step"><p class="eyebrow">Open positions reviewed</p>'
         f"{rows}"
-        '<p class="note" style="margin-top:.6rem">Advisory only. The loop does '
-        "not act on these: closing a position and moving a stop sit outside the "
-        "proposal path, so nothing here reached the broker.</p></div>"
+        '<p class="note" style="margin-top:.6rem">Advisory only. Closing a '
+        "position and moving a stop sit outside the proposal path, so nothing "
+        "here reached the broker.</p></div>"
     )
 
 
@@ -5144,10 +5294,14 @@ def _read(entry: DecisionEntry, *, seen: Sightings | None = None) -> str:
         edge=edge,
         limit=POSTS_PER_CYCLE,
         empty=(
-            "no posts this cycle. The X feed is off unless social.enabled and "
-            "X_BEARER_TOKEN are both set, and from this record an unconfigured "
-            "feed and a quiet one look identical — Settings says which this "
-            "deployment is."
+            # The distinction is what has to survive here: from this record
+            # alone a feed nobody switched on and a genuinely quiet morning are
+            # the same line. What was cut is how to switch it on — two
+            # environment variable names, which is a setup instruction sitting
+            # inside a record of one cycle, and Settings is already named as
+            # the page that answers it.
+            "no posts this cycle. An unconfigured feed and a quiet one look "
+            "identical from here; Settings says which this deployment is."
         ),
         degraded=inputs.social_degraded,
         degraded_text=(
@@ -5274,7 +5428,8 @@ def _cycle(
     if not d.proposals:
         out += (
             '<div class="step"><p class="note">Nothing proposed. Doing nothing is '
-            "a valid output and is recorded as one.</p></div>"
+            "usually the right answer, and it is recorded rather than "
+            "assumed.</p></div>"
         )
 
     for i, proposal in enumerate(d.proposals):
@@ -5315,9 +5470,9 @@ def _cycle(
         if verdict is None:
             out += (
                 '<div class="rung"><span class="lbl">Gate</span>'
-                '<span class="muted">no verdict recorded against this proposal. '
-                "The loop skips a proposal whose symbol has no tick, so the lists "
-                "no longer line up and pairing them would be a guess.</span></div>"
+                '<span class="muted">no verdict on file. The loop drops a '
+                "proposal whose symbol has no tick, so the two lists no longer "
+                "line up — pairing them would be a guess.</span></div>"
             )
         elif verdict.approved:
             out += '<div class="rung gate ok"><span class="lbl">Gate</span>approved</div>'
@@ -5364,14 +5519,17 @@ def trades_page(recent: list[Trade], report: JournalReport) -> str:
         "Journal",
         "Trades",
         f"{report.overall.trade_count} closed",
-        "Every closed trade with the reasoning recorded against it at the time. "
-        "R is the result as a multiple of what the trade was designed to lose.",
+        "What actually happened, carrying the reasoning it was written down "
+        "with rather than a reconstruction. The figure under each result is "
+        "its R: the outcome as a multiple of what the trade was designed to "
+        "lose, so -1R is the stop doing its job and +2R is twice that back.",
     )
 
     if not recent:
         body += (
             '<div class="card" style="margin-top:1.5rem"><p class="empty">'
-            "No closed trades yet.</p></div>"
+            "Nothing has closed yet. Open positions are on the Board; this is "
+            "where they end up.</p></div>"
         )
         return body
 
@@ -5456,8 +5614,16 @@ def analytics_page(report: JournalReport) -> str:
         "Measurement",
         "Analytics",
         f"{s.trade_count} closed trades",
-        "A wrong metric is worse than no metric, because it gets believed and "
-        "then acted on. Every figure here is computed by src/bot/metrics.py.",
+        # The lede used to be "a wrong metric is worse than no metric, because
+        # it gets believed and then acted on" — a true principle, aimed at
+        # whoever writes this page rather than at whoever reads it, and a
+        # disclaimer where an answer belongs. The consequence for a reader is
+        # the sample size, so that is what it says now; the principle survives
+        # in what the figures DO, which is answer "n/a" rather than 0%.
+        "How it has actually gone. Under about twenty closed trades this is "
+        "noise rather than a track record — three losses in a row prove very "
+        "little, and the Reading column says so wherever the sample is thin. "
+        "That is also why none of it is shown to the model.",
     )
     body += (
         '<div class="grid g4" style="margin-top:1.5rem">'
@@ -5486,7 +5652,7 @@ def analytics_page(report: JournalReport) -> str:
         + "</div>"
     )
     body += (
-        '<section class="block"><h2>Headline</h2>'
+        '<section class="block"><h2>The short version</h2>'
         f'<div class="readout">{_e(chr(10).join(render_summary(s)))}</div></section>'
         '<section class="block"><h2>Stops and targets, judged after the fact</h2>'
         f'<div class="readout">{_e(chr(10).join(render_excursions(report.excursions)))}'

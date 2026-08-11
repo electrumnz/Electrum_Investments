@@ -25,6 +25,7 @@ import structlog
 from pydantic import ValidationError
 
 import bot.main as main_mod
+from bot import jobs
 from bot.audit import AuditLog
 from bot.claude_client import CallUsage, ClaudeDecision
 from bot.confer import CONFERENCE
@@ -1269,3 +1270,361 @@ def test_a_failed_position_move_degrades_the_cycle_rather_than_ending_the_loop(
     trade = journal.open_trade_for("SPY")
     assert trade is not None and trade.current_stop is None
     assert [o.stop_price for o in broker.get_open_orders()] == [820.0]
+
+
+# ---------------------------------------------------------------------------
+# The loop's passes, recorded as jobs
+#
+# "Did the loop run at 14:15, and what happened?" used to need a grep through
+# `journalctl`, and grep could only ever find the passes that FINISHED: a cycle
+# skipped with the market shut and a cycle whose model call failed never reached
+# the audit log at all.
+#
+# Every test below exists to hold three outcomes apart — ran-and-did-nothing,
+# skipped, failed — plus the fourth state that is none of them: no record, which
+# must never be readable as a quiet cycle. Same rule as `has_cycles` in
+# `news_history`, `can_grade_anything` in `triggers` and `NO_DECISION` in
+# `confer`.
+
+
+def _jobs_after(tmp_path, **kwargs) -> jobs.JobHistory:
+    """The job history the cycle just written left behind."""
+    return jobs.read(AuditLog(tmp_path / "audit"), **kwargs)
+
+
+def test_a_quiet_pass_is_recorded_as_a_job_that_ran_and_proposed_nothing(
+    monkeypatch, tmp_path
+):
+    """The common case, and the one that has to be legible as a decision.
+
+    Standing pat is a valid output. The record says the loop looked and chose
+    nothing, which is a different fact from the loop not having looked.
+    """
+    _run_one_cycle(
+        monkeypatch,
+        tmp_path,
+        ClaudeDecision(market_assessment="Thin tape, nothing worth taking.", proposals=[]),
+    )
+
+    history = _jobs_after(tmp_path)
+    assert [j.outcome for j in history.jobs] == [jobs.Outcome.RAN]
+    job = history.jobs[0]
+    assert job.proposals == 0
+    assert job.approved == 0
+    assert job.executed == 0
+    # A real reading, so `quiet` is entitled to be true here and nowhere else.
+    assert job.quiet is True
+    assert history.ran == 1 and history.quiet == 1
+    assert history.skipped == 0 and history.failed == 0
+
+
+def test_a_skipped_pass_records_NO_COUNT_rather_than_a_zero(monkeypatch, tmp_path):
+    """The distinction the whole record exists for.
+
+    A skipped cycle did not propose nothing — it did not look. A zero here would
+    make a shut market indistinguishable from a quiet one, and `record_skipped`
+    has no parameter that could carry one.
+    """
+    _run_one_cycle_with_client(
+        monkeypatch,
+        tmp_path,
+        _ExplodingClaude(AssertionError("the model must not be called when shut")),
+        in_session=False,
+    )
+
+    history = _jobs_after(tmp_path)
+    assert [j.outcome for j in history.jobs] == [jobs.Outcome.SKIPPED]
+    job = history.jobs[0]
+    assert job.proposals is None
+    assert job.approved is None
+    assert job.executed is None
+    # Not merely absent from the counts: it must not be countable as quiet.
+    assert job.quiet is False
+    assert history.quiet == 0
+    assert history.skipped == 1 and history.ran == 0
+    # The account state is still on the record, so a skip reads as "the market
+    # was shut" rather than as a blank pass.
+    assert job.standing.equity_usd is not None
+    assert job.standing.open_risk_usd is not None
+
+
+def test_a_failed_pass_is_recorded_as_failed_and_never_as_one_that_held(
+    monkeypatch, tmp_path
+):
+    """A cycle that could not get a decision must not be recorded as one that
+    decided to do nothing. Observed live: a rationale came back over the cap,
+    the SDK raised, and the loop died into a systemd restart loop."""
+    _run_one_cycle_with_client(
+        monkeypatch, tmp_path, _ExplodingClaude(TimeoutError("read timed out"))
+    )
+
+    history = _jobs_after(tmp_path)
+    assert [j.outcome for j in history.jobs] == [jobs.Outcome.FAILED]
+    job = history.jobs[0]
+    assert job.proposals is None
+    assert job.quiet is False
+    assert "read timed out" in job.detail
+    assert history.failed == 1 and history.ran == 0 and history.quiet == 0
+    # The older named event stays: it carries the error under its own kind and
+    # other readers already know about it.
+    view = AuditLog(tmp_path / "audit").read()
+    assert any(e.kind == "model_call_failed" for e in view.events)
+
+
+def test_the_bars_are_not_fetched_on_a_pass_that_will_not_ask_the_model(
+    monkeypatch, tmp_path
+):
+    """The cost control that makes a wider `allowed_symbols` affordable.
+
+    Each of the three feeds is one network call PER SYMBOL PER CYCLE, so the
+    loop's data bill is linear in the allowlist. The quotes have to be paid
+    whatever the market is doing — `stop_watch` and the expiry alerts read them,
+    and out of hours is exactly what that backstop is for — but the daily and
+    intraday bars feed only the prompt, which a skipped pass never builds.
+    """
+    calls: list[str] = []
+
+    def _bars(broker, symbols):
+        calls.append("daily")
+        return {}, list(symbols)
+
+    def _intraday(broker, symbols):
+        calls.append("intraday")
+        return {}, list(symbols)
+
+    def _ticks(broker, symbols):
+        calls.append("ticks")
+        return {}
+
+    monkeypatch.setattr(main_mod, "fetch_indicators", _bars)
+    monkeypatch.setattr(main_mod, "fetch_intraday", _intraday)
+    monkeypatch.setattr(main_mod, "fetch_market_ticks", _ticks)
+
+    _run_one_cycle_with_client(
+        monkeypatch,
+        tmp_path,
+        _ExplodingClaude(AssertionError("the model must not be called when shut")),
+        in_session=False,
+    )
+    assert calls == ["ticks"], "a shut market must not pay for bars nobody renders"
+
+    calls.clear()
+    _run_one_cycle_with_client(
+        monkeypatch,
+        tmp_path,
+        _StubClaude(ClaudeDecision(market_assessment="Open.", proposals=[])),
+        in_session=True,
+    )
+    assert calls == ["ticks", "daily", "intraday"], "an open market still needs all three"
+
+
+def _view(*events: tuple[str, datetime, dict[str, Any]]) -> Any:
+    """An `AuditView` built by hand, so a reader test needs no clock and no disk."""
+    from bot.audit import AuditView, EventEntry
+
+    view = AuditView()
+    view.events = [EventEntry(kind=k, timestamp=t, payload=p) for k, t, p in events]
+    return view
+
+
+def _job_event(
+    started: datetime, outcome: str = "ran", *, interval: float | None = 900.0
+) -> tuple[str, datetime, dict[str, Any]]:
+    payload: dict[str, Any] = {
+        "outcome": outcome,
+        "started_at": started.isoformat(),
+        "interval_seconds": interval,
+        "detail": "",
+        "proposals": 0 if outcome == "ran" else None,
+        "approved": 0 if outcome == "ran" else None,
+        "executed": 0 if outcome == "ran" else None,
+    }
+    # Recorded a second after it began, which is what a real pass looks like.
+    return (jobs.JOB_EVENT, started + timedelta(seconds=1), payload)
+
+
+def test_a_moment_nothing_covers_is_not_recorded_rather_than_quiet(tmp_path):
+    """The fourth state. The loop was stopped, restarting, or its record was
+    lost — and none of those is "it ran and found nothing to do"."""
+    now = datetime(2026, 8, 11, 15, 0, tzinfo=UTC)
+    history = jobs.history(
+        _view(
+            _job_event(now - timedelta(minutes=120)),
+            _job_event(now - timedelta(minutes=15)),
+        ),
+        now=now,
+    )
+
+    inside = history.at(now - timedelta(minutes=60))
+    assert inside.coverage is jobs.Coverage.NOT_RECORDED
+    assert inside.job is None
+    assert "NOT a report that it ran and did nothing" in inside.describe()
+
+    covered = history.at(now - timedelta(minutes=10))
+    assert covered.coverage is jobs.Coverage.FOUND
+    assert covered.job is not None and covered.job.outcome is jobs.Outcome.RAN
+
+
+def test_a_gap_names_whether_a_shutdown_explains_it(tmp_path):
+    """A `loop_end` inside the gap means somebody stopped the process, which is
+    ordinary. A gap with no shutdown in it is the loop having gone away while it
+    was supposed to be running, and only one of those is a fault."""
+    now = datetime(2026, 8, 11, 15, 0, tzinfo=UTC)
+    stopped = jobs.history(
+        _view(
+            _job_event(now - timedelta(minutes=120)),
+            ("loop_end", now - timedelta(minutes=118), {}),
+            _job_event(now - timedelta(minutes=15)),
+        ),
+        now=now,
+    )
+    assert len(stopped.gaps) == 1
+    assert stopped.gaps[0].explained_by_shutdown is True
+    assert stopped.gaps[0].missed == 6
+
+    vanished = jobs.history(
+        _view(
+            _job_event(now - timedelta(minutes=120)),
+            _job_event(now - timedelta(minutes=15)),
+        ),
+        now=now,
+    )
+    assert len(vanished.gaps) == 1
+    assert vanished.gaps[0].explained_by_shutdown is False
+
+
+def test_consecutive_passes_are_not_reported_as_a_gap(tmp_path):
+    """Without grace every pair of passes is a gap and the finding is worthless
+    on the first read: a cycle sleeps AFTER its work, so the next one starts at
+    interval-plus-duration rather than at exactly the interval."""
+    now = datetime(2026, 8, 11, 15, 0, tzinfo=UTC)
+    history = jobs.history(
+        _view(
+            _job_event(now - timedelta(minutes=45)),
+            _job_event(now - timedelta(minutes=30)),
+            _job_event(now - timedelta(minutes=15)),
+        ),
+        now=now,
+    )
+    assert history.gaps == []
+    assert history.at(now - timedelta(minutes=22)).coverage is jobs.Coverage.FOUND
+
+
+def test_a_truncated_read_says_it_cannot_answer_rather_than_no(tmp_path):
+    """`AuditLog.read` bounds what it returns, so the absence of a pass older
+    than the oldest one held says nothing about the loop — it says the read
+    stopped. Same trap as `seen.reaches_past_marker`."""
+    now = datetime(2026, 8, 11, 15, 0, tzinfo=UTC)
+    view = _view(_job_event(now - timedelta(minutes=15)))
+    older = now - timedelta(hours=6)
+
+    honest = jobs.history(view, now=now, limit_reached=True)
+    assert honest.at(older).coverage is jobs.Coverage.OUT_OF_RANGE
+    assert honest.is_degraded is True
+
+    complete = jobs.history(view, now=now, limit_reached=False)
+    assert complete.at(older).coverage is jobs.Coverage.NOT_RECORDED
+
+
+def test_an_outcome_this_build_does_not_know_is_counted_not_defaulted(tmp_path):
+    """A lenient fallback plus a silent coercion is a mapping that can fail
+    completely while looking healthy — which is exactly what `str()` on an SDK
+    enum did to every order status on the Board."""
+    now = datetime(2026, 8, 11, 15, 0, tzinfo=UTC)
+    history = jobs.history(
+        _view(
+            _job_event(now - timedelta(minutes=30), outcome="dreamt"),
+            _job_event(now - timedelta(minutes=15)),
+        ),
+        now=now,
+    )
+    assert history.unreadable_records == 1
+    assert [j.outcome for j in history.jobs] == [jobs.Outcome.RAN]
+    assert history.is_degraded is True
+    assert any("could not be read" in line for line in jobs.render(history, now=now))
+
+
+def test_no_passes_on_file_is_not_a_quiet_window(tmp_path):
+    """The rule the whole module is built on, at the top level: an empty history
+    means nobody looked, never that there was nothing to do."""
+    now = datetime(2026, 8, 11, 15, 0, tzinfo=UTC)
+    history = jobs.history(_view(), now=now)
+
+    assert history.has_jobs is False
+    lines = jobs.render(history, now=now)
+    assert any("not running" in line for line in lines)
+    assert not any("stood pat" in line for line in lines)
+
+
+def test_the_jobs_command_is_dispatched_and_never_falls_through_to_the_loop(
+    monkeypatch, tmp_path, capsys
+):
+    """A command listed in `choices` with no branch of its own does not error —
+    the foot of `main()` returns `cmd_loop`, so it silently starts the decision
+    loop. That is the worst available failure for a read-only command, and it is
+    invisible from reading the argparse block."""
+    monkeypatch.setattr(main_mod, "AuditLog", lambda: AuditLog(tmp_path / "audit"))
+
+    def _must_not_run(*args: Any, **kwargs: Any) -> int:
+        raise AssertionError("`jobs` must never reach the decision loop")
+
+    monkeypatch.setattr(main_mod, "cmd_loop", _must_not_run)
+    monkeypatch.setattr("sys.argv", ["electrum-bot", "jobs"])
+
+    assert main_mod.main() == 0
+    out = capsys.readouterr().out
+    # Nothing has run here, and the empty answer says which kind of empty it is.
+    assert "not running" in out
+
+
+def test_the_jobs_command_reports_all_three_outcomes(monkeypatch, tmp_path, capsys):
+    """The operator's question, answered without a grep: which passes ran, which
+    were skipped with the market shut, and which could not get a decision."""
+    audit = AuditLog(tmp_path / "audit")
+    monkeypatch.setattr(main_mod, "AuditLog", lambda: audit)
+    started = datetime.now(UTC) - timedelta(minutes=5)
+    standing = jobs.Standing(equity_usd=100_000.0, open_positions=0, open_risk_usd=0.0)
+
+    jobs.record_ran(
+        audit, started_at=started, interval_seconds=900.0, standing=standing,
+        proposals=0, approved=0, executed=0,
+    )
+    jobs.record_skipped(
+        audit, started_at=started + timedelta(minutes=1), interval_seconds=900.0,
+        standing=standing, detail="No enabled instrument class was in session.",
+    )
+    jobs.record_failed(
+        audit, started_at=started + timedelta(minutes=2), interval_seconds=900.0,
+        standing=standing, detail="TimeoutError: read timed out",
+    )
+
+    assert main_mod.cmd_jobs(hours=24.0, at=None) == 0
+    out = capsys.readouterr().out
+    assert "1 ran, 1 skipped with the market shut, 1 could not get a decision" in out
+    assert "read timed out" in out
+
+    # And a moment nobody recorded is answered as such rather than as a hold.
+    assert main_mod.cmd_jobs(hours=24.0, at="2020-01-01T14:15") == 0
+    assert "cannot be established" in capsys.readouterr().out
+
+    # A time nobody can parse is refused rather than silently answered about now.
+    assert main_mod.cmd_jobs(hours=24.0, at="yesterday afternoon") == 2
+    assert "Could not read" in capsys.readouterr().out
+
+
+def test_a_pass_that_stated_no_cadence_says_so_instead_of_claiming_a_gap(tmp_path):
+    """A record with no `interval_seconds` cannot be stretched over a window
+    somebody assumed. The honest answer names the pass and says its reach is
+    unknown, rather than reporting the loop as absent when one is sitting there.
+    """
+    now = datetime(2026, 8, 11, 15, 0, tzinfo=UTC)
+    history = jobs.history(
+        _view(_job_event(now - timedelta(minutes=40), interval=None)), now=now
+    )
+
+    answer = history.at(now - timedelta(minutes=5))
+    assert answer.coverage is jobs.Coverage.NOT_RECORDED
+    assert answer.nearest_before is not None
+    assert "did not state its cadence" in answer.describe()
+    # And it is not counted as a gap either, for the same reason.
+    assert history.gaps == []
