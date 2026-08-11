@@ -854,6 +854,47 @@ def test_get_dream_returns_the_chain_the_conditions_and_the_transcript(wired_ses
     assert result["messages"][0]["age_days"] >= 0.0
 
 
+def test_get_dream_describes_an_observation_as_something_a_person_settles(
+    wired_session,
+):
+    """It reported `is_checkable` alone, so an agent called this prose.
+
+    An observation — a subject, a claim and a review date — is pre-registered
+    and settleable, just not by code. A payload carrying only "no trigger,
+    not checkable" left the reader with no way to tell it apart from a sentence
+    nobody committed to anything about, which is the missing-versus-absent rule
+    arriving through the dream surface.
+    """
+    from datetime import UTC, datetime, timedelta
+
+    from bot.dreaming import DreamCondition
+
+    due = datetime.now(UTC) + timedelta(days=30)
+    dream_id = _vaulted_dream(
+        wired_session,
+        conditions=[
+            DreamCondition(
+                text="Indonesian sesame acreage is a double-digit share of supply",
+                subject="the USDA oilseeds circular",
+                observable="Indonesia's share of world sesame production",
+                observe_by=due,
+            )
+        ],
+    )
+
+    detail = mcp_server.get_dream(dream_id)["condition_detail"][0]
+
+    assert detail["trigger"] is None and detail["is_checkable"] is False
+    assert detail["is_observable"] is True
+    assert detail["subject"] == "the USDA oilseeds circular"
+    assert detail["observable"] == "Indonesia's share of world sesame production"
+    assert detail["observe_by"] is not None
+    # Awaiting, not unsettleable — those are opposite readings.
+    assert detail["state"] == "awaiting"
+    # And a refuted claim is its own answer rather than an unanswered one.
+    assert detail["ruled_out"] is False
+
+
 def test_get_dream_missing_is_a_stated_fact(wired_session):
     result = mcp_server.get_dream(4242)
     assert result["found"] is False

@@ -14,9 +14,11 @@ No network, no real account: the broker is a `MockBroker` and Claude is stubbed.
 
 from __future__ import annotations
 
+import re
 import sqlite3
 import time
 from collections.abc import MutableMapping
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -644,6 +646,227 @@ def test_vault_expire_marks_an_old_dream_once_per_stay(monkeypatch, tmp_path, ca
     assert len(store.messages(dream_id)) == 1
     # Still there. Marks; never deletes.
     assert store.get(dream_id) is not None
+
+
+# ------------------------------- the observation worklist, and answering one
+
+
+def _observed(store: DreamStore, *, due_in_days: float = 20.0, **overrides) -> int:
+    """A keep whose weakest link is pinned by an OPERATOR-settled observation.
+
+    The shape TODO 0b exists for: nothing here is a number, because the weakest
+    hop of a supply-chain chain never is.
+    """
+    from bot.dreaming import Dream, DreamCondition, DreamVerdict, Hop
+
+    now = datetime.now(UTC)
+    fields: dict[str, Any] = {
+        "title": "Low water lifts the marginal barge operator",
+        "seed": "Gauge readings at Memphis are near record lows",
+        "chain": [
+            Hop(claim="Low water forces draft restrictions", checked=True, source="USACE"),
+            Hop(claim="Dry-cargo barging is material to KEX", checked=False),
+        ],
+        "verdict": DreamVerdict.KEEP,
+        "weakest_hop": "is dry-cargo barging material to KEX",
+        "weakest_hop_index": 2,
+        "symbols": ["KEX"],
+        "asset_class_key": "us_equity",
+        "conditions": [
+            DreamCondition(
+                text="Dry cargo is a double-digit share of Kirby's revenue",
+                subject="Kirby Corp's most recent 10-Q, segment note",
+                observable="dry-cargo revenue as a share of total revenue",
+                observe_by=now + timedelta(days=due_in_days),
+                settles_hops=(2,),
+            )
+        ],
+    }
+    fields.update(overrides)
+    return store.save(Dream(**fields))
+
+
+def test_observations_lists_what_is_waiting_on_a_person(monkeypatch, tmp_path, capsys):
+    """The command that exists because this half fails SILENTLY.
+
+    A threshold is graded by code on every dream run whether or not anybody is
+    watching. An observation is graded by somebody looking at the world, and
+    somebody who is never asked never looks — so without this the prophecy
+    shelf becomes a place dreams wait forever while every surface reports
+    patience.
+    """
+    store = _dream_store(monkeypatch, tmp_path)
+    _observed(store)
+
+    assert main_mod.cmd_observations() == 0
+
+    out = capsys.readouterr().out
+    assert "Kirby Corp's most recent 10-Q" in out
+    assert "1 awaiting, 0 overdue" in out
+    # The handle is what `settle` takes, so it has to be on screen.
+    assert re.search(r"\[[0-9a-f]{6}\]", out)
+
+
+def test_an_empty_worklist_does_not_read_as_nothing_being_stuck(
+    monkeypatch, tmp_path, capsys
+):
+    """`has_cycles` and `can_grade_anything`, arriving at a terminal.
+
+    "Nothing is waiting on you" is true and is not "no dream is stuck": a dream
+    can equally be held by a threshold the market has not reached, which nobody
+    can settle by looking at anything. Letting the first sentence stand for the
+    second is the confident partial answer this repository refuses.
+    """
+    _dream_store(monkeypatch, tmp_path)
+
+    assert main_mod.cmd_observations() == 0
+
+    out = capsys.readouterr().out
+    assert "Nothing is waiting on you" in out
+    assert "not that no dream is stuck" in out
+
+
+def test_an_overdue_observation_is_reported_as_late_not_as_refuted(
+    monkeypatch, tmp_path, capsys
+):
+    """OVERDUE is a fact about the LOOKING, never about the world.
+
+    An unopened dashboard must not read as a refuted prophecy, so the row says
+    the review date has passed and says nothing whatever about the claim.
+    """
+    store = _dream_store(monkeypatch, tmp_path)
+    _observed(store, due_in_days=-3.0)
+
+    assert main_mod.cmd_observations() == 0
+
+    out = capsys.readouterr().out
+    assert "OVERDUE" in out
+    assert "1 awaiting, 1 overdue" in out
+    # Still awaiting. An elapsed date does not settle anything either way.
+    assert "ruled out" not in out.lower()
+
+
+def test_settle_records_the_answer_and_carries_the_dream_up_a_shelf(
+    monkeypatch, tmp_path, capsys
+):
+    """The link that was missing: a prophecy nobody could answer never moved.
+
+    Before this command an observation-only dream reached PROPHECY and stopped
+    there for ever, because the only writer of an answer had no caller. This is
+    the whole ladder, driven the way an operator drives it.
+    """
+    from bot.dreaming import promotion_for
+
+    store = _dream_store(monkeypatch, tmp_path)
+    dream_id = _observed(store)
+
+    parked = store.get(dream_id)
+    assert parked is not None
+    before = promotion_for(parked)
+    assert before.moves and before.to is Vault.PROPHECY
+
+    handle = main_mod._observation_worklist(store, datetime.now(UTC))[0].handle
+    assert (
+        main_mod.cmd_settle(handle, met=True, note="Q2 10-Q: dry cargo 21% of revenue")
+        == 0
+    )
+
+    promoted = store.get(dream_id)
+    assert promoted is not None
+    after = promotion_for(promoted)
+    assert after.moves and after.to is Vault.VAULT
+
+    out = capsys.readouterr().out
+    assert "Recorded MET" in out
+    # What happens next is stated, because promotion runs on a different
+    # command and an operator left guessing why the shelf did not move would
+    # reasonably conclude the answer was not recorded.
+    assert "electrum-bot dream" in out
+
+
+def test_settle_refuses_an_answer_with_nothing_behind_it(monkeypatch, tmp_path, capsys):
+    """The note is the only record of WHAT was seen.
+
+    An answer with nothing behind it is indistinguishable afterwards from a
+    mis-click that granted a symbol, and this is a link in the route that
+    widens what may be traded.
+    """
+    store = _dream_store(monkeypatch, tmp_path)
+    _observed(store)
+    handle = main_mod._observation_worklist(store, datetime.now(UTC))[0].handle
+
+    assert main_mod.cmd_settle(handle, met=True, note="   ") == 1
+    assert "needs_reason" in capsys.readouterr().out
+
+
+def test_settle_has_no_default_answer(monkeypatch, tmp_path, capsys):
+    """There is no safe guess between yes and no.
+
+    A default of `--met` manufactures confirmations; a default of `--ruled-out`
+    refutes claims nobody meant to refute. So neither is the default and the
+    command says which flag to add.
+    """
+    _dream_store(monkeypatch, tmp_path)
+
+    assert main_mod.cmd_settle("abc123", met=None, note="anything") == 2
+    assert "--met or --ruled-out" in capsys.readouterr().out
+
+
+def test_a_handle_that_was_already_answered_says_so_rather_than_going_missing(
+    monkeypatch, tmp_path, capsys
+):
+    """Two reasons a handle misses, and they want opposite next actions.
+
+    "You answered this on Tuesday" and "the claim you were shown is no longer
+    on this dream" are different facts. Reporting both as *not found* would
+    leave the operator guessing which one they were looking at, which is the
+    missing-versus-answered rule arriving at a terminal.
+    """
+    store = _dream_store(monkeypatch, tmp_path)
+    _observed(store)
+    handle = main_mod._observation_worklist(store, datetime.now(UTC))[0].handle
+
+    assert main_mod.cmd_settle(handle, met=True, note="21% of revenue") == 0
+    capsys.readouterr()
+
+    assert main_mod.cmd_settle(handle, met=False, note="changed my mind") == 1
+    out = capsys.readouterr().out
+    assert "Already answered: met" in out
+    assert "Neither answer is reversible" in out
+
+    # And a handle for a claim that genuinely is not there reads differently.
+    assert main_mod.cmd_settle("deadbe", met=True, note="x") == 1
+    assert "Nothing on any shelf carries that claim" in capsys.readouterr().out
+
+
+def test_the_handle_changes_when_the_claim_does(monkeypatch, tmp_path):
+    """Derived from the claim, so a restated one cannot be answered by mistake.
+
+    This looks like a drawback and is the guarantee. A dreamer that rewords the
+    subject between the operator reading the worklist and answering it has
+    written a NEW claim; an answer aimed at the old handle must land nowhere
+    rather than land on something nobody was shown.
+    """
+    from bot.dreaming import observation_handle
+
+    store = _dream_store(monkeypatch, tmp_path)
+    dream_id = _observed(store)
+    saved = store.get(dream_id)
+    assert saved is not None
+    original = saved.conditions[0]
+
+    reworded = replace(original, text="the same claim, said differently")
+    moved = replace(original, subject="a different filing entirely")
+
+    # The prose is the claim's description, not the claim.
+    assert observation_handle(dream_id, reworded) == observation_handle(
+        dream_id, original
+    )
+    assert observation_handle(dream_id, moved) != observation_handle(dream_id, original)
+    # And the same claim on a different dream is a different question.
+    assert observation_handle(dream_id + 1, original) != observation_handle(
+        dream_id, original
+    )
 
 
 def test_confer_refuses_without_an_api_key(monkeypatch, tmp_path):

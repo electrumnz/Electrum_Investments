@@ -34,7 +34,18 @@ from .data.calendar import build_calendar_feed
 from .data.marketaux import MarketauxNews
 from .data.news import EmptyNews, NewsFeed
 from .data.xfeed import XFeed
-from .dreaming import Dream, DreamStore, FusionResult, Vault
+from .dreaming import (
+    OPERATOR,
+    ConditionState,
+    Dream,
+    DreamCondition,
+    DreamStore,
+    FusionResult,
+    ObservationDue,
+    Vault,
+    observation_handle,
+    pending_observations,
+)
 from .grants import (
     DEGRADED_STATES as GRANTS_DEGRADED_STATES,
 )
@@ -1492,6 +1503,227 @@ def cmd_confer(env: Env, rules: Rules) -> int:
     return 0
 
 
+def _observation_worklist(store: DreamStore, now: datetime) -> list[ObservationDue]:
+    """Every unanswered observation on every shelf, oldest review date first.
+
+    **Every shelf, not only the two where an answer moves something.** An
+    observation matters most on the workbench and on the prophecy shelf, since
+    those are where an answer promotes a dream — but an operator asking "what
+    is waiting on me" and being shown a filtered list would be told nothing is
+    waiting while questions sat unanswered somewhere else. The shelf is printed
+    beside each row instead, which is information rather than a silent drop.
+    """
+    dreams: list[Dream] = []
+    for shelf in Vault:
+        dreams.extend(store.in_vault(shelf, limit=200))
+    return pending_observations(dreams, now=now)
+
+
+def _answered_observation(
+    store: DreamStore, handle: str, now: datetime
+) -> tuple[int, DreamCondition] | None:
+    """The observation this handle names, if somebody has already answered it.
+
+    `pending_observations` deliberately drops answered claims, which is right
+    for a worklist and leaves `settle` unable to tell "you answered this on
+    Tuesday" from "that claim is gone". This walks the same shelves and rebuilds
+    the same handle over the answered ones, so the two can be reported apart.
+    """
+    for shelf in Vault:
+        for dream in store.in_vault(shelf, limit=200):
+            for condition in dream.conditions:
+                if not condition.is_observable or not condition.is_answered:
+                    continue
+                if observation_handle(int(dream.id or 0), condition) == handle:
+                    return int(dream.id or 0), condition
+    return None
+
+
+def cmd_observations() -> int:
+    """What is waiting on a PERSON, and nothing else in this repository asks it.
+
+    An observation is the half of a prophecy that fails silently. A threshold is
+    graded by code on every dream run whether or not anybody is watching; an
+    observation is graded by somebody looking at the world, and somebody who is
+    never asked never looks. Without this command the prophecy shelf becomes a
+    place dreams go to wait forever while every surface reports patience.
+
+    **Read-only, and needs no credential of any kind.** A local SQLite read that
+    demanded Alpaca keys would be a check protecting nothing.
+
+    Each row carries a HANDLE — six hex characters derived from the dream id and
+    the claim — which is what `settle` takes. It is derived rather than stored
+    precisely so that it changes if the claim changes: a dreamer that restates
+    its conditions between somebody reading this list and answering it produces
+    a different handle, so the answer lands nowhere rather than landing on a
+    claim nobody was shown.
+    """
+    now = datetime.now(UTC)
+    store = DreamStore()
+    due = _observation_worklist(store, now)
+
+    print(f"Observations awaiting an answer, as at {now.isoformat(timespec='minutes')}")
+    print()
+    if not due:
+        # Said out loud. An empty worklist is an ordinary state and an
+        # unreadable store is not, and the two look identical if nothing at all
+        # is printed.
+        print("  Nothing is waiting on you.")
+        print()
+        print(
+            "  That means no dream carries an unanswered observation — not "
+            "that no dream is stuck. A dream can also be held up by a "
+            "threshold the market has not reached, which nobody can settle by "
+            "looking. `electrum-bot vault` shows the shelves."
+        )
+        return 0
+
+    overdue = [item for item in due if item.is_overdue]
+    for item in due:
+        condition = item.condition
+        when = (
+            condition.observe_by.strftime("%d %b %Y")
+            if condition.observe_by
+            else "no date"
+        )
+        flag = "OVERDUE" if item.is_overdue else f"by {when}"
+        print(f"  [{item.handle}] #{item.dream_id} {item.title}")
+        print(f"      {condition.text}")
+        print(f"      Look at {condition.subject} — {condition.observable}")
+        print(f"      {flag}" + (f" (review date {when})" if item.is_overdue else ""))
+        print()
+
+    print(f"  {len(due)} awaiting, {len(overdue)} overdue.")
+    print()
+    print("  Answer one with:")
+    print('    electrum-bot settle <handle> --met --note "what you saw"')
+    print('    electrum-bot settle <handle> --ruled-out --note "what you saw"')
+    print()
+    print(
+        "  Both are real answers and neither is reversible. `--ruled-out` "
+        "records that the claim did NOT hold, which is a different fact from "
+        "nobody having looked."
+    )
+    log.info("observations_listed", awaiting=len(due), overdue=len(overdue))
+    return 0
+
+
+def cmd_settle(handle: str | None, *, met: bool | None, note: str) -> int:
+    """Record the operator's answer to one observation. The only writer of one.
+
+    **This is a write with teeth, and the chain it sits on is worth stating.** A
+    fulfilled condition can carry a dream to the VAULT; a vaulted dream is what
+    an adoption is taken from; an adoption is a live permission to trade a
+    symbol that is not in `config/rules.yaml`. So this command is one link in
+    the route that widens what may be traded — which is why it is a command a
+    person types on the box rather than a control on a password-gated web page,
+    and why `DreamStore.settle_condition` refuses every actor but the operator.
+
+    Every gate still runs on anything traded under a grant. What this changes is
+    the allowlist, not the limits.
+
+    The handle is looked up in the CURRENT worklist rather than decoded, so a
+    handle for a claim the dreamer has since restated matches nothing and is
+    refused. That is the honest outcome: the claim you were shown is no longer
+    on this dream.
+    """
+    if not handle:
+        print("Which observation? Run `electrum-bot observations` for the list.")
+        return 2
+    if met is None:
+        # Refused rather than defaulted. A default of `--met` would manufacture
+        # confirmations, and a default of `--ruled-out` would refute claims
+        # nobody meant to refute; there is no safe guess between them.
+        print("Say which answer: --met or --ruled-out. There is no default.")
+        return 2
+
+    now = datetime.now(UTC)
+    store = DreamStore()
+    wanted = handle.strip().lower()
+    match = next(
+        (item for item in _observation_worklist(store, now) if item.handle == wanted),
+        None,
+    )
+    if match is None:
+        # Two different reasons a handle misses, and they are worth telling
+        # apart. "You answered this on Tuesday" and "the claim you were shown
+        # is no longer on this dream" call for opposite next actions, and a
+        # single message covering both would leave the operator guessing which
+        # they were looking at — the missing-versus-answered rule arriving at a
+        # terminal.
+        answered = _answered_observation(store, wanted, now)
+        if answered is not None:
+            item, condition = answered
+            state = "met" if condition.fulfilled else "ruled out"
+            who = condition.observed_by or "somebody"
+            when = (
+                condition.fulfilled_at.isoformat(timespec="minutes")
+                if condition.fulfilled_at
+                else "an unrecorded moment"
+            )
+            print(f"Already answered: {state}, by {who} at {when}.")
+            print(f"  #{item} {condition.text}")
+            print()
+            print(
+                "  Neither answer is reversible here. A claim that turned out "
+                "differently is a NEW claim — the dreamer writes it, with its "
+                "own date — rather than an old one quietly reopened."
+            )
+            return 1
+
+        print(f"No observation with handle {wanted!r} is awaiting an answer.")
+        print()
+        print(
+            "  Nothing on any shelf carries that claim. The handle is derived "
+            "from the claim, so a dreamer that reworded the subject or the "
+            "observable produced a NEW claim with a new handle. Re-run "
+            "`electrum-bot observations`."
+        )
+        return 1
+
+    result = store.settle_condition(
+        match.dream_id,
+        match.condition.key,
+        by=OPERATOR,
+        met=met,
+        note=note,
+        at=now,
+    )
+    if not result.ok:
+        print(f"Refused: {result.detail}")
+        for refusal in result.refusals:
+            print(f"  - {refusal.value}")
+        log.warning(
+            "observation_settle_refused",
+            dream_id=match.dream_id,
+            handle=wanted,
+            refusals=[r.value for r in result.refusals],
+        )
+        return 1
+
+    answer = "MET" if met else "RULED OUT"
+    print(f"#{match.dream_id} {match.title}")
+    print(f"  {match.condition.text}")
+    print(f"  Recorded {answer} at {now.isoformat(timespec='minutes')}.")
+    print()
+    # What happens NEXT is the thing an operator wants and cannot see from
+    # here. Promotion runs on `electrum-bot dream`, not on this command, and
+    # saying so beats leaving somebody to wonder why the shelf did not move.
+    print(
+        "  This does not promote anything on its own. `electrum-bot dream` "
+        "runs the promotion rule, and a prophecy moves to the vault only once "
+        "EVERY condition on it is answered."
+    )
+    log.info(
+        "observation_settled",
+        dream_id=match.dream_id,
+        handle=wanted,
+        met=met,
+        state=ConditionState.MET.value if met else ConditionState.RULED_OUT.value,
+    )
+    return 0
+
+
 def cmd_vault_expire(rules: Rules) -> int:
     """Mark dreams past their shelf's TTL, and withdraw the grants that lapsed.
 
@@ -1832,6 +2064,8 @@ def main() -> int:
             "confer",
             "vault",
             "vault-expire",
+            "observations",
+            "settle",
             "jobs",
             "reindex",
             "settings-apply",
@@ -1847,6 +2081,11 @@ def main() -> int:
             "grants and anything expiring — read-only. vault-expire: mark "
             "dreams past their shelf's TTL and withdraw the grants that "
             "lapsed; it marks and never deletes, and never closes a position. "
+            "observations: what is waiting on a PERSON — the half of a "
+            "prophecy no figure the loop records can settle — read-only. "
+            "settle: record your answer to one of them, by handle, with a "
+            "reason; it is the only writer of one and neither answer is "
+            "reversible. "
             "jobs: what the loop actually did, pass by pass, out of the audit "
             "log — including the passes that were SKIPPED with the market shut "
             "and the ones that FAILED to get a decision, neither of which is a "
@@ -1864,8 +2103,39 @@ def main() -> int:
         nargs="?",
         default=None,
         help=(
-            "The settings request id, for settings-apply and settings-revert. "
-            "Ignored by every other command."
+            "The settings request id, for settings-apply and settings-revert; "
+            "the observation handle, for settle. Ignored by every other "
+            "command."
+        ),
+    )
+    parser.add_argument(
+        "--met",
+        dest="settled",
+        action="store_const",
+        const=True,
+        default=None,
+        help=(
+            "settle only: the observation held. There is deliberately no "
+            "default — a default of --met would manufacture confirmations."
+        ),
+    )
+    parser.add_argument(
+        "--ruled-out",
+        dest="settled",
+        action="store_const",
+        const=False,
+        help=(
+            "settle only: the observation did NOT hold. A real answer, and a "
+            "different fact from nobody having looked."
+        ),
+    )
+    parser.add_argument(
+        "--note",
+        default="",
+        help=(
+            "settle only: what you saw, in your own words. Required — it is "
+            "the only record of what settled the claim, and an answer with "
+            "nothing behind it cannot afterwards be told from a mis-click."
         ),
     )
     parser.add_argument(
@@ -1939,6 +2209,19 @@ def main() -> int:
     # error, it silently starts the decision loop.
     if args.command == "jobs":
         return cmd_jobs(hours=args.hours, at=args.at)
+
+    # Before the credential check, and dispatched here rather than at the foot
+    # for the same two reasons as `jobs`: neither touches a broker, and the foot
+    # of this function falls through to `cmd_loop`, so a command in `choices`
+    # with no branch of its own silently starts the decision loop.
+    #
+    # `settle` writes, but what it writes is an answer about the world, and the
+    # question of whether Alpaca is reachable has nothing to say about whether
+    # the barge draft restriction happened.
+    if args.command == "observations":
+        return cmd_observations()
+    if args.command == "settle":
+        return cmd_settle(args.target, met=args.settled, note=args.note)
 
     # Also before the credential check, and for a stronger reason than reindex's.
     # This is meant to be run as root on a box that may be halfway through a

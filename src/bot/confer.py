@@ -1060,8 +1060,31 @@ def render_dream(dream: Dream) -> str:
     if dream.conditions:
         out.append("  conditions:")
         for condition in dream.conditions:
-            state = "met" if condition.fulfilled else "not met"
-            shape = "checkable" if condition.is_checkable else "prose only"
+            # Three shapes, not two. "Prose only" was true of everything
+            # without a number until an OBSERVATION — a subject, a claim and a
+            # review date, settled by the operator — became the other way onto
+            # the prophecy shelf, and calling one of those prose would tell the
+            # trading agent that a claim somebody deliberately answered was
+            # never checkable at all.
+            #
+            # Harmless today, because a dream only reaches a conference once
+            # every condition is answered. Recorded here rather than left for
+            # the day that stops being true.
+            if condition.is_checkable:
+                shape = "checkable"
+            elif condition.is_observable:
+                shape = "observed, settled by the operator"
+            else:
+                shape = "prose only"
+            # `ruled_out` is its own answer. Folding it into "not met" would
+            # report a claim a person looked at and refuted as one nobody has
+            # got to yet.
+            if condition.fulfilled:
+                state = "met"
+            elif condition.ruled_out:
+                state = "ruled out"
+            else:
+                state = "not met"
             out.append(f"    [{state}, {shape}] {condition.text}")
     else:
         # `all_conditions_met` is False on an empty list on purpose, and the

@@ -2049,11 +2049,31 @@ def get_dream(dream_id: int) -> dict[str, Any]:
         "condition_detail": [
             {
                 "text": c.text,
-                # The checkable half. `null` means the condition is prose only,
-                # which is "cannot be graded" and never "did not hold".
+                # The checkable half. `null` means no THRESHOLD, which is
+                # "code cannot grade this" and never "did not hold" — and no
+                # longer implies nothing can settle it at all, since an
+                # observation is settled by a person instead.
                 "trigger": (t.render() if (t := c.as_trigger()) is not None else None),
                 "is_checkable": c.is_checkable,
+                # The other shape of pre-registration, and the fields a caller
+                # needs to say WHAT somebody has to go and look at. Reporting
+                # only `is_checkable` left an agent describing an
+                # operator-settled claim as unsettleable prose.
+                "is_observable": c.is_observable,
+                "subject": c.subject or None,
+                "observable": c.observable or None,
+                "observe_by": (
+                    c.observe_by.isoformat(timespec="minutes") if c.observe_by else None
+                ),
+                # Five states, because `fulfilled` alone cannot tell RULED_OUT
+                # from nobody having looked, or an elapsed review date from a
+                # claim with no way to settle it at all.
+                "state": c.state(now).value,
                 "fulfilled": c.fulfilled,
+                # An answer, not a failure to answer. A caller shown only
+                # `fulfilled: false` reads a refuted claim as an open one.
+                "ruled_out": c.ruled_out,
+                "answered_by": c.observed_by or None,
                 "fulfilled_at": (
                     c.fulfilled_at.isoformat(timespec="minutes")
                     if c.fulfilled_at

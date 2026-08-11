@@ -5074,6 +5074,203 @@ def test_a_condition_says_which_hop_it_settles_or_that_it_settles_none(dreams):
     assert "Settles no hop yet." in body
 
 
+def _observing_dream(*, due_in_days: float = 30.0, now=None):
+    from datetime import UTC, datetime, timedelta
+
+    from bot.dreaming import Dream, DreamCondition, DreamVerdict, Hop, Vault
+
+    moment = now or datetime(2026, 8, 11, tzinfo=UTC)
+    return Dream(
+        id=1,
+        title="Low water lifts the marginal barge operator",
+        seed="Gauge readings at Memphis are near record lows",
+        chain=[Hop("first", checked=True, source="USACE"), Hop("second")],
+        weakest_hop="second",
+        weakest_hop_index=2,
+        verdict=DreamVerdict.KEEP,
+        vault=Vault.PROPHECY,
+        conditions=[
+            DreamCondition(
+                text="dry cargo is a double-digit share of revenue",
+                subject="Kirby's most recent 10-Q",
+                observable="dry-cargo revenue as a share of the total",
+                observe_by=moment + timedelta(days=due_in_days),
+                settles_hops=(2,),
+            )
+        ],
+    )
+
+
+def test_the_dreaming_page_says_what_is_waiting_on_a_person(dreams):
+    """The half of a prophecy that fails SILENTLY, on the surface a person opens.
+
+    A threshold is graded by code on every dream run whether anybody is watching
+    or not. An observation is graded by somebody looking at the world, and
+    somebody who is never asked never looks — so without this card the prophecy
+    shelf becomes a place dreams wait for ever while every panel on the deck
+    reports patience.
+    """
+    from datetime import UTC, datetime
+
+    from bot.dreaming import DreamSummary
+
+    now = datetime(2026, 8, 11, tzinfo=UTC)
+    held = [_observing_dream(now=now)]
+
+    body = render.dreaming_page(
+        held,
+        DreamSummary.of(held),
+        enabled=False,
+        token="",
+        hermes_available=False,
+        soul_found=True,
+        now=now,
+    )
+
+    assert "Waiting on you" in body
+    assert "1 question waiting on you" in body
+    assert "Kirby&#x27;s most recent 10-Q" in body
+    # It SHOWS and does not settle. The write belongs at a terminal on the box,
+    # because an answer can carry a dream to the vault and a vaulted dream is
+    # what a live symbol permission is taken from.
+    assert "electrum-bot settle" in body
+    assert "<form" not in body.split("Waiting on you")[1].split("</section>")[0]
+    # Nothing waiting is not nothing stuck.
+    assert "not the same as nothing stuck" in body
+
+
+def test_the_waiting_card_is_absent_rather_than_empty_when_nothing_is_due(dreams):
+    """No card at all, rather than a card announcing zero.
+
+    An empty "waiting on you" panel is furniture that trains an operator to
+    stop reading the one thing on this page addressed to them.
+    """
+    from datetime import UTC, datetime
+
+    from bot.dreaming import Dream, DreamSummary
+
+    held = [Dream(id=1, title="no conditions at all", seed="s")]
+
+    body = render.dreaming_page(
+        held,
+        DreamSummary.of(held),
+        enabled=False,
+        token="",
+        hermes_available=False,
+        soul_found=True,
+        now=datetime(2026, 8, 11, tzinfo=UTC),
+    )
+
+    assert "Waiting on you" not in body
+
+
+def test_an_observation_is_not_rendered_as_something_nothing_can_settle(dreams):
+    """The one line on this page that became false, and it faces the operator.
+
+    Anything without a number rendered as *"No number in this one, so nothing
+    can settle it"*. That stopped being true the moment an observation — a
+    subject, a claim and a review date — became a way onto the prophecy shelf,
+    and it was the WORST place for it to be wrong: the claim is addressed to
+    the person reading, and the page was telling them nobody could answer it.
+    """
+    from datetime import UTC, datetime, timedelta
+
+    from bot.dreaming import Dream, DreamCondition, Hop
+
+    now = datetime(2026, 8, 11, tzinfo=UTC)
+    dream = Dream(
+        title="An observed prophecy",
+        seed="s",
+        chain=[Hop("first", checked=True, source="x"), Hop("second")],
+        weakest_hop="second",
+        weakest_hop_index=2,
+        conditions=[
+            DreamCondition(
+                text="dry cargo is a double-digit share of revenue",
+                subject="Kirby's most recent 10-Q",
+                observable="dry-cargo revenue as a share of the total",
+                observe_by=now + timedelta(days=30),
+                settles_hops=(2,),
+            )
+        ],
+    )
+
+    body = render._dream(dream, now=now)
+
+    assert "nothing can settle it" not in body
+    assert "Kirby&#x27;s most recent 10-Q" in body or "Kirby's most recent 10-Q" in body
+    assert "Only the operator settles this." in body
+    assert 'data-state="awaiting"' in body
+
+
+def test_an_overdue_review_is_flagged_without_touching_the_claim(dreams):
+    """OVERDUE is a fact about the LOOKING, never about the world.
+
+    An unopened dashboard must not read as a refuted prophecy — so the date is
+    coloured and the claim is left exactly as it was written.
+    """
+    from datetime import UTC, datetime, timedelta
+
+    from bot.dreaming import Dream, DreamCondition
+
+    now = datetime(2026, 8, 11, tzinfo=UTC)
+    dream = Dream(
+        title="A late review",
+        seed="s",
+        conditions=[
+            DreamCondition(
+                text="the restriction is still in force",
+                subject="USACE navigation notices",
+                observable="an active draft restriction",
+                observe_by=now - timedelta(days=5),
+            )
+        ],
+    )
+
+    body = render._dream(dream, now=now)
+
+    assert 'data-state="overdue"' in body
+    assert "review was due" in body
+    assert "ruled out" not in body.lower()
+
+
+def test_a_ruled_out_condition_does_not_look_like_one_nobody_has_answered(dreams):
+    """`data-met` alone drew the same dot for both, which is a boolean holding
+    a three-valued fact.
+
+    An operator scanning the list has to be able to see that somebody looked
+    and the claim did not hold — that is the whole reason `--ruled-out` is a
+    real answer rather than a failure to answer.
+    """
+    from datetime import UTC, datetime, timedelta
+
+    from bot.dreaming import Dream, DreamCondition
+
+    now = datetime(2026, 8, 11, tzinfo=UTC)
+    dream = Dream(
+        title="A refuted claim",
+        seed="s",
+        conditions=[
+            DreamCondition(
+                text="the overlap was large enough",
+                subject="the brood emergence map",
+                observable="counties overlapping the growing region",
+                observe_by=now + timedelta(days=10),
+                ruled_out=True,
+                observed_by="operator",
+            )
+        ],
+    )
+
+    body = render._dream(dream, now=now)
+
+    assert 'data-state="ruled_out"' in body
+    assert "data-met" not in body
+    # And the marker is a rule of its own, one class above the base, so it does
+    # not depend on winning a tie. See the `.note.alert` finding.
+    assert ".conds li[data-state=ruled_out]::before{" in render.STYLES
+
+
 def test_a_stuck_keep_explains_itself_in_the_rules_own_words(dreams):
     """A dream that has been attacked, kept, and will not promote reads as
     broken rather than incomplete unless the page says which clause holds it.

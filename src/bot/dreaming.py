@@ -296,6 +296,7 @@ permission that was reinstated by a restore.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 from collections.abc import Iterator, Sequence
@@ -2909,6 +2910,34 @@ class SettleResult:
         return self.ok
 
 
+def observation_handle(dream_id: int, condition: DreamCondition) -> str:
+    """A short, stable name for one claim, so a person can answer it.
+
+    `settle_condition` identifies a condition by its KEY — a tuple of three or
+    five strings — which is right for the store and unusable at a prompt. This
+    is that key, hashed with the dream id, rendered as six hex characters an
+    operator can retype without a copy-paste.
+
+    **Derived, never stored**, so it cannot disagree with the claim it names —
+    the same reason `Adoption.is_live` is computed rather than flagged.
+
+    The important property is the one that looks like a drawback: **it changes
+    when the claim changes.** A dreamer that restates its conditions between the
+    operator reading the worklist and answering it produces a different handle,
+    so the answer lands nowhere instead of landing on a claim nobody was shown.
+    That is `settle_condition`'s by-key rule arriving at the surface a person
+    actually touches.
+
+    A module-level function rather than only a property on `ObservationDue`,
+    because the caller that has to say *"you answered this already"* is looking
+    at conditions the worklist has deliberately dropped, and a second copy of
+    this derivation beside it would be two definitions of the same name waiting
+    to disagree.
+    """
+    material = "␟".join((str(dream_id), *condition.key))
+    return hashlib.blake2s(material.encode("utf-8"), digest_size=3).hexdigest()
+
+
 @dataclass(frozen=True)
 class ObservationDue:
     """One observation somebody has to answer, and which dream it belongs to.
@@ -2929,6 +2958,10 @@ class ObservationDue:
     @property
     def is_overdue(self) -> bool:
         return self.state is ConditionState.OVERDUE
+
+    @property
+    def handle(self) -> str:
+        return observation_handle(self.dream_id, self.condition)
 
 
 def pending_observations(

@@ -40,6 +40,7 @@ from ..dreaming import (
     FUSION,
     THIN_LEDGER_THRESHOLD,
     Adoption,
+    ConditionState,
     ConferenceDecision,
     ConferenceVerdict,
     Dream,
@@ -51,6 +52,7 @@ from ..dreaming import (
     Hop,
     NoDecision,
     Vault,
+    pending_observations,
     promotion_for,
 )
 from ..exit_review import ExitReport, ExitReview
@@ -1366,11 +1368,33 @@ nav a:hover::after,nav a[aria-current=page]::after{transform:scaleX(1)}
   color:var(--bone)}
 .conds li::before{content:"·";position:absolute;left:.3rem;top:.28rem;
   font-family:var(--mono);color:var(--pewter)}
+/* Five states, five markers, and the two ANSWERED ones must not look alike.
+   `data-met` used to be the only attribute, so a claim the operator had ruled
+   OUT drew the same dot as one nobody had looked at — the missing-versus-zero
+   rule wearing a bullet point. The selectors are written `li[data-state=...]`,
+   one class of specificity above the base rule, so none of them depends on
+   winning a tie: see the `.note.alert` finding.
+   `data-met` is kept beside it because it is the attribute the fused-card and
+   dream tests already read, and because a marker that survives an unknown
+   future state is better than one that vanishes. */
 .conds li[data-met]::before{content:"✓";color:var(--patina);font-size:.75rem}
+.conds li[data-state=ruled_out]::before{content:"✗";color:var(--rust-text);
+  font-size:.75rem}
+.conds li[data-state=overdue]::before{content:"!";color:var(--amber);
+  font-weight:700}
+.conds li[data-state=unsettleable]::before{content:"?";color:var(--pewter)}
 .conds .thr{font-family:var(--mono);font-size:.6875rem;color:var(--pewter);
   display:block}
+.conds .thr .alert{color:var(--amber)}
 .condhead{margin:.875rem 0 0;font-family:var(--mono);font-size:.625rem;
   letter-spacing:.14em;text-transform:uppercase;color:var(--pewter)}
+/* The command that answers a question this page can only show. Scrolls in its
+   own box rather than wrapping: a broken command line is worse than one that
+   needs a swipe, because the wrapped half looks like a second command. */
+.cmd{margin:.875rem 0 0;padding:.75rem .875rem;background:var(--ink);
+  border:1px solid var(--slate);border-radius:2px;font-family:var(--mono);
+  font-size:.6875rem;line-height:1.7;color:var(--bone);overflow-x:auto;
+  overscroll-behavior:contain}
 
 /* Symbiosis. The card is drawn fused by `dream_fx.CSS`; these are the parts
    that carry the ARGUMENT rather than the treatment.
@@ -7761,7 +7785,7 @@ def _verification_note(dream: Dream) -> str:
     )
 
 
-def _conditions(dream: Dream) -> str:
+def _conditions(dream: Dream, now: datetime) -> str:
     """What was pre-registered, how much the world has settled, and what it pins.
 
     `conditions_met` of `len(conditions)` — a count, never a summary. A fusion
@@ -7778,6 +7802,17 @@ def _conditions(dream: Dream) -> str:
 
     Nothing here is graded on this page: `grade_conditions` settles them against
     the figures the decision loop recorded, and this renders what it wrote.
+
+    **There are TWO shapes of pre-registration and this line used to know about
+    one.** Anything without a number rendered as *"No number in this one, so
+    nothing can settle it"*, which stopped being true the moment an observation
+    — a subject, a claim and a review date, settled by the operator — became a
+    way onto the prophecy shelf. That sentence would now tell an operator a
+    claim addressed to THEM was unsettleable, which is the confident wrong
+    answer this repository exists to refuse, arriving as page copy.
+
+    So the two shapes are rendered apart, and the sentence about nothing being
+    able to settle it is kept for the case where it is still true.
     """
     if not dream.has_conditions:
         return ""
@@ -7785,14 +7820,39 @@ def _conditions(dream: Dream) -> str:
     weakest = dream.resolved_weakest_hop
 
     def row(cond: DreamCondition) -> str:
+        state = cond.state(now)
+        # Both attributes. `data-met` is what the existing markers and tests
+        # read; `data-state` is what tells RULED_OUT apart from nobody having
+        # looked, which a boolean structurally cannot.
         met = ' data-met=""' if cond.fulfilled else ""
-        threshold = (
-            f'<span class="thr">{_e(cond.symbol)} {_e(cond.field)} '
-            f"{_e(cond.op)} {cond.value:g}</span>"
-            if cond.is_checkable
-            else '<span class="thr">No number in this one, so nothing can '
-            "settle it.</span>"
-        )
+        marks = f'{met} data-state="{state.value}"'
+        if cond.is_checkable:
+            threshold = (
+                f'<span class="thr">{_e(cond.symbol)} {_e(cond.field)} '
+                f"{_e(cond.op)} {cond.value:g}</span>"
+            )
+        elif cond.is_observable:
+            # The date is the actionable half — it is what puts the claim on
+            # somebody's list — so it is stated rather than implied, and an
+            # elapsed one is coloured rather than described, for the same
+            # reason `_wake` colours a missing symbol: "overdue" written into
+            # the sentence reads as part of the claim.
+            due = _e(cond.observe_by.strftime("%d %b %Y")) if cond.observe_by else ""
+            when = (
+                f'<span class="alert">review was due {due}</span>'
+                if state is ConditionState.OVERDUE
+                else f"review by {due}"
+            )
+            threshold = (
+                f'<span class="thr">Look at {_e(cond.subject)} — '
+                f"{_e(cond.observable)}; {when}. Only the operator settles "
+                f"this.</span>"
+            )
+        else:
+            threshold = (
+                '<span class="thr">Nothing was pre-registered here — no '
+                "threshold and no observation — so nobody can settle it.</span>"
+            )
         if not cond.settles_hops:
             pin = '<span class="thr">Settles no hop yet.</span>'
         else:
@@ -7807,7 +7867,7 @@ def _conditions(dream: Dream) -> str:
                 f"{_word(len(cond.settles_hops), 'hop')} {_e(named)}"
                 f"{kills}.</span>"
             )
-        return f"<li{met}>{_e(cond.text)}{threshold}{pin}</li>"
+        return f"<li{marks}>{_e(cond.text)}{threshold}{pin}</li>"
 
     met = dream.conditions_met
     total = len(dream.conditions)
@@ -8555,7 +8615,7 @@ def _dream(
             "named. A kept idea with no trigger is a note, not a watch.</span></p>"
         )
 
-    out += _conditions(dream)
+    out += _conditions(dream, moment)
     out += _stuck(dream)
 
     if dream.instruments:
@@ -8813,6 +8873,77 @@ def _shelf_rail(summary: DreamSummary) -> str:
     return f'<div class="shelfrail">{tiles}</div>'
 
 
+def _awaiting_you(dreams: Sequence[Dream], now: datetime) -> str:
+    """The observations waiting on a PERSON, on the page a person actually opens.
+
+    An observation is the half of a prophecy that fails silently. A threshold is
+    graded by code on every dream run whether or not anybody is watching; an
+    observation is graded by somebody looking at the world, and somebody who is
+    never asked never looks. Without this the prophecy shelf becomes a place
+    dreams wait for ever while every surface on the deck reports patience.
+
+    **It shows and it does not settle**, exactly as the Settings page shows the
+    limits and offers no way to change them. A fulfilled condition can carry a
+    dream to the vault, a vaulted dream is what an adoption is taken from, and
+    an adoption is a live permission to trade a symbol that is not in
+    `config/rules.yaml` — so the write belongs at a terminal on the box, behind
+    the shell, rather than behind one shared password on a surface that may be
+    exposed. The card names the command instead, in the same way each limit
+    names the file that owns it.
+
+    **Nothing waiting is not nothing stuck**, and the card says so. A dream can
+    equally be held by a threshold the market has not reached, which no amount
+    of looking settles. Letting the first stand for the second is the confident
+    partial answer this repository exists to refuse.
+    """
+    due = pending_observations(dreams, now=now)
+    if not due:
+        return ""
+
+    late = sum(1 for item in due if item.is_overdue)
+    rows = ""
+    for item in due:
+        condition = item.condition
+        when = (
+            condition.observe_by.strftime("%d %b %Y") if condition.observe_by else ""
+        )
+        # Overdue is a fact about the LOOKING, never about the world. An
+        # unopened dashboard must not read as a refuted prophecy, so the date
+        # is coloured and the claim is left exactly as it was written.
+        stamp = (
+            f'<span class="alert">review was due {_e(when)}</span>'
+            if item.is_overdue
+            else f"review by {_e(when)}"
+        )
+        rows += (
+            f'<li data-state="{item.state.value}"><code>{_e(item.handle)}</code> '
+            f"{_e(condition.text)}"
+            f'<span class="thr">#{item.dream_id} {_e(item.title)}</span>'
+            f'<span class="thr">Look at {_e(condition.subject)} — '
+            f"{_e(condition.observable)}; {stamp}.</span></li>"
+        )
+
+    head = f"{_count(len(due), 'question', 'questions')} waiting on you"
+    if late:
+        head += f", {late} past the review date"
+
+    return (
+        '<section class="block" id="awaiting-you"><h2>Waiting on you</h2>'
+        f'<p class="lede">{head}. These are the claims no figure the loop '
+        "records can settle — somebody has to go and look.</p>"
+        f'<ul class="conds">{rows}</ul>'
+        '<p class="note">Answer one at a terminal on the box. This page shows '
+        "them and cannot settle them: an answer can carry a dream to the vault, "
+        "and a vaulted dream is what a live symbol permission is taken from.</p>"
+        '<pre class="cmd">electrum-bot observations\n'
+        'electrum-bot settle &lt;handle&gt; --met --note "what you saw"\n'
+        'electrum-bot settle &lt;handle&gt; --ruled-out --note "what you saw"</pre>'
+        '<p class="note">Nothing waiting is not the same as nothing stuck. A '
+        "dream can equally be held by a threshold the market has not reached, "
+        "which no amount of looking settles.</p></section>"
+    )
+
+
 def dreaming_page(
     dreams: list[Dream],
     summary: DreamSummary,
@@ -8971,6 +9102,10 @@ def dreaming_page(
             "marked <span class=\"pill unverified\">unverified</span>, which is a "
             "statement about evidence rather than about how likely they are.</p>"
         )
+
+    # Ahead of both, because it is the only thing on this page addressed to the
+    # READER rather than describing what the agents did.
+    body += _awaiting_you(dreams, moment)
 
     # Above the shelves, because it answers a question about the two AGENTS and
     # the shelves answer one about the dreams. Below the early return on an empty

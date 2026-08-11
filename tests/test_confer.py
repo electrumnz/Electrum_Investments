@@ -1035,6 +1035,52 @@ def test_a_dream_with_no_conditions_does_not_read_as_all_conditions_met():
     assert "none were ever pre-registered" in rendered
 
 
+def test_an_observation_is_not_described_to_the_trader_as_prose():
+    """Three shapes of condition, and this said two.
+
+    "Prose only" was true of everything without a number until an observation —
+    a subject, a claim and a review date, settled by the operator — became the
+    other way onto the prophecy shelf. Calling one of those prose tells the
+    trading agent that a claim a person deliberately answered was never
+    checkable at all, on the surface where it decides whether to take a symbol
+    permission.
+
+    And `ruled_out` is its own answer: folding it into "not met" would report a
+    claim somebody looked at and refuted as one nobody has got to yet.
+    """
+    from datetime import UTC, datetime, timedelta
+
+    from bot.dreaming import DreamCondition
+
+    now = datetime.now(UTC)
+    rendered = render_dream(
+        Dream(
+            title="t",
+            seed="s",
+            conditions=[
+                DreamCondition(
+                    text="acreage is a double-digit share of supply",
+                    subject="the USDA oilseeds circular",
+                    observable="Indonesia's share of world production",
+                    observe_by=now + timedelta(days=30),
+                ),
+                DreamCondition(
+                    text="the overlap was large enough",
+                    subject="the brood emergence map",
+                    observable="counties overlapping the growing region",
+                    observe_by=now + timedelta(days=30),
+                    ruled_out=True,
+                    observed_by="operator",
+                ),
+            ],
+        )
+    )
+
+    assert "prose only" not in rendered
+    assert "settled by the operator" in rendered
+    assert "[ruled out," in rendered
+
+
 def test_a_dream_that_never_named_a_weakest_hop_says_so():
     rendered = render_dream(Dream(title="t", seed="s", chain=[Hop("a claim")]))
 
