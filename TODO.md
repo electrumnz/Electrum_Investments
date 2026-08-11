@@ -979,7 +979,7 @@ A resting stop whose level nobody can read is most of the way to no stop.
 
 ---
 
-## 7. The ticker tape — UI, and it is diagnosed rather than vague
+## 7. DONE — the ticker tape, and a countdown dead since `27afa85`
 
 Four separate problems. (b) is the one that makes the strip look wrong.
 
@@ -1074,7 +1074,7 @@ invisible to 860+ passing tests and visible in about a minute in a browser.
 
 ---
 
-## 9. Open up `allowed_symbols`
+## 9. DONE — `allowed_symbols` is twenty names, and adoption stays the only way out
 
 The sixteen on the tape are the **watchlist**, display only. The bot may
 actually trade six: SPY, QQQ, AAPL, MSFT, JNJ, KO.
@@ -1096,7 +1096,7 @@ path. Decide which is the intended shape before doing both at once.
 
 ---
 
-## 10. `record_fill` writes the PROPOSAL, not what the broker did
+## 10. DONE — `record_fill` writes the proposal and `reconcile` corrects it
 
 Row 1's entry price has been corrected by hand and the journal now reads
 $980.19, matching the account. The underlying behaviour has not changed.
@@ -1217,7 +1217,7 @@ to the box that runs the trading loop for a problem that has already gone away.
 
 ---
 
-## 13. "Machine on loop should be storing it as a job"
+## 13. DONE — a job is an audit event, and the three outcomes stay apart
 
 Raised and never addressed. The loop re-proposes from scratch every cycle, so
 there is no queue that survives a rejection, a shut session or a restart. A
@@ -1250,7 +1250,7 @@ stale list still looks answered.
 
 ---
 
-## 15. Let the agent choose its exit type
+## 15. DONE — a trail is one number, and every schema got faster
 
 `OrderProposal.take_profit_price` is a single fixed price. Alpaca supports
 trailing stops natively, so this is a model and adapter change rather than a
@@ -1262,7 +1262,7 @@ is no longer a journal note — **it is a live order resting at the broker.**
 
 ---
 
-## 16. An exit review, grading the PLAN and never the profit
+## 16. DONE — an exit review grading the PLAN, never the profit
 
 Nothing records *why* a position closed. `record_exit` takes a price, a time and
 a realised figure, so stop-hit, target-hit, closed-by-hand and expiry are
@@ -1389,7 +1389,7 @@ Two that are worth stating as rules rather than as tests:
 
 ---
 
-## 19. The copy is sterile, and that is a product fault rather than a polish one
+## 19. DONE — the copy, and the rule that was being applied too widely
 
 *"The copy on dream page and other pages is weak! Super sterile and logical, the
 agent is doing the work the user doesn't need to read an essay."*
