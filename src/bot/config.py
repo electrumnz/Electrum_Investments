@@ -555,6 +555,45 @@ class InstrumentRules(BaseModel):
     # pre-market, and the phases this reads are the US equity ones.
     refuse_premarket: bool = False
 
+    # ------------------------------------------- the out-of-hours fill switch
+    #
+    # **This is the only setting in this file that trades away one of the
+    # operator's four rules, so it is the most deliberate switch in the repo.**
+    # Off in the model, off in `config/rules.yaml`, and refusing to engage
+    # unless BOTH are true — see `broker.plan_extended_hours_fill`, which is
+    # where the arithmetic lives and which fails closed on every unknown.
+    #
+    # WHAT IT BUYS. An entry submitted during the pre-market (04:00-09:30 New
+    # York) or after hours (16:00-20:00) that actually FILLS THERE, instead of
+    # resting until the next regular open.
+    #
+    # WHAT IT COSTS, stated as a consequence rather than as a mechanism: the
+    # position stands at the broker with **nothing resting behind it**. The
+    # stop is a journal figure and `stop_watch` reports a breach on the loop's
+    # fifteen-minute pulse. Rule 3 — hard stops on every trade — is still true
+    # at sizing time and is no longer true at the broker.
+    #
+    # WHY THERE IS NO THIRD OPTION. `AlpacaBroker.place_order` attaches the
+    # stop, which makes every entry a bracket or an OTO, and Alpaca accepts
+    # `extended_hours` on neither. An entry that carries a stop cannot fill out
+    # of hours; an entry that can fill out of hours carries no stop. "Place the
+    # trade now" and "get a position on now" are therefore different
+    # instructions and the code can satisfy exactly one of them.
+    #
+    # WHAT IS ACTUALLY SURRENDERED IS NARROWER THAN IT LOOKS. A resting stop
+    # could not have fired out of hours anyway: a stop becomes a MARKET order
+    # and extended-hours venues take limit orders only. What is given up is the
+    # leg being THERE when the regular session reopens, and the window between
+    # the fill and that reopening in which nothing is resting at the broker.
+    #
+    # It must stay off for a continuous market. Crypto is already unbracketed —
+    # Alpaca accepts no bracket there either — so it has nothing to surrender,
+    # and it has no pre-market to surrender it for. `plan_extended_hours_fill`
+    # refuses a crypto symbol outright rather than a validator refusing the
+    # config, for the same reason `refuse_premarket` is handled by a comment
+    # there: refusing to start denies at the least useful moment.
+    allow_extended_hours_fills: bool = False
+
     # Optional ceiling on this class's share of equity, as a fraction of the
     # portfolio. Used to keep a volatile class from quietly dominating.
     capital_cap_pct: float | None = Field(default=None, ge=0, le=100)
@@ -1031,6 +1070,26 @@ class Rules(BaseModel):
     @property
     def enabled_instruments(self) -> dict[str, InstrumentRules]:
         return {name: i for name, i in self.instruments.items() if i.enabled}
+
+    @property
+    def extended_hours_fill_classes(self) -> list[str]:
+        """Enabled classes that have given up the broker-side stop out of hours.
+
+        Empty is the shipped state and the answer this should keep giving. It
+        exists so the surrender is a fact something can READ rather than a flag
+        buried in one block of one file — a startup banner, a Settings card, an
+        operator asking. The same reason `electrum-bot-web` announces its auth
+        mode out loud: a switch like this is invisible afterwards.
+
+        Enabled classes only. A class the operator has switched off cannot
+        trade at all, so listing it here would name a surrender that is not
+        being made.
+        """
+        return sorted(
+            name
+            for name, instrument in self.enabled_instruments.items()
+            if instrument.allow_extended_hours_fills
+        )
 
     @property
     def allowed_symbols(self) -> list[str]:

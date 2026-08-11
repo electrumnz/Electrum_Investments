@@ -10,13 +10,14 @@ are identified by UUID strings rather than integer tickets.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 import structlog
 
-from .config import Env
-from .market_clock import BrokerClock, TradingDay
+from .config import Env, Rules
+from .market_clock import BrokerClock, MarketPhase, TradingDay, market_state
 from .models import (
     AccountSnapshot,
     AssetClass,
@@ -78,6 +79,165 @@ DEFAULT_INTRADAY_MINUTES = 5
 # Roughly two sessions of five-minute bars. Enough for the prior session's high
 # and low, which is one of the levels the strategy names, plus today's action.
 DEFAULT_INTRADAY_LOOKBACK = 160
+
+
+# ------------------------------------------------- the out-of-hours fill path
+#
+# **A broker-side stop OR an out-of-hours fill. Never both.** `place_order`
+# attaches the stop, which makes every entry a bracket or an OTO, and Alpaca
+# accepts `extended_hours` on neither. So an entry carrying a stop cannot fill
+# outside the regular session — it rests and becomes eligible at the next open —
+# and an entry that CAN fill outside it is a plain limit with no stop at the
+# broker at all. There is no third option, at Alpaca or anywhere else.
+#
+# That half is DOCUMENTED rather than observed: no extended-hours bracket has
+# ever been sent from this codebase to watch Alpaca refuse it. **The consequence
+# is measured**: 21 SPY submitted 09:23:47 New York, inside the pre-market, came
+# back `filled_qty=0.0` and rested, then filled after 09:30. Correct behaviour,
+# correct explanation, and not what was asked for — the operator wanted the
+# position on during the pre-market.
+#
+# This module therefore never sends `extended_hours` and a stop in one request,
+# and the two are separate branches rather than one request with flags, so the
+# combination is unrepresentable rather than merely avoided. If Alpaca turns out
+# to DOWNGRADE an extended-hours bracket rather than rejecting it, everything
+# above stays true and the failure is worse — a stop silently missing with no
+# error — which is the second reason the branches are kept apart.
+
+
+@dataclass(frozen=True)
+class ExtendedHoursPlan:
+    """Whether this entry goes out unbracketed to fill out of hours.
+
+    Three states, not two, and the third is what stops the switch being inert.
+    `opted_in` is True the moment a class carries `allow_extended_hours_fills`,
+    whether or not this particular moment qualifies — so an operator who threw
+    the switch and saw nothing happen is told why, rather than left to wonder
+    whether the setting is read at all. Same rule as `has_cycles` and
+    `can_grade_anything`: "not asked" and "asked and answered no" are different
+    findings.
+
+    `reason` is a complete sentence and is always safe to log.
+    """
+
+    engage: bool
+    opted_in: bool
+    reason: str
+
+
+def plan_extended_hours_fill(
+    rules: Rules | None, symbol: str, now: datetime
+) -> ExtendedHoursPlan:
+    """Decide, from config plus the clock, whether to surrender the stop.
+
+    **Pure, offline and fails closed on every unknown.** It reads no database,
+    makes no network call and never raises: an unresolvable class, a class that
+    is not in the file, a class that is switched off and a broker that was
+    handed no rules at all each answer "no", which leaves the existing behaviour
+    standing — the order rests, and that is a correct answer to a different
+    question.
+
+    **The model does not choose this and cannot.** It is an execution-layer
+    decision from `config/rules.yaml` and the New York clock; `OrderProposal`
+    carries no field for it and must not gain one. A proposal is a trade, not an
+    instruction about how the venue should receive it.
+
+    Two conditions beyond the switch, and both narrow it:
+
+    - **Never crypto.** A continuous market has no pre-market to fill in, and
+      Alpaca accepts no bracket on it anyway, so there is nothing to surrender
+      and nothing to buy. The flag on a crypto class does nothing, and this is
+      where that is enforced rather than in a config-load validator.
+    - **Only PRE and POST**, which are the two windows `extended_hours` actually
+      covers. Overnight and the weekend are not fill windows for this flag, so
+      engaging there would give up the resting stop and buy nothing at all —
+      strictly worse than doing nothing. The regular session needs none of this:
+      a bracket fills there with its stop attached.
+
+    A market holiday reads as an ordinary trading day here, exactly as it does
+    everywhere the arithmetic runs alone. The direction that costs is benign:
+    Thanksgiving at 10:00 New York reads OPEN, so the bracket path stands.
+    """
+    if rules is None:
+        return ExtendedHoursPlan(
+            engage=False,
+            opted_in=False,
+            reason=(
+                "the broker was constructed without rules, so no instrument "
+                "class can be consulted and the ordinary bracketed path stands"
+            ),
+        )
+
+    key = rules.true_class_key(symbol)
+    if not key:
+        return ExtendedHoursPlan(
+            engage=False,
+            opted_in=False,
+            reason=(
+                f"the instrument class of {symbol} could not be determined, so "
+                "no per-class permission applies"
+            ),
+        )
+
+    instrument = rules.instruments.get(key)
+    if instrument is None or not instrument.enabled:
+        return ExtendedHoursPlan(
+            engage=False,
+            opted_in=False,
+            reason=(
+                f"instrument class {key} is not enabled in config/rules.yaml, "
+                "so nothing it says can widen anything"
+            ),
+        )
+
+    if not instrument.allow_extended_hours_fills:
+        return ExtendedHoursPlan(
+            engage=False,
+            opted_in=False,
+            reason=(
+                f"{key}.allow_extended_hours_fills is off, so the entry keeps "
+                "its broker-side stop and rests until the next regular open"
+            ),
+        )
+
+    # Everything below is opted in: the operator has thrown the switch for this
+    # class, so a decision not to engage is worth saying out loud.
+    if is_crypto_symbol(symbol):
+        return ExtendedHoursPlan(
+            engage=False,
+            opted_in=True,
+            reason=(
+                f"{symbol} is crypto: it trades continuously, so there are no "
+                "extended hours to fill in, and Alpaca accepts no bracket on it "
+                "either — the stop is already a journal figure watched by "
+                "stop_watch. The switch buys nothing here."
+            ),
+        )
+
+    state = market_state(now, windows_by_day=instrument.windows_by_day)
+    if state.phase not in (MarketPhase.PRE, MarketPhase.POST):
+        return ExtendedHoursPlan(
+            engage=False,
+            opted_in=True,
+            reason=(
+                f"the market phase is {state.label.lower()}, which is not a "
+                "window extended_hours covers, so an unbracketed order would "
+                "give up the resting stop and buy no fill. The entry keeps its "
+                "stop."
+            ),
+        )
+
+    return ExtendedHoursPlan(
+        engage=True,
+        opted_in=True,
+        reason=(
+            f"{key}.allow_extended_hours_fills is on and the phase is "
+            f"{state.label.lower()}, so this entry goes out as a plain limit "
+            "with extended_hours and NO stop at the broker. The stop is a "
+            "journal figure from here until the position is closed, and "
+            "stop_watch is the only thing reporting a breach."
+        ),
+    )
 
 
 @runtime_checkable
@@ -162,7 +322,16 @@ class MockBroker:
         *,
         starting_equity: float = 100_000.0,
         starting_cash: float | None = None,
+        rules: Rules | None = None,
     ) -> None:
+        # Same optional rules as `AlpacaBroker`, and for the reason a double
+        # exists at all: `stop_at_broker` is what a caller branches on, and a
+        # mock that reported FIXED where Alpaca reports ABSENT would pin a path
+        # production never takes. It is the `orders_degraded` trap — a double
+        # that fails differently from the thing it doubles — applied to a double
+        # that SUCCEEDS differently.
+        self._rules = rules
+        self._entry_moment_override: datetime | None = None
         self._equity = starting_equity
         self._cash = starting_cash if starting_cash is not None else starting_equity
         self._positions: dict[str, Position] = {}
@@ -186,6 +355,19 @@ class MockBroker:
         """Test hook. Nothing in memory can fail, so the flag has to be set by
         hand for a caller's degraded path to be exercisable at all."""
         self._orders_degraded = degraded
+
+    def set_entry_moment(self, moment: datetime | None) -> None:
+        """Test hook: pin the moment the out-of-hours decision is made.
+
+        Named for the one decision it feeds rather than as a clock, because it
+        is not one — `get_activity` reads the wall clock and is deliberately
+        left alone. An injectable clock honoured in one place and ignored in
+        another is how a figure that looks measured stops being measured.
+        """
+        self._entry_moment_override = moment
+
+    def _entry_moment(self) -> datetime:
+        return self._entry_moment_override or datetime.now(UTC)
 
     def set_clock(self, clock: BrokerClock | None) -> None:
         """Test hook. Defaults to `None`, which is the honest answer for a
@@ -329,6 +511,10 @@ class MockBroker:
         except KeyError as e:
             return OrderResult(accepted=False, error=str(e))
 
+        plan = plan_extended_hours_fill(
+            self._rules, proposal.symbol, self._entry_moment()
+        )
+
         fill_price = tick.ask if proposal.direction == Direction.BUY else tick.bid
         self._order_seq += 1
         order_id = f"mock-{self._order_seq:06d}"
@@ -362,9 +548,14 @@ class MockBroker:
             # `_open_orders`. This mock fills instantly, so there is no parent
             # for a bracket child to hang off, and `set_open_orders` stays the
             # single way a test says what is resting.
+            #
+            # The out-of-hours path answers ABSENT for the same reason and by
+            # the same arithmetic. Without rules — which is every existing
+            # caller, `MockBroker()` included — `plan_extended_hours_fill`
+            # answers no and this reads exactly as it always did.
             stop_at_broker=(
                 StopAtBroker.ABSENT
-                if is_crypto_symbol(proposal.symbol)
+                if plan.engage or is_crypto_symbol(proposal.symbol)
                 else StopAtBroker.FIXED
             ),
         )
@@ -393,9 +584,17 @@ class AlpacaBroker:
 
     Paper-only: the constructor calls `Env.assert_paper_only()`, so pointing this
     at a live account fails loudly here as well as at startup.
+
+    `rules` is optional and defaults to `None`, which is the SECOND lock on the
+    out-of-hours fill path: without them no instrument class can be consulted,
+    so the path is unreachable however `config/rules.yaml` is written. A caller
+    that wants the path available hands the rules in deliberately, and even then
+    `allow_extended_hours_fills` has to be on for the class and the moment has
+    to be inside a window `extended_hours` covers. Nothing else on this class
+    reads them.
     """
 
-    def __init__(self, env: Env) -> None:
+    def __init__(self, env: Env, rules: Rules | None = None) -> None:
         env.assert_paper_only()
 
         # Deferred so the package stays importable without the SDK installed.
@@ -425,10 +624,24 @@ class AlpacaBroker:
         )
         self._connected = False
         self._orders_degraded = False
+        self._rules = rules
 
     @property
     def orders_degraded(self) -> bool:
         return self._orders_degraded
+
+    def _entry_moment(self) -> datetime:
+        """The moment an entry is being submitted, for the out-of-hours decision.
+
+        **Not a clock for this class**, and it must not be mistaken for one:
+        `get_activity`, `get_daily_bars` and `get_intraday_bars` each read the
+        wall clock directly, so an injectable clock offered here and ignored
+        there would be the `LivePoller` trap — figures that look like
+        measurements taken against a clock nobody set. This is one seam for one
+        decision, so that decision can be exercised at 04:30 New York without
+        waiting until 04:30 New York.
+        """
+        return datetime.now(UTC)
 
     def connect(self) -> None:
         # Alpaca is stateless HTTP; "connecting" means proving the keys work.
@@ -838,6 +1051,20 @@ class AlpacaBroker:
         trail's behalf afterwards. It is logged here rather than left silent,
         because a trail that reached nobody would be a decision the agent made
         and the system quietly dropped.
+
+        ## One entry may go out with no stop, and only on purpose
+
+        `plan_extended_hours_fill` is consulted before either branch below. It
+        engages only when the class carries `allow_extended_hours_fills`, the
+        rules were handed to this broker at construction, the symbol is not
+        crypto and the phase is pre-market or after hours. Anything else — an
+        unknown class, a disabled class, a missing config, an unresolvable
+        symbol — leaves the bracketed path standing, so the switch is never
+        reached by a default, by a fallback or by an exception handler.
+
+        When it does engage the result carries `stop_at_broker=ABSENT`, which
+        is the only way a caller can tell a position with nothing behind it from
+        one with a leg resting at the level it was sized against.
         """
         if not self._connected:
             return OrderResult(accepted=False, error="not connected")
@@ -868,6 +1095,60 @@ class AlpacaBroker:
                     "stop is what rests; the trail is recorded and not yet "
                     "executed by anything."
                 ),
+            )
+
+        plan = plan_extended_hours_fill(
+            self._rules, proposal.symbol, self._entry_moment()
+        )
+        if plan.engage:
+            # **The one path in this repository that puts a position on with no
+            # broker-side stop by choice.** Logged at warning rather than info,
+            # every time, because it is rule 3 being traded away for a fill —
+            # and an operator reading the journal afterwards would otherwise
+            # have no line saying which of the two questions was answered.
+            log.warning(
+                "extended_hours_fill_no_broker_stop",
+                symbol=proposal.symbol,
+                planned_stop=proposal.stop_loss_price,
+                qty=proposal.qty,
+                reason=plan.reason,
+                watched_by=(
+                    "stop_watch on the loop's fifteen-minute pulse, which "
+                    "REPORTS a breach and never closes"
+                ),
+            )
+            # No `order_class`, no `stop_loss`, no `take_profit`. The bracket
+            # and this are separate requests rather than one request with flags,
+            # so an entry carrying both is unrepresentable here.
+            #
+            # **DAY rather than GTC, and that inverts the reasoning above for a
+            # reason.** Alpaca accepts `extended_hours` only on a DAY limit
+            # order; GTC is refused. The consequence is worth stating rather
+            # than discovering: this order does not rest for days the way a
+            # bracketed entry does. What has NOT been observed from here is
+            # whether an unfilled one survives into the regular session — if it
+            # does, it fills there UNBRACKETED, which is exactly why
+            # `stop_watch` covering the position is not optional.
+            return self._submit(
+                LimitOrderRequest(
+                    symbol=proposal.symbol,
+                    qty=proposal.qty,
+                    side=side,
+                    time_in_force=TimeInForce.DAY,
+                    limit_price=proposal.limit_price,
+                    extended_hours=True,
+                ),
+                stop_at_broker=StopAtBroker.ABSENT,
+            )
+        if plan.opted_in:
+            # Only for a class that has actually thrown the switch, so this is
+            # silent for every ordinary deployment. It exists because a setting
+            # that is read and then declines is indistinguishable from a setting
+            # nobody reads, and the second is how a feature ships inert.
+            log.info(
+                "extended_hours_fill_not_engaged",
+                symbol=proposal.symbol,
+                reason=plan.reason,
             )
 
         if crypto:

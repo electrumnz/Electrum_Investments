@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from types import EllipsisType
 from typing import Any
 
@@ -167,15 +167,27 @@ class _CapturingTrading:
         return _Order()
 
 
-def _alpaca_with(trading: Any) -> Any:
+def _alpaca_with(
+    trading: Any, *, rules: Any = None, now: datetime | None = None
+) -> Any:
     """An AlpacaBroker with its SDK clients replaced. Built without __init__ so
-    no credentials are needed and nothing reaches the network."""
+    no credentials are needed and nothing reaches the network.
+
+    `rules` defaults to `None`, which is what `main.build_broker` constructs
+    today and is the second lock on the out-of-hours fill path: with no rules
+    there is no instrument class to consult. `now` pins the moment the
+    out-of-hours decision is made, so 04:30 New York is reachable from a test
+    without waiting until 04:30 New York.
+    """
     from bot.broker import AlpacaBroker
 
     broker: Any = AlpacaBroker.__new__(AlpacaBroker)
     broker._trading = trading
     broker._connected = True
     broker._orders_degraded = False
+    broker._rules = rules
+    if now is not None:
+        broker._entry_moment = lambda: now
     return broker
 
 
@@ -832,3 +844,383 @@ def test_a_fixed_stop_is_not_reported_as_an_unreadable_trail():
     assert order.is_trailing is False
     assert order.trail_percent is None
     assert order.trail_is_unreadable is False
+
+
+# ------------------------------------------- filling an entry OUT OF HOURS
+#
+# The fork nobody was offered: 21 SPY submitted 09:23:47 New York came back
+# `filled_qty=0.0`, rested through the pre-market and filled after 09:30. The
+# code cannot satisfy "place the trade now" and "get a position on now" at once,
+# because an entry carrying a stop is a bracket or an OTO and Alpaca accepts
+# `extended_hours` on neither.
+#
+# Everything below is about the switch being OFF being the state that holds, and
+# about the ON state surrendering exactly one thing and saying so.
+
+
+def _rules(
+    *,
+    allow: bool = False,
+    enabled: bool = True,
+    also_listed_under_equity: str | None = None,
+) -> Any:
+    """The shipped rules with one field moved, so a test cannot pass because of
+    a fixture that looks nothing like production.
+
+    `Rules.load` builds a fresh object per call, so mutating one leaks nowhere.
+    """
+    from bot.config import Rules
+
+    from .conftest import RULES_PATH
+
+    rules = Rules.load(RULES_PATH)
+    equity = rules.instruments["us_equity"]
+    equity.allow_extended_hours_fills = allow
+    equity.enabled = enabled
+    if also_listed_under_equity is not None:
+        equity.allowed_symbols = [*equity.allowed_symbols, also_listed_under_equity]
+    return rules
+
+
+def _ny(year: int, month: int, day: int, hour: int, minute: int = 0) -> datetime:
+    """A New York wall-clock moment, as UTC.
+
+    Written this way rather than as a UTC hour because the whole point is that
+    the decision follows New York and therefore daylight saving. A fixed UTC
+    hour in a test would pass in July and quietly mean a different phase in
+    January, which is the trap `sessions_utc` already carries.
+    """
+    from bot.market_clock import NY
+
+    return datetime(year, month, day, hour, minute, tzinfo=NY).astimezone(UTC)
+
+
+# A Monday in May 2026. 05:00 is the pre-market, 10:00 the regular session,
+# 17:00 after hours, 22:00 overnight; the Saturday is dark.
+PREMARKET = _ny(2026, 5, 4, 5, 0)
+REGULAR = _ny(2026, 5, 4, 10, 0)
+AFTER_HOURS = _ny(2026, 5, 4, 17, 0)
+OVERNIGHT = _ny(2026, 5, 4, 22, 0)
+WEEKEND = _ny(2026, 5, 9, 12, 0)
+
+
+def test_the_switch_ships_off_and_nothing_has_surrendered_a_stop():
+    """The shipped state, asserted rather than assumed.
+
+    `extended_hours_fill_classes` is the readable form of the question "is any
+    class trading without a broker-side stop out of hours", and the answer this
+    repository ships with is none.
+    """
+    from bot.config import load_rules
+
+    rules = load_rules()
+    assert rules.extended_hours_fill_classes == []
+    assert rules.instruments["us_equity"].allow_extended_hours_fills is False
+
+
+@pytest.mark.parametrize(
+    ("moment", "why"),
+    [
+        (PREMARKET, "pre-market — the window the operator actually asked for"),
+        (AFTER_HOURS, "after hours — the other window extended_hours covers"),
+        (REGULAR, "the regular session, where a bracket fills anyway"),
+        (OVERNIGHT, "overnight, which extended_hours does not reach"),
+        (WEEKEND, "the weekend, where nothing trades at all"),
+    ],
+)
+def test_the_path_is_unreachable_while_the_switch_is_off(moment, why):
+    """**The load-bearing test.** With the switch off there is no moment, no
+    phase and no symbol that reaches the unbracketed path.
+
+    It is parametrized across every phase rather than tested once in the
+    pre-market, because the failure being guarded against is a fallback: some
+    later branch that reaches this path for a reason other than the operator
+    having chosen it.
+    """
+    from bot.broker import plan_extended_hours_fill
+
+    plan = plan_extended_hours_fill(_rules(allow=False), "SPY", moment)
+
+    assert not plan.engage, why
+    # Not opted in either, so nothing is logged and nothing is decided. The
+    # third state exists precisely so this reads differently from "considered
+    # and declined".
+    assert not plan.opted_in
+    assert "allow_extended_hours_fills is off" in plan.reason
+
+
+def test_the_shipped_config_keeps_the_stop_in_the_pre_market():
+    """The same property one layer up, through the real order path.
+
+    The pure function above could be right while `place_order` ignored it, so
+    this asserts what actually reaches the SDK: a bracket, GTC, with the stop
+    attached and no `extended_hours` anywhere on it.
+    """
+    from alpaca.trading.enums import OrderClass, TimeInForce
+
+    from bot.models import StopAtBroker
+
+    trading = _CapturingTrading()
+    result = _alpaca_with(trading, rules=_rules(allow=False), now=PREMARKET).place_order(
+        _proposal(symbol="SPY", stop_loss_price=575.0, take_profit_price=590.0)
+    )
+
+    request = trading.requests[0]
+    assert request.order_class == OrderClass.BRACKET
+    assert request.stop_loss.stop_price == 575.0
+    assert request.time_in_force == TimeInForce.GTC
+    assert not request.extended_hours
+    assert result.stop_at_broker is StopAtBroker.FIXED
+
+
+def test_a_broker_holding_no_rules_can_never_engage():
+    """The second lock, and it is the one that holds today.
+
+    `main.build_broker` constructs `AlpacaBroker(env)` with no rules, so even a
+    config that switched this on could not reach the path — there is no
+    instrument class to consult. A caller has to hand the rules in deliberately.
+    """
+    from bot.broker import plan_extended_hours_fill
+
+    plan = plan_extended_hours_fill(None, "SPY", PREMARKET)
+
+    assert not plan.engage
+    assert not plan.opted_in
+    assert "without rules" in plan.reason
+
+
+@pytest.mark.parametrize(
+    ("moment", "engage", "why"),
+    [
+        (PREMARKET, True, "04:00-09:30 New York is what extended_hours covers"),
+        (AFTER_HOURS, True, "16:00-20:00 is the other half of it"),
+        (REGULAR, False, "a bracket fills in the regular session with its stop on"),
+        (OVERNIGHT, False, "extended_hours does not reach the overnight venue"),
+        (WEEKEND, False, "nothing trades, so the stop would be given up for nothing"),
+    ],
+)
+def test_with_the_switch_on_only_the_two_real_windows_engage(moment, engage, why):
+    """Engaging outside PRE and POST would surrender the resting stop and buy no
+    fill at all, which is strictly worse than doing nothing.
+
+    The regular-session case is the one worth stating: there the bracket is not
+    a compromise, it is the better order.
+    """
+    from bot.broker import plan_extended_hours_fill
+
+    plan = plan_extended_hours_fill(_rules(allow=True), "SPY", moment)
+
+    assert plan.engage is engage, why
+    # Opted in either way, so an operator who threw the switch and saw nothing
+    # happen is told which of the two it was.
+    assert plan.opted_in
+
+
+@pytest.mark.parametrize(
+    ("moment", "season"),
+    [
+        (_ny(2026, 1, 5, 5, 0), "winter, when 05:00 New York is 10:00 UTC"),
+        (_ny(2026, 7, 6, 5, 0), "summer, when 05:00 New York is 09:00 UTC"),
+    ],
+)
+def test_the_window_follows_new_york_rather_than_a_fixed_utc_hour(moment, season):
+    """Daylight saving, which is what `sessions_utc` cannot express.
+
+    Both moments are 05:00 New York and they are different UTC hours. A decision
+    written against a fixed UTC hour would engage in one season and not the
+    other, silently, for six months at a time.
+    """
+    from bot.broker import plan_extended_hours_fill
+
+    assert plan_extended_hours_fill(_rules(allow=True), "SPY", moment).engage, season
+
+
+def test_crypto_is_refused_even_with_the_switch_on():
+    """A continuous market has no extended hours to fill in, and crypto is
+    already unbracketed at Alpaca — so there is nothing to surrender and nothing
+    to buy.
+
+    Refused here rather than by a config-load validator, which would deny at the
+    least useful moment. The flag is read, the answer is no, and the reason says
+    why rather than the setting being ignored in silence.
+    """
+    from bot.broker import plan_extended_hours_fill
+
+    rules = _rules(allow=True)
+    rules.instruments["crypto"].enabled = True
+    rules.instruments["crypto"].allowed_symbols = ["BTC/USD"]
+    rules.instruments["crypto"].allow_extended_hours_fills = True
+
+    plan = plan_extended_hours_fill(rules, "BTC/USD", PREMARKET)
+
+    assert not plan.engage
+    assert plan.opted_in
+    assert "crypto" in plan.reason
+
+
+def test_a_disabled_class_grants_nothing_however_it_is_configured():
+    """Same rule as the dream grant's class hard-block: `enabled:` is what makes
+    a switched-off class mean off, rather than off unless some other line says
+    otherwise."""
+    from bot.broker import plan_extended_hours_fill
+
+    plan = plan_extended_hours_fill(
+        _rules(allow=True, enabled=False), "SPY", PREMARKET
+    )
+
+    assert not plan.engage
+    assert not plan.opted_in
+    assert "not enabled" in plan.reason
+
+
+def test_a_symbol_whose_class_cannot_be_determined_is_refused():
+    """`true_class_key` answers `""` when the file and the routing rule disagree,
+    and an unknown class is an unknown permission. It fails closed, exactly as
+    `grants.resolve_granted_symbols` does on the same question.
+    """
+    from bot.broker import plan_extended_hours_fill
+
+    # Listed under us_equity while `"/" in symbol` routes it to crypto, so the
+    # two sources cannot both be right and neither is guessed at.
+    rules = _rules(allow=True, also_listed_under_equity="BTC/USD")
+
+    plan = plan_extended_hours_fill(rules, "BTC/USD", PREMARKET)
+
+    assert not plan.engage
+    assert not plan.opted_in
+    assert "could not be determined" in plan.reason
+
+
+def test_an_engaged_entry_carries_no_stop_and_reports_ABSENT():
+    """What the switch actually costs, asserted as the request that reaches the
+    SDK and the result that reaches the caller.
+
+    `ABSENT` is the whole reporting contract: it is the only way anything
+    downstream can tell a position with nothing behind it from one with a leg
+    resting at the level it was sized against.
+    """
+    from alpaca.trading.enums import TimeInForce
+
+    from bot.models import StopAtBroker
+
+    trading = _CapturingTrading()
+    result = _alpaca_with(trading, rules=_rules(allow=True), now=PREMARKET).place_order(
+        _proposal(symbol="SPY", stop_loss_price=575.0, take_profit_price=590.0)
+    )
+
+    request = trading.requests[0]
+    assert request.extended_hours is True
+    # DAY rather than GTC, which inverts the bracket path's reasoning: Alpaca
+    # accepts `extended_hours` only on a DAY limit order.
+    assert request.time_in_force == TimeInForce.DAY
+    assert request.stop_loss is None
+    assert request.take_profit is None
+    assert request.order_class in (None,)
+    assert request.limit_price == 580.00
+
+    assert result.accepted
+    assert result.stop_at_broker is StopAtBroker.ABSENT
+
+
+def test_a_stop_and_extended_hours_never_travel_on_one_request():
+    """The documented half of the wall, defended structurally.
+
+    Alpaca's docs say `extended_hours` is not accepted on a bracket or an OTO,
+    and **no extended-hours bracket has ever been sent from this codebase to
+    watch it be refused**. If Alpaca turns out to DOWNGRADE one rather than
+    reject it, the failure is worse than a rejection — a stop silently missing
+    with no error — so the two are separate branches and the combination is
+    unrepresentable here rather than merely avoided.
+    """
+    trading = _CapturingTrading()
+    broker = _alpaca_with(trading, rules=_rules(allow=True), now=PREMARKET)
+    broker.place_order(_proposal(symbol="SPY"))
+    broker._entry_moment = lambda: REGULAR
+    broker.place_order(_proposal(symbol="SPY"))
+
+    out_of_hours, in_session = trading.requests
+    assert out_of_hours.extended_hours and out_of_hours.stop_loss is None
+    assert in_session.stop_loss is not None and not in_session.extended_hours
+    for request in trading.requests:
+        assert not (request.extended_hours and request.stop_loss)
+
+
+def test_the_mock_reports_the_absent_stop_the_same_way():
+    """A double that answered FIXED here would pin a path production never
+    takes, which is the `orders_degraded` trap applied to a double that succeeds
+    differently rather than one that fails differently."""
+    from bot.models import StopAtBroker
+
+    broker = MockBroker(rules=_rules(allow=True))
+    broker.connect()
+    broker.set_price("SPY", 579.98, 580.02)
+
+    broker.set_entry_moment(REGULAR)
+    assert broker.place_order(_proposal()).stop_at_broker is StopAtBroker.FIXED
+
+    broker.set_entry_moment(PREMARKET)
+    assert broker.place_order(_proposal()).stop_at_broker is StopAtBroker.ABSENT
+
+
+def test_a_mock_with_no_rules_behaves_exactly_as_it_always_did():
+    """Every existing caller constructs `MockBroker()`, so the addition has to
+    be invisible to them."""
+    from bot.models import StopAtBroker
+
+    broker = MockBroker()
+    broker.connect()
+    broker.set_price("SPY", 579.98, 580.02)
+    broker.set_entry_moment(PREMARKET)
+
+    assert broker.place_order(_proposal()).stop_at_broker is StopAtBroker.FIXED
+
+
+def test_the_risk_gate_still_rejects_what_it_always_rejected():
+    """**The gate is not part of this and must not become part of it.**
+
+    The stop is still required, still validated and still what sizes the
+    position. What the switch changes is only where the stop LIVES after
+    approval — the journal rather than the broker — so an oversized proposal is
+    refused with the switch on exactly as it is with the switch off.
+    """
+    from bot.models import AccountSnapshot, Tick, TradingActivity
+    from bot.risk import RiskGate
+
+    from .conftest import PAPER_EQUITY
+
+    oversized = _proposal(symbol="SPY", qty=250)   # |580-575| x 250 = $1,250
+    account = AccountSnapshot(
+        equity_usd=PAPER_EQUITY,
+        cash_usd=PAPER_EQUITY,
+        buying_power_usd=PAPER_EQUITY,
+        open_positions=[],
+    )
+    tick = Tick(symbol="SPY", bid=579.98, ask=580.02, timestamp=PREMARKET)
+
+    for allow in (False, True):
+        gate = RiskGate(
+            _rules(allow=allow),
+            equity_at_session_start=PAPER_EQUITY,
+            now=PREMARKET,
+        )
+        verdict = gate.evaluate(
+            oversized, account=account, tick=tick, activity=TradingActivity()
+        )
+        assert not verdict.approved
+        assert any("per-trade" in reason.lower() for reason in verdict.reasons), (
+            verdict.reasons
+        )
+
+
+def test_a_proposal_cannot_ask_for_an_out_of_hours_fill():
+    """It is an execution-layer decision from config plus the clock, not a
+    property of a trade, and the model must not be able to choose it.
+
+    Asserted as an absence, in the same shape as
+    `test_a_dream_cannot_describe_an_order`: no field on `OrderProposal` names
+    extended hours, so there is nothing for a model to fill in.
+    """
+    from bot.models import OrderProposal
+
+    fields = set(OrderProposal.model_fields)
+    assert not [f for f in fields if "extended" in f or "hours" in f]

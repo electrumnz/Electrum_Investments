@@ -308,6 +308,59 @@ instruments:
     # window above permits.
     refuse_premarket: false
 
+    # ---------------------------------------------------------------------
+    # OFF. This is the switch that trades away one of the operator's four
+    # rules, and it is the most deliberate one in this file.
+    #
+    # WHAT IT BUYS: an entry submitted during the pre-market (04:00-09:30 New
+    # York) or after hours (16:00-20:00) that actually FILLS THERE, rather
+    # than resting until the next regular open. That is the fork nobody was
+    # offered when 21 SPY went in at 09:23:47 New York, came back
+    # filled_qty=0.0, sat through the pre-market and filled after 09:30 --
+    # correct behaviour, correct explanation, and the answer to the other
+    # question. "Place the trade now" and "get a position on now" are
+    # different instructions and the code can satisfy exactly one.
+    #
+    # WHAT IS SURRENDERED, stated as a consequence rather than a mechanism:
+    #
+    #   The position stands at the broker with NOTHING RESTING BEHIND IT.
+    #   Rule 3 -- hard stops on every trade -- stays true at sizing time and
+    #   stops being true at the broker. The stop becomes a journal figure and
+    #   stop_watch REPORTS a breach on the loop's fifteen-minute pulse; it
+    #   never closes, because closing out of hours is a new execution path
+    #   and one that fires unattended at 3am is its own decision.
+    #
+    # WHY THERE IS NO THIRD OPTION: place_order attaches the stop, which makes
+    # every entry a bracket or an OTO, and Alpaca accepts extended_hours on
+    # neither. An entry that carries a stop cannot fill out of hours; an entry
+    # that can fill out of hours carries no stop.
+    #
+    # WHAT IS SURRENDERED IS NARROWER THAN IT LOOKS, and the honest version
+    # matters here more than the alarming one. A resting stop could not have
+    # fired out of hours ANYWAY: a stop is a trigger that becomes a MARKET
+    # order, and extended-hours venues take limit orders only. So what is
+    # actually given up is the leg being THERE when the regular session
+    # reopens, and the window between the fill and that reopening in which
+    # nothing is resting at the broker. On a short horizon that is less than
+    # it sounds; held overnight it is exactly rule 3 missing.
+    #
+    # THIS IS NOT NEW GROUND. Crypto already lives here -- Alpaca accepts no
+    # bracket on it either -- so this is a new trigger for an arrangement that
+    # already exists, not a new concept. Same watcher, same reporting.
+    #
+    # TURNING IT ON TAKES TWO THINGS, on purpose. This flag, and the broker
+    # being constructed with the rules (`AlpacaBroker(env, rules)`); without
+    # the second, no class can be consulted and the path is unreachable
+    # whatever this says. Even then it engages only in the pre-market and
+    # after hours, never overnight or at the weekend, where it would give up
+    # the stop and buy no fill at all.
+    #
+    # HOW TO TELL AFTERWARDS: the OrderResult comes back
+    # stop_at_broker=ABSENT, a warning line reads
+    # `extended_hours_fill_no_broker_stop`, and Rules.extended_hours_fill_classes
+    # names every class in this state.
+    allow_extended_hours_fills: false
+
     # Monday to Friday. Monday is 0, Sunday is 6.
     #
     # Without this the hours alone made Saturday 15:00 UTC a valid session, and
@@ -407,6 +460,13 @@ instruments:
     # Deliberately absent: refuse_premarket. A 24/7 market has no pre-market,
     # and the phases that rule reads are the US equity ones — switched on here
     # it would refuse every hour of every day.
+    #
+    # Deliberately absent for the mirror-image reason: allow_extended_hours_fills.
+    # A continuous market has no extended hours to fill in, and crypto is
+    # already unbracketed at Alpaca, so there is nothing here to surrender and
+    # nothing to buy. `broker.plan_extended_hours_fill` refuses a crypto symbol
+    # outright, so setting it here would change nothing — and it says so on the
+    # log line rather than ignoring it silently.
 
     # 24/7. This is the setting that was wrong under the old global sessions
     # block, and the reason instruments are configured separately at all.

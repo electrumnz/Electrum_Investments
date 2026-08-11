@@ -857,6 +857,57 @@ def test_the_shipped_config_leaves_unattended_execution_off():
     assert rules.position_actions.enabled is False
 
 
+# ------------------------------------------ the out-of-hours fill switch
+
+
+def test_no_instrument_surrenders_its_stop_by_default():
+    """An `InstrumentRules` that never heard of this field gives up nothing.
+
+    The same fail-closed asymmetry as `PositionActionRules.enabled` and
+    `DreamingRules.allow_symbol_grants`, and it matters more here than for
+    either of them: this is the only setting in the file that trades away one
+    of the operator's four rules. A deployment predating the feature, and every
+    test fixture that builds `Rules` by hand, keeps its broker-side stop.
+    """
+    from bot.config import InstrumentRules
+
+    assert InstrumentRules().allow_extended_hours_fills is False
+
+
+def test_the_shipped_config_surrenders_nothing():
+    """Off in the model AND off in the file, which is the pattern every switch
+    that spends or acts follows here — `--execute`, `position_actions.enabled`,
+    the dream timer, `enable-forge.sh`.
+
+    `extended_hours_fill_classes` is the readable form of the question, and it
+    exists so that "is anything trading without a stop at the broker" is a fact
+    something can answer rather than a flag buried in one block of one file.
+    """
+    rules = Rules.load(REPO_ROOT / "config" / "rules.yaml")
+
+    assert rules.instruments["us_equity"].allow_extended_hours_fills is False
+    assert rules.extended_hours_fill_classes == []
+
+
+def test_a_class_that_has_surrendered_its_stop_is_named():
+    """The switch must not be invisible once thrown. A surrender nobody can see
+    is how a feature ships inert in one direction and unnoticed in the other."""
+    rules = Rules.load(REPO_ROOT / "config" / "rules.yaml")
+    rules.instruments["us_equity"].allow_extended_hours_fills = True
+
+    assert rules.extended_hours_fill_classes == ["us_equity"]
+
+
+def test_a_disabled_class_is_never_named_as_having_surrendered_anything():
+    """It cannot trade at all, so reporting it would name a cost nobody is
+    paying — the same reason `allowed_symbols` unions enabled classes only."""
+    rules = Rules.load(REPO_ROOT / "config" / "rules.yaml")
+    rules.instruments["crypto"].allow_extended_hours_fills = True
+
+    assert rules.instruments["crypto"].enabled is False
+    assert rules.extended_hours_fill_classes == []
+
+
 # ---------------------------------------------------------------------------
 # The widened allowlist
 #
