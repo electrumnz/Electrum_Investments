@@ -21,6 +21,7 @@ from bot.dreaming import (
     OPERATOR,
     TEXT_MAX_CHARS,
     TRADER,
+    ConditionState,
     ConferenceDecision,
     ConferenceVerdict,
     Dream,
@@ -32,6 +33,7 @@ from bot.dreaming import (
     Hop,
     MoveRefusal,
     NoDecision,
+    SettleRefusal,
     Vault,
     VaultCaps,
     VaultTTLs,
@@ -39,6 +41,7 @@ from bot.dreaming import (
     carry_forward_grading,
     fusion_candidates,
     grade_conditions,
+    pending_observations,
     plan_fusion,
     promotion_for,
     weaker_of,
@@ -1580,7 +1583,12 @@ def test_a_keep_with_no_conditions_at_all_stays_on_the_workbench():
     assert bare.has_conditions is False
     assert bare.all_conditions_met is False
     assert promotion_for(bare).to is None
-    assert "checkable condition" in promotion_for(bare).reason
+    # The refusal names BOTH routes out, because a dreamer told only "no
+    # threshold" reaches for a number, which is the failure that made this
+    # shelf unreachable in the first place.
+    reason = promotion_for(bare).reason
+    assert "nothing pre-registered" in reason
+    assert "threshold" in reason and "observation" in reason
 
 
 def test_a_keep_whose_only_condition_is_prose_stays_on_the_workbench():
@@ -2207,6 +2215,629 @@ def test_a_condition_written_before_symbols_existed_reads_as_ungradeable():
     assert old.symbol == ""
     assert old.is_checkable is True  # still promotes to the prophecy shelf
     assert old.is_gradeable is False  # but nothing can settle it
+
+
+# ============================================ the condition a PERSON settles
+#
+# An honest dreamer could never leave the workbench. `promotion_for` wanted a
+# checkable condition pinned to the weakest hop, every `TriggerField` is a price
+# or a technical figure, and the weakest hop of a second-order supply-chain
+# chain is never a price fact — so the only route to the shelf was to invent a
+# price threshold for a non-price claim, which the prompt forbids. Honesty won
+# every time and the vault stayed empty.
+#
+# These tests are organised around what must stay true now that a second shape
+# of pre-registration exists. Every one of the promotion tests below proves a
+# REFUSAL, because the risk in widening a rule is that it stops refusing
+# anything.
+
+DUE = datetime(2027, 3, 1, 23, 59, tzinfo=UTC)
+BEFORE = datetime(2027, 1, 5, tzinfo=UTC)
+AFTER = datetime(2027, 6, 1, tzinfo=UTC)
+
+
+def _observation(**kw) -> DreamCondition:
+    """A claim the world can settle and this box cannot read. No number in it."""
+    base = {
+        "text": (
+            "Century Aluminum brings the idled Mt. Holly potline back, which is "
+            "the link the whole chain rests on and the one nothing here can read."
+        ),
+        "subject": "Century Aluminum's quarterly production release for Mt. Holly",
+        "observable": (
+            "reports the idled potline restarted, or under restart, rather than "
+            "still curtailed"
+        ),
+        "observe_by": DUE,
+        "settles_hops": (3,),
+    }
+    base.update(kw)
+    return DreamCondition(**base)  # type: ignore[arg-type]
+
+
+def _smelter() -> Dream:
+    """A real second-order supply-chain dream, of the shape 0b was about.
+
+    Four hops, two sourced and two assumptions, and the weakest is hop 3 — a
+    claim about an industrial decision that no `TriggerField` measures. The
+    listed instrument arrives through a bridge hop, as the prompt requires.
+    """
+    return Dream(
+        title="The idled potline and the domestic premium",
+        seed=(
+            "Half a smelter has been switched off for a decade, and everyone "
+            "prices the half that is running."
+        ),
+        verdict=DreamVerdict.KEEP,
+        chain=[
+            Hop(
+                "Mt. Holly has run at part capacity since 2015 because the site's "
+                "power contract does not support the idled potline.",
+                True,
+                "Century Aluminum's own filings",
+            ),
+            Hop(
+                "Restarting it needs an industrial power tariff on different "
+                "terms, and South Carolina files those publicly.",
+                True,
+                "the state utility commission docket",
+            ),
+            Hop(
+                "On such terms the restart is economic, so the idled potline "
+                "comes back.",
+            ),
+            Hop(
+                "Alcoa is the largest US-listed primary producer, so a domestic "
+                "supply change of that size reaches its realised price.",
+            ),
+        ],
+        weakest_hop="that the restart actually happens once the tariff exists",
+        weakest_hop_index=3,
+        symbols=["AA"],
+        asset_class_key="us_equity",
+        conditions=[_observation()],
+    )
+
+
+def test_a_supply_chain_dream_reaches_the_prophecy_shelf_with_no_invented_figure():
+    """**The one this section exists for.**
+
+    Six real dream steps produced zero checkable conditions, twice, on two
+    different transports, and the model said why itself: no field available to
+    it measures the claim, and the listed company's share price prices the
+    market's guess about it rather than testing it. So the shelf was reachable
+    only by inventing a threshold, and an honest dreamer stayed on the bench.
+
+    This dream reaches the shelf carrying NO number at all — not a fabricated
+    one and not a real one. What it carries instead is a claim about the world,
+    the thing to look at, and a date the answer should exist by.
+    """
+    dream = _smelter()
+
+    # Nothing numeric was pre-registered anywhere on it.
+    assert all(c.value is None for c in dream.conditions)
+    assert not any(c.is_checkable for c in dream.conditions)
+
+    # And it promotes anyway, on the strength of an observation pinned to the
+    # hop that could kill the chain.
+    assert dream.resolved_weakest_hop == 3
+    assert dream.weakest_hop_is_pinned is True
+    assert promotion_for(dream).to is Vault.PROPHECY
+
+
+def test_the_shelf_is_still_refused_to_a_conclusion_with_nothing_registered():
+    """Widening the rule must not empty it. A keep alone still goes nowhere."""
+    promotion = promotion_for(_keeper(chain=_smelter().chain))
+
+    assert promotion.to is None
+    assert "nothing pre-registered" in promotion.reason
+
+
+def test_an_observation_with_no_date_is_refused():
+    """"Someday" is not a pre-registration.
+
+    A question that can never come due never reaches anybody's list, so nobody
+    is ever asked and the dream waits for ever while every surface reports
+    patience. The date is what makes the claim answerable, exactly as the number
+    is what makes a threshold checkable.
+    """
+    dream = _smelter()
+    dream.conditions = [_observation(observe_by=None)]
+
+    assert dream.conditions[0].is_observable is False
+    assert dream.conditions[0].is_pre_registered is False
+    assert promotion_for(dream).to is None
+
+
+def test_an_observation_with_no_subject_is_refused():
+    """A claim with nothing to look at is prose with extra fields.
+
+    "The market will confirm it" names no findable thing, so no two people
+    would answer it the same way — which is the whole difference between an
+    observation and an opinion.
+    """
+    dream = _smelter()
+    dream.conditions = [_observation(subject="   ")]
+
+    assert dream.conditions[0].is_observable is False
+    assert promotion_for(dream).to is None
+
+
+def test_an_observation_with_nothing_it_must_show_is_refused():
+    """A thing to look at with no question attached settles nothing either."""
+    dream = _smelter()
+    dream.conditions = [_observation(observable="")]
+
+    assert dream.conditions[0].is_observable is False
+    assert promotion_for(dream).to is None
+
+
+def test_an_observation_on_a_link_nobody_doubted_does_not_buy_the_shelf():
+    """The weakest-hop clause survives the widening.
+
+    Pinning the new shape to an easy hop would turn the shelf back into a filing
+    decision, which is exactly what the pin was added to stop. The refusal names
+    the hop and names both ways to cover it.
+    """
+    dream = _smelter()
+    dream.conditions = [_observation(settles_hops=(1,))]
+
+    promotion = promotion_for(dream)
+
+    assert dream.weakest_hop_is_pinned is False
+    assert promotion.to is None
+    assert "Hop 3" in promotion.reason
+    assert "observation" in promotion.reason
+
+
+def test_a_bare_sentence_pinned_to_the_weakest_hop_is_still_not_enough():
+    """Prose does not become a pre-registration by being pinned.
+
+    An observation is three specific things; a sentence naming none of them is
+    the `waiting_for`-with-no-trigger failure, and it must not have been made
+    promotable by accident.
+    """
+    dream = _smelter()
+    dream.conditions = [DreamCondition(text="the restart happens", settles_hops=(3,))]
+
+    assert dream.weakest_hop_is_pinned is False
+    assert promotion_for(dream).to is None
+
+
+# ------------------------------------- the four states, and none of them merge
+
+
+def test_an_unanswered_observation_is_awaiting_and_never_fulfilled():
+    """The good outcome must not be what an absence of evidence looks like."""
+    condition = _observation()
+
+    assert condition.state(BEFORE) is ConditionState.AWAITING
+    assert condition.fulfilled is False
+    assert condition.is_answered is False
+
+
+def test_an_observation_past_its_date_is_overdue_and_not_a_failure():
+    """OVERDUE is its own state, and it is a fact about the LOOKING.
+
+    What is late is nobody having gone to look — the world has not answered
+    "no". Reporting it as ruled out would turn an unopened dashboard into a
+    refuted prophecy, which is the missing-versus-zero rule in a new place.
+    """
+    condition = _observation()
+
+    assert condition.state(AFTER) is ConditionState.OVERDUE
+    assert condition.state(AFTER) is not ConditionState.RULED_OUT
+    assert condition.fulfilled is False
+    assert condition.ruled_out is False
+
+
+def test_a_condition_with_neither_shape_is_unsettleable_not_awaiting():
+    """Nobody is coming. Distinct from a question waiting on somebody."""
+    assert (
+        DreamCondition(text="the spread normalises").state(BEFORE)
+        is ConditionState.UNSETTLEABLE
+    )
+
+
+def test_grading_never_settles_an_observation_in_either_direction():
+    """**Code must not answer a question code cannot answer.**
+
+    Marking it met would manufacture a trading permission out of silence — the
+    vault is what an adoption is taken from, and an adoption is a live symbol
+    grant. Marking it ruled out would refute a prophecy nobody had looked at.
+    So `grade_conditions` leaves it alone however many cycles arrive, and counts
+    it as awaiting a person rather than as ungradeable.
+    """
+    dream = _smelter()
+    dream.id = 4
+    readings = [
+        CycleReadings(
+            at=AFTER,
+            readings={"AA": IndicatorSnapshot(close=9999.0), "": IndicatorSnapshot()},
+        )
+    ]
+
+    grading = grade_conditions(dream, readings)
+
+    assert grading.newly_fulfilled == ()
+    assert grading.conditions[0].fulfilled is False
+    assert grading.conditions[0].ruled_out is False
+    assert grading.awaiting_operator == 1
+    # And NOT counted as ungradeable: "no reading can settle this" and
+    # "somebody has to look at this" are opposite findings.
+    assert grading.ungradeable == 0
+
+
+def test_a_prose_only_condition_is_still_counted_as_ungradeable():
+    """The old counter keeps its old meaning. Nothing can settle this one."""
+    dream = _keeper(conditions=[DreamCondition(text="the spread normalises")])
+    dream.id = 5
+
+    grading = grade_conditions(dream, [CycleReadings(at=AFTER, readings={})])
+
+    assert grading.ungradeable == 1
+    assert grading.awaiting_operator == 0
+
+
+def test_an_unanswered_observation_never_reaches_the_vault_by_waiting():
+    """Time alone must not promote anything. The vault is where a dream becomes
+    adoptable, and an adoption is a live permission to trade a symbol that is in
+    no allowlist — so the unattended route to one still runs entirely on figures
+    the loop recorded, and this route runs through a person."""
+    dream = _smelter()
+    dream.vault = Vault.PROPHECY
+
+    assert dream.all_conditions_met is False
+    assert promotion_for(dream).to is None
+
+
+# --------------------------------------------------- the operator's own answer
+
+
+def _shelved(store, dream: Dream | None = None) -> int:
+    """One dream on the prophecy shelf, through the real promotion rule."""
+    dream_id = store.save(dream or _smelter())
+    assert store.promote(dream_id).moved_to is Vault.PROPHECY
+    return int(dream_id)
+
+
+def test_the_operator_settles_an_observation_and_the_dream_reaches_the_vault(store):
+    """The whole ladder, on a dream carrying no number anywhere.
+
+    Workbench → prophecy on a pre-registered observation, then the operator
+    looks, answers, and the dream is offered to the trading agent. That is the
+    pipeline 0b said could not start.
+    """
+    dream_id = _shelved(store)
+    shelved = store.get(dream_id)
+    assert shelved is not None
+
+    result = store.settle_condition(
+        dream_id,
+        shelved.conditions[0].key,
+        by=OPERATOR,
+        met=True,
+        note="Q4 release: potline 2 restarting, first metal expected next quarter.",
+        at=AFTER,
+    )
+
+    assert result.ok
+    assert result.condition is not None
+    assert result.condition.fulfilled is True
+    assert result.condition.observed_by == OPERATOR
+    assert result.condition.state(AFTER) is ConditionState.MET
+
+    moved = store.promote(dream_id, at=AFTER)
+    assert moved.ok and moved.moved_to is Vault.VAULT
+
+
+def test_the_dreamer_may_not_settle_its_own_observation(store):
+    """**The refusal that keeps this from being a model writing itself a grant.**
+
+    A fulfilled condition can carry a dream to the vault, a vaulted dream can be
+    adopted, and an adoption is a live permission to trade a symbol in no
+    allowlist. An agent answering its own question would be marking its own
+    homework on that route.
+    """
+    dream_id = _shelved(store)
+    shelved = store.get(dream_id)
+    assert shelved is not None
+
+    for actor in (DREAMER, TRADER, "", "operator "):
+        refused = store.settle_condition(
+            dream_id, shelved.conditions[0].key, by=actor, met=True, note="it happened"
+        )
+        assert refused.refused
+        assert SettleRefusal.FORBIDDEN_ACTOR in refused.refusals
+
+    after = store.get(dream_id)
+    assert after is not None
+    assert after.conditions[0].fulfilled is False
+    assert store.promote(dream_id).refused
+
+
+def test_an_answer_lands_on_the_claim_that_was_shown_or_on_nothing(store):
+    """Identified by key, never by index.
+
+    A dream run between the operator reading the list and answering can restate
+    and reorder the conditions. An index would land the yes on a different
+    claim — and on this route a yes is a step towards a trading permission.
+    """
+    dream_id = _shelved(store)
+    stale = _observation(observable="reports anything at all").key
+
+    refused = store.settle_condition(
+        dream_id, stale, by=OPERATOR, met=True, note="looked it up"
+    )
+
+    assert refused.refused
+    assert SettleRefusal.NO_SUCH_CONDITION in refused.refusals
+    assert refused.condition is None
+
+
+def test_a_threshold_may_not_be_settled_by_hand(store):
+    """Code owns the graded route. A person overriding a number would be a
+    reading nobody can check, which is the failure the number exists to
+    prevent arriving from the other direction."""
+    dream_id = store.save(_keeper(conditions=[_checkable()]))
+    dream = store.get(dream_id)
+    assert dream is not None
+
+    refused = store.settle_condition(
+        dream_id, dream.conditions[0].key, by=OPERATOR, met=True, note="close enough"
+    )
+
+    assert refused.refused
+    assert SettleRefusal.NOT_AN_OBSERVATION in refused.refusals
+
+
+def test_an_answer_needs_a_reason(store):
+    """The note is the only record of what was seen. Without it a settlement
+    cannot afterwards be told from a mis-click that granted a symbol."""
+    dream_id = _shelved(store)
+    dream = store.get(dream_id)
+    assert dream is not None
+
+    refused = store.settle_condition(
+        dream_id, dream.conditions[0].key, by=OPERATOR, met=True, note="   "
+    )
+
+    assert refused.refused
+    assert SettleRefusal.NEEDS_REASON in refused.refusals
+
+
+def test_neither_answer_can_be_overwritten(store):
+    """A fulfilled condition is never un-fulfilled, and a ruled-out one is not
+    quietly reopened. Same rule, both directions, and the refusal says who
+    answered."""
+    for met in (True, False):
+        dream_id = _shelved(store)
+        dream = store.get(dream_id)
+        assert dream is not None
+        key = dream.conditions[0].key
+
+        assert store.settle_condition(
+            dream_id, key, by=OPERATOR, met=met, note="looked", at=AFTER
+        ).ok
+
+        again = store.settle_condition(
+            dream_id, key, by=OPERATOR, met=not met, note="looked again", at=AFTER
+        )
+        assert again.refused
+        assert SettleRefusal.ALREADY_ANSWERED in again.refusals
+
+
+def test_a_ruled_out_observation_is_answered_and_blocks_the_vault(store):
+    """A mechanism that can record a yes and not a no manufactures confirmations.
+
+    The refutation is a real answer: it is not "still waiting", it is settled,
+    and the dream can never be offered to the trading agent on that condition.
+    Nothing archives it — the dreamer may take the chain apart again, and a
+    weakest link that was disproved is one of the more useful things it can read.
+    """
+    dream_id = _shelved(store)
+    dream = store.get(dream_id)
+    assert dream is not None
+
+    assert store.settle_condition(
+        dream_id,
+        dream.conditions[0].key,
+        by=OPERATOR,
+        met=False,
+        note="Q4 release: curtailment extended, no restart planned.",
+        at=AFTER,
+    ).ok
+
+    settled = store.get(dream_id)
+    assert settled is not None
+    condition = settled.conditions[0]
+    assert condition.ruled_out is True
+    assert condition.fulfilled is False
+    assert condition.is_answered is True
+    assert condition.state(AFTER) is ConditionState.RULED_OUT
+    assert settled.ruled_out_conditions == [condition]
+    assert settled.all_conditions_met is False
+    assert store.promote(dream_id, at=AFTER).refused
+    assert settled.vault is Vault.PROPHECY
+
+
+# ------------------------------------------------- carrying an answer forward
+
+
+def test_a_restated_observation_keeps_the_answer_a_person_gave():
+    """Rewording is not re-asking.
+
+    A dreamer restating its list would otherwise erase the operator's answer and
+    put the same question back on the worklist, spending a person's attention
+    twice on something already settled — and `all_conditions_met` promotes the
+    dream, so an answer that reset every step could never carry one anywhere.
+    """
+    was = [_observation(fulfilled=True, observed_by=OPERATOR, note="saw it")]
+    restated = [_observation(text="reworded entirely, same question")]
+
+    carried = carry_forward_grading(was, restated)
+
+    assert carried[0].fulfilled is True
+    assert carried[0].observed_by == OPERATOR
+    assert carried[0].text == "reworded entirely, same question"
+
+
+def test_a_restated_observation_keeps_a_RULED_OUT_answer_too():
+    """The half that would have been missed: `fulfilled` alone is not the answer.
+
+    Carrying only fulfilments would silently reopen every refuted claim on the
+    next dream step, which is the same question asked again as though nobody
+    had ever looked.
+    """
+    was = [_observation(ruled_out=True, observed_by=OPERATOR, note="no restart")]
+
+    carried = carry_forward_grading(was, [_observation()])
+
+    assert carried[0].ruled_out is True
+    assert carried[0].is_answered is True
+
+
+def test_changing_what_the_observation_must_show_starts_a_new_claim():
+    """The observation equivalent of moving a threshold.
+
+    Inheriting the answer across a changed claim would be back-dating a
+    prediction — settling one question and quietly applying it to another.
+    """
+    was = [_observation(fulfilled=True, observed_by=OPERATOR)]
+    moved = [_observation(observable="reports any capacity change at all")]
+
+    assert carry_forward_grading(was, moved)[0].fulfilled is False
+
+
+def test_moving_only_the_review_date_keeps_the_answer():
+    """The date says when to look, not what is claimed — the `settles_hops`
+    rule, in a second place. Re-scheduling a question does not re-ask it."""
+    was = [_observation(fulfilled=True, observed_by=OPERATOR)]
+    later = [_observation(observe_by=datetime(2028, 1, 1, tzinfo=UTC))]
+
+    carried = carry_forward_grading(was, later)
+
+    assert carried[0].fulfilled is True
+    assert carried[0].observe_by == datetime(2028, 1, 1, tzinfo=UTC)
+
+
+def test_a_threshold_and_an_observation_never_collide_on_one_key():
+    """The key names the SHAPE first, so two different kinds of claim cannot be
+    read as the same claim by filling the same blanks."""
+    keys = {_checkable().key, _observation().key, DreamCondition(text="t").key}
+
+    assert len(keys) == 3
+    assert {k[0] for k in keys} == {"threshold", "observation", "prose"}
+
+
+# ---------------------------------------------- the old shape still reads back
+
+
+def test_a_condition_written_before_observations_existed_reads_back_unchanged(store):
+    """The store keeps conditions as JSON in a TEXT column, so there is no
+    column to add and no migration to run — but a row written before these
+    fields existed genuinely says nothing about them, and it must come back as
+    "not an observation" rather than as a half-formed one.
+
+    Built from the OLD shape deliberately, which is the only way to exercise
+    this at all: every other test constructs a current `DreamCondition` and so
+    always gets the new keys.
+    """
+    old_row = {
+        "text": "close above 100",
+        "field": "close",
+        "op": "above",
+        "value": 100.0,
+        "symbol": "AA",
+        "settles_hops": [2],
+        "fulfilled": False,
+        "fulfilled_at": None,
+        "note": "",
+    }
+    dream_id = store.save(_keeper())
+    with sqlite3.connect(store.path) as conn:
+        conn.execute(
+            "UPDATE dreams SET conditions=? WHERE id=?",
+            (json.dumps([old_row]), dream_id),
+        )
+
+    reloaded = store.get(dream_id)
+
+    assert reloaded is not None
+    condition = reloaded.conditions[0]
+    assert condition.subject == "" and condition.observable == ""
+    assert condition.observe_by is None
+    assert condition.observed_by == "" and condition.ruled_out is False
+    assert condition.is_observable is False
+    assert condition.is_checkable is True  # unchanged: it still promotes
+    assert condition.state(AFTER) is ConditionState.AWAITING
+
+
+def test_an_unreadable_review_date_reads_as_no_date_not_as_overdue_now(store):
+    """`_dt` answers "now" for anything it cannot parse, which is right for a
+    stamp recording when something happened and very wrong here: a corrupt
+    value would land at the top of the operator's worklist as already overdue.
+    Unknown is unknown, and an unknown date is not an observation."""
+    condition = DreamCondition.from_row(
+        {"text": "t", "subject": "s", "observable": "o", "observe_by": "not a date"}
+    )
+
+    assert condition.observe_by is None
+    assert condition.is_observable is False
+
+
+def test_an_observation_survives_the_round_trip(store):
+    dream_id = store.save(_smelter())
+
+    reloaded = store.get(dream_id)
+
+    assert reloaded is not None
+    condition = reloaded.conditions[0]
+    assert condition.subject.startswith("Century Aluminum")
+    assert condition.observe_by == DUE
+    assert condition.is_observable is True
+    assert condition.settles_hops == (3,)
+
+
+# --------------------------------------------- what a person is asked to answer
+
+
+def test_the_worklist_names_what_is_due_and_keeps_awaiting_apart_from_overdue():
+    """The half of this that fails SILENTLY.
+
+    A threshold is checked by code on every run whether or not anybody is
+    watching. An observation is checked by a person, who never checks if never
+    asked — so without something that can be asked "what is waiting on me" the
+    prophecy shelf becomes a place dreams go to wait while every surface reports
+    patience.
+
+    Both states are returned, because a caller that dropped the merely-awaiting
+    would answer "nothing is waiting on you" to an operator with a question due
+    next week.
+    """
+    soon = _smelter()
+    soon.id = 1
+    later = _smelter()
+    later.id = 2
+    later.conditions = [
+        _observation(
+            subject="Santee Cooper's industrial tariff docket",
+            observe_by=datetime(2028, 9, 1, tzinfo=UTC),
+        )
+    ]
+    answered = _smelter()
+    answered.id = 3
+    answered.conditions = [_observation(fulfilled=True, observed_by=OPERATOR)]
+
+    due = pending_observations([later, answered, soon], now=AFTER)
+
+    # Answered questions are not asked again, and the oldest date sorts first.
+    assert [item.dream_id for item in due] == [1, 2]
+    assert due[0].state is ConditionState.OVERDUE and due[0].is_overdue
+    assert due[1].state is ConditionState.AWAITING and not due[1].is_overdue
+    assert due[0].title == soon.title
+    assert soon.overdue_observations(AFTER) == soon.conditions
+    assert soon.overdue_observations(BEFORE) == []
 
 
 # =========================================================== symbiosis: fusing

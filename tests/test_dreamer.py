@@ -8,7 +8,7 @@ the interesting case.
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -31,6 +31,7 @@ from bot.dreamer import (
     scope_symbols,
 )
 from bot.dreaming import (
+    OPERATOR,
     Dream,
     DreamCondition,
     DreamStage,
@@ -41,6 +42,7 @@ from bot.dreaming import (
     MoveRefusal,
     Vault,
     fusion_candidates,
+    promotion_for,
 )
 from bot.journal import Journal
 from bot.models import (
@@ -241,8 +243,8 @@ def test_a_condition_says_which_hop_it_settles_and_says_when_it_settles_none(
 
     prompt = build_prompt(rules, journal, [dream], now=ENTRY)
 
-    assert "pinned to the weak link [no checkable form] [hop 2]" in prompt
-    assert "pinned to nothing [no checkable form] [settles no hop yet]" in prompt
+    assert "pinned to the weak link [nothing pre-registered] [hop 2]" in prompt
+    assert "pinned to nothing [nothing pre-registered] [settles no hop yet]" in prompt
 
 
 def test_the_age_of_a_dream_is_stated_not_implied(rules, journal):
@@ -1146,6 +1148,145 @@ def test_restating_a_condition_on_a_later_step_does_not_wipe_its_grade(
     assert reloaded.conditions[0].fulfilled is True
 
 
+# ------------------------------- the condition shape a supply-chain hop can use
+
+
+def test_a_step_cannot_answer_its_own_condition():
+    """**The structural half of the operator-settled condition.**
+
+    A fulfilled condition can carry a dream to the vault, a vaulted dream can
+    be adopted, and an adoption is a live permission to trade a symbol in no
+    allowlist. So a model able to say "this one is met" would be a model able to
+    write itself a permission — and the guarantee is that there is no field here
+    it could say it with, not that it has been asked not to. Same shape as
+    `test_a_dream_cannot_describe_an_order`.
+    """
+    answers = {"fulfilled", "fulfilled_at", "observed_by", "ruled_out", "note"}
+
+    assert set(StepCondition.model_fields) & answers == set()
+
+
+def test_a_step_writes_an_observation_a_person_will_have_to_settle(
+    rules, store, journal
+):
+    """The route that closes the conflict, end to end through a real step.
+
+    No figure the loop records measures a smelter restart, so the model writes
+    what to look at, what it must show and by when — and the dream reaches the
+    prophecy shelf carrying no number at all.
+    """
+    step = _step(
+        stage=DreamStage.VERDICT,
+        verdict=DreamVerdict.KEEP,
+        chain=[DreamHop(claim="one"), DreamHop(claim="two"), DreamHop(claim="three")],
+        weakest_hop="the third link",
+        weakest_hop_index=3,
+        conditions=[
+            StepCondition(
+                text="the idled potline comes back",
+                settles_hops=[3],
+                subject="  Century Aluminum's quarterly production release  ",
+                observable="reports the idled potline restarted",
+                observe_by="2027-03-01",
+            )
+        ],
+    )
+    dreamer = Dreamer(_env(), rules, store, journal, client=_StubClient(step))
+
+    result = dreamer.run_once()
+
+    assert result is not None
+    condition = result.dream.conditions[0]
+    assert condition.subject == "Century Aluminum's quarterly production release"
+    assert condition.value is None and condition.is_checkable is False
+    assert condition.is_observable is True
+    assert condition.is_pre_registered is True
+    # A bare date means the END of that day: "by the 1st" is not a condition
+    # that spends the whole of the 1st reported as overdue.
+    assert condition.observe_by is not None
+    assert condition.observe_by.date() == date(2027, 3, 1)
+    assert condition.observe_by.hour == 23
+    assert result.dream.weakest_hop_is_pinned is True
+    assert promotion_for(result.dream).to is Vault.PROPHECY
+
+
+def test_an_unreadable_review_date_leaves_the_dream_where_it_was(
+    rules, store, journal
+):
+    """Parsed, never trusted, and never defaulted.
+
+    "Next spring" cannot be a date, and taking `now` for it would put the
+    question at the top of the operator's list as already overdue — a plausible
+    wrong figure wearing a timestamp. Unreadable is no date, which makes it not
+    an observation, which holds the dream exactly where the old rule held it.
+    """
+    step = _step(
+        stage=DreamStage.VERDICT,
+        verdict=DreamVerdict.KEEP,
+        chain=[DreamHop(claim="one")],
+        weakest_hop_index=1,
+        conditions=[
+            StepCondition(
+                text="the idled potline comes back",
+                settles_hops=[1],
+                subject="Century Aluminum's production release",
+                observable="reports the restart",
+                observe_by="next spring",
+            )
+        ],
+    )
+    dreamer = Dreamer(_env(), rules, store, journal, client=_StubClient(step))
+
+    result = dreamer.run_once()
+
+    assert result is not None
+    assert result.dream.conditions[0].observe_by is None
+    assert result.dream.conditions[0].is_observable is False
+    assert promotion_for(result.dream).to is None
+
+
+def test_the_prompt_shows_an_observation_with_its_date_and_its_state(
+    rules, journal
+):
+    """The dreamer has to see what it already asked for, and its state.
+
+    "Nobody has looked yet" and "a person looked and the answer was no" are
+    opposite facts. A model shown one word for both would keep re-proposing a
+    chain whose weakest link has been refuted.
+    """
+    dream = Dream(
+        id=9,
+        title="The idled potline",
+        seed="a spark",
+        chain=[Hop("one"), Hop("two")],
+        weakest_hop_index=2,
+        conditions=[
+            DreamCondition(
+                text="the idled potline comes back",
+                subject="Century Aluminum's production release",
+                observable="reports the restart",
+                observe_by=datetime(2026, 3, 1, tzinfo=UTC),
+                settles_hops=(2,),
+            ),
+            DreamCondition(
+                text="the tariff is filed",
+                subject="the state utility docket",
+                observable="carries a new industrial tariff",
+                observe_by=datetime(2026, 3, 1, tzinfo=UTC),
+                ruled_out=True,
+                observed_by=OPERATOR,
+            ),
+        ],
+    )
+
+    prompt = build_prompt(rules, journal, [dream], now=ENTRY)
+
+    assert "OVERDUE" in prompt
+    assert "RULED_OUT" in prompt
+    assert "observation: Century Aluminum's production release" in prompt
+    assert "due 2026-03-01" in prompt
+
+
 # ------------------------------------------------------------- promote_dreams
 
 
@@ -1176,6 +1317,40 @@ def test_promote_dreams_moves_a_finished_keep_off_the_workbench(store):
 
     assert run.considered == 1
     assert run.promoted == ((dream_id, str(Vault.PROPHECY)),)
+
+
+def test_promote_dreams_counts_the_questions_waiting_on_a_person(store):
+    """A still shelf has two explanations, and the log line has to say which.
+
+    A prophecy waiting on an observation looks, from the log, exactly like one
+    whose figures have not moved. The count is deliberately taken WITH NO
+    READINGS too: an observation does not need any, so a counter that only ran
+    inside the grading branch would report zero questions outstanding at exactly
+    the moment nothing else could move either — which is the `cycles_available`
+    lesson in the same function.
+    """
+    store.save(
+        _prophecy_ready(
+            vault=Vault.PROPHECY,
+            conditions=[
+                DreamCondition(
+                    text="the idled potline comes back",
+                    subject="Century Aluminum's production release",
+                    observable="reports the restart",
+                    observe_by=datetime(2027, 3, 1, tzinfo=UTC),
+                )
+            ],
+        )
+    )
+
+    assert promote_dreams(store).awaiting_operator == 1
+    assert (
+        promote_dreams(
+            store,
+            readings=[CycleReadings(at=datetime(2026, 6, 2, tzinfo=UTC), readings={})],
+        ).awaiting_operator
+        == 1
+    )
 
 
 def test_promote_dreams_grades_before_it_promotes(store):

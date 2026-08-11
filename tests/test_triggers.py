@@ -168,6 +168,37 @@ def test_a_snapshot_reports_missing_fields_as_none():
     assert snap.get(TriggerField.SMA_200) is None
 
 
+def test_every_trigger_field_is_a_figure_the_loop_actually_records():
+    """**The guard on the tempting fix, and it must fail when that fix is made.**
+
+    An honest dreamer could not reach the prophecy shelf, because every member
+    here is a price or a technical figure and the weakest hop of a supply-chain
+    chain never is. The obvious repair is to add members for the things it does
+    reason about — `wholesale_egg_price`, `smelter_restart` — and that repair is
+    the failure this type exists to prevent: a field the loop cannot produce is
+    a trigger nobody can ever check, so it would make the shelf reachable and
+    every prophecy on it ungradeable, which is worse than an empty shelf.
+
+    `IndicatorSnapshot` IS what the loop records, and `get` resolves a trigger
+    by attribute name, so a member with no field behind it silently reads `None`
+    for ever — `UNKNOWN` on every grading, on every cycle, with nothing saying
+    why. Pinning the two together makes that a red build instead.
+
+    The answer to the conflict is `DreamCondition`'s operator-settled
+    observation, which needs no figure at all. Do not widen this enum.
+    """
+    produced = set(IndicatorSnapshot.model_fields)
+
+    for field in TriggerField:
+        assert field.value in produced, (
+            f"{field.value} is not a figure `indicators.py` computes. A trigger "
+            "on it could never be graded — add the reading first, or express "
+            "the claim as a DreamCondition observation."
+        )
+        # Not merely declared: resolvable through the same lookup grading uses.
+        assert IndicatorSnapshot().get(field) is None
+
+
 # ----------------------------------------------------------------- reporting
 
 

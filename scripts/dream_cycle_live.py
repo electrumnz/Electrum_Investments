@@ -455,6 +455,19 @@ def condition_audit(dream: Dream) -> dict[str, Any]:
                 "settles_hops": list(condition.settles_hops),
                 "is_checkable": condition.is_checkable,
                 "is_gradeable": condition.is_gradeable,
+                # The second shape of pre-registration: a claim about the world
+                # that a PERSON settles, for the weakest hop of a supply-chain
+                # chain that no `TriggerField` can measure. Counted separately
+                # from `is_checkable`, or this audit reports the honest answer
+                # to 0b as "prose only" — which is what it used to be, and is
+                # exactly the reading that made the shelf look unreachable.
+                "is_observable": condition.is_observable,
+                "is_pre_registered": condition.is_pre_registered,
+                "subject": condition.subject,
+                "observable": condition.observable,
+                "observe_by": (
+                    condition.observe_by.isoformat() if condition.observe_by else None
+                ),
                 "fulfilled": condition.fulfilled,
                 "threshold_is_a_number": condition.value is not None,
                 "prose_names_a_moving_figure": bool(MOVING_LEVEL.search(condition.text)),
@@ -464,7 +477,9 @@ def condition_audit(dream: Dream) -> dict[str, Any]:
         "conditions": rows,
         "count": len(rows),
         "checkable": sum(1 for r in rows if r["is_checkable"]),
-        "prose_only": sum(1 for r in rows if not r["is_checkable"]),
+        "observations": sum(1 for r in rows if r["is_observable"]),
+        "pre_registered": sum(1 for r in rows if r["is_pre_registered"]),
+        "prose_only": sum(1 for r in rows if not r["is_pre_registered"]),
         "any_threshold_not_a_number": any(
             r["op"] is not None and not r["threshold_is_a_number"] for r in rows
         ),
@@ -481,6 +496,7 @@ def weakest_hop_audit(dream: Dream) -> dict[str, Any]:
             "text": c.text,
             "settles_hops": list(c.settles_hops),
             "is_checkable": c.is_checkable,
+            "is_observable": c.is_observable,
         }
         for c in dream.conditions
         if resolved is not None and c.settles(resolved)

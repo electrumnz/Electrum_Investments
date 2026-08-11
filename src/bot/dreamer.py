@@ -77,7 +77,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -294,6 +294,16 @@ class StepCondition(BaseModel):
     still legal. What `EVERY_FIELD_REQUIRED` changes is that the model has to
     SAY null rather than leave the key out, which is a wire format and not a
     change to what a condition may be.
+
+    **There is deliberately no field here that could carry an ANSWER**, and that
+    absence is the whole safety argument for the observation half. A dream whose
+    conditions are all met reaches the vault, a vaulted dream can be adopted,
+    and an adoption is a live permission to trade a symbol that is in no
+    allowlist — so a model able to say "this one is met" would be a model able
+    to write itself a permission. It can propose the question; only
+    `DreamStore.settle_condition` records the answer, and only the operator may
+    call it. Structural rather than asked for politely, exactly as `Dream`
+    carries no order fields. `tests/test_dreamer.py` pins the absence.
     """
 
     model_config = EVERY_FIELD_REQUIRED
@@ -340,6 +350,36 @@ class StepCondition(BaseModel):
             "The threshold, as a NUMBER and never the name of another figure. "
             "'Above the 20-day' re-checked next month tests a level nobody ever "
             "saw, because the average moved."
+        ),
+    )
+    subject: str = Field(
+        default="",
+        description=(
+            "OBSERVATION, part 1 of 3. The specific, findable thing a person "
+            "would go and look at: a named report, a named register, a named "
+            "company's own release. Not 'the market' and not 'the news'. Fill "
+            "this trio INSTEAD of the triple above when no figure the loop "
+            "records measures your claim — which is the normal case for a "
+            "supply-chain chain. Leave all three empty otherwise."
+        ),
+    )
+    observable: str = Field(
+        default="",
+        description=(
+            "OBSERVATION, part 2 of 3. What that thing would have to SHOW for "
+            "this condition to be met, written so a person can answer yes or "
+            "no. No number is wanted here: this shape exists precisely for "
+            "claims that are not about a figure."
+        ),
+    )
+    observe_by: str = Field(
+        default="",
+        description=(
+            "OBSERVATION, part 3 of 3. The date by which that answer should "
+            "exist, as YYYY-MM-DD. A review date and not a deadline — nothing "
+            "expires and nothing fails when it passes, it simply moves to the "
+            "operator's list as due. Required: 'someday' can never come due, so "
+            "nobody is ever asked and the dream waits forever."
         ),
     )
 
@@ -561,17 +601,58 @@ A verdict of `keep` says the chain holds. It does not say the moment has come,
 and those are different claims. `conditions` is what would have to happen
 before this is worth putting in front of the trading agent.
 
-- **A keep with no checkable condition goes nowhere.** It stays on the
-  workbench, and reaches nobody, because a conclusion nobody can grade is an
+- **A keep with nothing pre-registered goes nowhere.** It stays on the
+  workbench, and reaches nobody, because a conclusion nobody can settle is an
   opinion. If you want a dream to travel, pre-register something.
+
+There are TWO ways to pre-register one, and choosing the wrong one is how a
+good chain gets stuck or a bad number gets invented.
+
+  **A THRESHOLD** — `symbol`, `field`, `op`, `value`. Settled by CODE against
+  the figures the decision loop records. Use it when the claim really is about
+  one of those figures.
+
+  **AN OBSERVATION** — `subject`, `observable`, `observe_by`. Settled by a
+  PERSON, who goes and looks. Use it when no figure measures your claim, which
+  is the normal case for the hop a supply-chain chain actually rests on.
+
+**Every field the loop computes is a price or a technical figure**, and the hop
+that could kill a second-order chain almost never is. A smelter restarting, a
+brood map showing overlap, a regulator granting a licence, a plant coming back
+after an outage — nothing in `close`, `sma_20` or `atr_14` measures any of
+those, and a listed company's share price does not test your claim, it prices
+the market's own guess about it.
+
+So do NOT reach for a price threshold to make a non-price claim promotable.
+That is the invented-number failure with better manners, and it is worse than
+leaving the field null, because the dream then travels carrying a test of
+something nobody claimed. Write the observation instead.
+
+An observation needs all three parts and each one does a job:
+
+  `subject`    the specific, findable thing to look at. A named report, a named
+               register, a named company's own release. "The market" is not a
+               subject and neither is "the news".
+  `observable` what it would have to show, phrased so a person answers yes or no.
+  `observe_by` the date that answer should exist by, as YYYY-MM-DD.
+
+The date is a REVIEW date, not a deadline. Nothing expires when it passes and
+your dream does not fail; the question simply appears on the operator's list as
+due. Give the honest date the thing becomes knowable — when the report is
+published, when the quarter ends — and if it is already knowable, give a near
+one. What you may not do is leave it out: a question that can never be late is
+a question nobody is ever asked.
+
+**You do not answer your own observation, and there is no field here you could
+answer it with.** A person does, and their answer is what moves the dream.
 - **A prophecy is a claim about the WEAKEST LINK, and that is what the shelf is
   for: a dream parked awaiting the thing that would settle it.** So name the
   weakest hop, give its number in `weakest_hop_index`, and make sure at least
-  one checkable condition names that same number in `settles_hops`. A
-  pre-registered threshold on a link nobody doubted grades cleanly, promotes
-  cleanly and settles nothing — it turns the shelf into a filing decision. If
-  the hop that could kill your chain cannot be settled by any number, say so
-  and let the dream stay on the workbench; that is a real answer.
+  one PRE-REGISTERED condition — threshold or observation — names that same
+  number in `settles_hops`. A condition on a link nobody doubted grades
+  cleanly, promotes cleanly and settles nothing, which turns the shelf into a
+  filing decision. The weakest hop is usually the one no figure can measure, so
+  it is usually an observation that belongs on it.
 - One condition may settle several hops, and several conditions may settle the
   same hop. Pin what the condition honestly bears on and nothing more.
 - Each condition needs `text` — the sentence, with the reasoning in it — and,
@@ -586,10 +667,9 @@ before this is worth putting in front of the trading agent.
 - `symbol` says whose figure it is. It may be something you would never trade —
   a condition about the marginal producer is fine even when the symbol you
   claim is its customer.
-- A condition only a person could settle is legal: write the sentence and leave
-  the triple null. It is counted honestly as ungradeable rather than pretended
-  to be checkable. What is NOT acceptable is inventing a number so the field
-  looks filled.
+- A condition with only a sentence — no triple and no observation — is still
+  legal, and is counted honestly as one nobody can settle. It promotes nothing.
+  What is NOT acceptable is inventing a number so a field looks filled.
 
 ## symbiosis: two chains that meet at the same hop
 
@@ -944,13 +1024,26 @@ def build_prompt(
             if dream.symbols:
                 out.append(f"      symbols claimed: {', '.join(dream.symbols)}")
             for condition in dream.conditions:
-                mark = "MET" if condition.fulfilled else "not yet"
+                # The five-valued state rather than met/not-met. "Nobody has
+                # looked yet" and "a person looked and the answer was no" are
+                # opposite facts, and a dreamer shown one word for both would
+                # keep re-proposing a chain whose weakest link has been refuted.
+                mark = str(condition.state(stamp)).upper()
                 trigger = condition.as_trigger()
-                shape = (
-                    f" [{condition.symbol} {trigger.render()}]"
-                    if trigger is not None and condition.symbol
-                    else " [no checkable form]"
-                )
+                if trigger is not None and condition.symbol:
+                    shape = f" [{condition.symbol} {trigger.render()}]"
+                elif condition.is_observable:
+                    due = (
+                        condition.observe_by.date().isoformat()
+                        if condition.observe_by
+                        else "no date"
+                    )
+                    shape = (
+                        f" [observation: {condition.subject} — "
+                        f"{condition.observable}; due {due}]"
+                    )
+                else:
+                    shape = " [nothing pre-registered]"
                 # Which hop it claims to settle, and the absence stated rather
                 # than left blank. An unpinned condition is why a finished keep
                 # sits on the workbench, and a renderer that showed nothing
@@ -1002,10 +1095,13 @@ def build_prompt(
     )
     out.append(
         "  - `conditions`: what would have to be true before this is worth "
-        "offering. A keep verdict with no checkable condition never leaves the "
-        "workbench. Give each a sentence, and a symbol/field/op/value wherever "
-        "the claim can carry one. The value is a number you read off the "
-        "figures, never the name of another figure."
+        "offering. A keep verdict with nothing pre-registered never leaves the "
+        "workbench. Give each a sentence, and then EITHER a "
+        "symbol/field/op/value where the claim really is about one of the "
+        "figures above — the value a number you read off them, never the name "
+        "of another figure — OR, where no figure measures it, "
+        "subject/observable/observe_by for a person to settle. Do not force a "
+        "price threshold onto a claim that is not about a price."
     )
     # Third, and separate from the two above because it is the one that decides
     # whether the prophecy shelf means anything. The other two were added after
@@ -1015,12 +1111,40 @@ def build_prompt(
     out.append(
         "  - the WEAKEST HOP has to be covered. Name it, give its number in "
         "`weakest_hop_index`, and put that number in `settles_hops` on a "
-        "checkable condition. A prophecy is a dream parked awaiting the link "
-        "that could kill it; a threshold on a link nobody doubted settles "
-        "nothing and the dream stays on the workbench. If no number could "
-        "settle that hop, leave the dream on the workbench and say why."
+        "pre-registered condition. A prophecy is a dream parked awaiting the "
+        "link that could kill it; a condition on a link nobody doubted settles "
+        "nothing and the dream stays on the workbench. If no figure could "
+        "settle that hop — which is usual — pin an OBSERVATION to it rather "
+        "than inventing a threshold."
     )
     return "\n".join(out)
+
+
+def _observe_by(value: str) -> datetime | None:
+    """A review date the model wrote, as an instant. `None` when unreadable.
+
+    A bare `YYYY-MM-DD` becomes the END of that day in UTC, because "by the
+    31st" means by the end of the 31st and the alternative reading calls a
+    condition overdue for the whole of the day it is due on.
+
+    **Unreadable is `None`, never "now" and never a clamp.** A date that cannot
+    be parsed makes the condition not an observation, which leaves the dream on
+    the workbench with the refusal saying what is missing — the direction that
+    holds a dream where it already was. Defaulting to now would put a garbled
+    value straight to the top of the operator's worklist as already overdue.
+    """
+    text = value.strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    if (parsed.hour, parsed.minute, parsed.second, parsed.microsecond) == (0, 0, 0, 0):
+        return parsed + timedelta(days=1) - timedelta(microseconds=1)
+    return parsed
 
 
 @dataclass(frozen=True)
@@ -1036,6 +1160,12 @@ class PromotionRun:
 
     considered: int = 0
     conditions_fulfilled: int = 0
+    # Conditions no figure can settle, waiting on a PERSON to look. Its own
+    # count because a still shelf has two very different explanations — the
+    # figures have not moved, or nobody has been asked — and a zero here says
+    # which. The same reason `cycles_available` is on the line: a shelf that
+    # cannot move explains itself, rather than looking like patience.
+    awaiting_operator: int = 0
     # (dream_id, vault it landed on)
     promoted: tuple[tuple[int, str], ...] = ()
     # (dream_id, why it stayed). Includes the ordinary "still being worked on",
@@ -1079,6 +1209,7 @@ def promote_dreams(
     """
     stamp = at or datetime.now(UTC)
     fulfilled = 0
+    awaiting_operator = 0
     promoted: list[tuple[int, str]] = []
     held: list[tuple[int, str]] = []
 
@@ -1098,6 +1229,18 @@ def promote_dreams(
         if readings and dream.conditions:
             grading = store.grade(dream_id, readings, at=stamp)
             fulfilled += len(grading.newly_fulfilled)
+            awaiting_operator += grading.awaiting_operator
+        else:
+            # Counted whether or not there were readings to grade against,
+            # because an observation does not need any: it needs a person. With
+            # no cycles recorded the grading step is skipped entirely, and a
+            # count that skipped with it would report zero questions waiting on
+            # the operator at exactly the moment nothing else could move either.
+            awaiting_operator += sum(
+                1
+                for c in dream.conditions
+                if c.is_observable and not c.is_answered
+            )
 
         result = store.promote(dream_id, at=stamp, caps=caps)
         if result.ok and result.moved_to is not None:
@@ -1110,6 +1253,7 @@ def promote_dreams(
     run = PromotionRun(
         considered=len(candidates),
         conditions_fulfilled=fulfilled,
+        awaiting_operator=awaiting_operator,
         promoted=tuple(promoted),
         held=tuple(held),
         cycles_available=len(readings),
@@ -1119,6 +1263,10 @@ def promote_dreams(
         considered=run.considered,
         promoted=[f"{i} -> {v}" for i, v in run.promoted],
         conditions_fulfilled=run.conditions_fulfilled,
+        # A prophecy waiting on a person looks, from here, exactly like one
+        # whose figures have not moved. This is the difference, and without it
+        # the shelf reports patience either way.
+        awaiting_operator=run.awaiting_operator,
         # Named for the same reason `calendar_degraded` is: with no recorded
         # cycles nothing can fire, and that is a fact about the audit log rather
         # than about the prophecies. A zero here explains an unchanging shelf.
@@ -1655,6 +1803,21 @@ class Dreamer:
                         field=c.field,
                         op=c.op,
                         value=c.value,
+                        # The observation half. Prose is trimmed and the date is
+                        # PARSED rather than trusted — an unreadable one becomes
+                        # None, which makes the condition not an observation and
+                        # leaves the dream exactly where it was. That is the
+                        # direction to fail in: the alternative is a dream on
+                        # the prophecy shelf whose question can never come due.
+                        #
+                        # Nothing here carries an ANSWER, and there is no field
+                        # on `StepCondition` that could. `fulfilled`,
+                        # `ruled_out` and `observed_by` are written by
+                        # `DreamStore.settle_condition` and by grading, never
+                        # from a model's step.
+                        subject=c.subject.strip(),
+                        observable=c.observable.strip(),
+                        observe_by=_observe_by(c.observe_by),
                     )
                     for c in step.conditions
                 ],
