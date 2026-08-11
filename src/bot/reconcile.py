@@ -34,19 +34,72 @@ import structlog
 
 from .broker import Broker
 from .config import Rules
+from .exit_review import ExitReview, classify_exit
 from .journal import Journal
 from .models import (
     AccountSnapshot,
     Direction,
     ExecutionMode,
+    FillState,
     OrderProposal,
     OrderResult,
+    Position,
     Trade,
+    WorkingOrder,
 )
 from .position_actions import UnexplainedMoveReport, detect_unexplained_moves
 from .stand_down import evaluate_stand_down
 
 log = structlog.get_logger()
+
+# Float slack for comparing a quantity or a price read back from the broker
+# against one this journal wrote. Both round-trip through SQLite as doubles, so
+# this is about representation and nothing else — it is deliberately NOT a
+# tolerance band on whether a fill "counts". A percentage nobody agreed to is
+# how a measurement becomes an opinion.
+_TOL = 1e-9
+
+# How far back to read the action log when classifying one symbol's exit. The
+# query is already filtered to the symbol and ordered newest first, so this is a
+# ceiling on a pathological history rather than a window anybody has to tune.
+_ACTION_LOOKBACK = 200
+
+
+@dataclass(frozen=True)
+class FillCorrection:
+    """One entry squared against what the broker actually did.
+
+    Recorded rather than applied silently: the whole defect being fixed is a
+    journal that stated an intention and called it an outcome, and a correction
+    nobody can see would be the same fault with better numbers.
+    """
+
+    symbol: str
+    trade_id: int
+    fill_state: FillState
+    qty_before: float
+    qty_after: float
+    entry_before: float
+    entry_after: float
+
+    @property
+    def qty_changed(self) -> bool:
+        return abs(self.qty_after - self.qty_before) > _TOL
+
+    @property
+    def price_changed(self) -> bool:
+        return abs(self.entry_after - self.entry_before) > _TOL
+
+    def describe(self) -> str:
+        parts = []
+        if self.qty_changed:
+            parts.append(f"qty {self.qty_before:,.4f} -> {self.qty_after:,.4f}")
+        if self.price_changed:
+            parts.append(
+                f"entry {self.entry_before:,.4f} -> {self.entry_after:,.4f}"
+            )
+        what = ", ".join(parts) if parts else "figures unchanged"
+        return f"{self.symbol}: {what} ({self.fill_state.value})"
 
 
 @dataclass
@@ -68,6 +121,66 @@ class ReconcileResult:
     # Optional with a default, like everything else added here after the fact.
     # Populated by `position_actions.detect_unexplained_moves`, which is pure.
     unexplained: UnexplainedMoveReport = field(default_factory=UnexplainedMoveReport)
+
+    # ---- what the entry actually did, squared against what was submitted ----
+    #
+    # `record_fill` writes the PROPOSAL's quantity and limit price, because
+    # waiting for a terminal order state would leave a live position
+    # unjournalled in the meantime. These are the corrections that follow.
+
+    # Entries rewritten from the position the broker actually holds.
+    entries_corrected: list[FillCorrection] = field(default_factory=list)
+
+    # The entry order is still working with nothing filled. There is no
+    # position yet and there may never be one — this is what an out-of-hours
+    # entry looks like, and it is the state that used to be closed as a trade.
+    entries_resting: list[str] = field(default_factory=list)
+
+    # The entry order is still working and PART of it has filled. **A reading,
+    # never an outcome.** A poll during the first real order returned
+    # `FILLED 3.0` of 21 and the order completed moments later, so nothing is
+    # written from this state.
+    entries_mid_fill: list[str] = field(default_factory=list)
+
+    # Entries whose order could not be looked up: no order id on the row, or
+    # the order read was degraded. Named rather than treated as terminal —
+    # `get_open_orders` returns `[]` on its own failure, so an empty list is
+    # "could not ask" and never "nothing resting".
+    entries_unchecked: list[str] = field(default_factory=list)
+
+    # A position exists and cannot be attributed to one journal row: two open
+    # trades in the symbol, a direction that disagrees, or more held than was
+    # ever ordered. Alpaca aggregates per symbol, so its average entry is not
+    # this row's fill, and correcting from it would be a plausible wrong figure.
+    entries_ambiguous: list[str] = field(default_factory=list)
+
+    # Closes withheld because the entry may still be resting. Without this, an
+    # order placed out of hours — which rests and fills at the next open — was
+    # closed as a trade on the very next cycle, and then filled into a position
+    # the journal no longer had a row for.
+    closes_deferred: list[str] = field(default_factory=list)
+
+    # Why each position that closed this cycle closed. The plan, never the
+    # profit — see `exit_review`.
+    exits_reviewed: list[ExitReview] = field(default_factory=list)
+
+    @property
+    def plan_abandoned(self) -> list[ExitReview]:
+        """Closes made by hand before either level. The bucket that matters."""
+        return [r for r in self.exits_reviewed if r.plan_abandoned]
+
+    @property
+    def entry_figures_are_the_proposal(self) -> list[str]:
+        """Symbols whose journalled entry is still what was ASKED for.
+
+        The honest name for `open_risk_usd` being computed off a limit price
+        rather than a fill. Overstated is the safe direction — the first real
+        order read $990.36 against a real $980.19 — and it is still a figure
+        that does not describe the account.
+        """
+        return sorted(
+            set(self.entries_resting + self.entries_mid_fill + self.entries_unchecked)
+        )
 
     @property
     def risk_is_understated(self) -> bool:
@@ -101,25 +214,61 @@ def record_fill(
     the grant was what let the proposal through, because that is the risk gate's
     finding and it travels on the verdict. Defaulting to `None` is correct for
     every trade in a symbol `config/rules.yaml` already allows.
+
+    ## It records the PROPOSAL, and that is a decision rather than an oversight
+
+    This runs immediately after `broker.place_order`, so what it can write is
+    what was submitted. The alternative — waiting for a terminal order state —
+    leaves a live position unjournalled in the meantime, which is the `14b88c8`
+    hole exactly: an order at the broker the journal has never heard of, with
+    `open_risk_usd` unable to count it and the 2% cap blind to it. Recording
+    early and correcting in `reconcile` overstates risk for at most one cycle;
+    recording late understates it to zero for as long as the order takes.
+
+    So the submitted figures are kept beside the recorded ones —
+    `submitted_qty` and `submitted_price` — and `fill_state` says how much of it
+    anybody has actually read back. `reconcile` squares them once the entry
+    order is terminal.
+
+    **A partial reading at submission is not a partial fill**, and this is where
+    that is enforced. `filled_qty` short of what was asked for is a snapshot of
+    an order still filling: the first real order polled back `FILLED 3.0` of 21
+    and completed moments later. Writing 3 would understate the position's risk
+    by six sevenths, which is the unsafe direction, so the proposal's quantity
+    stands and the row is marked `UNCONFIRMED` until the order settles.
     """
     if not result.accepted:
         return None
 
-    entry_price = result.filled_price or proposal.limit_price
+    # Only a fill that is complete AND priced is taken as an outcome. Either
+    # half missing means the broker has not finished telling us what happened.
+    filled_qty = result.filled_qty
+    complete = (
+        filled_qty is not None
+        and filled_qty + _TOL >= proposal.qty
+        and result.filled_price is not None
+    )
     trade = Trade(
         symbol=proposal.symbol,
         asset_class=proposal.asset_class,
         strategy=strategy,
         direction=proposal.direction,
-        qty=result.filled_qty or proposal.qty,
+        qty=filled_qty if complete and filled_qty is not None else proposal.qty,
         entry_time=now or datetime.now(UTC),
-        entry_price=entry_price,
+        entry_price=(
+            result.filled_price
+            if complete and result.filled_price is not None
+            else proposal.limit_price
+        ),
         planned_stop=proposal.stop_loss_price,
         planned_target=proposal.take_profit_price,
         rationale=proposal.rationale,
         execution_mode=execution_mode,
         entry_order_id=result.order_id,
         dream_id=dream_id,
+        submitted_qty=proposal.qty,
+        submitted_price=proposal.limit_price,
+        fill_state=FillState.COMPLETE if complete else FillState.UNCONFIRMED,
     )
     return journal.record_entry(trade)
 
@@ -138,6 +287,27 @@ def reconcile(
     result = ReconcileResult()
 
     held = {p.symbol: p for p in snapshot.open_positions}
+
+    # One order read, used by the entry correction below and by the
+    # unexplained-move detection at the end. Two reads would eventually describe
+    # two different sets of resting orders, and the second of them would be
+    # compared against the first's conclusions.
+    orders = broker.get_open_orders()
+    orders_degraded = broker.orders_degraded
+
+    # 0. Square each ENTRY against what the broker actually did, BEFORE anything
+    #    reads the figures. `record_fill` wrote the proposal's quantity and limit
+    #    price; this is where they become what happened.
+    deferred_closes = _confirm_entries(
+        journal,
+        held=held,
+        open_trades=journal.open_trades(),
+        orders=orders,
+        orders_degraded=orders_degraded,
+        result=result,
+    )
+    # Re-read so every step below sees corrected entries rather than the
+    # proposals they replaced.
     open_trades = journal.open_trades()
 
     # 1. Anything the journal thinks is open but the broker no longer holds has
@@ -145,9 +315,32 @@ def reconcile(
     for trade in open_trades:
         if trade.symbol in held:
             continue
+        if trade.id is not None and trade.id in deferred_closes:
+            # Not a close. The entry order is still working at the broker, or
+            # the order read failed and cannot say it is not — either way this
+            # row has never been a position, so there is nothing to have closed.
+            # Without this an out-of-hours entry, which rests until the next
+            # regular open, was written off as a trade on the very next cycle
+            # and then filled into a position with no journal row behind it.
+            result.closes_deferred.append(trade.symbol)
+            continue
         exit_price, estimated = _resolve_exit_price(broker, trade)
         if estimated:
             result.estimated_exits += 1
+
+        # WHY it closed, captured at the only moment the evidence is all in one
+        # place. A price, a time and a realised figure cannot tell stop-hit from
+        # target-hit from closed-by-hand afterwards.
+        review = classify_exit(
+            trade,
+            actions=journal.position_actions(
+                symbol=trade.symbol, limit=_ACTION_LOOKBACK
+            ),
+            exit_price=exit_price,
+            exit_time=moment,
+            exit_price_estimated=estimated,
+        )
+        result.exits_reviewed.append(review)
 
         pnl = _realised_pnl(trade, exit_price)
         journal.record_exit(
@@ -155,6 +348,8 @@ def reconcile(
             exit_time=moment,
             exit_price=exit_price,
             realised_pnl_usd=pnl,
+            exit_reason=review.reason,
+            exit_price_estimated=estimated,
         )
         result.closed.append(trade.symbol)
         log.info(
@@ -163,6 +358,20 @@ def reconcile(
             exit_price=round(exit_price, 4),
             realised_pnl_usd=round(pnl, 2),
             price_source="estimated" if estimated else "broker",
+            exit_reason=review.reason.value,
+            closed_by_hand=review.closed_by_hand,
+        )
+
+    if result.plan_abandoned:
+        log.warning(
+            "plan_abandoned_on_close",
+            symbols=[r.symbol for r in result.plan_abandoned],
+            detail=(
+                "A position was closed by hand with the price at neither the "
+                "stop nor the target. That is the plan being put aside rather "
+                "than completed, which is the one exit worth looking at "
+                "whatever it made."
+            ),
         )
 
     # 2. Widen MAE/MFE on everything still open.
@@ -202,13 +411,13 @@ def reconcile(
     still_open = [t for t in journal.open_trades() if t.is_open]
     result.unexplained = detect_unexplained_moves(
         positions=snapshot.open_positions,
-        orders=broker.get_open_orders(),
+        orders=orders,
         open_trades=still_open,
         # Newest first and bounded: an explanation for a level resting NOW is a
         # recent move, and reading the whole history to find one would grow with
         # the log for no gain.
-        actions=journal.position_actions(limit=200),
-        orders_degraded=broker.orders_degraded,
+        actions=journal.position_actions(limit=_ACTION_LOOKBACK),
+        orders_degraded=orders_degraded,
     )
     if result.unexplained.moves:
         log.warning(
@@ -247,6 +456,157 @@ def reconcile(
     journal.record_equity(snapshot.equity_usd, when=moment)
 
     return result
+
+
+def _confirm_entries(
+    journal: Journal,
+    *,
+    held: dict[str, Position],
+    open_trades: list[Trade],
+    orders: list[WorkingOrder],
+    orders_degraded: bool,
+    result: ReconcileResult,
+) -> set[int]:
+    """Replace each proposed entry with what the broker did. Returns ids NOT to close.
+
+    The other half of the decision recorded on `record_fill`: the journal writes
+    the proposal at submission so a live position is never unjournalled, and
+    this is where it stops being a proposal. `reconcile` already squares journal
+    against broker every cycle, so it is the one place that sees both sides.
+
+    Five properties, and none of them is padding:
+
+    - **Nothing is written from an order that is still working.** A fill is not
+      atomic. The first real order polled back `FILLED 3.0` of 21 and completed
+      moments later, so anything sampling an in-flight order has a snapshot
+      rather than an outcome. Those are named in `entries_mid_fill` and left
+      alone.
+    - **A confirmed entry is never rewritten.** Squaring happens once, when the
+      entry order goes terminal. Afterwards a quantity that disagrees with the
+      broker is a POSITION change — a hand close, a partial exit — which
+      `detect_unexplained_moves` reports and which must not be quietly absorbed
+      into the entry.
+    - **A position that cannot be attributed to one row is left alone.** Alpaca
+      aggregates all exposure to a symbol into a single position, so with two
+      open trades in it the broker's average entry is not either row's fill.
+      Correcting from it would be a plausible wrong figure, which is the exact
+      failure this repository exists to refuse.
+    - **More held than was ordered is never absorbed.** `submitted_qty` is a
+      ceiling: an order cannot fill for more than it asked for, so a larger
+      position contains something this row did not buy.
+    - **A degraded order read defers rather than concludes.**
+      `Broker.get_open_orders` catches its own failures and returns `[]`, so an
+      empty list means "could not ask" and never "nothing resting" — the same
+      lesson as `FinnhubCalendar.is_degraded`. Concluding "terminal" from it
+      would close a resting entry as a trade.
+    """
+    deferred: set[int] = set()
+    working = {o.order_id: o for o in orders}
+    trades_per_symbol: dict[str, int] = {}
+    for trade in open_trades:
+        trades_per_symbol[trade.symbol] = trades_per_symbol.get(trade.symbol, 0) + 1
+
+    for trade in open_trades:
+        if trade.id is None or trade.fill_is_confirmed:
+            continue
+
+        if trade.entry_order_id is None:
+            # A row written by hand or adopted from the broker. There is no
+            # order to look up, so nothing can be established — and nothing is
+            # deferred either, which keeps the behaviour of such a row exactly
+            # what it was before this step existed.
+            result.entries_unchecked.append(trade.symbol)
+            continue
+
+        if orders_degraded:
+            result.entries_unchecked.append(trade.symbol)
+            deferred.add(trade.id)
+            continue
+
+        order = working.get(trade.entry_order_id)
+        if order is not None:
+            deferred.add(trade.id)
+            if order.filled_qty > _TOL:
+                result.entries_mid_fill.append(trade.symbol)
+                continue
+            result.entries_resting.append(trade.symbol)
+            if trade.fill_state is not FillState.RESTING:
+                journal.confirm_fill(trade.id, fill_state=FillState.RESTING)
+            continue
+
+        # The entry order is terminal: filled, cancelled or expired.
+        position = held.get(trade.symbol)
+        if position is None:
+            # Nothing is held, so there is nothing to square against. Step 1
+            # closes the row and `classify_exit` reports what it can and cannot
+            # establish — including that this entry was never confirmed, so the
+            # row may describe an order that never filled at all.
+            continue
+
+        ceiling = trade.submitted_qty if trade.submitted_qty is not None else trade.qty
+        if (
+            trades_per_symbol[trade.symbol] != 1
+            or position.direction != trade.direction
+            or position.qty > ceiling + _TOL
+        ):
+            result.entries_ambiguous.append(trade.symbol)
+            continue
+
+        state = (
+            FillState.COMPLETE
+            if position.qty + _TOL >= ceiling
+            else FillState.PARTIAL
+        )
+        correction = FillCorrection(
+            symbol=trade.symbol,
+            trade_id=trade.id,
+            fill_state=state,
+            qty_before=trade.qty,
+            qty_after=position.qty,
+            entry_before=trade.entry_price,
+            entry_after=position.entry_price,
+        )
+        journal.confirm_fill(
+            trade.id,
+            fill_state=state,
+            qty=position.qty,
+            entry_price=position.entry_price,
+        )
+        result.entries_corrected.append(correction)
+        log.info(
+            "entry_squared_against_broker",
+            symbol=trade.symbol,
+            trade_id=trade.id,
+            change=correction.describe(),
+            detail=(
+                "The journal held the proposal's quantity and limit price. "
+                "These are the position the broker actually reports, so open "
+                "risk now describes the account rather than the intention."
+            ),
+        )
+
+    if result.entries_mid_fill:
+        log.info(
+            "entry_still_filling",
+            symbols=result.entries_mid_fill,
+            detail=(
+                "Part of this order has filled and the rest is still working. "
+                "That is a reading, not an outcome, so nothing is written from "
+                "it — the journal keeps the submitted quantity, which "
+                "overstates risk rather than understating it."
+            ),
+        )
+    if result.entries_ambiguous:
+        log.warning(
+            "entry_cannot_be_attributed",
+            symbols=result.entries_ambiguous,
+            detail=(
+                "A held position cannot be matched to a single journal row, so "
+                "the broker's average entry is not this trade's fill and is not "
+                "copied onto it."
+            ),
+        )
+    return deferred
 
 
 def untracked_positions(

@@ -18,6 +18,8 @@ from bot.journal import Journal
 from bot.models import (
     Direction,
     ExecutionMode,
+    ExitReason,
+    FillState,
     OrderProposal,
     OrderResult,
     Position,
@@ -527,3 +529,329 @@ def test_reconcile_says_it_could_not_check_rather_than_reporting_nothing(
     assert result.unexplained.moves == []
     assert result.unexplained.can_check is False
     assert result.unexplained.anything_to_report
+
+
+# ------------------------------- squaring the entry against what actually filled
+#
+# `record_fill` runs immediately after `broker.place_order` and writes the
+# PROPOSAL's quantity and limit price, because waiting for a terminal order
+# state leaves a live position unjournalled — the `14b88c8` hole. So the journal
+# records an intention and calls it an outcome, and `reconcile` is where that
+# stops being true. Measured on the first real order: the limit was 772.84, the
+# fill averaged 773.324285, and open risk read $990.36 against a real $980.19.
+
+SHORT_ENTRY = 772.84          # the limit that was asked for
+SHORT_FILL = 773.324285       # what it actually averaged
+
+
+def _resting_short(journal, *, order_id: str | None = "entry-1", qty: float = 21):
+    """A journalled short written from the proposal, exactly as `record_fill`
+    leaves it: the limit price, the submitted quantity, and nothing confirmed."""
+    return journal.record_entry(
+        Trade(
+            symbol="SPY",
+            direction=Direction.SELL,
+            qty=qty,
+            entry_time=NOW,
+            entry_price=SHORT_ENTRY,
+            planned_stop=820.0,
+            submitted_qty=qty,
+            submitted_price=SHORT_ENTRY,
+            fill_state=FillState.UNCONFIRMED,
+            entry_order_id=order_id,
+            rationale="Short, journalled from the proposal it was submitted as.",
+        )
+    )
+
+
+def _held_short(broker, *, qty: float = 21, entry: float = SHORT_FILL):
+    broker._positions["SPY"] = Position(
+        symbol="SPY",
+        direction=Direction.SELL,
+        qty=qty,
+        entry_price=entry,
+        opened_at=NOW,
+    )
+
+
+def _working_entry(*, filled: float = 0.0, qty: float = 21) -> WorkingOrder:
+    return WorkingOrder(
+        order_id="entry-1",
+        symbol="SPY",
+        direction=Direction.SELL,
+        qty=qty,
+        limit_price=SHORT_ENTRY,
+        order_type="limit",
+        filled_qty=filled,
+    )
+
+
+def test_reconcile_squares_the_entry_against_what_the_broker_filled(
+    journal, broker, rules
+):
+    """The measured case, and the whole point of item 10.
+
+    Nothing else in the system can do this: the broker knows what filled and
+    does not know what was intended, and the journal knows what was intended
+    and was told nothing about the fill.
+    """
+    trade_id = _resting_short(journal)
+    _held_short(broker)
+    assert round(apply_journal_state(broker.get_account(), journal).open_risk_usd, 2) == 990.36
+
+    result = reconcile(journal, broker, rules, now=NOW)
+
+    stored = journal.open_trades()[0]
+    assert stored.id == trade_id
+    assert stored.entry_price == SHORT_FILL
+    assert stored.fill_state is FillState.COMPLETE
+    # What was ASKED for is still on the row. A correction that erased it would
+    # be the same fault with better numbers.
+    assert stored.submitted_price == SHORT_ENTRY
+
+    assert round(apply_journal_state(broker.get_account(), journal).open_risk_usd, 2) == 980.19
+    assert [c.symbol for c in result.entries_corrected] == ["SPY"]
+    assert "entry" in result.entries_corrected[0].describe()
+
+
+def test_a_mid_fill_reading_is_not_written_down_as_a_partial_fill(
+    journal, broker, rules
+):
+    """A fill is not atomic. A poll during the first real order returned
+    `FILLED 3.0` of 21 and the order completed moments later, so anything
+    sampling an in-flight order holds a snapshot rather than an outcome —
+    and writing 3 would understate the position's risk by six sevenths."""
+    _resting_short(journal)
+    _held_short(broker, qty=3)
+    broker.set_open_orders([_working_entry(filled=3.0)])
+
+    result = reconcile(journal, broker, rules, now=NOW)
+
+    stored = journal.open_trades()[0]
+    assert stored.qty == 21                       # the submitted quantity stands
+    assert stored.entry_price == SHORT_ENTRY
+    assert stored.fill_state is FillState.UNCONFIRMED
+    assert result.entries_mid_fill == ["SPY"]
+    assert result.entries_corrected == []
+
+
+def test_a_settled_short_fill_is_recorded_as_partial(journal, broker, rules):
+    """Once the entry order is terminal the rest is not coming. THAT is a
+    partial fill, and it is a different claim from the reading above."""
+    _resting_short(journal)
+    _held_short(broker, qty=3)
+    broker.set_open_orders([])                    # the entry order is gone
+
+    reconcile(journal, broker, rules, now=NOW)
+
+    stored = journal.open_trades()[0]
+    assert stored.fill_state is FillState.PARTIAL
+    assert stored.qty == 3
+    assert stored.submitted_qty == 21
+    # `Trade` has one qty and one entry price, so "3 filled and 18 cancelled" is
+    # expressed as a state plus the submitted figure rather than as two rows.
+    assert stored.fill_shortfall_qty == 18
+
+
+def test_a_resting_entry_is_not_written_off_as_a_closed_trade(
+    journal, broker, rules
+):
+    """The bug this guard exists for, and it is the out-of-hours case exactly.
+
+    An entry carrying a stop cannot fill outside the regular session — Alpaca
+    refuses `extended_hours` on a bracket or an OTO — so it RESTS and becomes
+    eligible at the next open. Observed live: 21 SPY submitted at 09:23 New York
+    came back `filled_qty=0.0` and filled after 09:30. With `--execute` on, the
+    next cycle saw no position, closed the row as a trade, and the fill then
+    landed as a position with no journal row behind it.
+    """
+    _resting_short(journal)
+    broker.set_open_orders([_working_entry(filled=0.0)])   # resting, nothing held
+
+    result = reconcile(journal, broker, rules, now=NOW)
+
+    assert result.closed == []
+    assert result.closes_deferred == ["SPY"]
+    assert result.entries_resting == ["SPY"]
+    stored = journal.open_trades()
+    assert len(stored) == 1
+    assert stored[0].fill_state is FillState.RESTING
+    assert stored[0].fill_is_confirmed is False
+
+
+def test_a_degraded_order_read_defers_rather_than_concluding_terminal(
+    journal, broker, rules
+):
+    """`get_open_orders` catches its own failures and returns `[]`, so an empty
+    list is 'could not ask' and never 'nothing resting'. Concluding terminal
+    from it would close a resting entry as a trade at the worst moment."""
+    _resting_short(journal)
+    broker.set_orders_degraded(True)
+
+    result = reconcile(journal, broker, rules, now=NOW)
+
+    assert result.closed == []
+    assert result.closes_deferred == ["SPY"]
+    assert result.entries_unchecked == ["SPY"]
+    assert journal.open_trades()[0].fill_state is FillState.UNCONFIRMED
+
+
+def test_a_row_with_no_order_id_is_named_rather_than_deferred(
+    journal, broker, rules
+):
+    """A hand-placed or adopted row has no order to look up, so nothing can be
+    established — and nothing is deferred either, which keeps such a row
+    behaving exactly as it did before this step existed."""
+    _resting_short(journal, order_id=None)
+    _held_short(broker)
+
+    result = reconcile(journal, broker, rules, now=NOW)
+
+    assert result.entries_unchecked == ["SPY"]
+    assert result.entries_corrected == []
+    assert journal.open_trades()[0].entry_price == SHORT_ENTRY
+
+
+def test_two_open_trades_in_one_symbol_leave_the_entry_alone(
+    journal, broker, rules
+):
+    """Alpaca aggregates all exposure to a symbol into ONE position, so its
+    average entry is not either row's fill. Copying it onto one of them would be
+    a plausible wrong figure, which is the thing this repository refuses."""
+    _resting_short(journal)
+    _resting_short(journal, order_id="entry-2")
+    _held_short(broker, qty=42, entry=774.0)
+    broker.set_open_orders([])
+
+    result = reconcile(journal, broker, rules, now=NOW)
+
+    assert result.entries_ambiguous == ["SPY", "SPY"]
+    assert {t.entry_price for t in journal.open_trades()} == {SHORT_ENTRY}
+
+
+def test_a_position_bigger_than_was_ordered_is_never_absorbed(
+    journal, broker, rules
+):
+    """`submitted_qty` is a ceiling: an order cannot fill for more than it asked
+    for, so a larger position holds something this row did not buy."""
+    _resting_short(journal, qty=21)
+    _held_short(broker, qty=30)
+    broker.set_open_orders([])
+
+    result = reconcile(journal, broker, rules, now=NOW)
+
+    assert result.entries_ambiguous == ["SPY"]
+    assert journal.open_trades()[0].qty == 21
+
+
+def test_a_confirmed_entry_is_never_rewritten_by_a_later_position_change(
+    journal, broker, rules
+):
+    """Squaring happens once. Afterwards a quantity that disagrees is a POSITION
+    change — a hand close, a partial exit — which `detect_unexplained_moves`
+    reports and which must not be quietly absorbed into the entry."""
+    _resting_short(journal)
+    _held_short(broker)
+    broker.set_open_orders([])
+    reconcile(journal, broker, rules, now=NOW)
+    assert journal.open_trades()[0].fill_state is FillState.COMPLETE
+
+    _held_short(broker, qty=10, entry=790.0)        # half closed by hand
+    result = reconcile(journal, broker, rules, now=NOW + timedelta(minutes=15))
+
+    stored = journal.open_trades()[0]
+    assert stored.qty == 21
+    assert stored.entry_price == SHORT_FILL
+    assert result.entries_corrected == []
+    assert result.unexplained.anything_to_report
+
+
+def test_record_fill_keeps_the_submitted_figures_beside_the_recorded_ones(journal):
+    proposal = _proposal()
+    result = OrderResult(accepted=True, order_id="x1", filled_price=580.0, filled_qty=83)
+
+    record_fill(journal, proposal, result, execution_mode=ExecutionMode.PAPER, now=NOW)
+
+    trade = journal.open_trades()[0]
+    assert trade.submitted_qty == 83
+    assert trade.submitted_price == 580.00
+    assert trade.fill_state is FillState.COMPLETE
+
+
+def test_a_partial_reading_at_submission_does_not_shrink_the_journalled_size(
+    journal,
+):
+    """`record_fill` used to take `result.filled_qty or proposal.qty`, so the
+    3-of-21 reading would have been written down as the position. Overstating
+    is the safe direction and understating by six sevenths is not."""
+    proposal = _proposal(qty=21)
+    result = OrderResult(accepted=True, order_id="x1", filled_price=580.10, filled_qty=3)
+
+    record_fill(journal, proposal, result, execution_mode=ExecutionMode.PAPER, now=NOW)
+
+    trade = journal.open_trades()[0]
+    assert trade.qty == 21
+    assert trade.entry_price == 580.00           # the limit, not the running average
+    assert trade.fill_state is FillState.UNCONFIRMED
+    assert trade.submitted_qty == 21
+
+
+# ------------------------------------------- why each position closed
+
+
+def test_reconcile_records_why_a_position_closed(journal, broker, rules):
+    """Item 16's back half. `record_exit` takes a price, a time and a realised
+    figure, so stop-hit and closed-by-hand used to look identical afterwards."""
+    trade_id = _resting_short(journal, order_id=None)
+    broker.set_price("SPY", bid=820.90, ask=821.10)     # through the 820 stop
+
+    result = reconcile(journal, broker, rules, now=NOW)
+
+    closed = journal.closed_trades()[0]
+    assert closed.id == trade_id
+    assert closed.exit_reason is ExitReason.STOP_HIT
+    assert closed.exit_price_estimated is False
+    assert [r.reason for r in result.exits_reviewed] == [ExitReason.STOP_HIT]
+
+
+def test_a_hand_close_before_either_level_is_recorded_as_the_plan_abandoned(
+    journal, broker, rules
+):
+    """The bucket that matters. `close_with_reason` captures WHY at the moment
+    of the move; this is where that becomes a verdict on the plan."""
+    trade_id = _resting_short(journal, order_id=None)
+    journal.record_position_action(
+        PositionActionRecord(
+            trade_id=trade_id,
+            symbol="SPY",
+            action=PositionAction.CLOSE,
+            actor="operator",
+            at=NOW,
+            reason="Nerves ahead of the print; taking it off.",
+        )
+    )
+    broker.set_price("SPY", bid=769.98, ask=770.02)     # neither level
+
+    result = reconcile(journal, broker, rules, now=NOW)
+
+    closed = journal.closed_trades()[0]
+    assert closed.exit_reason is ExitReason.CLOSED_EARLY
+    assert [r.symbol for r in result.plan_abandoned] == ["SPY"]
+    assert result.exits_reviewed[0].close_reason.startswith("Nerves")
+
+
+def test_an_estimated_exit_price_is_recorded_as_estimated_and_grades_unknown(
+    journal, broker, rules
+):
+    """The fallback is the ENTRY price, which sits between the stop and the
+    target by construction. Without the provenance stored beside it, every one
+    of these would grade as a confident `closed_early` off no evidence."""
+    _resting_short(journal, order_id=None)
+    broker._prices.pop("SPY")                           # no mark available
+
+    result = reconcile(journal, broker, rules, now=NOW)
+
+    closed = journal.closed_trades()[0]
+    assert closed.exit_price_estimated is True
+    assert closed.exit_reason is ExitReason.UNKNOWN
+    assert result.estimated_exits == 1

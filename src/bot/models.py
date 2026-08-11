@@ -147,6 +147,82 @@ class TradeOutcome(StrEnum):
     SCRATCH = "scratch"
 
 
+class FillState(StrEnum):
+    """How much of a submitted entry is KNOWN to have filled, and how well known.
+
+    `Trade` carries one `qty` and one `entry_price`, so it cannot express "3
+    filled now and 18 later" as two rows. What it can express — and what this
+    is — is **how much confidence the single row deserves**, which is the fact a
+    reader actually needs: a quantity nobody has read back from the broker and a
+    quantity confirmed against a held position are different claims and must not
+    share a representation.
+
+    The four states are ordered by evidence, not by time:
+
+    - `UNCONFIRMED` — written at submission from the PROPOSAL. Nothing has been
+      read back. This is the honest state of every row the moment it is created,
+      because `record_fill` runs immediately after `broker.place_order` and the
+      broker's own submission response reports `filled_qty=0` on an order that
+      goes on to fill completely.
+    - `RESTING` — the entry order was seen working at the broker with nothing
+      filled. Positive evidence that no position exists yet, which is what an
+      out-of-hours entry looks like: it rests and becomes eligible at the next
+      regular open.
+    - `PARTIAL` — the entry order has reached a terminal state and the position
+      behind it is SMALLER than what was submitted. Settled: the rest will not
+      arrive.
+    - `COMPLETE` — confirmed filled for the submitted quantity.
+
+    **A mid-fill reading is not `PARTIAL`.** That distinction is the whole
+    reason this enum has four members rather than three. A poll during the first
+    real order returned `FILLED 3.0` of 21 and was briefly written down as a
+    partial fill; the order completed moments later. An order still working at
+    the broker is a snapshot, so it stays `UNCONFIRMED` (or `RESTING` when
+    nothing has filled at all) until the order is terminal and there is an
+    outcome to record.
+    """
+
+    UNCONFIRMED = "unconfirmed"
+    RESTING = "resting"
+    PARTIAL = "partial"
+    COMPLETE = "complete"
+
+
+class ExitReason(StrEnum):
+    """Why a position closed. **The plan, never the profit.**
+
+    `record_exit` takes a price, a time and a realised figure, so stop-hit,
+    target-hit, closed-by-hand and expiry were indistinguishable afterwards.
+    These are the six answers, and they grade whether the trade ended the way it
+    was designed to — which is true regardless of what it made, and therefore
+    has no outcome sample to overfit to. It belongs beside `triggers.py` and
+    `DreamLedger`, not beside `metrics.py`. See `exit_review.py`.
+
+    **`CLOSED_EARLY` is the one that matters.** A stop that fires and a target
+    that fills are the plan working; a hand close with the price at neither
+    level is the plan being ABANDONED, which is discipline rather than luck and
+    is the only bucket here that says something about the operator or the agent
+    rather than about the market.
+
+    `UNKNOWN` is a real answer and must never be filled in with a guess. It
+    covers an exit price that had to be estimated — which is the entry price,
+    and would read as "at neither level" while being no evidence at all — and a
+    close that reached neither level with nothing on file to say who closed it.
+    """
+
+    STOP_HIT = "stop_hit"
+    TARGET_HIT = "target_hit"
+    # Closed by hand, with the exit at NEITHER level. The plan abandoned.
+    CLOSED_EARLY = "closed_early"
+    # Closed by hand, but a level had already been reached. The plan followed,
+    # with somebody pressing the button rather than the broker's leg firing.
+    CLOSED_AT_LEVEL = "closed_at_level"
+    # An option the broker resolved itself: auto-exercise, assignment, or the
+    # liquidation of a position the account could not fund.
+    EXPIRY = "expiry"
+    UNKNOWN = "unknown"
+
+
 class Tick(BaseModel):
     """A two-sided quote. **Both sides must be real prices.**
 
@@ -981,8 +1057,50 @@ class Trade(BaseModel):
     # increases the loss at unchanged size and no gate in this system sees it.
     current_stop: float | None = Field(default=None, gt=0)
 
+    # What was ORDERED, kept beside what was filled.
+    #
+    # `qty` and `entry_price` are written from the proposal at submission and
+    # corrected by `reconcile` once the entry order is terminal, so without
+    # these two the correction would erase the only record of what was actually
+    # asked for. Measured on the first real order: the limit was 772.84 and the
+    # fill averaged 773.324285, so `open_risk_usd` read $990.36 against a real
+    # $980.19 — overstated, which is the safe direction, and still a figure that
+    # does not describe the account.
+    #
+    # `None` on a row written before this existed. Absent, never zero: a
+    # submitted quantity of zero is not a thing anybody ordered, and
+    # `fill_shortfall_qty` answers `None` rather than inventing a difference.
+    submitted_qty: float | None = Field(default=None, gt=0)
+    submitted_price: float | None = Field(default=None, gt=0)
+
+    # How much of the above is known to have happened. See `FillState`.
+    #
+    # `UNCONFIRMED` is the default and is the truthful state of a row the
+    # instant it is written, as well as of every row written before this field
+    # existed — in both cases nothing was read back from the broker. It is not a
+    # migration artefact wearing an optimistic label.
+    fill_state: FillState = FillState.UNCONFIRMED
+
     exit_time: datetime | None = None
     exit_price: float | None = None
+
+    # Why it closed. `None` means nothing was recorded — a row that predates the
+    # exit review — which is deliberately NOT the same as `ExitReason.UNKNOWN`,
+    # where the question was asked and could not be answered. Same rule as
+    # `has_cycles` in `news_history` and `can_grade_anything` in `triggers`: not
+    # graded and graded-as-unknowable are opposite findings.
+    exit_reason: ExitReason | None = None
+
+    # Whether `exit_price` is a real reading or a fallback. `reconcile` uses the
+    # entry price when the broker cannot supply a mark, which makes the trade
+    # look flat rather than inventing a plausible result — and it also puts the
+    # exit at neither level, so an exit review that did not know would report a
+    # confident `CLOSED_EARLY` off no evidence at all.
+    #
+    # `None` means it was not recorded, which is every row written before this
+    # existed. Not `False`: the good outcome must not be what an absence looks
+    # like.
+    exit_price_estimated: bool | None = None
 
     realised_pnl_usd: float | None = None
     fees_usd: float = 0.0
@@ -1061,6 +1179,39 @@ class Trade(BaseModel):
     @property
     def is_open(self) -> bool:
         return self.exit_time is None
+
+    @property
+    def fill_is_confirmed(self) -> bool:
+        """Has anything been read back from the broker about this entry?
+
+        False for `UNCONFIRMED` and for `RESTING`, and those are different
+        facts: the first is "nobody has looked", the second is "we looked and
+        the order is still sitting there". Both mean the quantity and price on
+        this row came from the proposal rather than from a fill.
+        """
+        return self.fill_state in (FillState.PARTIAL, FillState.COMPLETE)
+
+    @property
+    def fill_shortfall_qty(self) -> float | None:
+        """How much of the order never arrived. `None` when it cannot be said.
+
+        Answers `None` rather than zero whenever the submitted quantity was
+        never recorded or the fill has not been confirmed — an unconfirmed row
+        whose `qty` still equals the proposal's would otherwise report a
+        shortfall of nothing, which is a claim about a fill nobody has read.
+        """
+        if self.submitted_qty is None or not self.fill_is_confirmed:
+            return None
+        return max(0.0, self.submitted_qty - self.qty)
+
+    @property
+    def entry_price_is_the_proposal(self) -> bool:
+        """True while `entry_price` is still the limit price that was asked for.
+
+        The reason `open_risk_usd` can be wrong in the safe direction: risk is
+        `|entry - stop| x qty`, and a limit price is not a fill.
+        """
+        return not self.fill_is_confirmed
 
     @property
     def net_pnl_usd(self) -> float | None:

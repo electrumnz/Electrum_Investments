@@ -25,6 +25,8 @@ from .models import (
     AssetClass,
     Direction,
     ExecutionMode,
+    ExitReason,
+    FillState,
     PositionAction,
     PositionActionRecord,
     StandDownState,
@@ -71,7 +73,31 @@ CREATE TABLE IF NOT EXISTS trades (
     -- the sizing figure so R keeps meaning what it meant at entry — see
     -- `Trade.current_stop`. Added to an existing table by
     -- `_add_current_stop_column`, for the same reason `dream_id` needs one.
-    current_stop      REAL
+    current_stop      REAL,
+    -- What was ORDERED, kept beside what filled. `qty` and `entry_price` above
+    -- are written from the proposal at submission and corrected by `reconcile`
+    -- once the entry order is terminal, so without these two the correction
+    -- erases the only record of what was actually asked for. NULL on a row
+    -- written before they existed — absent, never zero.
+    submitted_qty     REAL,
+    submitted_price   REAL,
+    -- How much of that is KNOWN to have happened: see `models.FillState`. NULL
+    -- reads back as `unconfirmed`, which is not a migration artefact wearing an
+    -- optimistic label — it is literally true of a legacy row, because nothing
+    -- was ever read back from the broker for it.
+    fill_state        TEXT,
+    -- Why the position closed: see `models.ExitReason`. NULL means nothing was
+    -- recorded, which is deliberately NOT the same as `unknown`, where the
+    -- question was asked and could not be answered.
+    exit_reason       TEXT,
+    -- Whether `exit_price` is a real reading or the fallback to entry price.
+    -- NULL means it was not recorded; 0 and 1 are the two answers. Not defaulted
+    -- to 0 — the good outcome must not be what an absence looks like, and an
+    -- exit review reading an estimated price as evidence would report a
+    -- confident `closed_early` off nothing.
+    --
+    -- All five added to an existing table by `_add_fill_and_exit_columns`.
+    exit_price_estimated INTEGER
 );
 
 CREATE INDEX IF NOT EXISTS idx_trades_open   ON trades (exit_time);
@@ -302,6 +328,77 @@ def _add_current_stop_column(conn: sqlite3.Connection) -> None:
     conn.execute("ALTER TABLE trades ADD COLUMN current_stop REAL")
 
 
+#: The columns that carry what was ORDERED versus what happened, and why the
+#: position closed. Declared once, so `SCHEMA` above and the migration below
+#: cannot drift apart about which columns exist or what type they are.
+_FILL_AND_EXIT_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("submitted_qty", "REAL"),
+    ("submitted_price", "REAL"),
+    ("fill_state", "TEXT"),
+    ("exit_reason", "TEXT"),
+    ("exit_price_estimated", "INTEGER"),
+)
+
+
+def _add_fill_and_exit_columns(conn: sqlite3.Connection) -> None:
+    """Give a `trades` table the five columns fill correction and exit review need.
+
+    **The fourth time this migration has been needed, and the reason has not
+    changed once.** `CREATE TABLE IF NOT EXISTS` does nothing to a table that
+    already exists, so adding a column to `SCHEMA` changes what a FRESH journal
+    gets and nothing whatever about `data/journal.db` on the droplet — the file
+    holding the one live position. The suite cannot see that gap on its own:
+    every other test here builds its journal from scratch in a `tmp_path` and
+    therefore always gets the new shape. That is how 866 green tests once sat
+    over a database that could not store the row the models had just been
+    changed to allow, found by placing a real order and watching the journal
+    write fail AFTER the broker call — a live order the journal had never heard
+    of, with the 2% cap blind to it.
+
+    **One function for five columns rather than five functions**, and that is
+    safe for the same reason each of the three before it was safe on its own:
+
+    - **Each `ALTER TABLE ... ADD COLUMN` is atomic by itself**, and nothing is
+      dropped, so there is no table to rebuild and no half-rebuilt state to be
+      left in. A run interrupted between two of them leaves a table with some of
+      the columns, which is a perfectly ordinary table; the next open adds the
+      rest. That is a weaker guarantee than one transaction and it is the
+      RIGHT one here, because the alternative — the rebuild in
+      `_drop_planned_target_not_null` — copies every row and is only needed when
+      a constraint has to be dropped.
+    - **Additive only.** Every column is nullable with no default, so no
+      existing row is touched, and `NULL` is the correct answer for all of them
+      on a legacy row: nothing was read back from the broker about that entry,
+      and nothing classified its exit.
+    - **Idempotent and cheap.** It runs on every open rather than behind a
+      version flag, because a version flag is one more piece of bookkeeping that
+      can be wrong. `PRAGMA table_info` is a lookup, so a correct database pays
+      one query and stops.
+
+    Any future change to `SCHEMA` needs a migration beside it and a test that
+    starts from the old shape. The suite will not warn you.
+    """
+    columns = {str(c["name"]) for c in conn.execute("PRAGMA table_info(trades)")}
+    if not columns:  # pragma: no cover - SCHEMA has just created the table
+        return
+    missing = [(n, t) for n, t in _FILL_AND_EXIT_COLUMNS if n not in columns]
+    if not missing:
+        return
+
+    log.warning(
+        "journal_migrating_fill_and_exit_columns",
+        columns=[n for n, _ in missing],
+        detail=(
+            "This journal predates fill confirmation and the exit review. "
+            "Adding the columns in place; no existing row is modified, and NULL "
+            "is correct for every one of them on a trade whose fill was never "
+            "read back and whose exit was never classified."
+        ),
+    )
+    for name, sql_type in missing:
+        conn.execute(f"ALTER TABLE trades ADD COLUMN {name} {sql_type}")
+
+
 class Journal:
     def __init__(self, path: Path = DEFAULT_DB_PATH) -> None:
         self._path = path
@@ -317,6 +414,7 @@ class Journal:
             _drop_planned_target_not_null(conn)
             _add_dream_id_column(conn)
             _add_current_stop_column(conn)
+            _add_fill_and_exit_columns(conn)
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
@@ -339,8 +437,9 @@ class Journal:
                     symbol, asset_class, strategy, direction, qty,
                     entry_time, entry_price, planned_stop, planned_target,
                     fees_usd, mae_usd, mfe_usd, execution_mode, rationale,
-                    entry_order_id, dream_id
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    entry_order_id, dream_id,
+                    submitted_qty, submitted_price, fill_state
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     trade.symbol,
@@ -359,9 +458,54 @@ class Journal:
                     trade.rationale,
                     trade.entry_order_id,
                     trade.dream_id,
+                    trade.submitted_qty,
+                    trade.submitted_price,
+                    trade.fill_state.value,
                 ),
             )
             return int(cursor.lastrowid or 0)
+
+    def confirm_fill(
+        self,
+        trade_id: int,
+        *,
+        fill_state: FillState,
+        qty: float | None = None,
+        entry_price: float | None = None,
+    ) -> None:
+        """Replace what the PROPOSAL said with what the broker actually did.
+
+        Called by `reconcile`, which is the only thing in a position to know:
+        `record_fill` runs immediately after `broker.place_order` and writes the
+        proposal's quantity and limit price, because waiting for a terminal
+        order state would leave a live position unjournalled in the meantime —
+        the `14b88c8` hole, where an order rests at the broker and the 2% cap is
+        blind to it.
+
+        `qty` and `entry_price` are optional because the state moves on its own
+        for an order that is merely RESTING: there is a fact to record and no
+        figures to correct yet.
+
+        **Only an OPEN trade is touched.** Rewriting the entry of a closed trade
+        would move the denominator of an R-multiple that has already been
+        reported, so a correction that arrives late is dropped rather than
+        applied to history.
+        """
+        sets = ["fill_state = ?"]
+        params: list[Any] = [fill_state.value]
+        if qty is not None:
+            sets.append("qty = ?")
+            params.append(qty)
+        if entry_price is not None:
+            sets.append("entry_price = ?")
+            params.append(entry_price)
+        params.append(trade_id)
+        with self._connect() as conn:
+            conn.execute(
+                f"UPDATE trades SET {', '.join(sets)} "
+                "WHERE id = ? AND exit_time IS NULL",
+                tuple(params),
+            )
 
     def record_exit(
         self,
@@ -372,8 +516,18 @@ class Journal:
         realised_pnl_usd: float,
         fees_usd: float | None = None,
         exit_order_id: str | None = None,
+        exit_reason: ExitReason | None = None,
+        exit_price_estimated: bool | None = None,
     ) -> None:
-        """Close out a trade. Fees are added to whatever entry already charged."""
+        """Close out a trade. Fees are added to whatever entry already charged.
+
+        `exit_reason` is WHY it closed and `exit_price_estimated` says whether
+        the price above is a reading or a fallback. Both default to `None`,
+        which stores NULL and means "not recorded" — deliberately not
+        `ExitReason.UNKNOWN`, which means the question was asked and could not be
+        answered, and deliberately not `False`, which would let an unrecorded
+        estimate read as a confirmed fill.
+        """
         with self._connect() as conn:
             if fees_usd is not None:
                 conn.execute(
@@ -384,10 +538,19 @@ class Journal:
                 """
                 UPDATE trades
                    SET exit_time = ?, exit_price = ?, realised_pnl_usd = ?,
-                       exit_order_id = ?
+                       exit_order_id = ?, exit_reason = ?,
+                       exit_price_estimated = ?
                  WHERE id = ?
                 """,
-                (_iso(exit_time), exit_price, realised_pnl_usd, exit_order_id, trade_id),
+                (
+                    _iso(exit_time),
+                    exit_price,
+                    realised_pnl_usd,
+                    exit_order_id,
+                    exit_reason.value if exit_reason is not None else None,
+                    None if exit_price_estimated is None else int(exit_price_estimated),
+                    trade_id,
+                ),
             )
 
     def update_excursion(self, trade_id: int, unrealised_pnl_usd: float) -> None:
@@ -519,6 +682,28 @@ class Journal:
             # Same again. NULL means the stop has never moved, so the stop in
             # force is still `planned_stop` — which `effective_stop` answers.
             current_stop=row["current_stop"],
+            submitted_qty=row["submitted_qty"],
+            submitted_price=row["submitted_price"],
+            # NULL reads back as UNCONFIRMED, which is not a default standing in
+            # for a missing value — it is what the row actually is. Nothing was
+            # ever read back from the broker about a trade written before this
+            # column existed, and `UNCONFIRMED` says exactly that.
+            fill_state=(
+                FillState(row["fill_state"])
+                if row["fill_state"]
+                else FillState.UNCONFIRMED
+            ),
+            # NULL stays None here, because "nothing classified this exit" and
+            # "the exit was classified and could not be established" are
+            # different findings and `ExitReason.UNKNOWN` is only the second.
+            exit_reason=(
+                ExitReason(row["exit_reason"]) if row["exit_reason"] else None
+            ),
+            exit_price_estimated=(
+                None
+                if row["exit_price_estimated"] is None
+                else bool(row["exit_price_estimated"])
+            ),
         )
 
     # --------------------------------------------------- position actions

@@ -16,6 +16,8 @@ from bot.models import (
     AssetClass,
     Direction,
     ExecutionMode,
+    ExitReason,
+    FillState,
     PositionAction,
     PositionActionRecord,
     StandDownState,
@@ -720,3 +722,259 @@ def test_a_blank_reason_is_refused_by_the_journal_as_well_as_the_model(journal):
     with pytest.raises(ValueError, match="needs a reason"):
         journal.record_stop_move(record)
     assert journal.position_actions() == []
+
+
+# ------------------------------------- what was ordered, and why it closed
+#
+# `record_fill` writes the PROPOSAL's quantity and limit price, so the journal
+# recorded an intention and called it an outcome. These cover the columns that
+# let `reconcile` correct that without erasing what was actually asked for, and
+# the exit reason that `record_exit` could never reconstruct afterwards.
+
+
+def _schema_without_fill_and_exit_columns() -> str:
+    """`journal.SCHEMA` as it stood before fill confirmation and exit review.
+
+    Same construction and same reasoning as the two helpers above: derived from
+    the live schema so only the columns under test differ, with their comment
+    blocks removed alongside them so the assertions below cannot pass on a
+    comment.
+
+    These five ARE the last columns, so removing them leaves `current_stop`
+    with a trailing comma and the DDL has to be repaired.
+    """
+    start = SCHEMA.index("    -- What was ORDERED")
+    end = SCHEMA.index("\n", SCHEMA.index("    exit_price_estimated INTEGER")) + 1
+    without = SCHEMA[:start] + SCHEMA[end:]
+    return without.replace(
+        "    current_stop      REAL,\n)", "    current_stop      REAL\n)"
+    )
+
+
+def _legacy_journal(tmp_path, ddl: str):
+    """Build a `trades` table from an older DDL and put one row in it."""
+    import sqlite3
+
+    path = tmp_path / "legacy.db"
+    conn = sqlite3.connect(path)
+    conn.executescript(ddl)
+    conn.execute(
+        "INSERT INTO trades (symbol, asset_class, strategy, direction, qty, "
+        "entry_time, entry_price, planned_stop, planned_target) VALUES "
+        "('SPY','us_equity','manual','sell',21,'2026-08-10T13:23:00+00:00',"
+        "772.84,820,NULL)"
+    )
+    conn.commit()
+    conn.close()
+    return path
+
+
+def test_an_old_journal_is_migrated_to_carry_the_fill_and_exit_columns(tmp_path):
+    """The fourth time this migration has been needed, for the fourth same reason.
+
+    `CREATE TABLE IF NOT EXISTS` is a no-op on a table that already exists, so
+    adding a column to `SCHEMA` changes what a fresh journal gets and nothing
+    whatever about the one on the droplet — the file holding the live position.
+    Every other test in this module builds its journal from scratch in a
+    `tmp_path` and therefore always gets the new shape, which is precisely why
+    this one builds the OLD shape by hand.
+    """
+    import sqlite3
+
+    path = _legacy_journal(tmp_path, _schema_without_fill_and_exit_columns())
+
+    conn = sqlite3.connect(path)
+    assert "fill_state" not in _columns(conn)      # the old shape really is old
+    conn.close()
+
+    journal = Journal(path)                        # the migration runs on open
+
+    conn = sqlite3.connect(path)
+    assert {
+        "submitted_qty",
+        "submitted_price",
+        "fill_state",
+        "exit_reason",
+        "exit_price_estimated",
+    } <= _columns(conn)
+    conn.close()
+
+    # The existing row survived. A migration that dropped history to add a
+    # column would be a far worse trade than the missing column.
+    trades = journal.open_trades()
+    assert [t.symbol for t in trades] == ["SPY"]
+
+    # And it reads back as what it actually is. Nothing was ever read back from
+    # the broker about this entry, so UNCONFIRMED is the truth rather than a
+    # default standing in for a missing value.
+    assert trades[0].fill_state is FillState.UNCONFIRMED
+    assert trades[0].submitted_qty is None
+    assert trades[0].fill_is_confirmed is False
+    # And "nothing classified this exit" is NOT "the exit could not be
+    # established". The second is `ExitReason.UNKNOWN`; this is neither.
+    assert trades[0].exit_reason is None
+    assert trades[0].exit_price_estimated is None
+
+
+def test_the_fill_and_exit_migration_is_idempotent(tmp_path):
+    """It runs on every open. A database already in the right shape must pay one
+    PRAGMA and stop."""
+    path = tmp_path / "fresh.db"
+    Journal(path)
+    journal = Journal(path)                        # second open, already migrated
+    journal.record_entry(_trade())
+    assert len(journal.open_trades()) == 1
+
+
+def test_a_half_added_set_of_columns_is_completed_on_the_next_open(tmp_path):
+    """Five columns, five independent `ALTER`s, so a torn run finishes later.
+
+    This is the property that makes one migration function safe for five
+    columns instead of five functions: each `ALTER TABLE ... ADD COLUMN` is
+    atomic by itself and nothing is dropped, so a run interrupted between two of
+    them leaves an ordinary table with some of the columns — and the next open
+    adds the rest. A migration guarded by a single version flag could not
+    recover from that.
+    """
+    import sqlite3
+
+    ddl = _schema_without_fill_and_exit_columns()
+    path = _legacy_journal(tmp_path, ddl)
+    conn = sqlite3.connect(path)
+    conn.execute("ALTER TABLE trades ADD COLUMN submitted_qty REAL")
+    conn.execute("ALTER TABLE trades ADD COLUMN fill_state TEXT")
+    conn.commit()
+    conn.close()
+
+    Journal(path)
+
+    conn = sqlite3.connect(path)
+    assert {
+        "submitted_qty",
+        "submitted_price",
+        "fill_state",
+        "exit_reason",
+        "exit_price_estimated",
+    } <= _columns(conn)
+    conn.close()
+
+
+def test_what_was_ordered_survives_beside_what_was_recorded(journal):
+    """The correction must not erase the only record of what was asked for."""
+    trade = _trade()
+    trade.submitted_qty = 21
+    trade.submitted_price = 772.84
+    trade_id = journal.record_entry(trade)
+
+    stored = journal.open_trades()[0]
+    assert stored.id == trade_id
+    assert stored.submitted_qty == 21
+    assert stored.submitted_price == 772.84
+    assert stored.fill_state is FillState.UNCONFIRMED
+
+
+def test_confirm_fill_replaces_the_proposal_with_what_the_broker_did(journal):
+    """The measured case: limit 772.84, fill 773.324285, and the risk figure
+    that followed from believing the limit."""
+    trade = Trade(
+        symbol="SPY",
+        direction=Direction.SELL,
+        qty=21,
+        entry_time=ENTRY,
+        entry_price=772.84,
+        planned_stop=820.0,
+        submitted_qty=21,
+        submitted_price=772.84,
+        rationale="Short, journalled from the proposal.",
+    )
+    trade_id = journal.record_entry(trade)
+    assert round(journal.open_trades()[0].current_risk_usd, 2) == 990.36
+
+    journal.confirm_fill(
+        trade_id, fill_state=FillState.COMPLETE, qty=21, entry_price=773.324285
+    )
+
+    stored = journal.open_trades()[0]
+    assert stored.entry_price == 773.324285
+    assert stored.fill_state is FillState.COMPLETE
+    assert stored.fill_is_confirmed is True
+    assert round(stored.current_risk_usd, 2) == 980.19
+    # And what was asked for is still on the row.
+    assert stored.submitted_price == 772.84
+
+
+def test_confirm_fill_leaves_a_closed_trade_alone(journal):
+    """R has already been reported off this entry. A correction arriving after
+    the close would move the denominator of a figure somebody has read."""
+    trade_id = journal.record_entry(_trade(entry_price=580.0))
+    journal.record_exit(
+        trade_id, exit_time=ENTRY, exit_price=590.0, realised_pnl_usd=100.0
+    )
+
+    journal.confirm_fill(
+        trade_id, fill_state=FillState.COMPLETE, qty=99, entry_price=1.0
+    )
+
+    closed = journal.closed_trades()[0]
+    assert closed.entry_price == 580.0
+    assert closed.qty == 10
+    assert closed.fill_state is FillState.UNCONFIRMED
+
+
+def test_a_partial_fill_is_expressed_as_a_state_rather_than_two_rows(journal):
+    """`Trade` has one qty and one entry price, so it cannot hold "3 now, 18
+    later". What it can hold is how much of the row anybody has confirmed."""
+    trade = Trade(
+        symbol="SPY",
+        direction=Direction.SELL,
+        qty=21,
+        entry_time=ENTRY,
+        entry_price=772.84,
+        planned_stop=820.0,
+        submitted_qty=21,
+        submitted_price=772.84,
+        rationale="Short, journalled from the proposal.",
+    )
+    trade_id = journal.record_entry(trade)
+    journal.confirm_fill(
+        trade_id, fill_state=FillState.PARTIAL, qty=3, entry_price=773.10
+    )
+
+    stored = journal.open_trades()[0]
+    assert stored.fill_state is FillState.PARTIAL
+    assert stored.qty == 3
+    assert stored.submitted_qty == 21
+    assert stored.fill_shortfall_qty == 18
+
+
+def test_an_unconfirmed_row_reports_no_shortfall_rather_than_zero(journal):
+    """Zero would be a claim about a fill nobody has read back."""
+    trade = _trade()
+    trade.submitted_qty = 10
+    journal.record_entry(trade)
+    assert journal.open_trades()[0].fill_shortfall_qty is None
+
+
+def test_an_exit_reason_round_trips_and_an_absent_one_stays_absent(journal):
+    """`None` is 'nothing classified this' and UNKNOWN is 'it could not be
+    established'. Two different findings, so two different stored values."""
+    graded = journal.record_entry(_trade(symbol="SPY"))
+    ungraded = journal.record_entry(_trade(symbol="QQQ"))
+
+    journal.record_exit(
+        graded,
+        exit_time=ENTRY,
+        exit_price=575.0,
+        realised_pnl_usd=-50.0,
+        exit_reason=ExitReason.STOP_HIT,
+        exit_price_estimated=False,
+    )
+    journal.record_exit(
+        ungraded, exit_time=ENTRY, exit_price=580.0, realised_pnl_usd=0.0
+    )
+
+    by_symbol = {t.symbol: t for t in journal.closed_trades()}
+    assert by_symbol["SPY"].exit_reason is ExitReason.STOP_HIT
+    assert by_symbol["SPY"].exit_price_estimated is False
+    assert by_symbol["QQQ"].exit_reason is None
+    assert by_symbol["QQQ"].exit_price_estimated is None
