@@ -1560,6 +1560,52 @@ gate holds whoever is talking".
 the dreamer and leaving `propose` behind still means a second account, a second
 bill and a second key to rotate.
 
+### MEASURED 12 Aug 2026 — the account, the catalogue and the schema question
+
+Run against the live endpoint with the operator's DigitalOcean token. Full
+detail in `docs/DROPLET_AI.md` §2; the load-bearing results:
+
+- **Serverless inference is already live on the account.** Nothing to switch
+  on. 75 models list, real calls succeed, and the **Mudhorn droplet is on the
+  same account** (`s-1vcpu-2gb`, nyc1) — so the one-bill goal is reachable.
+- **`output_config` is accepted with HTTP 200 and silently IGNORED.** Not
+  refused. The reply is prose. This is outcome 3, the dangerous one, and it
+  rules out the "just set `ANTHROPIC_BASE_URL`" swap for every structured path.
+- **Forced tool calling works on 16 of 27 text models** and is therefore the
+  only route. Six return HTTP 500; two exhaust `max_tokens` reasoning first.
+- **`glm-5.2` passes a naive check and is broken** — corrupted tool-call keys.
+  The documentation named it and `mimo-v2.5-pro` as the structured-output
+  models; the latter 500s. The docs pointed at the two worst candidates.
+- **Anthropic models are tier-gated** — listed but 403 on call. Moot now: the
+  operator's instruction is *"i dont care about anthropic models"*.
+- **A model access key cannot be created through the API.** Confirmed by
+  trying: `{"id":"gone","message":"resource retired: … Go to manage page in the
+  control panel"}`. A person makes it in a browser. No key exists yet.
+
+**Still unmeasured, and it is the one that matters:** whether any model holds a
+`ClaudeDecision`-shaped schema — nested array, enum, numeric order fields —
+reliably over repeated calls. A two-field toy schema is not evidence for the
+real payload. Do that before pinning anything to `dream`, let alone `propose`.
+
+### The router: decided NO, and the deciding fact was already in the repo
+
+`docs/DO_AGENTS.md` and this file both flirted with routing the souls. The
+answer is no, and `deploy/run-chat.sh` already refuses a slug containing
+`router` for the reason that settles it: **`hermes -z` returns the response
+text and nothing else**, so which model answered a soul's turn is invisible
+from that path. The router's own docs confirm silent substitution — *"if the
+selected model is not available, down, or rate limited, the router picks the
+next best model"* — and it reports the served model in a response field and an
+`x-model-router-selected-route` header that nothing in the Hermes path reads.
+
+A downgrade nobody can observe is worse than a failed call. The paths that
+*could* observe it are the Python ones, and those are exactly where the model
+must be pinned. The router has no home here.
+
+It is also **OpenAI Chat Completions only** — no Anthropic compatibility — so
+routing the Python paths would mean leaving the Anthropic SDK entirely, which
+is a rewrite of `claude_client.py` rather than a base-URL change.
+
 ### The catalogue is the thing to measure, and `scripts/do_inference_probe.py` does it
 
 `--sweep` grades **every** model DigitalOcean offers this account on the only

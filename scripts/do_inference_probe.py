@@ -203,6 +203,20 @@ def probe_structured(base: str, key: str, model: str, attempts: int, timeout: fl
             print("  not one of the three outcomes and must not be read as one.")
             return
 
+        if status in (401, 403):
+            # NOT a verdict about schemas. This was a real misreport: a 403
+            # saying "this model is not available for your subscription tier"
+            # was rendered as "output_config is refused outright", which is a
+            # confident claim about a field the server never got as far as
+            # looking at. An authorisation failure says nothing whatever about
+            # structured output and must never be folded into one that does.
+            print(f"  attempt {attempt}: HTTP {status} — not authorised for this model")
+            print(f"    {body[:300]}")
+            print("\n  VERDICT: NOT AVAILABLE. The subscription tier or the key's")
+            print("  scope refuses this model, so nothing about its schema")
+            print("  support has been measured. Try a model this tier can call.")
+            return
+
         if status >= 400:
             print(f"  attempt {attempt}: HTTP {status}")
             print(f"    {body[:400]}")
@@ -338,6 +352,9 @@ def _grade_one(base: str, key: str, model: str, attempts: int, timeout: float) -
         status, body = _post(f"{base}/v1/messages", key, payload, timeout)
         if status == 0:
             return "unreachable"
+        if status in (401, 403):
+            # Tier or scope, not a schema verdict. See `probe_structured`.
+            return "not-available"
         if status >= 400:
             return f"rejected({status})"
         obj = _extract_json(body)
@@ -366,6 +383,8 @@ def _tools_ok(base: str, key: str, model: str, timeout: float) -> str:
     status, body = _post(f"{base}/v1/messages", key, payload, timeout)
     if status == 0:
         return "unreachable"
+    if status in (401, 403):
+        return "not-available"
     if status >= 400:
         return f"no({status})"
     return "yes" if _extract_json(body) else "no-tool-block"

@@ -168,7 +168,62 @@ back is a hope.
 Sources: [Prompt caching how-to](https://docs.digitalocean.com/products/inference/how-to/use-prompt-caching/),
 [Inference features](https://docs.digitalocean.com/products/inference/details/features/).
 
-### 2. Structured output — NOT documented, and this is the blocker
+### 2. Structured output — MEASURED 12 Aug 2026, and it is worse than "not documented"
+
+> **Everything below this box was written from the documentation. It has now
+> been run against the live endpoint, and the finding is the dangerous one.**
+>
+> **`output_config` is accepted with HTTP 200 and silently ignored.** Not
+> refused, not 400 — accepted, and the reply comes back as prose. Measured on
+> `llama3.3-70b-instruct`, `glm-5.2`, `openai-gpt-oss-120b` and `deepseek-3.2`:
+> every one returned `stop_reason: max_tokens` and a paragraph beginning *"The
+> ticker SPY refers to the SPDR S&P 500 ETF Trust…"*. A caller that only checked
+> for an error would believe the schema was in force.
+>
+> **Forced tool calling DOES work, on 16 of 27 text models.** Verified end to
+> end: a `tool_choice` of `{"type":"tool","name":"record"}` with the schema as
+> `input_schema` returns a proper `tool_use` block with conforming values. That
+> is the route, and it is the one this document already predicted.
+>
+> **Three traps found by running it that reading would have missed:**
+>
+> - **`glm-5.2` looks like it works and does not.** It returns a `tool_use`
+>   block whose keys are corrupted — `{'<tool_call>record  <arg_key>symbol':
+>   'SPY', …}` — the model emitting its own tool-call markup as text with the
+>   proxy half-parsing it. A naive check that looked for one valid field passes
+>   it. This document previously named `glm-5.2` and `mimo-v2.5-pro` as the two
+>   models whose notes mention structured output; `mimo-v2.5-pro` returns
+>   HTTP 500 on a tool call. **The documentation pointed at exactly the two
+>   worst candidates.**
+> - **Six models return HTTP 500** on a forced tool call: `glm-5`, `glm-5.1`,
+>   `kimi-k2.6`, `mimo-v2.5-pro`, `minimax-m2.5` (*"Failed to parse tool call
+>   arguments"*), `qwen3.5-397b-a17b`.
+> - **Two run out of budget before emitting the call** — `kimi-k3` and
+>   `openai-gpt-oss-120b` both hit `max_tokens` reasoning first.
+>
+> **Anthropic models are tier-gated, and the catalogue does not say so.**
+> `/v1/models` lists all ten, and calling `anthropic-claude-5-sonnet` returns
+> **403 `"this model is not available for your subscription tier"`**. Listing is
+> not entitlement. This also caught a real defect in
+> `scripts/do_inference_probe.py`, which reported that 403 as *"`output_config`
+> is refused outright"* — a confident claim about schema support derived from an
+> authorisation error. Fixed: 401/403 is now `NOT AVAILABLE`, kept apart from a
+> 400.
+>
+> **Clean on a forced tool call** (toy schema, one sample each):
+> `alibaba-qwen3-32b`, `deepseek-3.2`, `deepseek-4-flash`,
+> `deepseek-v4-flash-0731`, `deepseek-v4-pro`, `gemma-4-31B-it`, `kimi-k2.5`,
+> `llama-4-maverick`, `llama3.3-70b-instruct`, `mistral-3-14B`,
+> `nemotron-3-nano-omni`, `nemotron-3-ultra-550b`, `openai-gpt-oss-20b`,
+> `qwen3-coder-flash`, `qwen3.8-max`.
+>
+> **Not yet measured:** whether any of them holds a `ClaudeDecision`-shaped
+> schema — nested array, enum, several numeric order fields — reliably across
+> repeated calls. A toy two-field schema is not evidence for the real payload,
+> and that run timed out before finishing. Do that before pinning anything to
+> `dream`, let alone `propose`.
+
+### 2a. What the documentation said, before it was run
 
 `claude.propose` calls `messages.parse(output_format=ClaudeDecision)`, which the
 Anthropic SDK sends as `output_config.format` with a JSON schema. The API
