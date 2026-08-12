@@ -15,7 +15,6 @@ import pytest
 
 from bot import news_history
 from bot.audit import AuditLog
-from bot.claude_client import CallUsage
 from bot.config import Env, Rules
 from bot.dreamer import (
     CARRY_FORWARD,
@@ -45,6 +44,7 @@ from bot.dreaming import (
     promotion_for,
 )
 from bot.journal import Journal
+from bot.model_client import CallUsage
 from bot.models import (
     Direction,
     IndicatorSnapshot,
@@ -643,7 +643,7 @@ def test_the_dreamer_does_not_cache_its_system_prompt(monkeypatch):
     Measured on the real ~2,400-token system block: $0.0095 a run cached-and-
     missing against $0.0071 uncached.
     """
-    from bot.claude_client import ClaudeClient
+    from bot.model_client import ModelClient
 
     captured: dict[str, object] = {}
 
@@ -659,7 +659,7 @@ def test_the_dreamer_does_not_cache_its_system_prompt(monkeypatch):
             captured["options"] = kw
             return self
 
-    client = ClaudeClient(_env(), "system text", cache_system=False)
+    client = ModelClient(_env(), "system text", cache_system=False)
     monkeypatch.setattr(client, "_client", _Inner())
 
     with pytest.raises(RuntimeError):
@@ -683,13 +683,13 @@ def test_the_dream_call_is_bought_deep_rather_than_fast(monkeypatch):
     timer occupied by a call that had already failed, with nothing on any
     surface saying so.
     """
-    from bot.claude_client import (
+    from bot.config import ClaudeTier
+    from bot.model_client import (
         DREAM_MAX_RETRIES,
         DREAM_MAX_TOKENS,
         DREAM_TIMEOUT_SECONDS,
-        ClaudeClient,
+        ModelClient,
     )
-    from bot.config import ClaudeTier
 
     captured: dict[str, object] = {}
 
@@ -705,7 +705,7 @@ def test_the_dream_call_is_bought_deep_rather_than_fast(monkeypatch):
             captured["options"] = kw
             return self
 
-    client = ClaudeClient(_env(), "system", tier=ClaudeTier.SONNET, cache_system=False)
+    client = ModelClient(_env(), "system", tier=ClaudeTier.SONNET, cache_system=False)
     monkeypatch.setattr(client, "_client", _Inner())
 
     with pytest.raises(RuntimeError):

@@ -2166,7 +2166,7 @@ case is when they disagree:
   stop price", which is the missing-versus-absent rule arriving at the order
   layer.
 - **`AccountSnapshot.planned_stop_by_symbol`** — what the journal planned,
-  rendered into the model's context. `claude_client` asks for a `position_plan`
+  rendered into the model's context. `model_client` asks for a `position_plan`
   on every open position with an action of hold, close or **tighten_stop**, and
   the context block used to carry no stop at all. The agent was being asked
   whether to tighten a level it had never been shown.
@@ -2535,7 +2535,7 @@ src/bot/
                         describe_history, search_news, ...
   models.py             Domain models. Quantities are shares/coin units, never "lots".
   config.py             Typed env + rules loader. Validators reject incoherent limits.
-  claude_client.py      Anthropic SDK wrapper (1h prompt cache, structured output).
+  model_client.py      Anthropic SDK wrapper (1h prompt cache, structured output).
   context.py            Renders market state for Claude.
   strategy.py           Base strategies. Placeholders with a shape, not an edge.
                         `requires` names what each one still cannot see.
@@ -2700,7 +2700,7 @@ The list below is the older deferred set and is duplicated there.
   Alpaca supports trailing stops natively, so this is a model and adapter
   change rather than a strategy one. The exit is the agent's decision; the
   model should be able to carry the decision it actually made.
-  Worth knowing while doing it: the system prompt in `claude_client.py` still
+  Worth knowing while doing it: the system prompt in `model_client.py` still
   lists `take_profit_price` among the fields each proposal "needs", which has
   not caught up with the field becoming optional.
 - **An exit review, grading the PLAN and never the profit.** Nothing currently

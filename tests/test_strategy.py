@@ -16,8 +16,8 @@ from __future__ import annotations
 
 import pytest
 
-from bot.claude_client import build_system_prompt
 from bot.config import load_rules
+from bot.model_client import build_system_prompt
 from bot.strategy import REGISTRY, Strategy, guidance_for
 
 
@@ -163,7 +163,7 @@ def test_no_unescaped_brace_reaches_the_prompt_template():
     Braces meant literally must be doubled. This asserts the template still
     renders rather than trying to police the source text.
     """
-    from bot.claude_client import SYSTEM_PROMPT_TEMPLATE, build_system_prompt
+    from bot.model_client import SYSTEM_PROMPT_TEMPLATE, build_system_prompt
 
     rendered = build_system_prompt(load_rules())
 

@@ -200,7 +200,7 @@ class RecordingClient:
     free to return a value outside an enum, so the transport travels on every
     step and a parse failure is recorded rather than retried into silence.
 
-    The probe is bounded deliberately. `ClaudeClient.dream` sets a 900-second
+    The probe is bounded deliberately. `ModelClient.dream` sets a 900-second
     timeout and the SDK retries twice, so letting the shipped path fail on its
     own terms is up to forty-five minutes per step for an answer already known —
     and that same arithmetic is what an operator would see on the box: a dream

@@ -29,21 +29,21 @@ from pydantic import ValidationError
 import bot.main as main_mod
 from bot import jobs
 from bot.audit import AuditLog
-from bot.claude_client import CallUsage, ClaudeDecision
 from bot.confer import CONFERENCE
 from bot.config import Env, Rules, load_rules
 from bot.dreaming import DreamStore, Hop, Vault
 from bot.journal import Journal
+from bot.model_client import CallUsage, ModelDecision
 from bot.models import Decision, IndicatorSnapshot, MarketInputs
 
 
 class _StubClaude:
-    """Stands in for ClaudeClient. Returns whatever decision the test asked for."""
+    """Stands in for ModelClient. Returns whatever decision the test asked for."""
 
-    def __init__(self, decision: ClaudeDecision) -> None:
+    def __init__(self, decision: ModelDecision) -> None:
         self._decision = decision
 
-    def propose(self, market_context: str) -> tuple[ClaudeDecision, CallUsage]:
+    def propose(self, market_context: str) -> tuple[ModelDecision, CallUsage]:
         return self._decision, CallUsage(
             input_tokens=2072,
             output_tokens=129,
@@ -54,7 +54,7 @@ class _StubClaude:
 
 
 def _run_one_cycle(
-    monkeypatch, tmp_path, decision: ClaudeDecision
+    monkeypatch, tmp_path, decision: ModelDecision
 ) -> list[MutableMapping[str, Any]]:
     """Run exactly one pass of `cmd_loop` and return the structlog events.
 
@@ -69,7 +69,7 @@ def _run_one_cycle(
     monkeypatch.setattr(time, "sleep", _stop)
     monkeypatch.setattr(main_mod, "Journal", lambda: Journal(tmp_path / "journal.db"))
     monkeypatch.setattr(main_mod, "AuditLog", lambda: AuditLog(tmp_path / "audit"))
-    monkeypatch.setattr(main_mod, "ClaudeClient", lambda *a, **k: _StubClaude(decision))
+    monkeypatch.setattr(main_mod, "ModelClient", lambda *a, **k: _StubClaude(decision))
     # The loop opens the dream store to resolve symbol grants, and the shipped
     # `config/rules.yaml` turns grants on — so without this the cycle writes
     # `data/dreams.db` next to the real journal. The runtime-directory guard in
@@ -106,7 +106,7 @@ class _ExplodingClaude:
     def __init__(self, error: Exception) -> None:
         self._error = error
 
-    def propose(self, market_context: str) -> tuple[ClaudeDecision, CallUsage]:
+    def propose(self, market_context: str) -> tuple[ModelDecision, CallUsage]:
         raise self._error
 
 
@@ -126,7 +126,7 @@ def _run_one_cycle_with_client(
     monkeypatch.setattr(time, "sleep", _stop)
     monkeypatch.setattr(main_mod, "Journal", lambda: Journal(tmp_path / "journal.db"))
     monkeypatch.setattr(main_mod, "AuditLog", lambda: AuditLog(tmp_path / "audit"))
-    monkeypatch.setattr(main_mod, "ClaudeClient", lambda *a, **k: client)
+    monkeypatch.setattr(main_mod, "ModelClient", lambda *a, **k: client)
     monkeypatch.setattr(main_mod, "DreamStore", lambda: DreamStore(tmp_path / "dreams.db"))
 
     env = Env(_env_file=None)  # type: ignore[call-arg]
@@ -175,7 +175,7 @@ def test_an_open_market_still_calls_the_model(monkeypatch, tmp_path):
     logs = _run_one_cycle_with_client(
         monkeypatch,
         tmp_path,
-        _StubClaude(ClaudeDecision(market_assessment="Open and quiet.", proposals=[])),
+        _StubClaude(ModelDecision(market_assessment="Open and quiet.", proposals=[])),
         in_session=True,
     )
 
@@ -186,7 +186,7 @@ def test_an_open_market_still_calls_the_model(monkeypatch, tmp_path):
 @pytest.mark.parametrize(
     "error",
     [
-        ValidationError.from_exception_data("ClaudeDecision", []),
+        ValidationError.from_exception_data("ModelDecision", []),
         TimeoutError("read timed out"),
         Exception("APIError: overloaded"),
     ],
@@ -223,7 +223,7 @@ def test_quiet_cycle_still_logs_a_heartbeat(monkeypatch, tmp_path):
     logs = _run_one_cycle(
         monkeypatch,
         tmp_path,
-        ClaudeDecision(market_assessment="Thin tape, nothing worth taking.", proposals=[]),
+        ModelDecision(market_assessment="Thin tape, nothing worth taking.", proposals=[]),
     )
 
     beat = _heartbeat(logs)
@@ -237,7 +237,7 @@ def test_heartbeat_carries_the_figures_worth_glancing_at(monkeypatch, tmp_path):
     logs = _run_one_cycle(
         monkeypatch,
         tmp_path,
-        ClaudeDecision(market_assessment="Standing pat.", proposals=[]),
+        ModelDecision(market_assessment="Standing pat.", proposals=[]),
     )
 
     beat = _heartbeat(logs)
@@ -281,7 +281,7 @@ def test_heartbeat_counts_proposals_separately_from_approvals(monkeypatch, tmp_p
     logs = _run_one_cycle(
         monkeypatch,
         tmp_path,
-        ClaudeDecision(market_assessment="Leaning long.", proposals=[oversized]),
+        ModelDecision(market_assessment="Leaning long.", proposals=[oversized]),
     )
 
     beat = _heartbeat(logs)
@@ -311,7 +311,7 @@ def test_nothing_is_executed_without_the_execute_flag(monkeypatch, tmp_path):
     logs = _run_one_cycle(
         monkeypatch,
         tmp_path,
-        ClaudeDecision(market_assessment="Constructive.", proposals=[modest]),
+        ModelDecision(market_assessment="Constructive.", proposals=[modest]),
     )
 
     assert any(e["event"] == "dry_run_no_orders_will_be_placed" for e in logs)
@@ -332,7 +332,7 @@ def test_the_heartbeat_states_which_symbols_a_dream_is_widening(monkeypatch, tmp
     logs = _run_one_cycle(
         monkeypatch,
         tmp_path,
-        ClaudeDecision(market_assessment="Quiet, and nothing adopted.", proposals=[]),
+        ModelDecision(market_assessment="Quiet, and nothing adopted.", proposals=[]),
     )
 
     beat = _heartbeat(logs)
@@ -356,7 +356,7 @@ def test_an_adopted_dream_reaches_the_heartbeat(monkeypatch, tmp_path):
     logs = _run_one_cycle(
         monkeypatch,
         tmp_path,
-        ClaudeDecision(market_assessment="Quiet, with one dream adopted.", proposals=[]),
+        ModelDecision(market_assessment="Quiet, with one dream adopted.", proposals=[]),
     )
 
     beat = _heartbeat(logs)
@@ -376,7 +376,7 @@ def test_the_heartbeat_says_WHY_the_granted_list_is_empty(monkeypatch, tmp_path)
     logs = _run_one_cycle(
         monkeypatch,
         tmp_path,
-        ClaudeDecision(market_assessment="Quiet, and nothing adopted.", proposals=[]),
+        ModelDecision(market_assessment="Quiet, and nothing adopted.", proposals=[]),
     )
 
     beat = _heartbeat(logs)
@@ -408,9 +408,9 @@ def test_a_broken_dream_store_costs_the_grants_and_not_the_cycle(monkeypatch, tm
     monkeypatch.setattr(main_mod, "DreamStore", _explode)
     monkeypatch.setattr(
         main_mod,
-        "ClaudeClient",
+        "ModelClient",
         lambda *a, **k: _StubClaude(
-            ClaudeDecision(market_assessment="The store is unavailable.", proposals=[])
+            ModelDecision(market_assessment="The store is unavailable.", proposals=[])
         ),
     )
 
@@ -452,9 +452,9 @@ def test_grants_switched_off_never_open_the_store(monkeypatch, tmp_path):
     monkeypatch.setattr(main_mod, "AuditLog", lambda: AuditLog(tmp_path / "audit"))
     monkeypatch.setattr(
         main_mod,
-        "ClaudeClient",
+        "ModelClient",
         lambda *a, **k: _StubClaude(
-            ClaudeDecision(market_assessment="Grants are off.", proposals=[])
+            ModelDecision(market_assessment="Grants are off.", proposals=[])
         ),
     )
 
@@ -1010,7 +1010,7 @@ def test_a_granted_symbol_is_fetched_a_tick_and_indicators_like_any_other(
     _run_one_cycle(
         monkeypatch,
         tmp_path,
-        ClaudeDecision(market_assessment="One dream adopted.", proposals=[]),
+        ModelDecision(market_assessment="One dream adopted.", proposals=[]),
     )
 
     assert seen, "the tick fetch never ran"
@@ -1042,7 +1042,7 @@ def test_the_earnings_calendar_is_REBUILT_for_a_granted_symbol_not_mutated(
     _run_one_cycle(
         monkeypatch,
         tmp_path,
-        ClaudeDecision(market_assessment="One dream adopted.", proposals=[]),
+        ModelDecision(market_assessment="One dream adopted.", proposals=[]),
     )
 
     # Built twice: once at loop start on the allowlist, once when the grant
@@ -1081,7 +1081,7 @@ def test_the_granted_symbol_and_its_chain_reach_the_market_context(
     _run_one_cycle(
         monkeypatch,
         tmp_path,
-        ClaudeDecision(market_assessment="One dream adopted.", proposals=[]),
+        ModelDecision(market_assessment="One dream adopted.", proposals=[]),
     )
 
     assert contexts
@@ -1138,7 +1138,7 @@ def test_a_cycle_that_recorded_no_numeric_readings_is_skipped(tmp_path):
 def _cycle_with_broker(
     monkeypatch,
     tmp_path,
-    decision: ClaudeDecision,
+    decision: ModelDecision,
     broker: Any,
     *,
     execute: bool = False,
@@ -1160,7 +1160,7 @@ def _cycle_with_broker(
     monkeypatch.setattr(time, "sleep", _stop)
     monkeypatch.setattr(main_mod, "Journal", lambda: store)
     monkeypatch.setattr(main_mod, "AuditLog", lambda: AuditLog(tmp_path / "audit"))
-    monkeypatch.setattr(main_mod, "ClaudeClient", lambda *a, **k: _StubClaude(decision))
+    monkeypatch.setattr(main_mod, "ModelClient", lambda *a, **k: _StubClaude(decision))
     monkeypatch.setattr(main_mod, "DreamStore", lambda: DreamStore(tmp_path / "dreams.db"))
     monkeypatch.setattr(main_mod, "build_broker", lambda env, force_mock=False: broker)
 
@@ -1230,7 +1230,7 @@ def _journal_with_the_short(tmp_path) -> Journal:
 def _tighten(new_stop: float | None = 810.0):
     from bot.models import PositionAction, PositionPlan
 
-    return ClaudeDecision(
+    return ModelDecision(
         market_assessment="Holding the short, pulling the stop in.",
         proposals=[],
         position_plans=[
@@ -1255,7 +1255,7 @@ def test_the_heartbeat_states_the_unexplained_move_count(monkeypatch, tmp_path):
     logs = _cycle_with_broker(
         monkeypatch,
         tmp_path,
-        ClaudeDecision(market_assessment="Holding.", proposals=[]),
+        ModelDecision(market_assessment="Holding.", proposals=[]),
         _short_spy_at_the_broker(),
         journal=_journal_with_the_short(tmp_path),
     )
@@ -1275,7 +1275,7 @@ def test_the_heartbeat_states_a_zero_rather_than_leaving_the_field_out(
     logs = _cycle_with_broker(
         monkeypatch,
         tmp_path,
-        ClaudeDecision(market_assessment="Holding.", proposals=[]),
+        ModelDecision(market_assessment="Holding.", proposals=[]),
         _short_spy_at_the_broker(stop_leg=820.0),
         journal=_journal_with_the_short(tmp_path),
     )
@@ -1313,7 +1313,7 @@ def test_a_trailing_leg_is_named_on_the_cycle_line_and_not_counted_as_a_move(
     logs = _cycle_with_broker(
         monkeypatch,
         tmp_path,
-        ClaudeDecision(market_assessment="Holding.", proposals=[]),
+        ModelDecision(market_assessment="Holding.", proposals=[]),
         broker,
         journal=_journal_with_the_short(tmp_path),
     )
@@ -1340,7 +1340,7 @@ def test_the_cycle_line_carries_what_reconcile_found_about_the_entry(
     logs = _cycle_with_broker(
         monkeypatch,
         tmp_path,
-        ClaudeDecision(market_assessment="Holding.", proposals=[]),
+        ModelDecision(market_assessment="Holding.", proposals=[]),
         _short_spy_at_the_broker(stop_leg=820.0),
         journal=_journal_with_the_short(tmp_path),
     )
@@ -1395,7 +1395,7 @@ def test_a_position_with_no_resting_stop_is_named_rather_than_counted_clean(
     logs = _cycle_with_broker(
         monkeypatch,
         tmp_path,
-        ClaudeDecision(market_assessment="Holding.", proposals=[]),
+        ModelDecision(market_assessment="Holding.", proposals=[]),
         _short_spy_at_the_broker(stop_leg=None),
         journal=_journal_with_the_short(tmp_path),
     )
@@ -1538,7 +1538,7 @@ def test_a_hold_is_not_recorded_as_an_action(monkeypatch, tmp_path):
     logs = _cycle_with_broker(
         monkeypatch,
         tmp_path,
-        ClaudeDecision(
+        ModelDecision(
             market_assessment="Thesis intact.",
             proposals=[],
             position_plans=[
@@ -1628,7 +1628,7 @@ def test_a_quiet_pass_is_recorded_as_a_job_that_ran_and_proposed_nothing(
     _run_one_cycle(
         monkeypatch,
         tmp_path,
-        ClaudeDecision(market_assessment="Thin tape, nothing worth taking.", proposals=[]),
+        ModelDecision(market_assessment="Thin tape, nothing worth taking.", proposals=[]),
     )
 
     history = _jobs_after(tmp_path)
@@ -1737,7 +1737,7 @@ def test_the_bars_are_not_fetched_on_a_pass_that_will_not_ask_the_model(
     _run_one_cycle_with_client(
         monkeypatch,
         tmp_path,
-        _StubClaude(ClaudeDecision(market_assessment="Open.", proposals=[])),
+        _StubClaude(ModelDecision(market_assessment="Open.", proposals=[])),
         in_session=True,
     )
     assert calls == ["ticks", "daily", "intraday"], "an open market still needs all three"

@@ -6,7 +6,7 @@ the documentation cannot answer it.
 
 ## Why this cannot be settled by reading
 
-`claude_client.py` calls `messages.parse(output_format=...)`, which the Anthropic
+`model_client.py` calls `messages.parse(output_format=...)`, which the Anthropic
 SDK sends as `output_config.format`. **DigitalOcean's published `/v1/messages`
 request schema does not list `output_config`.** That looks conclusive and is
 not: the same published list accepts `temperature`, `top_k` and `top_p`, all
@@ -43,7 +43,7 @@ No order path, no journal, no `data/`, no `audit/`. It imports **nothing from
 `bot` at all** — not the models, not the client — so it cannot reach a broker
 even by accident, and it runs on a stdlib Python with no virtualenv. The schema
 below is written out by hand for that reason rather than derived from
-`ClaudeDecision`: the question is whether the endpoint enforces *a* schema, and
+`ModelDecision`: the question is whether the endpoint enforces *a* schema, and
 a hand-written one with a deliberate trap in it answers that better than the
 real one would.
 
@@ -249,7 +249,7 @@ def probe_structured(base: str, key: str, model: str, attempts: int, timeout: fl
         print("  VERDICT: IGNORED — the dangerous outcome.")
         print("  The call succeeded and the schema was NOT enforced: the model")
         print("  returned a value the declared type forbids. Do NOT point")
-        print("  claude_client.py here without the tool-calling substitute.")
+        print("  model_client.py here without the tool-calling substitute.")
     elif complied:
         print("  VERDICT: consistent with ENFORCED, and this is one-way evidence.")
         print("  Every attempt obeyed a constraint the prompt argued against,")

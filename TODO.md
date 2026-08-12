@@ -176,7 +176,7 @@ Do not report these as done from a container that cannot see them.
 Found by running it for real against a pristine export of HEAD. Transcript:
 `tests/fixtures/dream_cycle_2026-08-10.json`, field `shipped_transport_probe`.
 
-`ClaudeClient.dream` calls `messages.parse(output_format=DreamStep)` and the API
+`ModelClient.dream` calls `messages.parse(output_format=DreamStep)` and the API
 refuses it — **"Schema is too complex."**, **"Grammar compilation timed out."**,
 and twice a plain `APITimeoutError`.
 
@@ -196,7 +196,7 @@ as the journal schema that could not store what the models allowed, and the
 `.gitignore` pattern that hid three modules while everything was green. A stub
 must never again be the only thing standing behind this call.
 
-Blast radius CHECKED rather than assumed: `ClaudeDecision` maxes at five
+Blast radius CHECKED rather than assumed: `ModelDecision` maxes at five
 optional (`PositionPlan`), the conference turns at one or two, and both compile
 in about four seconds. **The decision loop and the conference are fine. Only the
 dreamer WAS dead.**
@@ -226,7 +226,7 @@ failed dream rather than a constrained token.
 writes down is not a bound** — so the worst case is about 8 minutes rather than
 45, and `confer` inherits it.
 
-**`ClaudeDecision` is now the slowest schema the repo sends: 14.7s against 3.1s
+**`ModelDecision` is now the slowest schema the repo sends: 14.7s against 3.1s
 for the fixed `DreamStep`**, with five optional fields on `PositionPlan`.
 Measure before adding a sixth.
 
@@ -706,7 +706,7 @@ that it is currently the *only* answer.
 ### The feature is wired and INERT, and that is the next thing to fix
 
 `RiskGate` honours a grant. Nothing else does. The system prompt lists
-`rules.allowed_symbols` (`claude_client.py:270`) and the tick, indicator,
+`rules.allowed_symbols` (`model_client.py:270`) and the tick, indicator,
 intraday and news fetches all run over that same list
 (`main.py:94, 131-132, 288-290, 428`). So the model is never told a granted
 symbol exists, and a proposal in one would be dropped for want of a quote
@@ -1583,7 +1583,7 @@ detail in `docs/DROPLET_AI.md` §2; the load-bearing results:
   control panel"}`. A person makes it in a browser. No key exists yet.
 
 **Still unmeasured, and it is the one that matters:** whether any model holds a
-`ClaudeDecision`-shaped schema — nested array, enum, numeric order fields —
+`ModelDecision`-shaped schema — nested array, enum, numeric order fields —
 reliably over repeated calls. A two-field toy schema is not evidence for the
 real payload. Do that before pinning anything to `dream`, let alone `propose`.
 
@@ -1604,7 +1604,7 @@ must be pinned. The router has no home here.
 
 It is also **OpenAI Chat Completions only** — no Anthropic compatibility — so
 routing the Python paths would mean leaving the Anthropic SDK entirely, which
-is a rewrite of `claude_client.py` rather than a base-URL change.
+is a rewrite of `model_client.py` rather than a base-URL change.
 
 ### The catalogue is the thing to measure, and `scripts/do_inference_probe.py` does it
 
@@ -1682,10 +1682,43 @@ personal access token, and it **cannot be created through the API**; that route
 was retired, so it is a console action. A PAT controls the whole account —
 droplets, DNS, billing — and must not be used as the inference credential.
 
+### The vendor-neutral rename, and the three things deliberately left alone
+
+`ClaudeDecision` → `ModelDecision`, `ClaudeClient` → `ModelClient`,
+`claude_client.py` → `model_client.py`. Those names describe a structured
+output and the thing that fetches it; both will shortly be produced by a
+DeepSeek or Llama model, and a vendor in the type name would be actively
+misleading rather than merely untidy.
+
+**Three groups were NOT renamed, each for its own reason.**
+
+- **`ANTHROPIC_API_KEY`, `ANTHROPIC_BASE_URL`, `ANTHROPIC_MODEL`.** These are
+  the SDK's own environment variables, read by `anthropic.Anthropic()` itself.
+  Renaming them breaks the client. They are Anthropic-specific because the
+  thing reading them is.
+- **`ClaudeTier`, `CLAUDE_MODEL_IDS`, `CLAUDE_PRICING_USD_PER_MTOK`,
+  `CLAUDE_TIER`.** The values really are Claude — `haiku`, `sonnet`, `opus`,
+  and Anthropic's price table. A neutral name over Claude-only values would be
+  *worse* than an honest one: it would read as general while being anything
+  but. These go when `ModelSpec` replaces them, values and all, and not before.
+- **`claude_input_tokens`, `claude_output_tokens`, `claude_cached_tokens`.**
+  These are written into `audit/*.jsonl`, which is **append-only and never
+  migrated**. Renaming the field would leave every historical cycle reading
+  back as `0 in / 0 out` on the Decisions page — a plausible wrong figure, on
+  the surface whose entire job is reporting what actually happened. Renaming
+  them needs a reader that accepts both keys, which is its own commit.
+
+Note also that `model_` is a **reserved namespace in Pydantic v2**, so
+`model_input_tokens` is not available as a field name even once that commit is
+written. `llm_*` or a bare `input_tokens` is the shape to reach for.
+
+`CLAUDE.md` keeps its name: that is Claude Code's own convention for the file
+it reads, not vendor branding of the domain.
+
 ### Four Claude-specific assumptions block naming a DigitalOcean model
 
 Scoped by reading rather than guessed at, so the work is a known size when the
-sweep comes back. `ClaudeClient` can already run a different model per path —
+sweep comes back. `ModelClient` can already run a different model per path —
 it takes a `tier`, and `Env.dream_tier` is a separate setting — but "which
 model" is welded to a three-value Claude enum:
 
@@ -1700,7 +1733,7 @@ model" is welded to a three-value Claude enum:
 4. **`dreamer.estimated_cost_usd`** — `thinking = 0 if HAIKU else 4_000`, a
    Claude-shaped guess feeding the Settings page's cost estimate.
 
-Eight call sites across `claude_client.py`, `config.py`, `dreamer.py`,
+Eight call sites across `model_client.py`, `config.py`, `dreamer.py`,
 `confer.py`, `main.py` and `web/render.py`. The shape wanted is a `ModelSpec`
 — id, the three prices, and whether the model takes `effort` and `thinking` —
 with the Claude tiers becoming three instances of it rather than the only

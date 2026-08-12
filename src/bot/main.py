@@ -18,7 +18,6 @@ import structlog
 from . import jobs, stop_watch
 from .audit import AuditLog, AuditView
 from .broker import AlpacaBroker, Broker, MockBroker
-from .claude_client import ClaudeClient, build_system_prompt
 from .config import Env, LiveTradingRefused, Rules
 from .context import (
     build_market_context,
@@ -61,6 +60,7 @@ from .indicators import snapshot as snapshot_indicators
 from .indicators import summarise as summarise_indicators
 from .intraday import summarise as summarise_intraday
 from .journal import Journal
+from .model_client import ModelClient, build_system_prompt
 from .models import (
     AccountSnapshot,
     Decision,
@@ -157,7 +157,7 @@ def cmd_smoketest(env: Env, rules: Rules, *, force_mock: bool = False) -> int:
             )
             return 0
 
-        claude = ClaudeClient(env, build_system_prompt(rules))
+        claude = ModelClient(env, build_system_prompt(rules))
         context = build_market_context(
             account=account,
             ticks=ticks,
@@ -220,7 +220,7 @@ def cmd_loop(
     audit = AuditLog()
     broker = build_broker(env, force_mock=force_mock)
     broker.connect()
-    claude = ClaudeClient(env, build_system_prompt(rules))
+    claude = ModelClient(env, build_system_prompt(rules))
     news = build_news_feed(env)
     calendar = build_calendar_feed(env, rules)
     social = build_social_feed(env, rules)

@@ -86,7 +86,6 @@ import structlog
 from pydantic import BaseModel, Field
 
 from .audit import AuditLog
-from .claude_client import EVERY_FIELD_REQUIRED, CallUsage, ClaudeClient
 from .config import CLAUDE_PRICING_USD_PER_MTOK, ClaudeTier, Env, Rules
 from .dreaming import (
     DREAMER,
@@ -106,6 +105,7 @@ from .dreaming import (
     fusion_candidates,
 )
 from .journal import Journal
+from .model_client import EVERY_FIELD_REQUIRED, CallUsage, ModelClient
 from .models import TriggerField, TriggerOp
 from .models import class_key_for_symbol as _class_key_for_symbol
 from .news_history import (
@@ -258,7 +258,7 @@ class DreamHop(BaseModel):
     """One link, as the model returns it."""
 
     # Every field below is OPTIONAL in Python and REQUIRED on the wire. See
-    # `claude_client.EVERY_FIELD_REQUIRED`: an optional property doubles the
+    # `model_client.EVERY_FIELD_REQUIRED`: an optional property doubles the
     # grammar the API has to compile, the cost multiplies across nested models,
     # and this schema was over the line — the dreamer could not make its call.
     model_config = EVERY_FIELD_REQUIRED
@@ -393,11 +393,11 @@ class DreamStep(BaseModel):
 
     **Every field here is REQUIRED on the wire and optional in Python**, which
     is what makes this schema compilable at all — see
-    `claude_client.EVERY_FIELD_REQUIRED` for the measurements. Nothing about
+    `model_client.EVERY_FIELD_REQUIRED` for the measurements. Nothing about
     what a step may contain has changed: an empty list, an empty string and a
     null are all still answers. A field added with a default and no entry in
     `required` is what made `electrum-bot dream` unable to call the model at
-    all, and `tests/test_claude_client.py` fails the build if it happens again.
+    all, and `tests/test_model_client.py` fails the build if it happens again.
     """
 
     model_config = EVERY_FIELD_REQUIRED
@@ -1428,7 +1428,7 @@ class Dreamer:
         system = SYSTEM_PROMPT
         if soul.found:
             system = f"{soul.prompt_prefix()}\n{SYSTEM_PROMPT}"
-        self._client = client or ClaudeClient(
+        self._client = client or ModelClient(
             env,
             system,
             # Its own tier, because Haiku cannot think and thinking is how a

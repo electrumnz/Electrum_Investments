@@ -1,6 +1,6 @@
 """The transport, and the one property of it that no other test could see.
 
-`electrum-bot dream` could not make its model call at all. `ClaudeClient.dream`
+`electrum-bot dream` could not make its model call at all. `ModelClient.dream`
 asks the API to constrain the response to `DreamStep`, and the API refused the
 schema every time — 400 "Schema is too complex", 400 "Grammar compilation timed
 out", or a plain timeout after ninety seconds. **866 tests were green over it**,
@@ -39,14 +39,14 @@ from typing import Any
 import pytest
 from pydantic import BaseModel
 
-from bot.claude_client import (
+from bot.confer import DreamerTurn, TraderTurn
+from bot.dreamer import DreamHop, DreamStep, StepCondition
+from bot.model_client import (
     DREAM_MAX_RETRIES,
     DREAM_MAX_TOKENS,
     DREAM_TIMEOUT_SECONDS,
-    ClaudeDecision,
+    ModelDecision,
 )
-from bot.confer import DreamerTurn, TraderTurn
-from bot.dreamer import DreamHop, DreamStep, StepCondition
 
 SRC = Path(__file__).resolve().parent.parent / "src" / "bot"
 
@@ -57,7 +57,7 @@ SRC = Path(__file__).resolve().parent.parent / "src" / "bot"
 # enumerating routes from the application rather than from a list somebody
 # remembered to update.
 STRUCTURED_OUTPUT_SCHEMAS: dict[str, type[BaseModel]] = {
-    "ClaudeDecision": ClaudeDecision,  # the decision loop, every 15 minutes
+    "ModelDecision": ModelDecision,  # the decision loop, every 15 minutes
     "DreamStep": DreamStep,  # the dreamer, once a day
     "DreamerTurn": DreamerTurn,  # the conference, the dreamer's side
     "TraderTurn": TraderTurn,  # the conference, the trading agent's side
@@ -85,7 +85,7 @@ DREAMER_SCHEMAS: dict[str, type[BaseModel]] = {
 # budget to spend.
 #
 # **Nothing in this repository is anywhere near it any more**, and that is not a
-# reason to relax it. `ClaudeDecision` was the worst at five on `PositionPlan`
+# reason to relax it. `ModelDecision` was the worst at five on `PositionPlan`
 # and went to zero when the trailing exit needed a field on `OrderProposal` —
 # measured 2026-08-11, three shapes alternating within one run, four cold
 # compiles each: 12 optional took 10.9-14.2s, adding the trail as a 13th took
@@ -123,7 +123,7 @@ def output_format_sites() -> list[tuple[str, str]]:
     """Every place in `src/bot/` that names an `output_format`.
 
     Read out of the source rather than listed by hand. Two shapes reach the
-    SDK — a `"output_format"` key in the kwargs dict `ClaudeClient` builds, and
+    SDK — a `"output_format"` key in the kwargs dict `ModelClient` builds, and
     a plain keyword argument — and both are collected. A site that passes a
     variable through (which is how `confer` takes its schema from its caller)
     is recorded as `<dynamic>` and checked separately below.
@@ -171,8 +171,8 @@ def test_every_output_format_names_a_schema_this_file_checks():
     )
 
     dynamic = [module for module, name in sites if name == "<dynamic>"]
-    assert dynamic == ["bot.claude_client"], (
-        "only ClaudeClient.confer may take its schema from its caller; a new "
+    assert dynamic == ["bot.model_client"], (
+        "only ModelClient.confer may take its schema from its caller; a new "
         f"pass-through appeared in {sorted(set(dynamic))}. Add its schemas to "
         "STRUCTURED_OUTPUT_SCHEMAS and check them here."
     )
@@ -181,7 +181,7 @@ def test_every_output_format_names_a_schema_this_file_checks():
 def test_confers_callers_pass_a_schema_this_file_checks():
     """The one pass-through resolves in `confer.py`, so read it there too.
 
-    `ClaudeClient.confer` takes its schema as an argument, deliberately: an
+    `ModelClient.confer` takes its schema as an argument, deliberately: an
     exchange has two speakers and they return different shapes. That makes the
     conference the only place its schemas are named, so this reads them there —
     every model defined in `confer.py` that is HANDED to something is a
@@ -237,7 +237,7 @@ def test_no_output_schema_concentrates_optional_properties(name):
             f"({', '.join(optional)}). Measured: 8 optional properties on one "
             "object already takes 18 seconds to compile and 12 does not "
             "compile at all, while 15 REQUIRED nullable fields take 10. Make "
-            "them required with claude_client.EVERY_FIELD_REQUIRED, or split "
+            "them required with model_client.EVERY_FIELD_REQUIRED, or split "
             "the call."
         )
 
@@ -258,7 +258,7 @@ def test_the_dreamers_schemas_leave_nothing_optional(name):
         f"{name} declares optional properties again. Every field the dreamer "
         "returns must be REQUIRED on the wire — a null and an empty list are "
         "still answers, and an absent key is what the grammar compiler cannot "
-        "afford. Add claude_client.EVERY_FIELD_REQUIRED to the model."
+        "afford. Add model_client.EVERY_FIELD_REQUIRED to the model."
     )
 
 
@@ -277,10 +277,10 @@ def test_the_decision_schema_leaves_nothing_optional_either():
     asks for one more thing, and the cap above is where compilation is already
     slow rather than where it breaks.
     """
-    schema = ClaudeDecision.model_json_schema()
+    schema = ModelDecision.model_json_schema()
     nodes = object_nodes(schema)
     assert set(nodes) >= {
-        "ClaudeDecision",
+        "ModelDecision",
         "OrderProposal",
         "SymbolAssessment",
         "PositionPlan",
@@ -290,7 +290,7 @@ def test_the_decision_schema_leaves_nothing_optional_either():
         assert optional_properties(node) == [], (
             f"{name} declares optional properties again "
             f"({', '.join(optional_properties(node))}). Add "
-            "claude_client.EVERY_FIELD_REQUIRED to the model — a null costs "
+            "model_client.EVERY_FIELD_REQUIRED to the model — a null costs "
             "nothing on the wire and an absent key is what the grammar "
             "compiler cannot afford."
         )
@@ -412,7 +412,7 @@ def test_the_prompt_no_longer_calls_the_target_a_field_a_proposal_NEEDS():
     being told to produce one — which is the invented-target problem surviving
     the fix that was supposed to end it.
     """
-    from bot.claude_client import SYSTEM_PROMPT_TEMPLATE
+    from bot.model_client import SYSTEM_PROMPT_TEMPLATE
 
     # The sentence that enumerates them, not the paragraph — the target is
     # named right afterwards, as something to CHOOSE rather than to supply, and
@@ -435,7 +435,7 @@ def test_the_prompt_offers_all_three_exits_and_names_none_as_the_default():
     schema is, which is the state this replaces: the model could not express a
     trail because nothing ever told it one existed.
     """
-    from bot.claude_client import SYSTEM_PROMPT_TEMPLATE
+    from bot.model_client import SYSTEM_PROMPT_TEMPLATE
 
     assert "trail_percent" in SYSTEM_PROMPT_TEMPLATE
     assert "take_profit_price" in SYSTEM_PROMPT_TEMPLATE
@@ -452,7 +452,7 @@ def test_the_prompt_does_not_promise_the_broker_is_holding_the_trail():
     something were following the price, which is the confident-partial-answer
     failure with the model on the receiving end of it.
     """
-    from bot.claude_client import SYSTEM_PROMPT_TEMPLATE
+    from bot.model_client import SYSTEM_PROMPT_TEMPLATE
 
     section = SYSTEM_PROMPT_TEMPLATE.split("### the exit is yours", 1)[1]
 

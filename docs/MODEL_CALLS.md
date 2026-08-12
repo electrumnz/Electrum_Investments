@@ -36,7 +36,7 @@ turn out to be wrong in the direction that matters.
 >    requires it.** MEASURED live: `output_config.format.type` must be
 >    `"json_schema"`, `output_config.format.schema` is required, and
 >    `output_config.effort` accepts Anthropic's exact five levels. **The repo's
->    real `ClaudeDecision` and `DreamStep` schemas both pass it.** DigitalOcean
+>    real `ModelDecision` and `DreamStep` schemas both pass it.** DigitalOcean
 >    authenticates before parsing the body, so the same question **cannot be
 >    asked there at all** without a key.
 >
@@ -55,7 +55,7 @@ turn out to be wrong in the direction that matters.
 >    Sonnet 5, ~$30/month on Opus 5, where caching demonstrably works.
 >
 > 5. **`ANTHROPIC_BASE_URL` already routes the Python path and nothing says so.**
->    MEASURED. `ClaudeClient` passes no `base_url`; the SDK reads the
+>    MEASURED. `ModelClient` passes no `base_url`; the SDK reads the
 >    environment; `mudhorn-dream.service` and `mudhorn-confer.service` both carry
 >    `EnvironmentFile=/opt/mudhorn/.env`. The repo's switch is
 >    `DO_INFERENCE_KEY`; the SDK's switch is `ANTHROPIC_BASE_URL`; only the first
@@ -79,20 +79,20 @@ turn out to be wrong in the direction that matters.
 
 - **Call sites enumerated by AST**, not from memory, over `src/`, `scripts/` and
   `tests/`, matching `messages.parse`, `messages.create`, `messages.stream` and
-  `anthropic.Anthropic(`. `tests/test_claude_client.py::output_format_sites`
+  `anthropic.Anthropic(`. `tests/test_model_client.py::output_format_sites`
   already does the narrower version and is the right thing to extend. Subprocess
   model paths were found separately by grepping `subprocess.run` and `exec`
   across `src/` and `deploy/`.
 - **A local stub server** speaking the Anthropic wire shape, standing in for "a
   normalising layer that models a subset of the upstream schema and drops what it
   has never heard of". It records the exact request body and returns a reply of
-  our choosing. The repository's own `ClaudeClient.propose` and
-  `ClaudeClient.dream` were driven against it, so what is reported is the shipped
+  our choosing. The repository's own `ModelClient.propose` and
+  `ModelClient.dream` were driven against it, so what is reported is the shipped
   path and not a reconstruction of it.
 - **Live unauthenticated probes** against `https://inference.do-ai.run` and
   `https://ai-gateway.vercel.sh`.
 - **Live probes against Anthropic**, using the opt-in key
-  `ANTHROPIC_API_KEY_ELECTRUM` that `tests/test_claude_client.py` already uses:
+  `ANTHROPIC_API_KEY_ELECTRUM` that `tests/test_model_client.py` already uses:
   `count_tokens` (free) for the system-block size, and four `max_tokens=8` calls
   to settle the caching question. Total spend under two cents.
 
@@ -126,7 +126,7 @@ themselves have to be repointed.
 
 | # | Call site | Model / how chosen | Structured output | Caching | Params sent | Cadence |
 |---|---|---|---|---|---|---|
-| 1 | `claude.propose` — `main.py:212` (loop), `main.py:149` (smoketest) | `CLAUDE_MODEL_IDS[env.claude_tier]`, default **Haiku 4.5** | **Yes** — `output_format=ClaudeDecision` | **1h `cache_control`**, and it does not engage | `max_tokens=4096`; Sonnet/Opus add `thinking={"type":"adaptive"}` and `output_config={"effort":"medium"}`; **SDK default timeout (600 s) and `max_retries=2`** | ~96/day, ~2,900/month |
+| 1 | `claude.propose` — `main.py:212` (loop), `main.py:149` (smoketest) | `CLAUDE_MODEL_IDS[env.claude_tier]`, default **Haiku 4.5** | **Yes** — `output_format=ModelDecision` | **1h `cache_control`**, and it does not engage | `max_tokens=4096`; Sonnet/Opus add `thinking={"type":"adaptive"}` and `output_config={"effort":"medium"}`; **SDK default timeout (600 s) and `max_retries=2`** | ~96/day, ~2,900/month |
 | 2 | `claude.dream` — `dreamer.py:1331` | `CLAUDE_MODEL_IDS[env.dream_tier]`, default **Sonnet 5** | **Yes** — `output_format=DreamStep` | `cache_system=False`, deliberately | `max_tokens=16000`; `thinking={"type":"adaptive"}`; `output_config={"effort":"high"}`; `timeout=240 s`, `max_retries=1` | 1/day |
 | 3 | `claude.confer` — `confer.py:2036`, two clients (Grogu, Yoda) | `env.dream_tier` | **Yes** — schema passed in by the caller | `cache_system=False`, deliberately | `max_tokens=4096`; `thinking={"type":"adaptive"}`; `output_config={"effort":"medium"}`; `timeout=240 s`, `max_retries=1` | ≤12/day |
 | 4 | `deploy/run-chat.sh` → `hermes -z` | `ANTHROPIC_MODEL` / `~/.hermes/config.yaml`. **Already DO-capable** | No | Hermes' business | Nothing this repo sets; 180 s subprocess timeout in `chat.py` | Per chat message |
@@ -141,7 +141,7 @@ subprocess is a root-owned config-file mover, not an agent.
 
 ### What the SDK actually puts on the wire
 
-MEASURED, against the stub, for the shipped `ClaudeClient`:
+MEASURED, against the stub, for the shipped `ModelClient`:
 
 ```
 POST /v1/messages          anthropic-version: 2023-06-01     (NO beta header)
@@ -157,7 +157,7 @@ tier=sonnet   keys = [max_tokens, messages, model, output_config, system, thinki
 system[0]     = {type, text, cache_control: {type: "ephemeral", ttl: "1h"}}
 ```
 
-Four details, none of them obvious from reading `claude_client.py`:
+Four details, none of them obvious from reading `model_client.py`:
 
 - **`output_format=` is not a wire field.** The SDK folds it into
   `output_config.format`. So `output_format` and `output_config` — which read in
@@ -174,7 +174,7 @@ Four details, none of them obvious from reading `claude_client.py`:
   repository does not use and should not adopt.
 - **The Haiku path sends `output_config` too**, carrying only `format`. The
   default tier is not exempt.
-- **`ClaudeDecision`'s schema declares `required: ["market_assessment"]` and
+- **`ModelDecision`'s schema declares `required: ["market_assessment"]` and
   `additionalProperties: false`.** One required field. That single fact is what
   makes the quiet-cycle hole below possible.
 
@@ -194,10 +194,10 @@ def parse_text(text, output_format):
 `messages.parse` runs that over every `text` block. No error handling, so a
 response the schema cannot accept raises `pydantic_core.ValidationError` **out of
 the SDK call**, not into a `None`. The `if decision is None: raise RuntimeError`
-branch in `claude_client.py` is near-unreachable whenever a schema is given: it
+branch in `model_client.py` is near-unreachable whenever a schema is given: it
 fires only when the response carries no text block at all.
 
-MEASURED, driving `ClaudeClient.propose` against a stub that ignores
+MEASURED, driving `ModelClient.propose` against a stub that ignores
 `output_config` and returns text of our choosing:
 
 | Response the model returns without a grammar constraining it | Result |
@@ -257,7 +257,7 @@ shape lies".
 
 ## Finding 2 — the required-on-the-wire fix, per provider
 
-MEASURED, from the wire body of `ClaudeClient.dream`:
+MEASURED, from the wire body of `ModelClient.dream`:
 
 ```
 output_config = {effort: "high", format: {type: "json_schema", schema: <9,833 bytes>}}
@@ -319,7 +319,7 @@ Then two identical requests seconds apart, with the shipped
 > **On the default tier the cache never engages, and it never has.** Haiku 4.5's
 > minimum cacheable prefix is 4,096 tokens (DOCUMENTED); the system block is
 > 3,676 (MEASURED). A prefix under the minimum is not an error — it silently
-> produces no cache entry. So `claude_client.py`'s `ttl: "1h"`, the reasoning in
+> produces no cache entry. So `model_client.py`'s `ttl: "1h"`, the reasoning in
 > its module docstring, and the "four reads per write" arithmetic in
 > `docs/COSTS.md` are all correct in principle and all describing something that
 > is not happening.
@@ -389,7 +389,7 @@ API key:
 | `thinking: {"type":"adaptive"}` | `401` — accepted |
 | system block with malformed `cache_control` | `400 system: Invalid input` |
 | system block with `cache_control: {"type":"ephemeral","ttl":"1h"}` | `401` — accepted |
-| **the repo's real `ClaudeDecision` body** (9,440 bytes) | `401` — **accepted by the validator** |
+| **the repo's real `ModelDecision` body** (9,440 bytes) | `401` — **accepted by the validator** |
 | **the repo's real `DreamStep` body** (9,998 bytes) | `401` — **accepted by the validator** |
 | old shape: top-level `output_format` | `401` — i.e. an unknown key, stripped |
 
@@ -465,7 +465,7 @@ estimate. **A figure that looks like a measurement and is not is the exact thing
 this repository refuses.** If a tier is ever repointed, the pricing table moves in
 the same commit.
 
-**Per-call model selection is not expressible.** `ClaudeClient` reads
+**Per-call model selection is not expressible.** `ModelClient` reads
 `CLAUDE_MODEL_IDS[self._tier]`; no field can hold "this run, use something else".
 The operator's "allocate tasks to better models" is already real on Hermes —
 `run-chat.sh` and `run-dream.sh` each read their own instance's
@@ -485,10 +485,10 @@ claim silently.
 ## `ANTHROPIC_BASE_URL` — honoured by the Python path, and unverified for Hermes
 
 **MEASURED.** `anthropic/_client.py` resolves `base_url` as *kwarg >
-`ANTHROPIC_BASE_URL` > profile config*. `ClaudeClient` constructs
+`ANTHROPIC_BASE_URL` > profile config*. `ModelClient` constructs
 `anthropic.Anthropic(api_key=env.anthropic_api_key)` and passes no `base_url`, so
 the environment variable wins. Every stub measurement in this audit proved it:
-the only thing pointing the shipped `ClaudeClient` at `127.0.0.1` was that
+the only thing pointing the shipped `ModelClient` at `127.0.0.1` was that
 variable.
 
 That is convenient, and it is the gap between two switches:
@@ -626,7 +626,7 @@ It had two independent reasons. **One is now gone on Vercel and one is not.**
 - ~~*It costs a server-enforced schema on the path that produces order
   quantities and stop prices.*~~ On Vercel this looks resolved: the validator
   models, types and requires `output_config.format.schema`, and the repo's real
-  `ClaudeDecision` body passes it. Pending one authenticated call.
+  `ModelDecision` body passes it. Pending one authenticated call.
 - **It still buys nothing.** Price parity means a like-for-like swap saves
   $0.00 and adds a hop, a second credential and a normalising layer between this
   code and the API it was written against. The only version that saves money is

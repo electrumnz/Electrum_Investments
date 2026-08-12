@@ -9,7 +9,7 @@ the model list before acting on the arithmetic; both move.
 > **Do the chat and dreaming halves. Do not do the trading loop.**
 >
 > DigitalOcean resells Anthropic's models at **exactly Anthropic's list price**,
-> so routing `claude_client.py` through it saves nothing and costs one more hop,
+> so routing `model_client.py` through it saves nothing and costs one more hop,
 > one more credential and one more prepaid balance to keep topped up. Its
 > Anthropic-compatible endpoint also **does not document the structured-output
 > parameter that `claude.propose` depends on** — the field is absent from the
@@ -135,7 +135,7 @@ Sources: [Supported models](https://docs.digitalocean.com/products/inference/det
 `cache_control` with `{"type": "ephemeral", "ttl": "1h"}` is documented for
 Anthropic models, with the 5m/1h choice and the exact multipliers above. Cache
 hits report as `cache_read_input_tokens`, the same field
-`ClaudeClient._usage_from` already reads. Open-source models cache
+`ModelClient._usage_from` already reads. Open-source models cache
 automatically and need no `cache_control` at all.
 
 **The gap:** the caching how-to is titled and scoped to the **Chat Completions
@@ -217,7 +217,7 @@ Sources: [Prompt caching how-to](https://docs.digitalocean.com/products/inferenc
 > `nemotron-3-nano-omni`, `nemotron-3-ultra-550b`, `openai-gpt-oss-20b`,
 > `qwen3-coder-flash`, `qwen3.8-max`.
 >
-> **Not yet measured:** whether any of them holds a `ClaudeDecision`-shaped
+> **Not yet measured:** whether any of them holds a `ModelDecision`-shaped
 > schema — nested array, enum, several numeric order fields — reliably across
 > repeated calls. A toy two-field schema is not evidence for the real payload,
 > and that run timed out before finishing. Do that before pinning anything to
@@ -225,7 +225,7 @@ Sources: [Prompt caching how-to](https://docs.digitalocean.com/products/inferenc
 
 ### 2a. What the documentation said, before it was run
 
-`claude.propose` calls `messages.parse(output_format=ClaudeDecision)`, which the
+`claude.propose` calls `messages.parse(output_format=ModelDecision)`, which the
 Anthropic SDK sends as `output_config.format` with a JSON schema. The API
 enforces the schema server-side; the SDK validates the result into a Pydantic
 model. That is a **correctness mechanism**, not ergonomics: a `qty` or a
@@ -248,7 +248,7 @@ full-text search of the Serverless Inference API reference returns no match for
 Two further mismatches in that same field list are worth naming, because they
 show the endpoint is Anthropic-*shaped* rather than Anthropic-*identical*:
 
-- **`reasoning_effort`, not `output_config.effort`.** `claude_client.py` sends
+- **`reasoning_effort`, not `output_config.effort`.** `model_client.py` sends
   `output_config={"effort": "medium"}` on Sonnet and Opus. That key does not
   exist in DigitalOcean's schema.
 - **`temperature`, `top_k` and `top_p` are listed as accepted**, where
@@ -261,7 +261,7 @@ calling, which DigitalOcean states plainly: "All commercial models from
 Anthropic and OpenAI available on DigitalOcean support tool (function)
 calling", and the Messages how-to claims "full compatibility with Anthropic's
 tool-use schema". `tool_choice` is in the schema, so a single forced tool whose
-`input_schema` is `ClaudeDecision`'s JSON schema, with the result validated
+`input_schema` is `ModelDecision`'s JSON schema, with the result validated
 client-side by Pydantic, reproduces most of the guarantee.
 
 **Most of it, not all of it.** The differences are exactly the ones this
@@ -346,14 +346,14 @@ The honest summary: **the operator's feature is real, and its home is Hermes.**
 They are different jobs with different risk, and "all agent use" reads as one
 instruction only until you look at them.
 
-### Path A — `src/bot/claude_client.py` (the trading loop, the dreamer, the conference)
+### Path A — `src/bot/model_client.py` (the trading loop, the dreamer, the conference)
 
 The Anthropic SDK, called from Python, in-process, three methods:
 `propose` (96×/day, structured, 1h-cached), `dream` (1×/day, structured,
 uncached, 16k tokens, 900s timeout) and `confer` (up to 12 calls/day,
 structured, uncached).
 
-**All three use structured output.** `propose` returns `ClaudeDecision`,
+**All three use structured output.** `propose` returns `ModelDecision`,
 `dream` returns `DreamStep`, `confer` takes its schema as an argument. So the
 blocker in section 2 applies to the whole module, not only to the loop — which
 is why the recommendation below moves the dreamer *last* and only after the
@@ -505,7 +505,7 @@ of these is a precondition, not a nice-to-have:
 - **Prove caching first.** Two identical `/v1/messages` calls a minute apart;
   assert `cache_read_input_tokens > 0` on the second. If it is zero, stop — the
   swap costs money instead of saving it.
-- **Prove the structured substitute** against `ClaudeDecision` over at least a
+- **Prove the structured substitute** against `ModelDecision` over at least a
   week of real cycles, comparing rejection rates against the current path.
 - **Pin the model. No router.** `model` is a fixed string, never
   `router:something`.

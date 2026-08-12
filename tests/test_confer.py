@@ -26,7 +26,6 @@ from pathlib import Path
 
 import pytest
 
-from bot.claude_client import CallUsage
 from bot.confer import (
     CONFERENCE,
     DREAMER_SYSTEM_PROMPT,
@@ -72,6 +71,7 @@ from bot.dreaming import (
     Vault,
     VaultCaps,
 )
+from bot.model_client import CallUsage
 
 CONFER_SOURCE = Path(__file__).resolve().parent.parent / "src" / "bot" / "confer.py"
 

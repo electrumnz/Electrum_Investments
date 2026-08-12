@@ -307,7 +307,7 @@ def test_no_instruments_means_no_session_block_rather_than_a_guessed_one(account
 
 # --------------------------------------------- the position the agent manages
 #
-# `claude_client` asks for a `position_plan` on every open position, with an
+# `model_client` asks for a `position_plan` on every open position, with an
 # action of hold, close or TIGHTEN_STOP. The context block used to render
 # direction, quantity, entry, current price and P&L and no stop at all, so the
 # model was asked whether to tighten a level it had never been shown, and

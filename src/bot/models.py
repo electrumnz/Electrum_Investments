@@ -55,12 +55,12 @@ def _require_every_property(schema: dict[str, Any]) -> None:
 # **A null is free; an ABSENCE is what costs.** A property the schema does not
 # require may be present or absent, so the grammar the API compiles has to
 # accept every subset of the optional set in any order, and each optional field
-# doubles that space. `claude_client.EVERY_FIELD_REQUIRED` re-exports this and
+# doubles that space. `model_client.EVERY_FIELD_REQUIRED` re-exports this and
 # carries the measurements — read them there before adding a field with a
 # default to anything the model returns.
 #
 # It lives HERE, in the leaf module, rather than beside those measurements,
-# because `claude_client` imports this file and the models that need it are
+# because `model_client` imports this file and the models that need it are
 # defined in it. One definition, imported both ways round, rather than a second
 # copy that can drift.
 EVERY_FIELD_REQUIRED = ConfigDict(json_schema_extra=_require_every_property)
@@ -375,7 +375,7 @@ class AccountSnapshot(BaseModel):
     # The journalled stop LEVEL per symbol, from that same read.
     #
     # This exists because the model is asked to manage stops it could not see.
-    # `claude_client` asks for a `position_plan` on every open position with an
+    # `model_client` asks for a `position_plan` on every open position with an
     # action of hold, close or **tighten_stop**, while the context block
     # rendered direction, quantity, entry, current price and P&L — and no stop
     # at all. So the agent was being asked whether to tighten a level that was
@@ -1022,7 +1022,7 @@ class PositionPlan(BaseModel):
 
     Every property is REQUIRED on the wire and none in Python. This object was
     the measured worst in the repository — five optional properties, which made
-    `ClaudeDecision` the slowest schema this build sends — so a `null` for a
+    `ModelDecision` the slowest schema this build sends — so a `null` for a
     plan that has nothing to say is cheap and its absence was not. See
     `EVERY_FIELD_REQUIRED`.
     """

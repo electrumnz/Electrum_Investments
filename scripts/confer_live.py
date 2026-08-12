@@ -118,7 +118,7 @@ class Tripwire:
 
 
 class RecordingCaller:
-    """Wraps one side's `ClaudeClient` so the turn is seen BEFORE the store trims it.
+    """Wraps one side's `ModelClient` so the turn is seen BEFORE the store trims it.
 
     `DreamStore.add_message` trims to `TEXT_MAX_CHARS`, so reading the stored
     text can only ever show a message at or under the cap — which proves nothing

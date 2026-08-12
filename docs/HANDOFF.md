@@ -246,7 +246,7 @@ Three constraints hold across all four and should survive whoever picks this up:
    tool.
 3. **Pick one thesis and make it explicit.** "Buy oversold large-caps in an uptrend"
    is testable. "Trade well" is not. Put it in the system prompt in
-   `claude_client.py` and measure whether it helps.
+   `model_client.py` and measure whether it helps.
 
    Before inventing an architecture, read the prior art in `reference/src/`.
    `TradingAgents` (Apache-2.0) models a real trading desk — analysts,

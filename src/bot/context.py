@@ -121,7 +121,7 @@ def build_market_context(
     # ## Open positions — and these are YOURS to manage.
     #
     # The stop and the risk are rendered here because the model is ASKED about
-    # them. `claude_client` requests a `position_plan` for every open position
+    # them. `model_client` requests a `position_plan` for every open position
     # with an action of hold, close or **tighten_stop**, and this block used to
     # carry direction, quantity, entry, current price and P&L — and no stop at
     # all. So the agent was being asked whether to tighten a level it had never

@@ -193,7 +193,6 @@ import anthropic
 import structlog
 from pydantic import BaseModel, Field
 
-from .claude_client import CallUsage, ClaudeClient
 from .config import Env, Rules
 from .dreaming import (
     DREAMER,
@@ -212,6 +211,7 @@ from .dreaming import (
     Vault,
     VaultCaps,
 )
+from .model_client import CallUsage, ModelClient
 from .souls import GROGU, YODA, load_soul
 
 log = structlog.get_logger(__name__)
@@ -920,7 +920,7 @@ class TurnCaller(Protocol):
     Everything else in this module is pure or is a store write, so a test can
     drive every cap — six turns, two dreams, three exchanges, the change gate —
     with a stub that returns canned turns and never touches the network.
-    `ClaudeClient` satisfies this.
+    `ModelClient` satisfies this.
     """
 
     def confer(
@@ -1200,7 +1200,7 @@ class Conference:
         """
         soul = load_soul(soul_name)
         prompt = f"{soul.prompt_prefix()}\n{system}" if soul.found else system
-        return ClaudeClient(env, prompt, tier=env.dream_tier, cache_system=False)
+        return ModelClient(env, prompt, tier=env.dream_tier, cache_system=False)
 
     # ------------------------------------------------------------- the run
 

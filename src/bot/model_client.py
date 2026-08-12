@@ -63,7 +63,7 @@ from .models import OrderProposal, PositionPlan, SymbolAssessment
 #   made came back 400 "Schema is too complex", 400 "Grammar compilation timed
 #   out", or a plain timeout.
 #
-# What is NOT the rule is a budget on the total. `ClaudeDecision` carried twelve
+# What is NOT the rule is a budget on the total. `ModelDecision` carried twelve
 # optional properties across four models, never more than five on any one of
 # them, and it compiled — concentration is what bites, not the sum.
 #
@@ -71,9 +71,9 @@ from .models import OrderProposal, PositionPlan, SymbolAssessment
 # dreamer's. Measured the same day, same model, one call each:
 #
 #     DreamStep, fixed    3.1s      DreamerTurn   3.4s
-#     TraderTurn          5.3s      ClaudeDecision  14.7s
+#     TraderTurn          5.3s      ModelDecision  14.7s
 #
-# **`ClaudeDecision` was the slowest thing this repository sends, and it now
+# **`ModelDecision` was the slowest thing this repository sends, and it now
 # leaves nothing optional at all.** That happened when the trailing exit was
 # added: the field it needed sits on `OrderProposal`, inside the schema that had
 # the least room, so the cheap move was to spend nothing rather than to spend a
@@ -95,7 +95,7 @@ from .models import OrderProposal, PositionPlan, SymbolAssessment
 # pair of readings measures the afternoon. And rebuild EVERY shape under a fresh
 # name, including the one already in the file — the server caches a compiled
 # grammar, and a schema sent earlier that day reads back in about 2.5 seconds.
-# The first attempt here subclassed the live `ClaudeDecision`, left its nested
+# The first attempt here subclassed the live `ModelDecision`, left its nested
 # `$defs` byte-identical to something already compiled, and measured the cache.
 #
 # The alternative was to drop `output_format` and validate the JSON on this
@@ -104,7 +104,7 @@ from .models import OrderProposal, PositionPlan, SymbolAssessment
 # guarantee and costs a handful of `null`s on the wire.
 
 
-class ClaudeDecision(BaseModel):
+class ModelDecision(BaseModel):
     """Top-level output Claude must produce on every call.
 
     `assessments` and `position_plans` cost output tokens on a cycle that
@@ -527,7 +527,7 @@ def build_system_prompt(rules: Rules) -> str:
     return SYSTEM_PROMPT_TEMPLATE.format(rules_summary=rules_summary)
 
 
-class ClaudeClient:
+class ModelClient:
     def __init__(
         self,
         env: Env,
@@ -562,14 +562,14 @@ class ClaudeClient:
             block["cache_control"] = {"type": "ephemeral", "ttl": "1h"}
         return [block]
 
-    def propose(self, market_context: str) -> tuple[ClaudeDecision, CallUsage]:
+    def propose(self, market_context: str) -> tuple[ModelDecision, CallUsage]:
         """Send the market context, get back a structured decision plus token accounting."""
         kwargs: dict[str, Any] = {
             "model": self._model,
             "max_tokens": 4096,
             "system": self._system_block(),
             "messages": [{"role": "user", "content": market_context}],
-            "output_format": ClaudeDecision,
+            "output_format": ModelDecision,
         }
 
         if self._tier in (ClaudeTier.SONNET, ClaudeTier.OPUS):
@@ -603,7 +603,7 @@ class ClaudeClient:
         patiently. See `Env.dream_tier`.
 
         Imported inside the method rather than at module scope: `dreamer`
-        imports this module for `ClaudeClient` and `CallUsage`, so a top-level
+        imports this module for `ModelClient` and `CallUsage`, so a top-level
         import of `DreamStep` would close the cycle.
         """
         from .dreamer import DreamStep
