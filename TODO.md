@@ -1636,15 +1636,56 @@ personal access token, and it **cannot be created through the API**; that route
 was retired, so it is a console action. A PAT controls the whole account —
 droplets, DNS, billing — and must not be used as the inference credential.
 
+### Four Claude-specific assumptions block naming a DigitalOcean model
+
+Scoped by reading rather than guessed at, so the work is a known size when the
+sweep comes back. `ClaudeClient` can already run a different model per path —
+it takes a `tier`, and `Env.dream_tier` is a separate setting — but "which
+model" is welded to a three-value Claude enum:
+
+1. **`CLAUDE_MODEL_IDS[tier]`** — a model id can only be one of three Claude
+   strings. `glm-5.2` cannot be named at all.
+2. **`CLAUDE_PRICING_USD_PER_MTOK[tier]`** — Claude prices, keyed on the same
+   enum, used by `_usage_from` for every call's cost.
+3. **`if self._tier in (SONNET, OPUS)`** — sends `thinking` and
+   `output_config.effort`, which are Anthropic fields. DigitalOcean's schema
+   lists `reasoning_effort` instead and no `output_config` at all, so this is
+   wrong in two ways at once against a non-Anthropic model.
+4. **`dreamer.estimated_cost_usd`** — `thinking = 0 if HAIKU else 4_000`, a
+   Claude-shaped guess feeding the Settings page's cost estimate.
+
+Eight call sites across `claude_client.py`, `config.py`, `dreamer.py`,
+`confer.py`, `main.py` and `web/render.py`. The shape wanted is a `ModelSpec`
+— id, the three prices, and whether the model takes `effort` and `thinking` —
+with the Claude tiers becoming three instances of it rather than the only
+possibility.
+
+**The trap inside that work, which is why it is not started ahead of the
+sweep.** `CallUsage.estimated_cost_usd` is a plain `float`, so a model whose
+price is not in the table would report **0.00** — a figure that reads as *free*
+on the Settings page and in the cost tracker. That is the missing-versus-zero
+rule with money attached, and fixing it properly means the field can express
+"unknown", which ripples into `metrics.py`, `jobs.py` and the Settings
+renderer. Do not paper over it with a default price: an invented cost is the
+same class of error as an invented indicator.
+
 ### Order of work once the answer is known
 
 Staged so nothing that can lose money moves first:
 
 1. **Hermes and the three souls** (`/chat`, `/dreaming`, `/settings`). A config
-   change on the box, no code in this repository, and none of those agents
-   proposes an order.
-2. **`dream`**, then **`confer`** — structured, but they cannot place a trade.
-3. **`propose` last, or never.** It feeds the risk gate.
+   change on the box, **no code in this repository at all**, and none of those
+   agents proposes an order. This is three of the four model paths by count and
+   it can ship the day a key exists — it does not wait on the sweep, because a
+   soul that answers badly is a bad answer rather than a bad order.
+2. **The `ModelSpec` work above**, once the sweep says which models are even
+   candidates. Doing it first would mean designing a price table for models
+   nobody has chosen.
+3. **`dream`**, then **`confer`** — structured, but they cannot place a trade,
+   so they are where the tool-call substitute gets proven if it is needed.
+4. **`propose` last.** It feeds the risk gate. Whatever model ends up here is
+   PINNED, and the failure path stays `model_call_failed` plus a skipped cycle
+   — never a retry onto a second model.
 
 ---
 
