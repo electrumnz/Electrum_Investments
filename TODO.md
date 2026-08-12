@@ -587,7 +587,8 @@ page.
 the permission to hold that symbol came from. It must not read as "a prophecy
 backs this trade" — the chain that produced it is speculative by construction,
 and a badge that implies otherwise would put the dreamer's confidence next to a
-real figure, which is the one thing `brand/` is kept separate to avoid.
+real figure — speculation dressed as measurement, on the surface that exists to
+report what was actually read.
 
 **Every tag is derived from STORED state, never recomputed by a model.** The
 source is the adoption record and a `dream_id` on the trade. A tag a model
@@ -1504,14 +1505,15 @@ Two that are worth stating as rules rather than as tests:
   journal and hands over the whole snapshot, which is the one function that
   derives all four figures from ONE journal read. The no-default property is
   preserved, so a caller that omits it still raises at wiring time.
-- **The `mudhorn-capital` Vercel project is real and deploying — the CONNECTOR
-  is what could not see it.** Previously recorded as a 404 with the cause
-  unconfirmed. Settled from the other direction: the Vercel bot posted a Ready
-  deployment for `prj_LpUzEDhsQz5duCKFzhL3FxKgbMSA` on this branch's PR, with a
-  working preview URL. So the project exists, `brand/` still redeploys on every
-  push, and the 404 through `list_projects` is connector token scope and
-  nothing about the deployment. The practical limit stands: the deploy cannot
-  be inspected from a session, only from the PR comment or the Vercel UI.
+- **DELETE THE VERCEL PROJECT — it is orphaned now.** `brand/` and
+  `scripts/generate_demo_data.py` are gone, at the operator's instruction:
+  there is one user, he logs straight into the real app, and the demo site was
+  scaffolding to get started. The Vercel project `mudhorn-capital` is still
+  configured with Root Directory `brand`, which no longer exists, so **every
+  push will now fail its build and put a red mark on the PR**. Remove the
+  project in the Vercel UI; it cannot be done from a session (the connector
+  token's scope 404s on it, which was itself recorded here as a mystery and is
+  now moot).
 - **Multi-agent dreaming.** Several dreamers working a topic independently and
   debating it out before a verdict. `Thought.by` already carries the
   attribution, and the A2A message store from item 2 is most of the transcript

@@ -58,18 +58,25 @@ That assumption is load-bearing and worth stating plainly, because it is why:
 If that ever stops being true, re-read `reference/STATUS.md` first — the licence
 groupings there become real obligations rather than a record.
 
-### The one thing that is published
+### Nothing is published
 
-`brand/` is the exception, and it is deliberate. The identity page is static,
-reads no journal, no broker and no credential, and is live at
-**https://mudhorn-capital.vercel.app** (Vercel, Root Directory `brand`, imported
-from this repo so each push redeploys).
+There used to be one exception: `brand/`, a static marketing site on Vercel
+rendering a committed fixture of invented figures. It has been deleted. One
+operator, no audience, and everything it cost — a second design system, a
+fixture with its own correctness assertions, a public page that looked like a
+trading dashboard — bought nothing.
 
-**That is not a precedent for the dashboard.** The dashboard renders account
-equity, open positions and realised P&L, and it has no login *because* it binds
-to `127.0.0.1`. Publishing it would put a live view of a brokerage account on
-the open internet. Use Tailscale for remote access instead, as
-`src/bot/web/app.py` says at the top of its module docstring.
+**The dashboard renders account equity, open positions and realised P&L**, and
+it binds to `127.0.0.1`. It now sits behind a shared password
+(`src/bot/web/auth.py`), which is what made exposing it over a Tailscale Funnel
+defensible — the prerequisite was met rather than waived. That gate is
+proportionate to **paper** money: one password, no accounts, no rotation, no
+record of who signed in. **If this ever fronts real money, `auth.py` is the file
+to replace rather than extend.**
+
+`tailscale serve` instead of `funnel` removes the public exposure entirely and
+still reaches your own devices. With one operator that is the smaller
+arrangement, and it is one command on the box.
 
 ---
 

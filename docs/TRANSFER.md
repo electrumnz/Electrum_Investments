@@ -145,10 +145,15 @@ the journal across and destroy the old one so it stops billing.
 
 ## What stays true regardless of owner
 
-`brand/` is published at https://mudhorn-capital.vercel.app and is safe there:
-static, and it reads no journal, no broker and no credential.
+**Nothing is published.** There used to be a static marketing site under
+`brand/` serving invented figures; it has been deleted, and the Vercel project
+that served it should go with it.
 
-**The dashboard is not.** It renders account equity, open positions and realised
-P&L, and it has no login *because* it binds to `127.0.0.1`. Remote access is
-Tailscale. That does not change with ownership, and it is written into
-`CLAUDE.md` so a future session cannot quietly undo it.
+**The dashboard renders account equity, open positions and realised P&L.** It
+binds to `127.0.0.1` and sits behind a shared password (`src/bot/web/auth.py`),
+which is what makes exposing it over a Tailscale Funnel defensible. That gate is
+sized for **paper** money — one password, no accounts, no rotation, no record of
+who signed in — so it is the first thing to replace if a live account is ever
+attached. Remote access without any public exposure is `tailscale serve`. None
+of this changes with ownership, and it is written into `CLAUDE.md` so a future
+session cannot quietly undo it.

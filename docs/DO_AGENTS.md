@@ -807,13 +807,13 @@ Complete, at every step, and none of it touches the trading loop:
 
 ## Things that look reasonable and are not
 
-- **Do not put the chatbot embed script on `brand/`.** Setting an agent's
-  endpoint public produces a `<script>` snippet with `data-agent-id` and
-  `data-chatbot-id`, ready to paste into a static site. `brand/` is the shop
-  window where **every figure is invented**, it has no server, and it recently
-  had a decorative sign-in form removed for implying it held something. A live
-  model on it would be the opposite problem: something real, on the surface
-  built to hold nothing real. If it ever happens, allowed-domains are a
+- **Do not resurrect a static site to hang the chatbot embed on.** Setting an
+  agent's endpoint public produces a `<script>` snippet with `data-agent-id`
+  and `data-chatbot-id`, ready to paste into a static site — and there used to
+  be one, `brand/`, where every figure was invented. It has been deleted, and
+  standing a page back up to host a live model would be the opposite problem
+  from the one that page had: something real, on a surface with no server and
+  no gate. If it ever happens, allowed-domains are a
   prerequisite, not a follow-up — and the answer today is no.
 - **Do not describe DigitalOcean guardrails as risk controls.** Three fixed
   content classifiers with uncustomisable rules. They do not know what a stop is.

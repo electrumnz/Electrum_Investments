@@ -308,8 +308,11 @@ part: an HTTPS URL reachable only by your own devices. If the goal is "view it
 on my phone" rather than "show it to someone else", prefer that — it needs no
 password at all and there is no secret to leak.
 
-The identity page under `brand/` is public and that is fine, because it reads no
-journal, no broker and no credential. It is not a precedent for this.
+There used to be a public marketing site under `brand/` serving invented
+figures, and it was fine there because it read no journal, no broker and no
+credential. It has been deleted — one operator, no audience — so this dashboard
+is the only surface, and nothing about the old site was ever a precedent for
+exposing this one.
 
 ---
 

@@ -525,10 +525,12 @@ Things the research turned up that look reasonable and are not.
   to another model is the feature; on the order path it is a silent downgrade
   that still emits `cycle_complete`. See rule 4 above.
 
-- **Do not put the DigitalOcean key in `brand/`.** Same reason the dashboard
-  password could not go there: `brand/` is static files in a public GitHub repo,
-  so the key would be readable in the repository and in the page source, and
-  there is no server there to check it against.
+- **Do not put the DigitalOcean key in any static page.** This was written when
+  a public marketing site existed under `brand/`, and it is the same reason the
+  dashboard password could not go there: static files in a public GitHub repo
+  make the key readable in the repository and in the page source, with no
+  server anywhere to check it against. That site is gone; the rule applies to
+  whatever replaces it.
 
 - **Do not use a DigitalOcean personal access token as the inference
   credential.** A PAT controls the account — droplets, DNS, billing. A model
