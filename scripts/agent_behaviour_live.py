@@ -97,8 +97,22 @@ from bot.dreamer import render_class_fence  # noqa: E402
 from bot.settings_agent import WrapperApplier, render_briefing  # noqa: E402
 from bot.souls import ARMORER, GROGU, YODA, load_soul  # noqa: E402
 
-AGENT_MODEL = "claude-sonnet-5"
-JUDGE_MODEL = "claude-opus-5"
+# **These must name the model the souls ACTUALLY run on, and that is no longer
+# a constant.** The three souls moved to DigitalOcean on 12 Aug 2026 and now run
+# `llama-4-maverick`; a harness pinned to `claude-sonnet-5` would have carried
+# on reporting 15/15 rails held for a model nothing uses. A green suite about
+# the wrong subject is worse than no suite, because it reads as assurance.
+#
+# Overridable by environment so the same script grades whatever is deployed:
+#
+#     AGENT_MODEL=llama-4-maverick JUDGE_MODEL=deepseek-v4-pro \
+#     ANTHROPIC_BASE_URL=https://inference.do-ai.run \
+#     ANTHROPIC_API_KEY_ELECTRUM=<do model access key> \
+#     python scripts/agent_behaviour_live.py ...
+#
+# The defaults stay as they were, so an existing invocation is unchanged.
+AGENT_MODEL = os.environ.get("AGENT_MODEL", "claude-sonnet-5")
+JUDGE_MODEL = os.environ.get("JUDGE_MODEL", "claude-opus-5")
 
 OPERATOR = "Sam"
 EQUITY_USD = 100_000.0
@@ -111,11 +125,41 @@ ROUTE_ABSENT = WrapperApplier(wrapper=Path("/opt/mudhorn/deploy/apply-settings.s
 
 
 def _client() -> anthropic.Anthropic:
+    """The SDK, pointed wherever `ANTHROPIC_BASE_URL` says.
+
+    No `base_url` is passed, which is deliberate rather than an omission: the
+    Anthropic SDK resolves it as *kwarg > `ANTHROPIC_BASE_URL` > profile*, so
+    leaving it unset lets the environment variable win and one script can grade
+    Anthropic or DigitalOcean without a flag. **Measured 12 Aug 2026** — that is
+    the same mechanism the souls now reach DigitalOcean through.
+
+    The endpoint in force is announced rather than assumed, because a harness
+    that graded the wrong provider silently would be reporting about something
+    nobody deployed.
+    """
     key = os.environ.get("ANTHROPIC_API_KEY_ELECTRUM") or os.environ.get("ANTHROPIC_API_KEY")
     if not key:
         raise SystemExit(
-            "No Anthropic key in the environment. Set ANTHROPIC_API_KEY_ELECTRUM "
-            "or ANTHROPIC_API_KEY. The offline half of the suite runs without one."
+            "No model key in the environment. Set ANTHROPIC_API_KEY_ELECTRUM "
+            "or ANTHROPIC_API_KEY — a DigitalOcean model access key goes in the "
+            "same place, with ANTHROPIC_BASE_URL set. The offline half of the "
+            "suite runs without either."
+        )
+    where = os.environ.get("ANTHROPIC_BASE_URL", "").strip()
+    print(
+        f"[harness] endpoint {where or 'Anthropic (default)'} · "
+        f"agent {AGENT_MODEL} · judge {JUDGE_MODEL}",
+        file=sys.stderr,
+    )
+    # The judge must not be the agent — a model grading its own reply is not a
+    # second opinion. `tests/test_agent_behaviour.py` asserts this on the
+    # recorded transcript; failing here as well means a bad invocation costs
+    # nothing rather than a full run's worth of calls.
+    if AGENT_MODEL == JUDGE_MODEL:
+        raise SystemExit(
+            f"AGENT_MODEL and JUDGE_MODEL are both {AGENT_MODEL}. A model "
+            "grading its own reply is not a verdict. Set JUDGE_MODEL to a "
+            "different one."
         )
     return anthropic.Anthropic(api_key=key)
 
