@@ -47,13 +47,34 @@ below is written out by hand for that reason rather than derived from
 a hand-written one with a deliberate trap in it answers that better than the
 real one would.
 
+## The question this is really for
+
+Not "can we proxy Anthropic through DigitalOcean" — that one is answered and
+dull, since DigitalOcean resells Claude at Anthropic's exact list price. The
+operator's question is **which model, for which task**, across a catalogue where
+open models run $0.18-$0.99 per million against Sonnet's $2/$10.
+
+That makes `--sweep` the mode that matters. It grades every model in the
+catalogue on the only two things a path here needs: server-enforced structured
+output, or a forced tool call validated client-side. A model offering neither
+cannot serve `propose`, `dream` or `confer` whatever it costs and however well
+it writes.
+
+**Price is not measured here and should not be**, because a published price is
+readable and a schema guarantee is not. Take the cost from DigitalOcean's
+pricing page and the capability from this.
+
 ## Running it
 
     export DO_MODEL_ACCESS_KEY=...        # console-created; NOT a dop_v1_ PAT
-    .venv/bin/python scripts/do_inference_probe.py --model <do-model-id>
 
-`--list` prints the catalogue instead, which is the first thing to check: if no
-Claude model is offered on this account's tier, everything below is moot.
+    ... --list                            # the catalogue, cheapest question
+    ... --sweep                           # every model, both routes graded
+    ... --sweep --only llama              # narrow it
+    ... --model <id> --attempts 20        # one model, in detail
+
+`--list` first: it costs one request and says what is even available on this
+account's tier.
 """
 
 from __future__ import annotations
@@ -287,6 +308,117 @@ def list_models(base: str, key: str, timeout: float) -> None:
     )
 
 
+def _catalogue(base: str, key: str, timeout: float) -> list[str]:
+    status, body = _get(f"{base}/v1/models", key, timeout)
+    if status != 200:
+        return []
+    try:
+        data = json.loads(body).get("data", [])
+    except ValueError:
+        return []
+    return sorted(str(m.get("id", "")) for m in data if isinstance(m, dict) and m.get("id"))
+
+
+def _grade_one(base: str, key: str, model: str, attempts: int, timeout: float) -> str:
+    """One model's structured-output verdict, as a single word for the table.
+
+    Same trap as `probe_structured`, reported compactly. The verdicts are
+    deliberately the same four the long form uses, so a sweep row and a detailed
+    run can never disagree about what a word means.
+    """
+    payload: dict[str, Any] = {
+        "model": model,
+        "max_tokens": 256,
+        "messages": [{"role": "user", "content": PROBE_PROMPT}],
+        "output_config": {"format": {"type": "json_schema", "schema": PROBE_SCHEMA}},
+    }
+    violations = 0
+    complied = 0
+    for _ in range(attempts):
+        status, body = _post(f"{base}/v1/messages", key, payload, timeout)
+        if status == 0:
+            return "unreachable"
+        if status >= 400:
+            return f"rejected({status})"
+        obj = _extract_json(body)
+        if obj is None:
+            continue
+        value = obj.get("verbosity")
+        if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 5:
+            violations += 1
+        else:
+            complied += 1
+    if violations:
+        return "IGNORED"
+    if complied:
+        return f"enforced?({complied}/{attempts})"
+    return "unparsed"
+
+
+def _tools_ok(base: str, key: str, model: str, timeout: float) -> str:
+    payload: dict[str, Any] = {
+        "model": model,
+        "max_tokens": 256,
+        "messages": [{"role": "user", "content": "Reply about the ticker SPY."}],
+        "tools": [{"name": "record", "description": "Record.", "input_schema": PROBE_SCHEMA}],
+        "tool_choice": {"type": "tool", "name": "record"},
+    }
+    status, body = _post(f"{base}/v1/messages", key, payload, timeout)
+    if status == 0:
+        return "unreachable"
+    if status >= 400:
+        return f"no({status})"
+    return "yes" if _extract_json(body) else "no-tool-block"
+
+
+def sweep(base: str, key: str, attempts: int, timeout: float, only: str) -> None:
+    """Every model in the catalogue, graded on the two things that decide it.
+
+    This is the question the operator actually asked — *which* model for *which*
+    task — and it is answered by measuring the whole catalogue rather than by
+    reasoning about a vendor. Two columns, because a path needs one or the
+    other: server-enforced structured output, or a forced tool call whose result
+    is validated client-side.
+
+    A model that offers neither cannot serve `propose`, `dream` or `confer` at
+    all, whatever it costs and however well it writes.
+    """
+    models = _catalogue(base, key, timeout)
+    if not models:
+        print("Could not read the catalogue. Nothing below can be measured.")
+        return
+    if only:
+        models = [m for m in models if only.lower() in m.lower()]
+
+    print(f"Sweeping {len(models)} model(s). {attempts} structured attempts each.\n")
+    print(f"  {'model':<44} {'output_config':<20} {'forced tool'}")
+    print(f"  {'-' * 44} {'-' * 20} {'-' * 12}")
+    rows: list[tuple[str, str, str]] = []
+    for model in models:
+        structured = _grade_one(base, key, model, attempts, timeout)
+        tools = _tools_ok(base, key, model, timeout)
+        rows.append((model, structured, tools))
+        print(f"  {model:<44} {structured:<20} {tools}")
+
+    usable = [m for m, s, t in rows if s.startswith("enforced?") or t == "yes"]
+    ignored = [m for m, s, _ in rows if s == "IGNORED"]
+
+    print()
+    print(f"  {len(usable)} of {len(rows)} can carry a schema by one route or the other.")
+    if ignored:
+        # The dangerous column, called out rather than left in the table. These
+        # accept the field and do not honour it, so a caller that only checked
+        # for a 400 would believe the schema was in force.
+        print()
+        print("  ACCEPTED output_config AND IGNORED IT — these look fine and are not:")
+        for model in ignored:
+            print(f"    {model}")
+    print()
+    print("  `enforced?` is one-way evidence: every attempt obeyed a constraint")
+    print("  the prompt argued against, which is what enforcement looks like and")
+    print("  is not proof. Raise --attempts before pinning a model to `propose`.")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base-url", default=os.environ.get("DO_BASE_URL", DEFAULT_BASE_URL))
@@ -294,6 +426,16 @@ def main() -> int:
     parser.add_argument("--attempts", type=int, default=4)
     parser.add_argument("--timeout", type=float, default=60.0)
     parser.add_argument("--list", action="store_true", help="print the model catalogue and stop")
+    parser.add_argument(
+        "--sweep",
+        action="store_true",
+        help="grade EVERY model in the catalogue, not just one. The real question.",
+    )
+    parser.add_argument(
+        "--only",
+        default="",
+        help="sweep only models whose id contains this substring, e.g. 'llama'.",
+    )
     args = parser.parse_args()
 
     key = os.environ.get("DO_MODEL_ACCESS_KEY", "").strip()
@@ -314,6 +456,10 @@ def main() -> int:
 
     if args.list:
         list_models(base, key, args.timeout)
+        return 0
+
+    if args.sweep:
+        sweep(base, key, args.attempts, args.timeout, args.only)
         return 0
 
     probe_structured(base, key, args.model, args.attempts, args.timeout)

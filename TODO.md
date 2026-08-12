@@ -1525,27 +1525,61 @@ Two that are worth stating as rules rather than as tests:
 
 ---
 
-## 20. One account — can DigitalOcean replace Anthropic entirely?
+## 20. Move ALL model calls to DigitalOcean, choosing per task from its catalogue
 
-**The goal is billing and logins, not cost.** *"It would be nice if we could use
-the DO version, so we don't need vercel ai gateway or anthropic logins and
-billing. All through one account."* DigitalOcean already hosts the droplet, so
-consolidating means one console, one card, one balance.
+**The instruction, and note it is not the question that was first answered:**
+*"We don't have to just use anthropic models through DO, there's a full base of
+models there including better ones for the task. We need to move all AI
+requirements to that."*
 
-**Note what that does to the earlier recommendation.** `docs/DROPLET_AI.md`
-concluded "do the chat and dreaming halves, not the trading loop", and it
-weighed a benefit of roughly zero — DigitalOcean resells Anthropic models at
-Anthropic's exact list price, so a like-for-like swap saves $0.00. Against a
-zero benefit, any cost loses. **The benefit is no longer zero**, so the trade is
-genuinely arguable now and the same document's technical findings still stand
-unchanged. Re-read it before acting; do not re-derive it.
+The first framing here was "proxy Anthropic through DigitalOcean", which is a
+dull question with a dull answer — DigitalOcean resells Claude at Anthropic's
+exact list price, so it saves $0.00 and adds a hop. **That conclusion then
+hardened into a comment in `config.py` saying `claude.propose` was "never in
+scope", and the word `never` was withdrawn**, because it was earned under a
+premise that no longer holds. Open models in that catalogue run **$0.18-$0.99
+per million against Sonnet's $2/$10**, so the cost half of the argument inverts.
 
-**Consolidation is all-or-nothing for the stated goal.** Moving the souls and
-the dreamer to DigitalOcean and leaving `propose` on Anthropic still means an
-Anthropic account, an Anthropic bill and an Anthropic key to rotate. A partial
-move is worth doing on its own merits and does **not** achieve what was asked.
+**What does NOT change with the destination**, because it is a property of the
+path rather than of the vendor:
 
-### The one measurement that decides it
+- **The schema must be ENFORCED, not requested**, on anything producing an
+  order quantity or a stop price.
+- **The model is PINNED per path and nothing may re-route on failure.**
+  Automatic fallback to a second model is a silent downgrade that still emits
+  `cycle_complete`. This is the one place "allocate tasks to better models"
+  must not become "allocate them dynamically".
+
+And note which way the evidence points, since the obvious suspicion is that
+this argument is vendor loyalty: **Alpha Arena is this repository's founding
+lesson and it is not a Claude endorsement.** Claude Sonnet finished −$3,081,
+second-worst of six flagships. The rule was never "use this vendor", it is "the
+gate holds whoever is talking".
+
+**Consolidation is all-or-nothing for the billing goal.** Moving the souls and
+the dreamer and leaving `propose` behind still means a second account, a second
+bill and a second key to rotate.
+
+### The catalogue is the thing to measure, and `scripts/do_inference_probe.py` does it
+
+`--sweep` grades **every** model DigitalOcean offers this account on the only
+two things a path here needs: server-enforced structured output, or a forced
+tool call validated client-side. A model with neither cannot serve `propose`,
+`dream` or `confer` whatever it costs and however well it writes, so that is
+the first cut and it is empirical.
+
+**Price is deliberately not measured by it.** A published price is readable off
+DigitalOcean's pricing page; a schema guarantee is not. Take cost from the page
+and capability from the probe.
+
+What the desk research already suggests, and the sweep is what confirms or
+kills it: of the open models, **only `glm-5.2` and `mimo-v2.5-pro` mention
+structured outputs at all** in their usage notes, and `glm-5.2`, `mimo-v2.5-pro`
+and `kimi-k3` are the three carrying both tool calling and caching. Caching
+matters for `propose` specifically — it wakes 96 times a day against a static
+system prompt.
+
+### The mechanism that decides whether any of it is safe
 
 All three Python model calls — `propose` (96/day), `dream` (1/day) and `confer`
 (≤12/day) — go through `messages.parse(output_format=...)`, which the SDK sends
@@ -1558,8 +1592,16 @@ three of which Opus 5 and Sonnet 5 reject with a 400 — so it is a generic
 superset that describes the proxy rather than the model, and it is not evidence
 either way about a field it omits. This has to be measured.
 
-Send one `messages.parse` call through `https://inference.do-ai.run` and read
-which of three things happens:
+**A schema-shaped reply is not evidence of enforcement**, and a probe that only
+checked "did it parse" would report success for an endpoint that dropped the
+field entirely — a capable model asked politely returns the right shape anyway.
+So the probe declares a field as a bounded integer and then asks, in the prompt,
+for a WORD. Enforcement makes that impossible; an unenforced call is free to
+obey the prose. One-way evidence: a violation proves it was not enforced,
+compliance merely fails to disprove it.
+
+Four outcomes per model, not three — "could not ask" is reported as unknown
+rather than folded into any of the others:
 
 1. **Honoured** — the schema is enforced server-side exactly as at Anthropic.
    Then the swap is an `ANTHROPIC_BASE_URL` line in `/opt/mudhorn/.env` plus a

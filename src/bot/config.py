@@ -86,10 +86,30 @@ DIGITALOCEAN = "digitalocean"
 # commit, once the forced tool-call substitute for server-enforced structured
 # output has been proven on the one structured call that cannot lose money.
 #
-# **`claude.propose` is never in scope.** DigitalOcean charges Anthropic's
-# exact list price for Anthropic models, so the swap buys nothing, and it costs
-# a server-enforced schema on the single path that produces order quantities
-# and stop prices. That trade is the wrong way round at any price.
+# **`claude.propose` was once written here as "never in scope", and that word
+# was withdrawn.** The argument behind it was purely economic — DigitalOcean
+# charges Anthropic's exact list price for ANTHROPIC models, so proxying Claude
+# through it buys nothing — and it silently assumed the destination was the same
+# model at the other end of a longer wire. The operator's instruction is the
+# other thing entirely: *"there's a full base of models there including better
+# ones for the task. We need to move all AI requirements to that."* Open models
+# in that catalogue run $0.18-$0.99 per million against Sonnet's $2/$10, so the
+# cost half of the argument inverts.
+#
+# What does NOT change with the destination, because it is a property of the
+# path rather than of the vendor:
+#
+# - **The schema must be ENFORCED, not requested.** `propose` produces order
+#   quantities and stop prices. A model asked nicely for a shape is a model that
+#   can return a plausible wrong one.
+# - **The model is PINNED per path, and nothing may re-route on failure.**
+#   Automatic fallback to a second model is a silent downgrade that still emits
+#   `cycle_complete`.
+#
+# Note which way the evidence actually points. Alpha Arena is this repository's
+# founding lesson and it is not a Claude endorsement: Claude Sonnet finished
+# -$3,081, second-worst of six flagships. The rule was never "use this vendor",
+# it is "the gate holds whoever is talking".
 PYTHON_MODEL_PATH_USES_DO = False
 
 
