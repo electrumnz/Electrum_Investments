@@ -2738,9 +2738,14 @@ The list below is the older deferred set and is duplicated there.
 - **Multi-agent dreaming.** Several dreamers working a topic independently and
   then debating it out before a verdict. `Thought.by` already carries the
   attribution that needs.
-- **Vercel AI Gateway.** `https://ai-gateway.vercel.sh` speaks the Anthropic
-  Messages API, so it is a base-URL swap rather than a rewrite. The Vercel AI
-  SDK itself is TypeScript only and does not apply to this Python codebase.
+- **~~Vercel AI Gateway~~ — DROPPED, and not on cost grounds.** It speaks the
+  Anthropic Messages API, so it was a base-URL swap rather than a rewrite, and
+  it was never built. It is off the table because the operator wants **one
+  account**: DigitalOcean already hosts the droplet, and a gateway on a third
+  provider is another login, another subscription and another balance to keep
+  topped up for a component whose entire bill is about $8/month. The same
+  base-URL swap points at DigitalOcean instead — see `docs/DROPLET_AI.md`, and
+  note that the blocker there is structured output rather than plumbing.
 
 ## What is deliberately not here
 

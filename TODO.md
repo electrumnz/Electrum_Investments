@@ -1518,8 +1518,91 @@ Two that are worth stating as rules rather than as tests:
   debating it out before a verdict. `Thought.by` already carries the
   attribution, and the A2A message store from item 2 is most of the transcript
   machinery.
-- **Vercel AI Gateway.** `https://ai-gateway.vercel.sh` speaks the Anthropic
-  Messages API, so it is a base-URL swap rather than a rewrite.
+- **~~Vercel AI Gateway~~ — DROPPED.** Never built, and now ruled out: the
+  operator wants one account, and Vercel is no longer used for anything at all
+  since `brand/` was deleted. The same base-URL swap points at DigitalOcean
+  instead. See the consolidation item below.
+
+---
+
+## 20. One account — can DigitalOcean replace Anthropic entirely?
+
+**The goal is billing and logins, not cost.** *"It would be nice if we could use
+the DO version, so we don't need vercel ai gateway or anthropic logins and
+billing. All through one account."* DigitalOcean already hosts the droplet, so
+consolidating means one console, one card, one balance.
+
+**Note what that does to the earlier recommendation.** `docs/DROPLET_AI.md`
+concluded "do the chat and dreaming halves, not the trading loop", and it
+weighed a benefit of roughly zero — DigitalOcean resells Anthropic models at
+Anthropic's exact list price, so a like-for-like swap saves $0.00. Against a
+zero benefit, any cost loses. **The benefit is no longer zero**, so the trade is
+genuinely arguable now and the same document's technical findings still stand
+unchanged. Re-read it before acting; do not re-derive it.
+
+**Consolidation is all-or-nothing for the stated goal.** Moving the souls and
+the dreamer to DigitalOcean and leaving `propose` on Anthropic still means an
+Anthropic account, an Anthropic bill and an Anthropic key to rotate. A partial
+move is worth doing on its own merits and does **not** achieve what was asked.
+
+### The one measurement that decides it
+
+All three Python model calls — `propose` (96/day), `dream` (1/day) and `confer`
+(≤12/day) — go through `messages.parse(output_format=...)`, which the SDK sends
+as `output_config.format`. **DigitalOcean's published `/v1/messages` request
+schema does not list `output_config`.**
+
+**Undocumented is not the same as unsupported, and that is the whole point.**
+That same published field list accepts `temperature`, `top_k` and `top_p`, all
+three of which Opus 5 and Sonnet 5 reject with a 400 — so it is a generic
+superset that describes the proxy rather than the model, and it is not evidence
+either way about a field it omits. This has to be measured.
+
+Send one `messages.parse` call through `https://inference.do-ai.run` and read
+which of three things happens:
+
+1. **Honoured** — the schema is enforced server-side exactly as at Anthropic.
+   Then the swap is an `ANTHROPIC_BASE_URL` line in `/opt/mudhorn/.env` plus a
+   key, with no code change at all, and Anthropic can be closed.
+2. **Rejected with a 400** — a clean, loud failure. Easy to detect, easy to
+   fall back from.
+3. **Silently ignored, returning unstructured prose** — the dangerous one, and
+   the reason this is a measurement rather than an argument. The call would
+   appear to work while the schema stopped being enforced.
+
+### If it is not honoured, the fallback is flakier rather than unsafe
+
+The documented substitute is a single forced tool whose `input_schema` is the
+model's JSON schema, validated client-side by Pydantic. Worth being precise
+about what that costs, because the first draft of this overstated it:
+
+- **It still fails closed.** A malformed object is rejected by Pydantic, the
+  numbers still reject, `cmd_loop` logs `model_call_failed` and the cycle is
+  skipped. It does not produce a bad order; `RiskGate` never sees one.
+- **What actually degrades is reliability.** The model is *asked* for the shape
+  rather than *constrained* to it, so the rejection rate rises and every
+  rejection is a lost cycle.
+- **It must never fall back to parsing prose, and never retry onto a different
+  model.** Automatic model fallback on the order path is a silent downgrade
+  that still emits `cycle_complete`.
+
+### What is needed to run the test
+
+A **model access key** — console → Gradient AI Platform → Serverless Inference →
+*Create model access key*. It is a different credential from a `dop_v1_`
+personal access token, and it **cannot be created through the API**; that route
+was retired, so it is a console action. A PAT controls the whole account —
+droplets, DNS, billing — and must not be used as the inference credential.
+
+### Order of work once the answer is known
+
+Staged so nothing that can lose money moves first:
+
+1. **Hermes and the three souls** (`/chat`, `/dreaming`, `/settings`). A config
+   change on the box, no code in this repository, and none of those agents
+   proposes an order.
+2. **`dream`**, then **`confer`** — structured, but they cannot place a trade.
+3. **`propose` last, or never.** It feeds the risk gate.
 
 ---
 
