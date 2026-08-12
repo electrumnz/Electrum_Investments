@@ -586,6 +586,70 @@ catalogue carries **Claude Opus 5, Sonnet 5, Haiku 4.5 and Fable 5** alongside
 the 4.x generation. The model table in `docs/DROPLET_AI.md` predates that and is
 out of date; trust the control panel and this check, not the table.
 
+**The catalogue LISTS models the tier cannot call.** Measured 12 Aug 2026: all
+ten Anthropic rows appear in `GET /v1/models`, and asking for one returns
+**403 `"this model is not available for your subscription tier"`**. Listing is
+not entitlement, and the only way to find out is the check above. The open
+models — `llama-4-maverick`, `deepseek-v4-pro`, `llama3.3-70b-instruct`,
+`deepseek-3.2`, `nemotron-3-ultra-550b` — all answered 200.
+
+### 3b. Set the model in Hermes' own config, because the wrapper cannot
+
+**This step is easy to miss and the whole thing fails without it.** The first
+deployment did miss it, and the failure was instructive rather than obvious.
+
+`DO_INFERENCE_MODEL` in `inference.env` does **not** select the model. Neither
+does `ANTHROPIC_MODEL`, which the wrapper exports. Hermes reads `model.default`
+from its own `$HERMES_HOME/config.yaml`, and out of the box that is
+`claude-sonnet-5`:
+
+```sh
+sudo -u hermes sed -n '4,6p' /home/hermes/.hermes/config.yaml
+# model:
+#   default: claude-sonnet-5
+#   provider: anthropic
+```
+
+Change `default` to the serving slug, and **leave `provider: anthropic`
+alone** — that is the wire protocol, and DigitalOcean's `/v1/messages` is
+Anthropic-shaped. The base URL is what redirects it.
+
+```sh
+sudo -u hermes cp /home/hermes/.hermes/config.yaml \
+                  /home/hermes/.hermes/config.yaml.bak-$(date +%s)
+sudo -u hermes sed -i '5s|^  default: .*|  default: llama-4-maverick|' \
+                  /home/hermes/.hermes/config.yaml
+```
+
+**The wrappers now refuse a mismatch** rather than printing a model they cannot
+set, so getting this wrong costs a turn and an explanation rather than a quiet
+answer from the wrong model. Before that check existed the banner read `model
+llama-4-maverick` while Hermes asked for `claude-sonnet-5`; it failed only
+because that model happened to be tier-gated, and a slug the account *could*
+serve would have answered normally from a model nobody chose.
+
+Note what this means for per-agent routing: Grogu running a different model from
+Yoda works through **`HERMES_HOME` pointing at a different config directory**,
+which is what `run-dream.sh` already does — not through the environment.
+
+### 3c. Remove every Anthropic credential from Hermes' reach
+
+`$HERMES_HOME/.env` may carry `ANTHROPIC_API_KEY` and `ANTHROPIC_TOKEN` from the
+original install, and **they take precedence over what the wrapper exports.**
+Symptom is a `401` from DigitalOcean, which is the good direction — the bad one
+is an Anthropic credential quietly serving turns the operator believes moved.
+
+```sh
+sudo -u hermes cp /home/hermes/.hermes/.env /home/hermes/.hermes/.env.bak-$(date +%s)
+sudo -u hermes sed -i 's/^ANTHROPIC_API_KEY=/#ANTHROPIC_API_KEY=/' /home/hermes/.hermes/.env
+sudo -u hermes sed -i 's/^ANTHROPIC_TOKEN=/#ANTHROPIC_TOKEN=/'     /home/hermes/.hermes/.env
+```
+
+Commented rather than deleted, so the rollback is one character.
+
+**Do NOT touch `/opt/mudhorn/.env`.** That is the trading loop's Anthropic key,
+a different user and a different process, and the loop has not moved.
+
 ### 4. Do not point a soul at an inference router
 
 The wrappers refuse a `DO_INFERENCE_MODEL` containing `router`, and the reason

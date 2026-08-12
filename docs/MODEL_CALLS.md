@@ -522,13 +522,35 @@ honest fix is for `Env.inference_provider` to read
 shape as `market_clock` reporting the broker's clock beside the computed one:
 name the discrepancy, do not resolve it.
 
-**Whether Hermes honours `ANTHROPIC_BASE_URL` is still unverified**, and phase 1
-rests on it. `run-chat.sh` is honest about this in place and mitigates it
-correctly by exporting the gateway key as `ANTHROPIC_API_KEY`, so a client that
-ignores the base URL gets a 401 rather than quietly serving the turn from
-Anthropic. That is the right failure direction and nothing here improves on it.
-**Do not verify it by reading `/tools` or a config file** — the dropped-toolset
-finding in `CLAUDE.md` applies unchanged.
+**Hermes DOES honour `ANTHROPIC_BASE_URL` — MEASURED 12 Aug 2026**, deploying
+the souls to DigitalOcean. This was the open question phase 1 rested on and it
+is now settled.
+
+The evidence is behavioural rather than a config read, which is the only kind
+that counts here: with the base URL set, a request for **`llama-4-maverick`**
+succeeded, and **Anthropic serves no model by that name** — so DigitalOcean can
+only have answered it. Confirmed twice over by commenting out both
+`ANTHROPIC_API_KEY` and `ANTHROPIC_TOKEN` in `$HERMES_HOME/.env` and getting the
+same answer, which rules out a fallback nobody could see.
+
+`run-chat.sh` mitigates the failure direction correctly anyway, by exporting the
+gateway key as `ANTHROPIC_API_KEY`, so a client that ignored the base URL would
+get a 401 rather than quietly serving the turn from Anthropic. Keep that.
+
+**Two things the deployment found that this document had wrong:**
+
+- **`ANTHROPIC_MODEL` does not select the model.** Hermes reads `model.default`
+  from `$HERMES_HOME/config.yaml`. The wrapper printed one model while Hermes
+  asked for another, and it failed only because that other model happened to be
+  tier-gated. Both wrappers now read the config and refuse on a mismatch.
+- **Credentials in `$HERMES_HOME/.env` outrank the wrapper's exports.** An
+  `ANTHROPIC_API_KEY` there survives the wrapper replacing it in the
+  environment, producing a 401 from the new endpoint.
+
+**Do not verify any of this by reading `/tools` or a config file** — the
+dropped-toolset finding in `CLAUDE.md` applies unchanged. Ask the agent, and
+prefer a model name the old provider does not serve, because that turns a
+successful answer into proof of where it came from.
 
 ---
 
