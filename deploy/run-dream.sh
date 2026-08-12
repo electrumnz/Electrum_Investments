@@ -117,14 +117,50 @@ if [[ -n "$DO_INFERENCE_KEY" ]]; then
     exit 78
   fi
 
+  # `ANTHROPIC_MODEL` does NOT select the model — Hermes reads `model.default`
+  # from its own config.yaml, and this wrapper used to print a slug it had no
+  # power to set. Observed on the chat instance: the banner named one model
+  # while Hermes asked for another. Checked rather than asserted; see the same
+  # block in `run-chat.sh` for the full account.
+  #
+  # This matters MORE here than there. The dreamer's whole reason for a separate
+  # `HERMES_HOME` is that Grogu can run a different model from Yoda and the
+  # Armorer — and if the model came from the environment that would work, while
+  # in fact it comes from a per-home config file. Without this check the two
+  # instances could silently share a model while the deployment claimed
+  # otherwise.
+  HERMES_CONFIG="$HERMES_HOME/config.yaml"
+  if [[ -r "$HERMES_CONFIG" ]]; then
+    CONFIGURED_MODEL="$(
+      awk '/^model:/{inblock=1; next}
+           inblock && /^[^[:space:]]/{inblock=0}
+           inblock && $1=="default:"{print $2; exit}' "$HERMES_CONFIG"
+    )"
+    if [[ -z "$CONFIGURED_MODEL" ]]; then
+      echo "No model.default found in $HERMES_CONFIG." >&2
+      echo "Hermes takes its model from that file, not from this wrapper, so the" >&2
+      echo "model actually used cannot be established. Refusing." >&2
+      exit 78
+    fi
+    if [[ "$CONFIGURED_MODEL" != "$DO_INFERENCE_MODEL" ]]; then
+      echo "Model mismatch, and the config wins:" >&2
+      echo "  $INFERENCE_ENV says   DO_INFERENCE_MODEL=$DO_INFERENCE_MODEL" >&2
+      echo "  $HERMES_CONFIG says   model.default=$CONFIGURED_MODEL" >&2
+      echo "Set model.default to the DigitalOcean serving slug, or change" >&2
+      echo "DO_INFERENCE_MODEL to match what is configured." >&2
+      exit 78
+    fi
+  fi
+
   export ANTHROPIC_BASE_URL="$DO_INFERENCE_BASE_URL"
   # Replaces any Anthropic credential here, so a client that ignores the base
   # URL fails with a 401 rather than quietly answering from the old provider.
+  # Hermes DOES honour it — measured 12 Aug 2026 on the chat instance.
   export ANTHROPIC_API_KEY="$DO_INFERENCE_KEY"
   export ANTHROPIC_MODEL="$DO_INFERENCE_MODEL"
   unset ANTHROPIC_AUTH_TOKEN
-  echo "inference: requesting DigitalOcean $DO_INFERENCE_BASE_URL, model $DO_INFERENCE_MODEL" >&2
-  echo "inference: requesting, not confirming -- this wrapper cannot see which model answered" >&2
+  echo "inference: DigitalOcean $DO_INFERENCE_BASE_URL, model $DO_INFERENCE_MODEL" >&2
+  echo "inference: endpoint and model both checked; which model ANSWERED is still not visible here" >&2
 else
   # Blanking the key is the documented rollback, so it has to be a complete
   # one: a leftover base URL would send the turn to DigitalOcean with an

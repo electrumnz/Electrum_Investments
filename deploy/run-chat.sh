@@ -119,19 +119,64 @@ if [[ -n "$DO_INFERENCE_KEY" ]]; then
     exit 78
   fi
 
+  # **`ANTHROPIC_MODEL` DOES NOT SET THE MODEL, and this banner used to claim it
+  # did.** Observed live on 12 Aug 2026: `inference.env` named
+  # `llama-4-maverick`, the wrapper printed `model llama-4-maverick`, and Hermes
+  # asked DigitalOcean for `claude-sonnet-5` — the value in its OWN
+  # `config.yaml`, under `model.default`. The request came back 403 because that
+  # model is tier-gated, which is the lucky version: a slug the account COULD
+  # serve would have answered normally, from a model nobody chose, under a
+  # banner naming a different one.
+  #
+  # So the variable is checked against the config rather than exported and
+  # hoped over. This is the file's existing rule — every branch REFUSES rather
+  # than falling back — applied to the one claim it was making without
+  # evidence. A wrapper that cannot set the model must not print one as though
+  # it had.
+  HERMES_CONFIG="$HERMES_HOME/config.yaml"
+  if [[ -r "$HERMES_CONFIG" ]]; then
+    # `model:` is a block with `default:` under it. Read the first `default:`
+    # after the `model:` line and nothing else; a missing block is its own case
+    # below rather than an empty string compared against a real slug.
+    CONFIGURED_MODEL="$(
+      awk '/^model:/{inblock=1; next}
+           inblock && /^[^[:space:]]/{inblock=0}
+           inblock && $1=="default:"{print $2; exit}' "$HERMES_CONFIG"
+    )"
+    if [[ -z "$CONFIGURED_MODEL" ]]; then
+      echo "No model.default found in $HERMES_CONFIG." >&2
+      echo "Hermes takes its model from that file, not from this wrapper, so" >&2
+      echo "the model actually used here cannot be established. Refusing rather" >&2
+      echo "than printing a slug from inference.env that may not be in force." >&2
+      exit 78
+    fi
+    if [[ "$CONFIGURED_MODEL" != "$DO_INFERENCE_MODEL" ]]; then
+      echo "Model mismatch, and the config wins:" >&2
+      echo "  $INFERENCE_ENV says   DO_INFERENCE_MODEL=$DO_INFERENCE_MODEL" >&2
+      echo "  $HERMES_CONFIG says   model.default=$CONFIGURED_MODEL" >&2
+      echo "Hermes reads its own config; ANTHROPIC_MODEL does not override it." >&2
+      echo "Set model.default to the DigitalOcean serving slug, or change" >&2
+      echo "DO_INFERENCE_MODEL to match what is actually configured." >&2
+      exit 78
+    fi
+  fi
+
   export ANTHROPIC_BASE_URL="$DO_INFERENCE_BASE_URL"
   # The DigitalOcean key REPLACES any Anthropic credential in this environment,
-  # deliberately. Whether Hermes honours ANTHROPIC_BASE_URL is unverified — the
-  # authoritative check is behavioural, so ask the agent rather than reading a
-  # config file. If it turns out not to, this key reaches Anthropic and is
-  # refused with a 401, which is loud. Leaving a working Anthropic key beside a
-  # DigitalOcean base URL is the arrangement that could serve the turn from the
-  # old provider while the operator believed it had moved.
+  # deliberately. **Hermes DOES honour ANTHROPIC_BASE_URL** — measured 12 Aug
+  # 2026 and no longer an assumption: with the base URL set, a request for
+  # `llama-4-maverick` succeeded, and Anthropic serves no model by that name, so
+  # it can only have been answered by DigitalOcean. Leaving a working Anthropic
+  # key beside a DigitalOcean base URL is still the arrangement that could serve
+  # the turn from the old provider, so the replacement stays.
+  #
+  # `ANTHROPIC_MODEL` is exported for completeness and is NOT what selects the
+  # model. See the check above.
   export ANTHROPIC_API_KEY="$DO_INFERENCE_KEY"
   export ANTHROPIC_MODEL="$DO_INFERENCE_MODEL"
   unset ANTHROPIC_AUTH_TOKEN
-  echo "inference: requesting DigitalOcean $DO_INFERENCE_BASE_URL, model $DO_INFERENCE_MODEL" >&2
-  echo "inference: requesting, not confirming -- this wrapper cannot see which model answered" >&2
+  echo "inference: DigitalOcean $DO_INFERENCE_BASE_URL, model $DO_INFERENCE_MODEL" >&2
+  echo "inference: endpoint and model both checked; which model ANSWERED is still not visible here" >&2
 else
   # Blanking the key is the documented rollback, so it has to be a COMPLETE
   # one. A base URL left exported by anything else in this environment would

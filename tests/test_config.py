@@ -335,10 +335,93 @@ def test_a_configured_switch_replaces_the_anthropic_credential(script, tmp_path)
     assert "base=https://inference.do-ai.run" in done.stdout
     assert "model=some-slug" in done.stdout
     assert "key=fake-do-key" in done.stdout
-    # It says what it ASKED for, never that the swap happened: the wrapper
-    # cannot see which model answered, and a line claiming otherwise would be
-    # the overclaim this repository keeps catching.
-    assert "requesting" in done.stderr
+    # It never claims the swap HAPPENED. The wrapper cannot see which model
+    # answered, and a line saying otherwise would be the overclaim this
+    # repository keeps catching. The endpoint and the configured model ARE both
+    # checked now, so the banner says that much and stops exactly there.
+    assert "which model ANSWERED is still not visible" in done.stderr
+
+
+@pytest.mark.parametrize("script", WRAPPERS)
+def test_a_model_the_wrapper_cannot_set_is_refused_rather_than_announced(script, tmp_path):
+    """**The rule that rejects, and it is here because it happened.**
+
+    `ANTHROPIC_MODEL` does not select the model. Hermes reads `model.default`
+    from its own `config.yaml`. Observed live on 12 Aug 2026: `inference.env`
+    named `llama-4-maverick`, the wrapper printed `model llama-4-maverick`, and
+    Hermes asked DigitalOcean for `claude-sonnet-5`.
+
+    That returned 403 only because the other model happened to be tier-gated.
+    A slug the account COULD serve would have answered normally, from a model
+    nobody chose, under a banner naming a different one — which is the
+    confident wrong figure this repository exists to refuse, arriving through
+    the deployment rather than through a model.
+    """
+    home = tmp_path / "home"
+    home.mkdir(parents=True, exist_ok=True)
+    (home / "inference.env").write_text(
+        "DO_INFERENCE_KEY=fake-do-key\nDO_INFERENCE_MODEL=llama-4-maverick\n",
+        encoding="utf-8",
+    )
+    # The shape the real file has: a `model:` block, and a DIFFERENT nested
+    # `model:` further down that the reader must not pick up instead.
+    (home / "config.yaml").write_text(
+        "model:\n  default: claude-sonnet-5\n  provider: anthropic\n"
+        "speech:\n  model: whisper-1\n",
+        encoding="utf-8",
+    )
+
+    done = _run_wrapper(script, home, tmp_path)
+
+    assert done.returncode == 78, done.stdout
+    assert "Model mismatch" in done.stderr
+    assert "claude-sonnet-5" in done.stderr
+    assert "llama-4-maverick" in done.stderr
+    # Refused, so no turn was taken at all — not taken against the wrong model.
+    assert "base=" not in done.stdout
+
+
+@pytest.mark.parametrize("script", WRAPPERS)
+def test_a_matching_model_is_allowed_through(script, tmp_path):
+    """The other half, or the check above would pass by refusing everything."""
+    home = tmp_path / "home"
+    home.mkdir(parents=True, exist_ok=True)
+    (home / "inference.env").write_text(
+        "DO_INFERENCE_KEY=fake-do-key\nDO_INFERENCE_MODEL=llama-4-maverick\n",
+        encoding="utf-8",
+    )
+    (home / "config.yaml").write_text(
+        "model:\n  default: llama-4-maverick\n  provider: anthropic\n"
+        "speech:\n  model: whisper-1\n",
+        encoding="utf-8",
+    )
+
+    done = _run_wrapper(script, home, tmp_path)
+
+    assert done.returncode == 0, done.stderr
+    assert "model=llama-4-maverick" in done.stdout
+
+
+@pytest.mark.parametrize("script", WRAPPERS)
+def test_a_config_with_no_model_default_refuses(script, tmp_path):
+    """Unknown is not the same as matching, so it must not read as agreement.
+
+    A config carrying no `model.default` means the model in force cannot be
+    established from here. Proceeding would print a slug out of `inference.env`
+    with nothing behind it — the same overclaim, one step quieter.
+    """
+    home = tmp_path / "home"
+    home.mkdir(parents=True, exist_ok=True)
+    (home / "inference.env").write_text(
+        "DO_INFERENCE_KEY=fake-do-key\nDO_INFERENCE_MODEL=llama-4-maverick\n",
+        encoding="utf-8",
+    )
+    (home / "config.yaml").write_text("speech:\n  model: whisper-1\n", encoding="utf-8")
+
+    done = _run_wrapper(script, home, tmp_path)
+
+    assert done.returncode == 78, done.stdout
+    assert "No model.default" in done.stderr
 
 
 @pytest.mark.parametrize("script", WRAPPERS)
