@@ -11,7 +11,7 @@ over a class hard-block that did not work.
 from __future__ import annotations
 
 import ast
-import os
+import importlib
 from pathlib import Path
 
 import pytest
@@ -171,6 +171,22 @@ def test_the_console_entrypoint_is_registered():
     assert 'electrum-bot-console = "bot.console_mcp:main"' in pyproject
 
 
-def test_the_app_dir_is_overridable_for_a_test_box():
-    """Hardcoding /opt/mudhorn would make this untestable and unmovable."""
-    assert console_mcp.APP_DIR == Path(os.environ.get("MUDHORN_APP_DIR", "/opt/mudhorn"))
+def test_the_app_dir_defaults_to_opt_mudhorn_and_is_overridable(monkeypatch: pytest.MonkeyPatch):
+    """Hardcoding the path would make this untestable and unmovable.
+
+    Reloaded rather than compared against the same expression the module itself
+    uses. The first version of this asserted
+    `APP_DIR == Path(os.environ.get("MUDHORN_APP_DIR", "/opt/mudhorn"))`, which
+    restates the implementation and therefore passes whatever the
+    implementation says — a tautology wearing a test's clothes. `ruff` caught
+    it as a Yoda condition, which was the lesser of the two problems.
+    """
+    monkeypatch.delenv("MUDHORN_APP_DIR", raising=False)
+    assert str(importlib.reload(console_mcp).APP_DIR) == "/opt/mudhorn"
+
+    monkeypatch.setenv("MUDHORN_APP_DIR", "/srv/elsewhere")
+    assert str(importlib.reload(console_mcp).APP_DIR) == "/srv/elsewhere"
+
+    # Leave the module as the rest of the suite expects to find it.
+    monkeypatch.delenv("MUDHORN_APP_DIR", raising=False)
+    importlib.reload(console_mcp)
