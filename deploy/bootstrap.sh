@@ -28,6 +28,50 @@ if [[ ! -f "$APP_DIR/pyproject.toml" ]]; then
   exit 1
 fi
 
+# ------------------------------------------------------- WHICH code is this
+#
+# **"Provisioned." used to be a claim about a tree nobody had identified**, and
+# that cost a deploy. Observed 13 Aug 2026: two wrappers had been hand-edited on
+# the box, so `git pull` aborted with "your local changes would be overwritten",
+# this script then ran happily against the OLD checkout and printed
+# "Provisioned.", and the verification step afterwards reproduced the exact bug
+# the pull was meant to fix. Every line of output was true and the deploy had
+# not happened.
+#
+# The operator ran four commands as one paste, so the abort scrolled past above
+# a wall of successful-looking output. That is the shape to defend against: a
+# step that silently did not happen, under a summary that reads as though it
+# did. Same rule as `calendar_degraded` and the tailnet status — report the
+# weaker fact rather than let silence read as the stronger one.
+#
+# So this states the commit it is provisioning FROM, and says loudly when the
+# tree is dirty. It does not refuse: a deliberate local edit is a legitimate
+# thing to be doing on a box, and refusing to provision would be the
+# config-load validator mistake in a new place. It has to be impossible to miss,
+# not impossible to do.
+if [[ -d "$APP_DIR/.git" ]] && command -v git >/dev/null 2>&1; then
+  echo "==> Checkout"
+  # `safe.directory`: this runs as root over a tree git may consider another
+  # user's, and a refusal here must cost the READING rather than the deploy.
+  GIT="git -c safe.directory=$APP_DIR -C $APP_DIR"
+  DESCRIBED="$($GIT log -1 --format='%h %s' 2>/dev/null || echo 'unknown')"
+  BRANCH="$($GIT rev-parse --abbrev-ref HEAD 2>/dev/null || echo 'unknown')"
+  echo "    $BRANCH at $DESCRIBED"
+
+  DIRTY="$($GIT status --porcelain 2>/dev/null || true)"
+  if [[ -n "$DIRTY" ]]; then
+    echo ""
+    echo "    *** UNCOMMITTED CHANGES IN $APP_DIR ***"
+    echo "$DIRTY" | sed 's/^/      /'
+    echo ""
+    echo "    A dirty tree makes 'git pull' ABORT. If you just ran one and did"
+    echo "    not read every line, this box may still be on the old code while"
+    echo "    everything below reports success. Check what the pull actually"
+    echo "    said before trusting the commit named above."
+    echo ""
+  fi
+fi
+
 echo "==> Packages"
 apt-get update -qq
 # python3-venv is separate from python3 on Debian and Ubuntu, and its absence is
@@ -199,9 +243,14 @@ Next, in order:
          sudo systemctl start mudhorn-bot mudhorn-web
          systemctl status mudhorn-bot
 
-  4. Reach the dashboard from a phone with Tailscale. It binds to 127.0.0.1 and
-     has no login, so do not put it on a public address:
+  4. Reach the dashboard from a phone with Tailscale:
          curl -fsSL https://tailscale.com/install.sh | sh && sudo tailscale up
+     It binds to 127.0.0.1 and sits behind ONE shared password, from
+     DASHBOARD_PASSWORD in $APP_DIR/.env. With that set it may be exposed
+     publicly; with it UNSET there is no gate at all, and this process cannot
+     tell the two apart -- a Funnel and a local curl both arrive on loopback.
+     electrum-bot-web says which mode it is in at startup, because that is the
+     only moment anyone can be told. Read that line.
 
   5. Optional, and only once Hermes is installed: point the three souls at
      DigitalOcean Gradient inference instead of Anthropic.
