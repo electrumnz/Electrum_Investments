@@ -133,32 +133,48 @@ if [[ -n "$DO_INFERENCE_KEY" ]]; then
   # than falling back — applied to the one claim it was making without
   # evidence. A wrapper that cannot set the model must not print one as though
   # it had.
-  HERMES_CONFIG="$HERMES_HOME/config.yaml"
-  if [[ -r "$HERMES_CONFIG" ]]; then
-    # `model:` is a block with `default:` under it. Read the first `default:`
-    # after the `model:` line and nothing else; a missing block is its own case
-    # below rather than an empty string compared against a real slug.
-    CONFIGURED_MODEL="$(
-      awk '/^model:/{inblock=1; next}
-           inblock && /^[^[:space:]]/{inblock=0}
-           inblock && $1=="default:"{print $2; exit}' "$HERMES_CONFIG"
-    )"
-    if [[ -z "$CONFIGURED_MODEL" ]]; then
-      echo "No model.default found in $HERMES_CONFIG." >&2
-      echo "Hermes takes its model from that file, not from this wrapper, so" >&2
-      echo "the model actually used here cannot be established. Refusing rather" >&2
-      echo "than printing a slug from inference.env that may not be in force." >&2
-      exit 78
-    fi
-    if [[ "$CONFIGURED_MODEL" != "$DO_INFERENCE_MODEL" ]]; then
-      echo "Model mismatch, and the config wins:" >&2
-      echo "  $INFERENCE_ENV says   DO_INFERENCE_MODEL=$DO_INFERENCE_MODEL" >&2
-      echo "  $HERMES_CONFIG says   model.default=$CONFIGURED_MODEL" >&2
-      echo "Hermes reads its own config; ANTHROPIC_MODEL does not override it." >&2
-      echo "Set model.default to the DigitalOcean serving slug, or change" >&2
-      echo "DO_INFERENCE_MODEL to match what is actually configured." >&2
-      exit 78
-    fi
+  # **`$HERMES_HOME/.hermes/config.yaml`, not `$HERMES_HOME/config.yaml`.**
+  # Hermes sets HOME to its own directory and reads `~/.hermes/config.yaml`
+  # under it. The first version of this check looked one level too high,
+  # found nothing, and SKIPPED — while the banner below said the model had
+  # been checked. Observed live: `inference.env` was deliberately set to a
+  # different model from the config and the turn ran anyway.
+  #
+  # So a config that cannot be read now REFUSES. Skipping was the whole
+  # defect: this wrapper exists to stop a model being announced that is not
+  # in force, and a check that quietly does not run is worse than no check,
+  # because the banner keeps making the claim.
+  HERMES_CONFIG="$HERMES_HOME/.hermes/config.yaml"
+  if [[ ! -r "$HERMES_CONFIG" ]]; then
+    echo "Cannot read $HERMES_CONFIG, so the model in force cannot be" >&2
+    echo "established. Hermes takes its model from that file, not from" >&2
+    echo "this wrapper. Refusing rather than announcing a slug from" >&2
+    echo "$INFERENCE_ENV that may not be what answers." >&2
+    exit 78
+  fi
+  # `model:` is a block with `default:` under it. Read the first `default:`
+  # after the `model:` line and nothing else; a missing block is its own case
+  # below rather than an empty string compared against a real slug.
+  CONFIGURED_MODEL="$(
+    awk '/^model:/{inblock=1; next}
+         inblock && /^[^[:space:]]/{inblock=0}
+         inblock && $1=="default:"{print $2; exit}' "$HERMES_CONFIG"
+  )"
+  if [[ -z "$CONFIGURED_MODEL" ]]; then
+    echo "No model.default found in $HERMES_CONFIG." >&2
+    echo "Hermes takes its model from that file, not from this wrapper, so" >&2
+    echo "the model actually used here cannot be established. Refusing rather" >&2
+    echo "than printing a slug from inference.env that may not be in force." >&2
+    exit 78
+  fi
+  if [[ "$CONFIGURED_MODEL" != "$DO_INFERENCE_MODEL" ]]; then
+    echo "Model mismatch, and the config wins:" >&2
+    echo "  $INFERENCE_ENV says   DO_INFERENCE_MODEL=$DO_INFERENCE_MODEL" >&2
+    echo "  $HERMES_CONFIG says   model.default=$CONFIGURED_MODEL" >&2
+    echo "Hermes reads its own config; ANTHROPIC_MODEL does not override it." >&2
+    echo "Set model.default to the DigitalOcean serving slug, or change" >&2
+    echo "DO_INFERENCE_MODEL to match what is actually configured." >&2
+    exit 78
   fi
 
   export ANTHROPIC_BASE_URL="$DO_INFERENCE_BASE_URL"

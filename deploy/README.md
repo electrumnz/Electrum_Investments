@@ -600,8 +600,9 @@ deployment did miss it, and the failure was instructive rather than obvious.
 
 `DO_INFERENCE_MODEL` in `inference.env` does **not** select the model. Neither
 does `ANTHROPIC_MODEL`, which the wrapper exports. Hermes reads `model.default`
-from its own `$HERMES_HOME/config.yaml`, and out of the box that is
-`claude-sonnet-5`:
+from its own `$HERMES_HOME/.hermes/config.yaml` — **note the `.hermes/`**, which
+is one level lower than it looks and is where the first version of the wrapper's
+own check went wrong — and out of the box that is `claude-sonnet-5`:
 
 ```sh
 sudo -u hermes sed -n '4,6p' /home/hermes/.hermes/config.yaml
@@ -683,9 +684,11 @@ sudo -u hermes /opt/mudhorn/deploy/run-chat.sh <<< 'Reply with the single word O
 Three things that line is careful about, and they are worth understanding
 rather than skipping:
 
-- It says **requesting**, never *in force*. Whether Hermes honours
-  `ANTHROPIC_BASE_URL` is unverified, and a wrapper claiming a swap it cannot
-  confirm would be the confident partial answer this project exists to prevent.
+- It claims the endpoint and the configured model were **checked**, and stops
+  exactly there — *which model answered* is not visible from this box, because
+  `hermes -z` returns the response text and nothing else. A wrapper claiming a
+  swap it cannot confirm would be the confident partial answer this project
+  exists to prevent.
 - If Hermes *ignores* the base URL, the DigitalOcean key reaches Anthropic and
   is refused with a 401 — loud. That is deliberate: the wrapper replaces the
   Anthropic credential rather than leaving one beside a DigitalOcean endpoint,
@@ -698,6 +701,24 @@ rather than skipping:
 
 Move one wrapper at a time — chat first, the dreamer a day later — so a problem
 is attributable to one of them.
+
+**Then break it on purpose, because a safety check nobody has watched fire is a
+hope.** Point `inference.env` at a model the config does not name and run one
+turn; it must refuse with exit 78 and print both values.
+
+```sh
+sudo -u hermes sed -i 's/deepseek-v4-pro/llama-4-maverick/' ~hermes/inference.env
+echo hi | sudo -u hermes /opt/mudhorn/deploy/run-chat.sh   # expect: refuses, 78
+sudo -u hermes sed -i 's/llama-4-maverick/deepseek-v4-pro/' ~hermes/inference.env
+```
+
+That is not a hypothetical. **The first version of the check failed this exact
+test**, on 13 Aug 2026: it looked in `$HERMES_HOME/config.yaml` rather than
+`$HERMES_HOME/.hermes/config.yaml`, found nothing, and `[[ -r ]]` made it skip
+in silence — while the banner two lines below went on saying the model had been
+checked. The turn ran and answered normally. A config that cannot be read now
+refuses, and `tests/test_config.py` pins it by writing no config at all. Run
+this after any `bootstrap.sh` that replaces the wrappers.
 
 ### Rollback
 

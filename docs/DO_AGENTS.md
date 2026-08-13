@@ -21,7 +21,7 @@ were measured by the operator and are labelled as theirs.
 >
 > Grogu is the opposite case and the reason this is worth doing at all. It has
 > no tools **by design**, and its isolation is currently a deployment fact
-> nobody can read: a `config.yaml` under `/home/hermes/dreamer` that the web
+> nobody can read: a `.hermes/config.yaml` under `/home/hermes/dreamer` that the web
 > process cannot even stat, which is why `/dreaming` carries a fallback banner
 > instead of a check. As a hosted agent that isolation becomes four fields on
 > one authenticated GET. **The guarantee stops being asserted and starts being
@@ -463,7 +463,7 @@ Compare that with today. `/dreaming` cannot inspect the dreamer's Hermes
 registry at all — `/home/hermes/dreamer` is 0700 and the web process is
 `mudhorn`. So the page reports *which binary answered* and shows a banner when
 the isolated one is missing. It is honest about the gap, and the gap is real:
-a `run-dream.sh` pointing at an instance whose `config.yaml` had gained an
+a `run-dream.sh` pointing at an instance whose `.hermes/config.yaml` had gained an
 `mcp_servers` entry would look identical from the page.
 
 **So the property genuinely strengthens.** Today: *"we invoke a wrapper that is
@@ -746,7 +746,7 @@ decides whether tonight ends in a working dreamer panel or in a documented
 finding, and it cannot be skipped or assumed. The agent speaks OpenAI
 chat-completions at `/api/v1/chat/completions` with a bearer key; Hermes is
 configured for Anthropic. Check `hermes model` and the `agent:` block in
-`/home/hermes/dreamer/config.yaml` — **and change it with
+`/home/hermes/dreamer/.hermes/config.yaml` — **and change it with
 `deploy/merge-hermes-config.py`, never by appending**, for the duplicate-key
 reason already documented.
 

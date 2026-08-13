@@ -540,9 +540,16 @@ get a 401 rather than quietly serving the turn from Anthropic. Keep that.
 **Two things the deployment found that this document had wrong:**
 
 - **`ANTHROPIC_MODEL` does not select the model.** Hermes reads `model.default`
-  from `$HERMES_HOME/config.yaml`. The wrapper printed one model while Hermes
-  asked for another, and it failed only because that other model happened to be
-  tier-gated. Both wrappers now read the config and refuse on a mismatch.
+  from `$HERMES_HOME/.hermes/config.yaml`. The wrapper printed one model while
+  Hermes asked for another, and it failed only because that other model happened
+  to be tier-gated. Both wrappers now read the config and refuse on a mismatch.
+- **The mismatch check then had the same disease it was written to cure.** It
+  looked in `$HERMES_HOME/config.yaml` — one level too high — and guarded itself
+  with `[[ -r ]]`, so on the real box it found nothing and SKIPPED, while the
+  banner below it went on saying the model had been checked. Measured by
+  pointing `inference.env` at a different model from the config: the turn ran.
+  A config that cannot be read now refuses, and `tests/test_config.py` pins it
+  by writing no config at all.
 - **Credentials in `$HERMES_HOME/.env` outrank the wrapper's exports.** An
   `ANTHROPIC_API_KEY` there survives the wrapper replacing it in the
   environment, producing a 401 from the new endpoint.

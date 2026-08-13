@@ -38,7 +38,7 @@
 #   sudo -u hermes env HERMES_HOME=/home/hermes/dreamer hermes   # first run
 #   # then, as root:
 #   #   - copy souls/grogu.md to /home/hermes/dreamer/SOUL.md
-#   #   - ensure /home/hermes/dreamer/config.yaml has NO mcp_servers entry
+#   #   - ensure /home/hermes/dreamer/.hermes/config.yaml has NO mcp_servers entry
 #   #     pointing at run-mcp.sh
 #   #   - add to /etc/sudoers.d/mudhorn-chat:
 #   #       mudhorn ALL=(hermes) NOPASSWD: /opt/mudhorn/deploy/run-dream.sh
@@ -129,27 +129,43 @@ if [[ -n "$DO_INFERENCE_KEY" ]]; then
   # in fact it comes from a per-home config file. Without this check the two
   # instances could silently share a model while the deployment claimed
   # otherwise.
-  HERMES_CONFIG="$HERMES_HOME/config.yaml"
-  if [[ -r "$HERMES_CONFIG" ]]; then
-    CONFIGURED_MODEL="$(
-      awk '/^model:/{inblock=1; next}
-           inblock && /^[^[:space:]]/{inblock=0}
-           inblock && $1=="default:"{print $2; exit}' "$HERMES_CONFIG"
-    )"
-    if [[ -z "$CONFIGURED_MODEL" ]]; then
-      echo "No model.default found in $HERMES_CONFIG." >&2
-      echo "Hermes takes its model from that file, not from this wrapper, so the" >&2
-      echo "model actually used cannot be established. Refusing." >&2
-      exit 78
-    fi
-    if [[ "$CONFIGURED_MODEL" != "$DO_INFERENCE_MODEL" ]]; then
-      echo "Model mismatch, and the config wins:" >&2
-      echo "  $INFERENCE_ENV says   DO_INFERENCE_MODEL=$DO_INFERENCE_MODEL" >&2
-      echo "  $HERMES_CONFIG says   model.default=$CONFIGURED_MODEL" >&2
-      echo "Set model.default to the DigitalOcean serving slug, or change" >&2
-      echo "DO_INFERENCE_MODEL to match what is configured." >&2
-      exit 78
-    fi
+  # **`$HERMES_HOME/.hermes/config.yaml`, not `$HERMES_HOME/config.yaml`.**
+  # Hermes sets HOME to its own directory and reads `~/.hermes/config.yaml`
+  # under it. The first version of this check looked one level too high,
+  # found nothing, and SKIPPED — while the banner below said the model had
+  # been checked. Observed live: `inference.env` was deliberately set to a
+  # different model from the config and the turn ran anyway.
+  #
+  # So a config that cannot be read now REFUSES. Skipping was the whole
+  # defect: this wrapper exists to stop a model being announced that is not
+  # in force, and a check that quietly does not run is worse than no check,
+  # because the banner keeps making the claim.
+  HERMES_CONFIG="$HERMES_HOME/.hermes/config.yaml"
+  if [[ ! -r "$HERMES_CONFIG" ]]; then
+    echo "Cannot read $HERMES_CONFIG, so the model in force cannot be" >&2
+    echo "established. Hermes takes its model from that file, not from" >&2
+    echo "this wrapper. Refusing rather than announcing a slug from" >&2
+    echo "$INFERENCE_ENV that may not be what answers." >&2
+    exit 78
+  fi
+  CONFIGURED_MODEL="$(
+    awk '/^model:/{inblock=1; next}
+         inblock && /^[^[:space:]]/{inblock=0}
+         inblock && $1=="default:"{print $2; exit}' "$HERMES_CONFIG"
+  )"
+  if [[ -z "$CONFIGURED_MODEL" ]]; then
+    echo "No model.default found in $HERMES_CONFIG." >&2
+    echo "Hermes takes its model from that file, not from this wrapper, so the" >&2
+    echo "model actually used cannot be established. Refusing." >&2
+    exit 78
+  fi
+  if [[ "$CONFIGURED_MODEL" != "$DO_INFERENCE_MODEL" ]]; then
+    echo "Model mismatch, and the config wins:" >&2
+    echo "  $INFERENCE_ENV says   DO_INFERENCE_MODEL=$DO_INFERENCE_MODEL" >&2
+    echo "  $HERMES_CONFIG says   model.default=$CONFIGURED_MODEL" >&2
+    echo "Set model.default to the DigitalOcean serving slug, or change" >&2
+    echo "DO_INFERENCE_MODEL to match what is configured." >&2
+    exit 78
   fi
 
   export ANTHROPIC_BASE_URL="$DO_INFERENCE_BASE_URL"

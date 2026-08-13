@@ -1857,6 +1857,24 @@ was fixed by sharpening the soul clause rather than loosening the rail, and the
 same rule applies here — if a rail does not hold on Llama, the answers are a
 sharper clause or a different model, never a weaker rail.
 
+**The mismatch check itself was broken, and the box still has the broken one.**
+Caught by running the deliberate-break test above: `inference.env` was pointed
+at `llama-4-maverick` while the config said `deepseek-v4-pro`, and the turn ran
+anyway under a banner reading *"endpoint and model both checked"*. The wrapper
+looked in `$HERMES_HOME/config.yaml`; Hermes keeps it at
+`$HERMES_HOME/.hermes/config.yaml`. The `[[ -r ]]` guard then made a config it
+could not find SKIP rather than refuse — **the disease the check was written to
+cure, caught inside the cure.** The tests passed because they were written from
+the code rather than from the deployment, so both agreed with each other and
+neither agreed with Hermes.
+
+Fixed in both wrappers: the path is corrected and an unreadable config now
+refuses. `tests/test_config.py::test_a_config_that_cannot_be_read_refuses_rather_than_skipping`
+writes no config at all and fails against the old shape.
+
+**Action on the box:** re-fetch `deploy/` and re-run the deliberate-break test.
+Until then the deployed wrapper still announces a model it has not checked.
+
 Two smaller things from the same deployment:
 
 - **`model.default` is edited on the box and not in the repo.** It survives a

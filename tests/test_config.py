@@ -402,6 +402,25 @@ def _run_wrapper(script: str, home: Path, tmp_path: Path) -> Any:
 WRAPPERS = ["run-chat.sh", "run-dream.sh"]
 
 
+def _hermes_config(home: Path) -> Path:
+    """Where Hermes ACTUALLY keeps its config: `$HERMES_HOME/.hermes/config.yaml`.
+
+    **These tests wrote `$HERMES_HOME/config.yaml` and passed, while the wrapper
+    read the same wrong path and silently skipped its check on the real box.**
+    The test was written from the code rather than from the deployment, so both
+    agreed with each other and neither agreed with Hermes. Observed live:
+    `inference.env` was deliberately set to a different model from the config,
+    and the turn ran anyway under a banner claiming the model had been checked.
+
+    A helper rather than a literal in four places, so the path is stated once
+    and a future move is one edit rather than four that can disagree.
+    """
+    directory = home / ".hermes"
+    directory.mkdir(parents=True, exist_ok=True)
+    return directory / "config.yaml"
+
+
+
 @pytest.mark.parametrize("script", WRAPPERS)
 def test_no_inference_file_means_anthropic_and_a_working_turn(script, tmp_path):
     """The default path, and the one every existing deployment is on."""
@@ -466,6 +485,9 @@ def test_a_configured_switch_replaces_the_anthropic_credential(script, tmp_path)
     (home / "inference.env").write_text(
         "DO_INFERENCE_KEY=fake-do-key\nDO_INFERENCE_MODEL=some-slug\n", encoding="utf-8"
     )
+    # The config has to agree, or the mismatch check below refuses first and
+    # this test would pass for the wrong reason.
+    _hermes_config(home).write_text("model:\n  default: some-slug\n", encoding="utf-8")
 
     done = _run_wrapper(script, home, tmp_path)
 
@@ -503,7 +525,7 @@ def test_a_model_the_wrapper_cannot_set_is_refused_rather_than_announced(script,
     )
     # The shape the real file has: a `model:` block, and a DIFFERENT nested
     # `model:` further down that the reader must not pick up instead.
-    (home / "config.yaml").write_text(
+    _hermes_config(home).write_text(
         "model:\n  default: claude-sonnet-5\n  provider: anthropic\n"
         "speech:\n  model: whisper-1\n",
         encoding="utf-8",
@@ -528,7 +550,7 @@ def test_a_matching_model_is_allowed_through(script, tmp_path):
         "DO_INFERENCE_KEY=fake-do-key\nDO_INFERENCE_MODEL=llama-4-maverick\n",
         encoding="utf-8",
     )
-    (home / "config.yaml").write_text(
+    _hermes_config(home).write_text(
         "model:\n  default: llama-4-maverick\n  provider: anthropic\n"
         "speech:\n  model: whisper-1\n",
         encoding="utf-8",
@@ -554,12 +576,44 @@ def test_a_config_with_no_model_default_refuses(script, tmp_path):
         "DO_INFERENCE_KEY=fake-do-key\nDO_INFERENCE_MODEL=llama-4-maverick\n",
         encoding="utf-8",
     )
-    (home / "config.yaml").write_text("speech:\n  model: whisper-1\n", encoding="utf-8")
+    _hermes_config(home).write_text("speech:\n  model: whisper-1\n", encoding="utf-8")
 
     done = _run_wrapper(script, home, tmp_path)
 
     assert done.returncode == 78, done.stdout
     assert "No model.default" in done.stderr
+
+
+@pytest.mark.parametrize("script", WRAPPERS)
+def test_a_config_that_cannot_be_read_refuses_rather_than_skipping(script, tmp_path):
+    """**The bug the check itself had, and the reason it is pinned.**
+
+    The first version guarded the whole comparison with `[[ -r $config ]]`, so a
+    config it could not find was SKIPPED — and the banner two lines below still
+    said the model had been checked. It was looking one level too high
+    (`$HERMES_HOME/config.yaml` rather than `$HERMES_HOME/.hermes/config.yaml`),
+    so on the real box it skipped every time. Observed live: `inference.env` was
+    deliberately pointed at a different model from the config and the turn ran
+    anyway, announcing a slug that was not in force.
+
+    That is the disease this whole block exists to cure, caught inside the cure.
+    A check that quietly does not run is worse than no check at all, because the
+    claim it licenses keeps being printed.
+    """
+    home = tmp_path / "home"
+    home.mkdir(parents=True, exist_ok=True)
+    (home / "inference.env").write_text(
+        "DO_INFERENCE_KEY=fake-do-key\nDO_INFERENCE_MODEL=llama-4-maverick\n",
+        encoding="utf-8",
+    )
+    # No config written at all — the state the real box was in.
+
+    done = _run_wrapper(script, home, tmp_path)
+
+    assert done.returncode == 78, done.stdout
+    assert ".hermes/config.yaml" in done.stderr, "the path it could not read is not named"
+    assert "base=" not in done.stdout, "the turn ran with the model unestablished"
+    assert "both checked" not in done.stderr, "it claimed a check it had skipped"
 
 
 @pytest.mark.parametrize("script", WRAPPERS)
