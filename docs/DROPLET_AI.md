@@ -584,14 +584,24 @@ these is a precondition, not a nice-to-have. **Two are still open, and they are
 open rather than waived — the honest state of the move is "built and not yet
 proven live".**
 
-- ~~**Prove caching first.**~~ **STILL OPEN, and it is the one with money on
-  it.** Two identical `/v1/messages` calls a minute apart; assert
-  `cache_read_input_tokens > 0` on the second. A dropped `cache_control` does
-  not raise — it bills 10x on the system block forever. The count already
-  reaches the `cycle_complete` line as `cached_tokens`, so the check is
-  available from the first day of real cycles rather than needing a harness:
-  **a run of cycles reading zero is the answer.** Note the failure direction is
-  money and not correctness, which is why it did not block the move.
+- ~~**Prove caching first.**~~ **DONE 13 Aug 2026 — it does NOT engage.** The
+  real system block (4,791 tokens) sent twice, eight seconds apart, carrying
+  `cache_control` ttl 1h, to `deepseek-v4-pro` and `qwen3-coder-flash`: HTTP 200
+  both times, every cache counter zero, identical `input_tokens` on the repeat.
+  Accepted and ignored, exactly like `output_config`. A dropped `cache_control`
+  does not raise — it bills the system block in full, forever.
+
+  "Reported zero" cannot distinguish *not cached* from *cached but unreported*;
+  only the billing page settles that, so the planning assumption is the
+  expensive one. The failure direction is money and not correctness, which is
+  why it did not block the move.
+
+  **Correction to how this said to check it:** the count does NOT reach the
+  `cycle_complete` line. It goes to `audit/*.jsonl` — `claude_cached_tokens` on
+  the `Decision` record, and `cached_tokens` on the `model_cost_unknown` event —
+  so it is the Decisions page or a query, never the heartbeat. Established by
+  reading a live cycle line after the switch threw, which is the only way that
+  claim was ever going to be checked.
 - ~~**Prove the structured substitute against `ModelDecision`**~~ — **DONE for
   the shape, OPEN for the rate.** `scripts/do_schema_fidelity.py` measured the
   real schema over 10 samples per model; four models hold it 10/10. What has

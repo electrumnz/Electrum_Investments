@@ -1024,8 +1024,20 @@ name, because Pydantic turns a docstring into the schema's `description`.
 **Caching is unverified at that endpoint and fails silently in the money
 direction.** `cache_control` is not in DigitalOcean's published request schema,
 and a dropped one does not raise — it bills 10x on the system block forever.
-`cached_tokens` is already on the `cycle_complete` line, so a run of cycles
-reading zero is the answer; nothing needs building to check it.
+**MEASURED 13 Aug 2026: it does not engage.** The real system block (4,791
+tokens) sent twice eight seconds apart with `cache_control` came back HTTP 200
+both times with every cache counter at zero and an identical `input_tokens` on
+the repeat. Accepted and ignored, exactly like `output_config`. "Reported zero"
+cannot distinguish *not cached* from *cached but unreported* — only the billing
+page settles that — so the planning assumption is that the system prompt is
+billed in full on all 96 cycles a day.
+
+**`cached_tokens` is NOT on the `cycle_complete` line**, which this file
+previously said it was. It reaches `audit/*.jsonl` — on the `Decision` record as
+`claude_cached_tokens`, and on the `model_cost_unknown` event — so it is the
+Decisions page and a query that answer it, not the heartbeat. Checked against a
+live cycle, because the claim had been repeated into three documents without
+anybody reading a log line to confirm it.
 
 ### The model call is a feed too, and prose truncates while numbers reject
 
