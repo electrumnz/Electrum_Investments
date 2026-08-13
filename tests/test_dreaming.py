@@ -2721,6 +2721,61 @@ def test_moving_only_the_review_date_keeps_the_answer():
     assert carried[0].observe_by == datetime(2028, 1, 1, tzinfo=UTC)
 
 
+def test_a_restated_list_that_OMITS_a_refused_claim_does_not_erase_it():
+    """**Omission was the hole that restatement was already closed against.**
+
+    Carrying the verdict across a reworded claim is only half the rule. The
+    other half is that the output used to be exactly `incoming`, so a step
+    that simply did not mention a claim DELETED it — and dropping a ruled-out
+    condition is strictly stronger than restating one, because
+    `all_conditions_met` is what promotes a dream to the vault and a
+    ruled-out condition is the thing stopping it. Measured end to end: the
+    dream went workbench → vault → adopted and granted a symbol in no
+    allowlist, with `ruled_out_conditions` empty so even the absence was
+    invisible.
+
+    A model must not be able to change a settled fact by not mentioning it.
+    """
+    refused = _observation(ruled_out=True, observed_by=OPERATOR, note="no restart")
+    was = [_checkable(fulfilled=True), refused]
+
+    carried = carry_forward_grading(was, [_checkable()])
+
+    assert [c.key for c in carried] == [_checkable().key, refused.key]
+    assert carried[-1].ruled_out is True
+    assert carried[-1].observed_by == OPERATOR
+
+
+def test_a_restated_list_that_omits_a_MET_claim_keeps_that_too():
+    """One rule reads as one rule.
+
+    `is_answered` is the test on the way in and it is the test here, so both
+    halves of an answer survive an omission. Retaining a fulfilment costs
+    nothing — it is met, so it blocks nothing — and a rule that preserved only
+    refusals would be asymmetric bookkeeping somebody talks themselves out of.
+    """
+    met = _observation(fulfilled=True, observed_by=OPERATOR, note="saw it")
+
+    carried = carry_forward_grading([met], [_checkable()])
+
+    assert [c.key for c in carried] == [_checkable().key, met.key]
+    assert carried[-1].fulfilled is True
+
+
+def test_an_unanswered_condition_a_step_drops_is_gone():
+    """The retention is about ANSWERS, not about every condition ever written.
+
+    A dreamer reworking its own unsettled claims is the ordinary case and must
+    stay possible; what it may not do is withdraw a question somebody has
+    already answered. Without this the list would only ever grow.
+    """
+    stale = _observation(subject="a subject nobody ever answered")
+
+    carried = carry_forward_grading([stale], [_checkable()])
+
+    assert [c.key for c in carried] == [_checkable().key]
+
+
 def test_a_threshold_and_an_observation_never_collide_on_one_key():
     """The key names the SHAPE first, so two different kinds of claim cannot be
     read as the same claim by filling the same blanks."""

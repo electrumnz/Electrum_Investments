@@ -2026,14 +2026,47 @@ def carry_forward_grading(
     on the same question, which is the resource this whole arrangement is
     careful with. `is_answered` is the test, and both halves of the answer
     travel with it.
+
+    **And an answered condition the incoming list simply LEAVES OUT is kept.**
+    Carrying the verdict across a restatement was only half the rule, and the
+    other half was the exploitable one: the output used to be exactly
+    `incoming`, so a step that did not mention a claim deleted it. Measured
+    end to end through `Dreamer.run_once` — the operator ruled out an
+    observation, the next step returned the list minus that one, and the dream
+    went workbench → vault → adopted, granting a symbol in no allowlist. The
+    refutation was not overridden or argued with; it was gone, with nothing on
+    any surface saying it had ever been given. `ruled_out_conditions` was
+    empty, so even the absence was invisible.
+
+    Omission is strictly stronger than restatement, which is why it is worth
+    stating separately: restating a refuted claim puts it back on somebody's
+    worklist, and dropping it removes the thing that was blocking the vault.
+    `all_conditions_met` needs every condition fulfilled, so a ruled-out one is
+    a settled fact that the dream cannot travel — and a model must not be able
+    to change a settled fact by not mentioning it. Same rule as the trading
+    agent being unable to delete: an answer is a record, and a record is not
+    the answerer's to withdraw.
+
+    Both halves of an answer are retained, not only the "no". One rule reads as
+    one rule, and a retained fulfilment costs nothing — it is already met, so
+    it blocks nothing. A rule that only ever preserved refusals would itself be
+    a signal, and asymmetric bookkeeping is how the next reader talks
+    themselves out of it.
+
+    Retained conditions are appended after the incoming list, in the order they
+    already had. Threading them back into their original positions would need a
+    second ordering nobody stated; appending keeps the step's own list readable
+    as the step wrote it, with what it dropped visible underneath.
     """
     graded = {c.key: c for c in existing if c.is_answered}
     out: list[DreamCondition] = []
+    restated: set[tuple[str, ...]] = set()
     for condition in incoming:
         was = graded.get(condition.key)
         if was is None:
             out.append(condition)
             continue
+        restated.add(condition.key)
         out.append(
             replace(
                 condition,
@@ -2044,6 +2077,25 @@ def carry_forward_grading(
                 ruled_out=was.ruled_out,
             )
         )
+
+    dropped = [c for c in existing if c.is_answered and c.key not in restated]
+    if dropped:
+        # Loud rather than silent. Retaining these quietly would swap one
+        # surprise for another: a reader comparing the model's step against the
+        # stored dream would find conditions the step never wrote, with nothing
+        # saying where they came from.
+        log.warning(
+            "dream_conditions_answered_but_omitted",
+            kept=[c.text or c.subject for c in dropped],
+            ruled_out=sum(1 for c in dropped if c.ruled_out),
+            detail=(
+                "A restated condition list left out claims that had already "
+                "been answered. They are kept: an answer is a record, and a "
+                "ruled-out condition is what stops a dream reaching the vault. "
+                "Dropping one would be a settled question un-asked by omission."
+            ),
+        )
+    out.extend(dropped)
     return out
 
 
