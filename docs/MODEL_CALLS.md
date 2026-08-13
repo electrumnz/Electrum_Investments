@@ -668,12 +668,13 @@ Of the two extra preconditions this audit added:
 - **Read the served model off the response and treat a mismatch as a failed
   cycle** — STILL OPEN. `ModelClient.model_id` is recorded, so what was
   *requested* is on file; nothing reads what was *served*.
-- **Fix the quiet-cycle hole** — HALF DONE, and the open half is named in
-  `TODO.md` item 23. A reply carrying no tool call is now a hard failure, which
-  closes the route this move created. A tool call that IS made and comes back
-  with `assessments: []` reaches the same place by a different road and is still
-  recorded as a considered decision. `llama3.3-70b-instruct` does exactly that
-  on 6 of 10 samples.
+- **Fix the quiet-cycle hole** — DONE, both entrances. A reply carrying no tool
+  call is a hard failure, which closes the route this move created; and a tool
+  call that IS made and comes back with `assessments: []` — which
+  `llama3.3-70b-instruct` does on 6 of 10 samples — now fails the cycle too,
+  through `refuse_a_decision_that_considered_nothing`. That one had to live in
+  `cmd_loop` rather than in the schema, because the fault is a ratio and only
+  the loop knows the denominator.
 
 Vercel is moot — see `TODO.md` item 18, the gateway is dropped on one-account
 grounds. What follows is the original assessment.

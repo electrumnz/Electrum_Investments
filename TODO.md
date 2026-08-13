@@ -1920,10 +1920,54 @@ Staged so nothing that can lose money moves first:
 
 ---
 
-## 23. The quiet-cycle hole has a second entrance, and it is still open
+## 23. DONE — the quiet-cycle hole's second entrance is closed too
 
-Found while closing the first one, and named in `docs/MODEL_CALLS.md` as a
-precondition for moving `propose` — half met.
+**Shipped.** `refuse_a_decision_that_considered_nothing` raises
+`ConsideredNothing` into the existing `model_call_failed` path, so the cycle is
+skipped and no `cycle_complete` is emitted.
+
+**It lives in `main.py` rather than in the schema or the transport, because the
+fault is a RATIO and only `cmd_loop` knows the denominator.**
+
+**Which denominator was the real decision**, and this item did not name it.
+Three readings behave differently on a degraded cycle:
+
+- `symbols_in_play` is what the loop INTENDED to look at, so a cycle whose bars
+  all failed would be refused as a model fault when it was a feed fault — on
+  exactly the cycle where the data is already degraded.
+- `ticks` is over-broad the other way: a symbol with a quote and no history is
+  one the context tells the model to propose nothing on, so demanding an
+  assessment for it would fail the cycle for obeying an instruction.
+- **`indicators` wins.** It is what the output contract is literally written
+  against — *"one entry for every symbol you were given indicators for"* — and
+  is the same object handed to `build_market_context`, so the check cannot
+  drift from what was actually rendered.
+
+**Zero is the trip, never a shortfall.** Three of six is a judgement a reader
+can argue with on the Decisions page; none of six is a record indistinguishable
+from never looking. The ratio goes on the heartbeat instead, with `symbols_shown`
+and `assessments` on the `cycle_complete` line — a partial answer is deliberately
+allowed through, and nothing else on that line would have shown it.
+
+**`position_plans` is REPORTED, not refused**, and the distinction is the stake
+rather than the shape. The fidelity probe grades both as `empty_arrays`, but an
+unassessed symbol is unrecoverable — the audit log is the only place a
+considered-and-passed symbol is ever written down — while an unplanned position
+is in the journal, on the Board, in `reconcile`, in `stop_watch` and behind a
+resting stop leg, and the plan is advisory unless `position_actions` is on. So
+the standing rule applies: report the gap, do not refuse. Refusing would also
+throw away a cycle carrying good assessments and a sound proposal, costing a
+trade to punish a missing sentence.
+
+**No fixture was weakened to make this pass**, which was the risk. Every
+existing loop test runs against a bare `MockBroker`, which raises from
+`get_daily_bars` for an unseeded symbol, so `indicators` is genuinely empty and
+zero assessments is the correct answer there. That is asserted rather than
+assumed.
+
+The original item follows.
+
+## 23a. The original item, kept for the reasoning
 
 `assessments` exists so that "nothing met the conditions" and "the loop never
 looked at QQQ" are different entries afterwards. A reply with no tool call at

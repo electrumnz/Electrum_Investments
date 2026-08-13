@@ -904,10 +904,28 @@ that never looked. `qwen3.8-max` returned prose on 2 of 3 attempts against the
 real schema *with `tool_choice` forcing the call*, so this is live rather than
 hypothetical.
 
-**The same hole has a second entrance, and it is still open.** A tool call that
-IS made and comes back with `assessments: []` after being shown six symbols
-arrives at the identical place. `llama3.3-70b-instruct` does that on 6 of 10
-samples, in 2.2 seconds, and passes validation. `TODO.md` item 23 holds it.
+**The same hole has a second entrance, and it is CLOSED too.** A tool call that
+IS made and comes back with `assessments: []` after being shown symbols arrives
+at the identical place — `llama3.3-70b-instruct` does that on 6 of 10 samples,
+in 2.2 seconds, and passes validation. `refuse_a_decision_that_considered_nothing`
+raises `ConsideredNothing` into the existing `model_call_failed` path.
+
+It lives in `main.py` rather than in the schema or the transport **because the
+fault is a RATIO and only `cmd_loop` knows the denominator** — and which
+denominator is the whole decision. It is `indicators`, not the symbols the loop
+intended to look at (a cycle whose bars all failed would be refused as a model
+fault when it was a feed fault) and not the ones carrying a quote (a symbol with
+no history is one the context tells the model to propose nothing on, so
+demanding an assessment for it would fail the cycle for obeying an instruction).
+`indicators` is what the output contract is written against and is the same
+object handed to `build_market_context`, so the check cannot drift from what was
+rendered.
+
+**Zero is the trip, never a shortfall**, and `position_plans` is reported rather
+than refused. Same shape, different stake: an unassessed symbol is
+unrecoverable, because the audit log is the only place a considered-and-passed
+symbol is ever written down, while an unplanned position is in the journal, on
+the Board, in `reconcile`, in `stop_watch` and behind a resting stop leg.
 
 Three refusals rather than one, kept apart because they are three different
 findings about the far end: no tool call at all, a tool call whose argument KEYS
