@@ -5704,6 +5704,54 @@ def test_a_shelf_with_nothing_gradeable_does_not_read_like_a_shelf_being_patient
     assert "cycles_available" not in card
 
 
+def test_a_shelf_waiting_only_on_a_person_is_a_third_state_of_its_own():
+    """Between "the market will settle this" and "nothing will".
+
+    Every unsettled claim here is answerable — by somebody going and looking —
+    so the shelf is not stuck, and saying it cannot be settled by anybody would
+    refute claims nobody has been asked yet. It is also not waiting on the
+    market, so the `cycles_available` caveat has no business here either.
+    """
+    card = _grading_card([_prophecy([_observation()])])
+
+    assert "Nothing on this shelf is waiting on the market" in card
+    assert "Nothing on this shelf can be settled by anybody" not in card
+    assert "cycles_available" not in card
+    # And the count sits under the person, not under the market.
+    assert ">1</b><small>only you settle these" in card
+    assert ">0</b><small>nothing here waits on the market" in card
+
+
+def test_an_overdue_observation_colours_the_tile_without_refuting_the_claim():
+    """OVERDUE is a fact about the LOOKING, never about the world — so the tile
+    is marked and the claim keeps its place in the count that is waiting."""
+    card = _grading_card(
+        [_prophecy([_observation(observe_by=GRADING_NOW - timedelta(days=4))])]
+    )
+
+    assert '<b class="alert">1</b><small>1 past the review date' in card
+    # Still counted as waiting on somebody, never moved into the settled tally:
+    # a review nobody got to is not a claim that was answered.
+    assert "0 conditions have been settled here" in card
+
+
+def test_a_prophecy_shelf_carrying_no_conditions_is_not_reported_as_all_settleable():
+    """A nought in the "nothing can settle" tile has two meanings, and only one
+    of them is good news.
+
+    `promotion_for` needs one pre-registered claim to leave the workbench, so a
+    conditionless prophecy arrives by hand or by a restatement wiping the list.
+    "Every claim here is settleable" over no claims at all is the missing-versus-
+    zero failure, and `all_conditions_met` being False on an empty list is the
+    same rule one layer down.
+    """
+    card = _grading_card([_prophecy([])])
+
+    assert "No prophecy on this shelf carries a condition at all" in card
+    assert "every claim here is settleable" not in card
+    assert "no claim to settle" in card
+
+
 def test_a_shelf_waiting_on_figures_says_which_count_this_page_cannot_give():
     """The opposite finding, and the half that is NOT establishable here.
 

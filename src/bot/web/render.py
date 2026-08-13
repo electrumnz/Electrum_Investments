@@ -9278,6 +9278,13 @@ def _shelf_grading(dreams: Sequence[Dream], now: datetime) -> str:
 
     unanswered = on_figure + on_person + no_symbol + unregistered
     stuck = no_symbol + unregistered
+    # Nothing pre-registered ANYWHERE on the shelf is its own state, and it must
+    # not be reported as everything being settleable. `promotion_for` requires
+    # one pre-registered claim to leave the workbench, so this can only arrive
+    # by hand or by a restatement wiping the list — and an absence of conditions
+    # is never conditions satisfied, which is what `all_conditions_met` being
+    # False on an empty list already encodes.
+    total = settled + unanswered
 
     # Pairs rather than a mapping keyed by the dream: `Dream` is a mutable
     # dataclass and so unhashable, and the alternative — keying by `id`, which
@@ -9324,13 +9331,26 @@ def _shelf_grading(dreams: Sequence[Dream], now: datetime) -> str:
         + stat(
             "Nothing can settle",
             str(stuck),
-            "these will never fire" if stuck else "every claim here is settleable",
-            "alert" if stuck else "",
+            # Three captions, because a nought here has two very different
+            # meanings: every claim is settleable, or there is no claim.
+            "these will never fire"
+            if stuck
+            else ("every claim here is settleable" if total else "no claim to settle"),
+            "alert" if stuck or not total else "",
         )
     )
 
     notes = ""
-    if unanswered and not on_figure:
+    if not total:
+        notes += (
+            '<p class="note"><span class="alert">No prophecy on this shelf '
+            "carries a condition at all.</span> Leaving the workbench takes one "
+            "pre-registered claim, so a shelf in this state was either moved by "
+            "hand or had its conditions restated away. An absence of conditions "
+            "is not conditions satisfied, and nothing can carry these to the "
+            "vault.</p>"
+        )
+    elif unanswered and not on_figure:
         # The finding that used to be invisible. Stated flatly, because it is a
         # fact about what is stored rather than a guess about the world: not one
         # unsettled claim on this shelf names a figure the loop can look up, so
