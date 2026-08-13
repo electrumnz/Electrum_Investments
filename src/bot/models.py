@@ -1575,3 +1575,30 @@ class Decision(BaseModel):
     # unknown and a cycle served by the model that was asked for are different
     # findings, and only one of them is reassuring.
     served_model_id: str | None = None
+
+    # And what was ASKED for, so the two can be compared later by anything
+    # reading this record back. Storing only the served id would make the
+    # Decisions page unable to answer the one question the field exists for —
+    # it would have to compare against whatever model the process is
+    # configured for TODAY, which is a different fact about a different moment.
+    #
+    # Both `None` on a record written before either field existed. That is the
+    # honest reading and it must not be filled in from the current
+    # configuration: a cycle whose model nobody recorded and a cycle served by
+    # the model that was asked for are different findings.
+    requested_model_id: str | None = None
+
+    @property
+    def served_as_requested(self) -> bool | None:
+        """Did the endpoint answer with the model this cycle asked for?
+
+        Three-valued for the same reason `CallUsage.served_as_requested` is:
+        `None` means nobody can tell, which must not read as agreement. It
+        matters on the Decisions page in particular because that page prints a
+        COST, and the cost was computed from the price sheet of the model that
+        was asked for — so a substitution makes the figure beside it wrong with
+        nothing saying so.
+        """
+        if self.served_model_id is None or self.requested_model_id is None:
+            return None
+        return self.served_model_id == self.requested_model_id

@@ -411,6 +411,7 @@ def cmd_smoketest(env: Env, rules: Rules, *, force_mock: bool = False) -> int:
                 claude_cached_tokens=usage.cache_read_tokens,
                 estimated_cost_usd=_recorded_cost(usage.estimated_cost_usd),
                 served_model_id=usage.served_model,
+                requested_model_id=usage.requested_model,
                 notes=f"smoketest assessment: {decision.market_assessment}",
             )
         )
@@ -1367,6 +1368,7 @@ def cmd_loop(
                     # decision three months old still has to be able to answer
                     # "which weights sized this position".
                     served_model_id=usage.served_model,
+                    requested_model_id=usage.requested_model,
                     notes=decision.market_assessment,
                 )
             )

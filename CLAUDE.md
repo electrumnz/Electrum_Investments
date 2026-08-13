@@ -716,10 +716,26 @@ Miss it and the cap silently has nothing to count. This was a real bug, fixed in
 `14b88c8`. A held position with no journal entry has an unknowable stop, so its
 risk is reported as **missing** rather than guessed at.
 
-**One gate now goes further and REFUSES on that missing figure** — the per-class
-total-risk cap, where an unknown in the class means the cap cannot be enforced
-at all. Reporting is still the rule everywhere else; that one is the stated
-exception, not the new default.
+**TWO gates now go further and REFUSE on that missing figure**, and the second
+one is the account-wide 2%. The per-class total-risk cap was the first, where
+an unknown in the class means the cap cannot be enforced at all.
+`_total_risk` joined it because the same argument turned out to apply to the
+portfolio rule and nothing was making it — measured against the shipped
+config, an unknown position let a proposal through onto a book already at
+2.79% of a 2% cap, because `max_class_total_risk_pct` is configured on crypto
+alone and crypto is disabled. So in the shipped configuration NO gate refused
+on missing risk, while this file said one did.
+
+**The live consequence is real and is the right way round.** While a held
+position has no journal row, nothing new opens. That is recoverable by closing
+the position or journalling it, and it is better than a 2% rule that binds
+only when the paperwork happens to be complete.
+
+Reporting is still the rule everywhere else — `reconcile`'s
+`risk_is_understated`, `stops_unchecked`, `calendar_degraded`. What separates
+these two is that they are the gates whose ARITHMETIC is the missing number:
+a cap cannot be applied to a total it cannot compute, so there is no partial
+answer to report.
 
 ### A resting stop whose level nobody can read is most of the way to no stop
 

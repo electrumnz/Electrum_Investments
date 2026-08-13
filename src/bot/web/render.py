@@ -5987,10 +5987,30 @@ def _cycle(
         # writes a `model_cost_unknown` event naming it, because an inference
         # drawn here is not a record.
         priced = f"${d.estimated_cost_usd:.4f}" if d.estimated_cost_usd else "cost unknown"
+        # **A price is computed from the price sheet of the model that was
+        # ASKED for, so a substitution makes the figure beside it wrong.** The
+        # cost, the tokens and every proposal below came back from whatever
+        # actually answered — a catalogue aliasing a retired id, a proxy named
+        # in `ANTHROPIC_BASE_URL` routing elsewhere — and none of that raises,
+        # so the cycle reads as entirely ordinary. Named here rather than left
+        # to a log line that has long since scrolled.
+        #
+        # Only when the two are BOTH on file and disagree. `served_as_requested`
+        # is `None` for every record written before the fields existed, and
+        # rendering that as a mismatch would manufacture a finding about a
+        # cycle nobody recorded anything about.
+        substituted = (
+            f' &middot; <span class="alert">served by '
+            f"{_e(d.served_model_id or '')}, not the "
+            f"{_e(d.requested_model_id or '')} this cost is priced from</span>"
+            if d.served_as_requested is False
+            else ""
+        )
         cost = (
             f"{d.claude_input_tokens:,} in / {d.claude_output_tokens:,} out"
             + (f" / {d.claude_cached_tokens:,} cached" if d.claude_cached_tokens else "")
             + f" &middot; {priced}"
+            + substituted
         )
 
     # `<details>`, and the head line is its `<summary>`.
