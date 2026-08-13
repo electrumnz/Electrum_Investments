@@ -23,8 +23,18 @@ EnvironmentFile=/opt/mudhorn/.env
 ExecStart=/opt/mudhorn/.venv/bin/electrum-bot dream
 
 # A dream is bought deep rather than fast: high effort, a large thinking budget
-# and a 900-second client timeout. This has to outlast that, or systemd kills
-# the call the moment it starts being worth having.
+# and DREAM_TIMEOUT_SECONDS (240s) with one retry, so about eight minutes at
+# worst. This has to outlast that, or systemd kills the call the moment it
+# starts being worth having. The figure here read 900 seconds until the client
+# bound was cut; the headroom was always the point, so the value stands and the
+# sentence is what was wrong.
+#
+# Which ENDPOINT it reaches is `.env`'s business rather than this unit's:
+# DO_INFERENCE_KEY set means DigitalOcean, unset means Anthropic, and the
+# command authenticates with that provider's own key and refuses rather than
+# falling back to the other one. It exits non-zero with the reason when the
+# configured provider has no credential, which is what makes a missing key show
+# up in `systemctl --failed` instead of as a quiet morning.
 TimeoutStartSec=1200
 
 # This one places nothing and reaches no broker, so it can be sandboxed harder

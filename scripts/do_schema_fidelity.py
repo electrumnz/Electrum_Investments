@@ -85,7 +85,7 @@ from pydantic import BaseModel, ValidationError
 # `.venv/bin/python` like the rest of the harnesses and a path hack would only
 # mask a broken install.
 from bot.dreamer import DreamStep
-from bot.model_client import ModelDecision
+from bot.model_client import ModelDecision, _missing_required
 
 DEFAULT_BASE_URL = "https://inference.do-ai.run"
 
@@ -219,7 +219,9 @@ def _looks_corrupt(args: dict[str, Any]) -> bool:
     a key nobody named — a check that merely looked for one field it recognised
     would pass a payload that is nine-tenths markup.
     """
-    return any(("<" in k or ">" in k or k.strip() != k) for k in args)
+    return any(
+        not isinstance(k, str) or "<" in k or ">" in k or k.strip() != k for k in args
+    )
 
 
 def _grade(body_text: str, status: int, schema_model: type[BaseModel], seconds: float) -> Sample:
@@ -244,6 +246,22 @@ def _grade(body_text: str, status: int, schema_model: type[BaseModel], seconds: 
         return Sample("corrupt", seconds, repr(args)[:160])
     if _looks_corrupt(args):
         return Sample("corrupt", seconds, repr(sorted(args)[:3])[:160])
+
+    # **Graded under the rule the TRANSPORT actually enforces, which is not
+    # `model_validate` alone.** `EVERY_FIELD_REQUIRED` puts every property into
+    # the sent schema's `required` list, and `model_validate` honours the Python
+    # defaults instead — so an OMITTED key was not a rejection here, it became a
+    # value invented on this side and counted as a pass. Twenty-four properties
+    # across the five shapes could go missing that way, and a model that omits
+    # `action` on a `PositionPlan` was scoring 10/10 while the loop would have
+    # recorded `hold` as though the model had said it.
+    #
+    # A procurement decision has to be made under the rule the code enforces,
+    # or the table is measuring a laxer system than the one that will run.
+    schema_json = schema_model.model_json_schema()
+    gaps = _missing_required(args, schema_json, schema_json.get("$defs", {}))
+    if gaps:
+        return Sample("omitted", seconds, ", ".join(sorted(gaps))[:200])
 
     try:
         parsed = schema_model.model_validate(args)

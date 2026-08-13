@@ -18,9 +18,10 @@ from bot.dreaming import DreamStore
 from bot.journal import Journal
 from bot.web import live
 from bot.web.app import build_app
-from bot.web.auth import COOKIE_NAME, MAX_ATTEMPTS, SessionStore
+from bot.web.auth import ATTEMPT_WINDOW_SECONDS, COOKIE_NAME, MAX_ATTEMPTS, SessionStore
 
 pytest.importorskip("fastapi")
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 PASSWORD = "correct-horse-battery-staple"
@@ -237,9 +238,186 @@ def test_guessing_is_rate_limited(guarded):
     blocked = guarded.post("/login", data={"password": "wrong"})
     assert blocked.status_code == 429
 
-    # And the lockout does not distinguish itself from a wrong password by
-    # letting the correct one through while throttled.
-    assert guarded.post("/login", data={"password": PASSWORD}).status_code == 429
+    # This test used to close with `PASSWORD` also getting a 429, described as
+    # the lockout refusing to distinguish itself from a wrong password. That
+    # assertion pinned an availability bug as though it were a feature, and it
+    # is inverted deliberately in the test below rather than deleted quietly.
+
+
+# ------------------------------------------- who the throttle is allowed to stop
+
+
+def test_the_operator_gets_in_while_a_guesser_is_hammering_the_same_bucket(guarded):
+    """The bug this throttle was rebuilt for, and the whole point of the change.
+
+    Behind a Tailscale Funnel every request arrives on loopback from the proxy,
+    so a bucket keyed on `request.client.host` is one bucket for the entire
+    internet. Five wrong passwords from a stranger therefore refused the
+    OPERATOR's correct one, for as long as the stranger cared to keep going: a
+    free, repeatable denial of the one surface whose job is watching the
+    account, triggerable from anywhere by anybody.
+
+    The throttle exists to stop guessing, and a correct password is not a
+    guess. So the budget is consulted only after the answer is known wrong.
+    """
+    for _ in range(MAX_ATTEMPTS * 4):
+        hammering = guarded.post("/login", data={"password": "wrong"})
+        assert hammering.status_code in (401, 429), "a guess must never get in"
+
+    opened = guarded.post("/login", data={"password": PASSWORD})
+
+    assert opened.status_code == 303
+    assert guarded.get("/", headers={"accept": "text/html"}).status_code == 200
+
+
+def test_five_wrong_passwords_do_not_become_unlimited_wrong_passwords(guarded):
+    """The other half, or fixing the lockout would just be deleting the limit.
+
+    Letting the RIGHT answer through is not the same as letting wrong ones
+    through. Every guess past the budget is refused identically and none of
+    them can mint a session — what an attacker gains is the ability to keep
+    submitting, which is stated as the trade-off in `auth.py` rather than
+    hidden.
+    """
+    for _ in range(MAX_ATTEMPTS):
+        guarded.post("/login", data={"password": "wrong"})
+
+    for n in range(50):
+        refused = guarded.post("/login", data={"password": f"guess-{n}"})
+        assert refused.status_code == 429
+        assert COOKIE_NAME not in refused.cookies
+
+    assert guarded.get("/", headers={"accept": "text/html"}).status_code == 303
+
+
+def test_a_forged_x_forwarded_for_does_not_buy_a_fresh_budget(guarded):
+    """A rotated header must not reset the count.
+
+    **This test alone would be worth very little, and that is worth writing
+    down.** `TestClient` never runs `uvicorn`'s `ProxyHeadersMiddleware`, so
+    `request.client.host` is the same string here whatever this header says —
+    which means a per-address bucket passes this too. It is the test double
+    failing differently from the thing it doubles, which is how the old
+    behaviour got recorded as audited-and-clean.
+
+    `test_the_budget_is_one_budget_and_not_one_per_address` is the assertion
+    that actually holds the property; this one holds the route.
+    """
+    for n in range(MAX_ATTEMPTS):
+        guarded.post(
+            "/login",
+            data={"password": "wrong"},
+            headers={"X-Forwarded-For": f"203.0.113.{n}"},
+        )
+
+    blocked = guarded.post(
+        "/login",
+        data={"password": "wrong"},
+        headers={"X-Forwarded-For": "203.0.113.99"},
+    )
+
+    assert blocked.status_code == 429
+
+
+def test_the_budget_is_one_budget_and_not_one_per_address():
+    """Rotating the client key must buy nothing, because it is not a key.
+
+    In production `uvicorn` rewrites `scope["client"]` out of
+    `X-Forwarded-For` — `proxy_headers=True` and `forwarded_allow_ips` of
+    `127.0.0.1` are its defaults, and loopback is exactly where a Funnel
+    connects from. So the address `app.py` reads is not reliably the visitor,
+    and a budget keyed on it is a budget an attacker may be able to reset per
+    request. This asserts the counting happens somewhere no header reaches.
+    """
+    store = SessionStore(password=PASSWORD)
+    for n in range(MAX_ATTEMPTS):
+        store.record_failure(f"203.0.113.{n}")
+
+    with pytest.raises(HTTPException) as refused:
+        store.check_password("a guess from a brand new address")
+
+    assert refused.value.status_code == 429
+
+
+def test_a_correct_password_never_consults_the_budget():
+    """However spent it is. This is the availability guarantee in one line."""
+    store = SessionStore(password=PASSWORD)
+    for _ in range(MAX_ATTEMPTS * 10):
+        store.record_failure("127.0.0.1")
+
+    assert store.check_password(PASSWORD) is True
+
+
+def test_nothing_is_refused_before_the_password_has_been_read():
+    """`throttled` is asked before the candidate is compared, and at that point
+    the operator and a guesser are indistinguishable — so a refusal there is
+    aimed at both, which is the lockout.
+
+    Pinned rather than left as a quiet `return False`, so that re-arming it
+    fails the suite instead of silently restoring the bug.
+    """
+    store = SessionStore(password=PASSWORD)
+    for _ in range(MAX_ATTEMPTS * 10):
+        store.record_failure("127.0.0.1")
+
+    assert store.throttled("127.0.0.1") is False
+
+
+def test_the_budget_decays_so_a_mistyped_password_is_not_permanent():
+    """A refused attempt is not recorded, so the window empties on its own.
+
+    Otherwise a hammering that never stops would hold the budget shut for ever
+    and the cheap 401 tier would never come back — harmless to the operator
+    now, but it would make the window a fiction.
+    """
+    store = SessionStore(password=PASSWORD)
+    for _ in range(MAX_ATTEMPTS):
+        store.record_failure("127.0.0.1")
+    store._wrong_answers = [
+        t - ATTEMPT_WINDOW_SECONDS - 1 for t in store._wrong_answers
+    ]
+
+    assert store.check_password("wrong") is False, "an expired budget must not refuse"
+
+
+def test_the_module_does_not_claim_a_spent_budget_stops_a_lucky_guess():
+    """The docstring said "past the budget every one is refused with a 429 and
+    none can ever produce a session", and that is false about the only guess
+    that matters.
+
+    `check_password` compares BEFORE it reads the budget, deliberately — that
+    is the whole fix for the Funnel lockout — so a correct candidate is
+    answered as correct however many wrong ones went before it. What is
+    therefore surrendered is the rate limit as a brute-force defence, entire:
+    guessing is bounded by request throughput and by nothing in this file.
+
+    That is a defensible trade and it is argued in place. It is not defensible
+    for the file to describe itself as still holding a bound it does not hold,
+    on the one surface where a wrong claim about a guarantee is the whole risk.
+    Pinned by inspection, in the same shape as
+    `test_password_comparison_is_constant_time`, because the property being
+    defended here is a SENTENCE.
+    """
+    import inspect
+
+    import bot.web.auth as auth_module
+
+    doc = inspect.getdoc(auth_module) or ""
+
+    assert "none can ever produce a session" not in doc
+    assert "brute-force defence" in doc
+
+    # And the behaviour the sentence now describes, so the two cannot drift.
+    store = SessionStore(password=PASSWORD)
+    for _ in range(MAX_ATTEMPTS * 3):
+        store.record_failure("127.0.0.1")
+
+    assert store.check_password(PASSWORD) is True, (
+        "a right answer past the budget is admitted; that is the trade, and it "
+        "is why the docstring may not claim otherwise"
+    )
+    with pytest.raises(HTTPException):
+        store.check_password("still wrong")
 
 
 # ------------------------------------------------- the loopback deployment

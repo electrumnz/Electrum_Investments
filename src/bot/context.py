@@ -425,6 +425,11 @@ VALUE_UNIT = "position value"
 # spelling is what keeps a test and a renderer talking about the same state.
 BUDGET_SPENT = "BUDGET SPENT"
 HEADROOM_UNKNOWN = "HEADROOM UNKNOWN"
+# Deliberately NOT one of the other two. "Spent" and "unknown" are both answers
+# about a budget; this is the account being shut, which is a different sentence
+# and must not be read as a very small budget or as a figure nobody could
+# establish.
+ACCOUNT_HALTED = "ACCOUNT HALTED"
 
 # **The words start above the rounding boundary, not at zero.** Every figure in
 # this document prints at two decimal places, so a headroom of $0.004 is a
@@ -586,7 +591,15 @@ def sizing_ceilings(
     total_pct = rules.account.max_total_risk_pct
     total_cap = equity * total_pct / 100
     caveat = ""
+    # "already at risk" claims the subtracted figure is the WHOLE of what is at
+    # risk. With a position the journal has never seen it is not, and on that
+    # account the figure is frequently $0.00 — so the basis would assert that
+    # nothing is at risk, one line above the caveat correcting it. The phrasing
+    # narrows to what the journal can account for, which is all the subtraction
+    # ever measured.
+    subtracted = f"${account.open_risk_usd:,.2f} already at risk"
     if account.symbols_with_unknown_risk:
+        subtracted = f"${account.open_risk_usd:,.2f} the journal can account for"
         # **The figure is still rendered, and it is still the gate's own.**
         # `_total_risk` does not refuse on an unknown — it computes with the
         # understated total — so a ceiling that went `HEADROOM UNKNOWN` here
@@ -606,10 +619,7 @@ def sizing_ceilings(
             label="Combined risk left across ALL open positions",
             unit=RISK_UNIT,
             headroom_usd=total_cap - account.open_risk_usd,
-            basis=(
-                f"${total_cap:,.2f} at {total_pct:.2f}% of equity, less "
-                f"${account.open_risk_usd:,.2f} already at risk"
-            ),
+            basis=f"${total_cap:,.2f} at {total_pct:.2f}% of equity, less {subtracted}",
             spent_note=(
                 f"the {total_pct:.2f}% portfolio cap is ${total_cap:,.2f} and "
                 f"${account.open_risk_usd:,.2f} is already at risk across open "
@@ -826,6 +836,22 @@ def _tightest_line(ceilings: list[Ceiling], class_key: str, unit: str) -> str:
     matters. An unknown could be smaller than anything established, so taking a
     minimum over what happens to be known would answer a question nobody asked
     and answer it optimistically.
+
+    **A caveat on ANY applicable ceiling qualifies this line, including when
+    some other ceiling is the one that won.** This is a claim about the whole
+    set — the smallest of them — so a member that is overstated can be
+    genuinely smaller than the figure printed here, and the reader has no way to
+    tell from this line which member was chosen. Carried on the line itself
+    rather than left to the note four lines above it: this is the summary, it is
+    the line a size gets divided out of, and a qualification a reader has to
+    scroll for is a qualification that only reaches the people who did not need
+    it.
+
+    The unknown and spent branches need no such qualification and deliberately
+    return before it. Both are already stronger statements than "this may be
+    lower" — nothing fits at any size, and nothing can be established at all —
+    so adding a hedge to either would soften the two answers that must not be
+    softened.
     """
     applicable = [c for c in ceilings if c.unit == unit and c.applies_to(class_key)]
     if not applicable:
@@ -850,10 +876,26 @@ def _tightest_line(ceilings: list[Ceiling], class_key: str, unit: str) -> str:
 
     known = [(c.headroom_usd, c.label) for c in applicable if c.headroom_usd is not None]
     smallest, label = min(known, key=lambda pair: pair[0])
-    return (
+    line = (
         f"- Tightest {unit} ceiling for a {class_key} trade: ${smallest:,.2f} "
         f"— {label.lower()}."
     )
+
+    overstated = [c for c in applicable if c.caveat]
+    if overstated:
+        # The symbols are named once, on the qualified ceiling's own line, so
+        # there is one place the set of unjournalled positions is written down.
+        # What is repeated here is the DIRECTION of the error, which is the part
+        # that changes what a reader does with this number.
+        names = "; ".join(c.label.lower() for c in overstated)
+        line += (
+            f" UPPER BOUND, not a measurement: {names} is OVERSTATED (see the "
+            f"note above it), so the true tightest figure may be lower than "
+            f"this. The gate will use the same overstated figure and will not "
+            f"refuse you for it — the correct response to an unknown is a "
+            f"smaller size or no trade, never a larger one."
+        )
+    return line
 
 
 def render_sizing_ceilings(
@@ -873,6 +915,23 @@ def render_sizing_ceilings(
     The block states its own limits at the end rather than implying
     completeness. These are ceilings on SIZE, and half the gates in `risk.py`
     are not about size at all.
+
+    **One of those non-size gates is stated here rather than only in that list,
+    because it is HALTING and it is visible from this snapshot.**
+    `RiskGate._equity_floor` refuses every proposal once equity drops below
+    `min_equity_floor_usd`, and audit drove it: at $89,999 against the shipped
+    $90,000 floor this block rendered a $899.99 risk budget and a $44,999.50
+    value budget, every figure correct as a size limit, while the gate refused a
+    proposal sized at exactly those. The floor appears nowhere in the cached
+    system prompt either, so an agent in that state had no way whatever to know
+    the account was halted — a budget quoted to an account that may open
+    nothing is the confident partial answer this repository exists to refuse,
+    arriving through the furniture.
+
+    The other halting gate, the daily-loss kill switch, is deliberately NOT
+    stated as a fact: it is state held inside `RiskGate` and is not on the
+    snapshot, so this could only guess at it. It is named in the closing list
+    instead, which is the honest half.
     """
     out = ["## Sizing ceilings, in dollars (computed — do not re-derive them)"]
 
@@ -886,6 +945,20 @@ def render_sizing_ceilings(
             "Propose nothing until the account reads back."
         )
         return out
+
+    # Ahead of every figure it qualifies, for the same reason a stale reading is
+    # announced above the banners that describe it: each line below is a
+    # statement about what may be opened, and all of them are moot.
+    floor = rules.account.min_equity_floor_usd
+    if account.equity_usd < floor:
+        out.append(
+            f"- {ACCOUNT_HALTED} — equity ${account.equity_usd:,.2f} is below the "
+            f"${floor:,.2f} floor in config/rules.yaml, so the gate REFUSES every "
+            f"new position whatever it is sized at. The figures below are still "
+            f"the size limits and they are not permission: nothing opens until "
+            f"equity is back above the floor. Closing a position and moving a "
+            f"stop are never gated and are unaffected."
+        )
 
     ceilings = sizing_ceilings(
         account=account, rules=rules, granted_symbols=granted_symbols
@@ -937,11 +1010,18 @@ def render_sizing_ceilings(
                 out.append(line)
 
     out.append("")
+    # The two HALTING gates lead, because they are a different kind of refusal
+    # from the rest of this list: the others refuse a trade, these refuse every
+    # trade. Both were missing, and both are the ones an agent most needs to
+    # know are there — a rejection it cannot see coming is one it will keep
+    # walking into every fifteen minutes.
     out.append(
-        "These bound SIZE only. The session window, the news blackout, the "
-        "per-symbol cooldown, the daily and weekly trade counts, the "
-        "concurrent-position limit and a consecutive-loss stand-down can each "
-        "still refuse a trade that fits every figure above."
+        "These bound SIZE only. The equity floor and the daily-loss kill switch "
+        "each stop the account opening ANYTHING, whatever it is sized at. The "
+        "session window, the news blackout, the per-symbol cooldown, the daily "
+        "and weekly trade counts, the concurrent-position limit and a "
+        "consecutive-loss stand-down can each still refuse a trade that fits "
+        "every figure above."
     )
     return out
 

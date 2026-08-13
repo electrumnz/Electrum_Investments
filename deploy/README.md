@@ -559,17 +559,24 @@ Messages API on `https://inference.do-ai.run/v1/messages`, so the three souls
 can be pointed at it by exporting two variables — no Python change, no rebuild.
 The research and the arithmetic are in `docs/DROPLET_AI.md`.
 
-**Be exact about what moves.** This is that document's phase 1 and nothing else:
+**Be exact about what moves, because there are now TWO keys in two places and
+they are not interchangeable.**
 
-| Path | Moves? | Why |
+| Path | Endpoint chosen by | Key lives in |
 |---|---|---|
-| Yoda, Grogu, the Armorer (Hermes) | **Yes** | None of them proposes an order, and three different jobs genuinely want different models |
-| `electrum-bot dream` / `confer` | Not yet | Both use server-enforced structured output, which DigitalOcean does not document. A later decision, on its own evidence |
-| The trading loop (`claude.propose`) | **Never** | DigitalOcean charges Anthropic's *exact list price*, so it saves nothing — and it would trade a server-enforced schema on the one call that produces order quantities and stop prices |
+| Yoda, Grogu, the Armorer (Hermes) | `DO_INFERENCE_KEY` in the **hermes** account's own `inference.env` | `/home/hermes/inference.env`, `/home/hermes/dreamer/inference.env` |
+| The loop, `dream` and `confer` (Python) | `DO_INFERENCE_KEY` in **`/opt/mudhorn/.env`** | `/opt/mudhorn/.env` |
 
-So `DO_INFERENCE_KEY` in `/opt/mudhorn/.env` is a declaration for later. It
-changes no behaviour today and every startup line built from it says
-`NOT IN FORCE`, which is the truth rather than a warning.
+Setting one does not set the other, and that separation is the user split doing
+its job rather than duplication to tidy up: `hermes` cannot read
+`/opt/mudhorn/.env`, so the agent that holds a shell holds no credential that
+reaches the broker.
+
+This section is the Hermes half. **The Python half is section "Pointing the
+loop, the dreamer and the conference at DigitalOcean" below** — it moved on
+13 Aug 2026, and it is not a base-URL swap: that endpoint accepts
+`output_config` with HTTP 200 and silently ignores it, so the schema is enforced
+by Pydantic on this side through a forced tool call.
 
 ### 1. The account, by hand
 
@@ -802,6 +809,70 @@ with exit 78 and a sentence saying what to fix — which surfaces on the Chat pa
 as the error, because `HermesBridge` returns the wrapper's stderr on a non-zero
 exit. Losing one chat message is the right price for never being told a swap
 happened when it did not.
+
+## Pointing the loop, the dreamer and the conference at DigitalOcean
+
+The Python half, moved 13 Aug 2026. Separate from the section above in every
+respect that matters: **a different key, in a different file, read by a
+different user, over a different transport.**
+
+### It is not a base-URL swap, and that is measured
+
+That endpoint accepts `output_config` — the field the Anthropic SDK sends for a
+server-enforced schema — with **HTTP 200 and silently ignores it**, returning
+prose. So `ModelClient` sends a **forced tool call** instead: one tool whose
+`input_schema` is the schema, `tool_choice` pinned to it, and the arguments
+validated on this side by Pydantic. The numbers still reject; what changes is
+that the rejection happens here.
+
+**A reply with no tool call fails the cycle.** It is not recorded as a quiet one,
+because an empty structured object parses as a decision that considered nothing.
+
+### What to put in `/opt/mudhorn/.env`
+
+```
+DO_INFERENCE_KEY=<a model access key, never a dop_v1_ token>
+DECISION_MODEL_ID=<the loop's model>
+DREAM_MODEL_ID=<the dreamer's and the conference's model>
+```
+
+**Naming the models is not optional.** Left unset they fall back to a Claude
+tier id, which this endpoint calls by another name and 403s on this account's
+tier — a guaranteed failure, so the command refuses at startup rather than
+failing on every cycle. `docs/DROPLET_AI.md` carries the fidelity table: which
+models actually hold the real schema across repeated calls.
+
+Read what that table does **not** measure before choosing from it. It grades
+whether a model can hold the SHAPE, never whether its reasoning is any good — a
+14B model can comply perfectly and propose nonsense, and `RiskGate` checks
+arithmetic rather than judgement. `scripts/agent_behaviour_live.py` is the
+harness for that half.
+
+### Check it took
+
+```sh
+sudo -u mudhorn /opt/mudhorn/.venv/bin/electrum-bot smoketest
+```
+
+The first line names the provider, the endpoint and the transport. That line is
+the only moment anyone can be told — a provider swap leaves no trace in a cycle
+line afterwards.
+
+Then watch `cached_tokens` on the first few `cycle_complete` lines. Prompt
+caching is **not documented** for `/v1/messages` at that endpoint and a dropped
+`cache_control` does not raise — it bills 10x on the system block, silently and
+forever. A run of cycles reading zero is the answer, and nothing needs building
+to ask the question.
+
+### Rollback
+
+Blank `DO_INFERENCE_KEY` in `/opt/mudhorn/.env` and restart the unit. Empty
+means Anthropic, which is the default and a fully supported configuration.
+
+Nothing falls back on its own, in either direction: a key that is set but
+unusable **refuses** rather than quietly answering from Anthropic. That would
+run, bill the wrong account, and leave nothing on any surface saying which model
+produced the orders.
 
 ## Backups
 

@@ -2063,3 +2063,607 @@ def test_a_pass_that_stated_no_cadence_says_so_instead_of_claiming_a_gap(tmp_pat
     assert "did not state its cadence" in answer.describe()
     # And it is not counted as a gap either, for the same reason.
     assert history.gaps == []
+
+
+# ------------------------------------------- which credential, and who refuses
+#
+# `smoketest`, `dream` and `confer` each asked whether ANTHROPIC_API_KEY was
+# set. With two possible endpoints that question is wrong in both directions,
+# and the loop asks a deliberately narrower one. These pin the asymmetry,
+# because it looks like an inconsistency and is the opposite of one.
+
+
+def _provider_env(**overrides: Any) -> Any:
+    from bot.config import Env
+
+    env = Env(_env_file=None)  # type: ignore[call-arg]
+    env.anthropic_api_key = ""
+    env.do_inference_key = ""
+    env.do_inference_base_url = ""
+    # Cleared for the same reason the three above are: whatever is in the
+    # environment of the machine running the suite must not decide which
+    # configuration a test is describing.
+    env.decision_model_id = ""
+    env.dream_model_id = ""
+    for key, value in overrides.items():
+        setattr(env, key, value)
+    return env
+
+
+def test_a_missing_key_is_reported_against_the_provider_that_would_read_it():
+    """The guard that said yes about a credential nothing was going to use.
+
+    Both directions are checked, and the second is the one that hurts.
+
+    A DigitalOcean box with no Anthropic key used to REFUSE, naming a variable
+    the operator had deliberately not set. That is loud and merely annoying.
+
+    The quiet one is a half-finished swap: the endpoint set, the model access
+    key not. The old check asked about `ANTHROPIC_API_KEY`, found it, and said
+    everything was fine — while `inference_provider` was reporting in as many
+    words that nothing had moved. A guard that passes over a configuration the
+    operator believes is live is worse than no guard.
+    """
+    on_anthropic = _provider_env()
+    blocked = main_mod.model_calls_are_impossible(on_anthropic)
+    assert blocked and "ANTHROPIC_API_KEY" in blocked
+
+    half_a_swap = _provider_env(
+        anthropic_api_key="anthropic-key",
+        do_inference_base_url="https://inference.do-ai.run",
+    )
+    assert half_a_swap.anthropic_api_key  # what the old check looked at, and found
+    blocked = main_mod.model_calls_are_impossible(half_a_swap)
+    assert blocked and "nothing has moved" in blocked
+
+    # A model has to be NAMED, and this line used to omit it and still assert
+    # the configuration was fine. That is the hole audit found: with no
+    # `DECISION_MODEL_ID` the spec falls back to a Claude tier id, which
+    # `ModelClient.__init__` refuses outright — so the guard said yes to a
+    # configuration whose very next statement raises. See
+    # `test_the_loop_refuses_exactly_what_the_client_refuses`.
+    configured = _provider_env(
+        do_inference_key="do-model-access-key",
+        decision_model_id="llama3.3-70b-instruct",
+    )
+    assert main_mod.model_calls_are_impossible(configured) is None
+    # And the Anthropic key is neither required nor consulted once it is.
+    assert not configured.anthropic_api_key
+
+
+def test_an_unusable_provider_is_reported_even_with_a_key_present():
+    """Configured and wrong is not the same fault as incomplete.
+
+    `usable=False` means the operator set something that cannot work, and no key
+    makes that better. Reporting it as "no credential" would send them to create
+    a second key for a configuration that would still refuse.
+    """
+    env = _provider_env(
+        do_inference_key="do-model-access-key",
+        do_inference_base_url="http://inference.do-ai.run",  # not https
+    )
+
+    assert env.model_api_key  # the key IS there
+    blocked = main_mod.model_calls_are_impossible(env)
+    assert blocked and "NOT a fall back to Anthropic" in blocked
+    assert main_mod.provider_is_unusable(env) is not None
+
+
+def test_the_loop_refuses_a_wrong_endpoint_and_tolerates_a_missing_key():
+    """The asymmetry, and it is deliberate rather than an oversight.
+
+    A cycle with no model call still reconciles the journal against the broker
+    and still runs `stop_watch` over open positions. That safety work is worth
+    more than the proposal, so a missing key degrades the cycle exactly as a
+    dead feed does — which is also why every loop test in this file runs with no
+    key at all and a stub client.
+
+    A provider that is configured and WRONG is the other case. `ModelClient`
+    refuses to construct against it, once, at loop start, outside the per-cycle
+    `except` that turns a bad call into a skipped cycle. Uncaught that is a
+    traceback, and under systemd a traceback is a restart into the identical
+    failure — the shape `CLAUDE.md` records as costing a live cycle once
+    already.
+    """
+    no_key = _provider_env()
+    assert main_mod.provider_is_unusable(no_key) is None
+    assert main_mod.model_calls_are_impossible(no_key) is not None
+
+    wrong_endpoint = _provider_env(
+        do_inference_key="do-model-access-key",
+        do_inference_base_url="http://inference.do-ai.run",
+    )
+    assert main_mod.provider_is_unusable(wrong_endpoint) is not None
+
+
+#: Every configuration the two guards are asked about, as
+#: `(name, env kwargs)`. Driven against the REAL `ModelClient` below, so the
+#: table is a description of the world rather than of the guard.
+_PROVIDER_CONFIGURATIONS: list[tuple[str, dict[str, Any]]] = [
+    ("nothing set at all", {}),
+    ("anthropic key only", {"anthropic_api_key": "ak"}),
+    (
+        "DO key, model named",
+        {"do_inference_key": "dk", "decision_model_id": "llama3.3-70b-instruct"},
+    ),
+    # The hole. The key is the switch an operator is told to set; the model id
+    # is a second variable and is easy to miss.
+    ("DO key, NO model named", {"do_inference_key": "dk"}),
+    (
+        "DO key, model named, base url not https",
+        {
+            "do_inference_key": "dk",
+            "do_inference_base_url": "http://inference.do-ai.run",
+            "decision_model_id": "llama3.3-70b-instruct",
+        },
+    ),
+    ("DO key, no model, base url not https",
+     {"do_inference_key": "dk", "do_inference_base_url": "http://inference.do-ai.run"}),
+    # The mirror hole: a configuration `.env.example` describes as moving
+    # nothing, which the loop refused outright.
+    (
+        "DO base url set, no DO key, anthropic key present",
+        {"anthropic_api_key": "ak", "do_inference_base_url": "https://inference.do-ai.run"},
+    ),
+    (
+        "DO base url set, no DO key, no anthropic key",
+        {"do_inference_base_url": "https://inference.do-ai.run"},
+    ),
+]
+
+
+def test_the_loop_refuses_exactly_what_the_client_refuses():
+    """**The anti-drift lock, and it is the whole reason the guard may exist.**
+
+    `provider_is_unusable` is a second copy of `ModelClient.__init__`'s refusal
+    list living in another file, and a second copy is a second thing to be
+    wrong. It was wrong in BOTH directions at once, which is what this pins:
+
+    - It cleared `DO_INFERENCE_KEY` with no `DECISION_MODEL_ID`, and the loop
+      then raised `ModelCallFailed` out of `cmd_loop` — a traceback under
+      systemd, restarted into forever, which is the exact failure the guard was
+      added to prevent.
+    - It refused `DO_INFERENCE_BASE_URL` set without the key, where the client
+      builds happily and the calls go to Anthropic. `cmd_loop` exited 1, taking
+      `reconcile`, `stop_watch` and the expiry alerts down with it.
+
+    So this drives the REAL constructor over every configuration and asserts the
+    two agree. A third refusal added to `ModelClient` turns this red rather than
+    reopening the traceback.
+    """
+    from bot.model_client import ModelCallFailed, ModelClient
+
+    for name, overrides in _PROVIDER_CONFIGURATIONS:
+        env = _provider_env(**overrides)
+        try:
+            ModelClient(env, "system prompt")
+        except ModelCallFailed:
+            client_refused = True
+        else:
+            client_refused = False
+
+        assert bool(main_mod.provider_is_unusable(env)) is client_refused, name
+        # And the wider question can never be softer than the narrower one: a
+        # command that cannot construct a client cannot make a call.
+        if client_refused:
+            assert main_mod.model_calls_are_impossible(env), name
+
+
+def test_the_dreamer_is_guarded_against_its_OWN_model_not_the_loops():
+    """`DREAM_MODEL_ID` and `DECISION_MODEL_ID` are two variables.
+
+    `Dreamer.__init__` and `Conference._build` both construct with
+    `env.dream_spec`, outside any `except`. A guard asked about the decision
+    model would clear a box where the loop's model is named and the dreamer's is
+    not, and hand `electrum-bot dream` the traceback instead.
+    """
+    from bot.model_client import ModelCallFailed, ModelClient
+
+    env = _provider_env(
+        do_inference_key="dk",
+        decision_model_id="llama3.3-70b-instruct",  # named
+        dream_model_id="",                          # and not
+    )
+
+    assert main_mod.model_calls_are_impossible(env) is None
+    blocked = main_mod.model_calls_are_impossible(env, spec=env.dream_spec)
+    assert blocked and "DREAM_MODEL_ID" in blocked
+    with pytest.raises(ModelCallFailed):
+        ModelClient(env, "system prompt", spec=env.dream_spec)
+
+
+def test_the_refusal_never_prints_the_key():
+    """Credentials are reported as configured or not configured, never rendered.
+
+    This sentence goes to the journal and to `systemctl --failed`, both of which
+    outlive the process and neither of which is private.
+    """
+    env = _provider_env(
+        do_inference_key="do-secret-value",
+        do_inference_base_url="http://inference.do-ai.run",
+    )
+
+    assert "do-secret-value" not in (main_mod.model_calls_are_impossible(env) or "")
+
+
+# --------------------------- a decision that considered nothing at all
+#
+# The second entrance to the quiet-cycle hole. A reply with NO tool call already
+# fails hard in `ModelClient`; a tool call that IS made and comes back with
+# `assessments: []` used to arrive at exactly the same place and be recorded as
+# a considered decision. `llama3.3-70b-instruct` does that on 6 of 10 samples
+# after being shown four symbols and an open position, in a 2.2-second median
+# (`docs/DROPLET_AI.md`). Structurally valid, passes Pydantic, and it puts back
+# the whole gap `assessments` exists to close.
+#
+# The rule these pin is a RATIO, which is why it can only live in `cmd_loop`:
+# neither `ModelDecision` nor `ModelClient` knows how many symbols were shown.
+
+
+def _bars(symbol: str, count: int = 30, start: float = 100.0) -> list[Any]:
+    """Enough daily history for `indicators.compute` to return something.
+
+    The figures are unimportant — what matters is that the symbol lands in the
+    INDICATOR set rather than in `symbols_without_history`, because that set is
+    the denominator the refusal is measured against.
+    """
+    from bot.models import Bar
+
+    return [
+        Bar(
+            symbol=symbol,
+            timestamp=datetime(2026, 7, 1, tzinfo=UTC) + timedelta(days=i),
+            open=start + i,
+            high=start + i + 1.0,
+            low=start + i - 1.0,
+            close=start + i,
+            volume=1_000_000.0,
+        )
+        for i in range(count)
+    ]
+
+
+def _broker_showing(*symbols: str) -> Any:
+    """A broker with daily bars for exactly these symbols and nothing else.
+
+    Every other name in `allowed_symbols` raises out of `get_daily_bars`, which
+    `fetch_indicators` reports as missing history — so the indicator set is
+    exactly what this names, and the test can say what the model was shown.
+    """
+    from bot.broker import MockBroker
+
+    broker = MockBroker(starting_equity=100_000.0)
+    broker.connect()
+    for symbol in symbols:
+        broker.set_price(symbol, bid=99.98, ask=100.02)
+        broker.set_bars(symbol, _bars(symbol))
+    return broker
+
+
+def _assessed(symbol: str) -> Any:
+    from bot.models import Stance, SymbolAssessment
+
+    return SymbolAssessment(
+        symbol=symbol,
+        stance=Stance.PASS,
+        reasoning=f"{symbol} is mid-range with no edge worth taking today.",
+    )
+
+
+def test_a_decision_assessing_none_of_the_symbols_shown_fails_the_cycle(
+    monkeypatch, tmp_path
+):
+    """The REJECT. Two symbols with indicators, zero assessments, cycle refused.
+
+    This is the `llama3.3-70b-instruct` answer exactly: valid against the
+    schema, instant, and empty. Recorded, it is indistinguishable afterwards
+    from a loop that never looked at either symbol — which is the one state
+    `assessments` exists to make impossible.
+
+    It takes the identical path to a timeout: `model_call_failed`, a failed job
+    record, and **no `cycle_complete`**. A cycle that could not get a usable
+    decision must never be readable as one that decided to do nothing.
+    """
+    logs = _cycle_with_broker(
+        monkeypatch,
+        tmp_path,
+        ModelDecision(market_assessment="Mixed tape.", proposals=[], assessments=[]),
+        _broker_showing("SPY", "QQQ"),
+    )
+
+    failures = [e for e in logs if e["event"] == "model_call_failed"]
+    assert len(failures) == 1
+    # The message names what it was shown, so the record says WHY it refused
+    # rather than only that it did.
+    assert "SPY" in failures[0]["error"] and "QQQ" in failures[0]["error"]
+    assert "ConsideredNothing" in failures[0]["error"]
+    assert not [e for e in logs if e["event"] == "cycle_complete"]
+
+
+def test_a_cycle_that_showed_no_symbols_is_quiet_rather_than_failed(
+    monkeypatch, tmp_path
+):
+    """The other half, and the one that would break a correct bot if it were
+    wrong.
+
+    Nothing was seeded, so every symbol raises out of `get_daily_bars` and lands
+    in `symbols_without_history`. The model was given no indicators at all, so
+    an empty assessment list is the only honest answer it could return — and
+    refusing it would turn a data outage, or a shut market, into a failed cycle
+    every fifteen minutes.
+    """
+    from bot.broker import MockBroker
+
+    broker = MockBroker(starting_equity=100_000.0)
+    broker.connect()
+
+    logs = _cycle_with_broker(
+        monkeypatch,
+        tmp_path,
+        ModelDecision(market_assessment="Nothing to read.", proposals=[], assessments=[]),
+        broker,
+    )
+
+    assert not [e for e in logs if e["event"] == "model_call_failed"]
+    beat = _heartbeat(logs)
+    assert beat["symbols_shown"] == 0
+    assert beat["assessments"] == 0
+
+
+def test_a_quote_without_history_is_not_counted_as_a_symbol_shown(
+    monkeypatch, tmp_path
+):
+    """The denominator is the INDICATOR set, not the quotes and not the allowlist.
+
+    A symbol with a live quote and no bars is one the context tells the model to
+    treat as having no indicators at all and to propose nothing on. Counting it
+    would fail the cycle for obeying that instruction, and it would blame the
+    model for a feed that was down.
+    """
+    from bot.broker import MockBroker
+
+    broker = MockBroker(starting_equity=100_000.0)
+    broker.connect()
+    broker.set_price("SPY", bid=99.98, ask=100.02)  # a quote, and no bars
+
+    logs = _cycle_with_broker(
+        monkeypatch,
+        tmp_path,
+        ModelDecision(market_assessment="Quote only.", proposals=[], assessments=[]),
+        broker,
+    )
+
+    assert not [e for e in logs if e["event"] == "model_call_failed"]
+    beat = _heartbeat(logs)
+    assert beat["symbols_shown"] == 0
+    assert "SPY" in beat["symbols_without_history"]
+
+
+def test_a_partial_answer_is_not_refused_and_the_ratio_is_stated(monkeypatch, tmp_path):
+    """Zero is the trip, not a shortfall — and the shortfall is made visible.
+
+    A model that assessed one of two symbols has made a judgement a reader can
+    see and argue with on the Decisions page. A model that assessed none has
+    produced a record indistinguishable from never having looked. Only the
+    second is a failed cycle.
+
+    Because the first is deliberately allowed through, the ratio goes on the
+    cycle line: without it, one of two reads exactly like two of two in every
+    other field.
+    """
+    logs = _cycle_with_broker(
+        monkeypatch,
+        tmp_path,
+        ModelDecision(
+            market_assessment="Looked at one of them properly.",
+            proposals=[],
+            assessments=[_assessed("SPY")],
+        ),
+        _broker_showing("SPY", "QQQ"),
+    )
+
+    assert not [e for e in logs if e["event"] == "model_call_failed"]
+    beat = _heartbeat(logs)
+    assert beat["symbols_shown"] == 2
+    assert beat["assessments"] == 1
+    # Nothing strayed, so the count above genuinely is one of two.
+    assert beat["assessments_off_list"] == []
+
+
+def test_a_decision_that_assessed_only_symbols_it_was_never_shown_is_refused(
+    monkeypatch, tmp_path
+):
+    """**Assessing NONE of what you were shown, with a non-empty list.**
+
+    The refusal counted the list's LENGTH while every sentence around it — the
+    docstring, the message it raises, the field on the cycle line — described a
+    RATIO against the indicator set. Reproduced: two symbols shown, two
+    assessments naming neither, cycle recorded, and `cycle_complete` read
+    `symbols_shown=2, assessments=2`. The one field put there to make a partial
+    answer visible reported a complete one, which is worse than the gap it was
+    covering.
+
+    This is reachable without inventing a hallucination. `SymbolAssessment.symbol`
+    is free text with no allowlist behind it, and the context block ASKS for
+    symbols outside the current indicator set: "What you said last cycle" lists
+    the previous cycle's assessments and the prompt tells the model to report on
+    each of them. A symbol whose bars failed this cycle, or whose dream grant
+    lapsed, is in that list and not in the indicator set — so a model that
+    answers only the recall section lands here, and looks diligent doing it.
+    """
+    logs = _cycle_with_broker(
+        monkeypatch,
+        tmp_path,
+        ModelDecision(
+            market_assessment="Mixed tape.",
+            proposals=[],
+            assessments=[_assessed("BANANA"), _assessed("TSLA")],
+        ),
+        _broker_showing("SPY", "QQQ"),
+    )
+
+    failures = [e for e in logs if e["event"] == "model_call_failed"]
+    assert len(failures) == 1
+    assert "ConsideredNothing" in failures[0]["error"]
+    # The message says WHICH question was answered instead, or an operator
+    # reading "assessed none of them" beside a list of two would think the
+    # record was lying to them.
+    assert "BANANA" in failures[0]["error"] and "TSLA" in failures[0]["error"]
+    assert not [e for e in logs if e["event"] == "cycle_complete"]
+
+
+def test_a_stray_assessment_is_named_rather_than_padding_the_ratio(
+    monkeypatch, tmp_path
+):
+    """One real assessment plus one stray is NOT refused, and is not 2 of 2.
+
+    A stray is frequently the model doing as it was told — the recall block asks
+    for a report on last cycle's symbols, some of which may have dropped out of
+    the indicator set since. So this is the repository's standing rule: report
+    the gap, do not refuse. What must not happen is the stray quietly counting
+    towards the ratio, which is what turns "one of the two symbols was never
+    mentioned" into a line that reads as a full answer.
+    """
+    logs = _cycle_with_broker(
+        monkeypatch,
+        tmp_path,
+        ModelDecision(
+            market_assessment="Reported on the watch and one live name.",
+            proposals=[],
+            assessments=[_assessed("SPY"), _assessed("BANANA")],
+        ),
+        _broker_showing("SPY", "QQQ"),
+    )
+
+    assert not [e for e in logs if e["event"] == "model_call_failed"]
+    beat = _heartbeat(logs)
+    assert beat["symbols_shown"] == 2
+    assert beat["assessments"] == 2
+    assert beat["assessments_off_list"] == ["BANANA"]
+
+
+def test_a_lower_case_symbol_is_not_a_stray(monkeypatch, tmp_path):
+    """The false refusal the fix must not introduce.
+
+    `SymbolAssessment.symbol` is free text and nothing upper-cases it, so a
+    model answering `spy` for `SPY` has assessed what it was shown. Refusing a
+    correct answer over its casing would fail a cycle that was fine — the one
+    outcome worse than the gap being open.
+    """
+    logs = _cycle_with_broker(
+        monkeypatch,
+        tmp_path,
+        ModelDecision(
+            market_assessment="Case is not a stance.",
+            proposals=[],
+            assessments=[_assessed("spy")],
+        ),
+        _broker_showing("SPY", "QQQ"),
+    )
+
+    assert not [e for e in logs if e["event"] == "model_call_failed"]
+    assert _heartbeat(logs)["assessments_off_list"] == []
+
+
+def test_an_open_position_with_no_plan_is_reported_and_never_fails_the_cycle(
+    monkeypatch, tmp_path
+):
+    """The same shape of defect, deliberately answered differently.
+
+    `position_plans` empty against an open position is the other half of what
+    the fidelity probe grades as `empty_arrays`, and it is REPORTED rather than
+    refused. An unassessed symbol is unrecoverable — the audit log is the only
+    place it was ever written down. An unplanned position is not: it is in the
+    journal, on the Board, in `reconcile`, in `stop_watch` and behind a resting
+    stop leg, and the plan is advisory and never executed unless the operator
+    switched position actions on.
+
+    Refusing it would also throw away good work — a decision can carry sound
+    assessments and a sound proposal while saying nothing about a held
+    position.
+    """
+    broker = _short_spy_at_the_broker()
+    broker.set_bars("SPY", _bars("SPY", start=780.0))
+
+    logs = _cycle_with_broker(
+        monkeypatch,
+        tmp_path,
+        ModelDecision(
+            market_assessment="Short is fine, nothing new to add about it.",
+            proposals=[],
+            assessments=[_assessed("SPY")],
+            position_plans=[],
+        ),
+        broker,
+        journal=_journal_with_the_short(tmp_path),
+    )
+
+    assert not [e for e in logs if e["event"] == "model_call_failed"]
+    beat = _heartbeat(logs)
+    assert beat["positions_without_a_plan"] == ["SPY"]
+    # Stated where an operator is looking, not only counted.
+    gaps = [e for e in logs if e["event"] == "positions_without_a_plan"]
+    assert len(gaps) == 1 and gaps[0]["symbols"] == ["SPY"]
+
+
+def test_a_planned_position_leaves_the_field_empty_rather_than_absent(
+    monkeypatch, tmp_path
+):
+    """A stated empty list each cycle is a fact; a field that only appears when
+    something is wrong makes an outage look like a clean run. Same reasoning as
+    `stops_breached`."""
+    from bot.models import PositionAction, PositionPlan
+
+    broker = _short_spy_at_the_broker()
+    broker.set_bars("SPY", _bars("SPY", start=780.0))
+
+    logs = _cycle_with_broker(
+        monkeypatch,
+        tmp_path,
+        ModelDecision(
+            market_assessment="Short is fine.",
+            proposals=[],
+            assessments=[_assessed("SPY")],
+            position_plans=[
+                PositionPlan(
+                    symbol="SPY",
+                    action=PositionAction.HOLD,
+                    reasoning="Thesis intact; the stop is where it was sized.",
+                )
+            ],
+        ),
+        broker,
+        journal=_journal_with_the_short(tmp_path),
+    )
+
+    beat = _heartbeat(logs)
+    assert beat["positions_without_a_plan"] == []
+    assert not [e for e in logs if e["event"] == "positions_without_a_plan"]
+
+
+def test_the_refusal_is_a_model_call_failure_rather_than_a_new_kind_of_error():
+    """Raised, not branched on, and in the family every caller already handles.
+
+    `ModelCallFailed` is the base class `cmd_loop` turns into a skipped cycle.
+    A refusal outside that family would need its own handler, and the two would
+    drift the first time one of them changed.
+    """
+    from bot.model_client import ModelCallFailed
+
+    assert issubclass(main_mod.ConsideredNothing, ModelCallFailed)
+
+    shown = ["QQQ", "SPY"]
+    empty = ModelDecision(market_assessment="Quiet.", proposals=[], assessments=[])
+    with pytest.raises(ModelCallFailed) as caught:
+        main_mod.refuse_a_decision_that_considered_nothing(empty, shown=shown)
+    # Both symbols named: the record has to say what it was measured against.
+    assert "QQQ, SPY" in str(caught.value)
+
+    # And neither the empty denominator nor a non-empty answer raises.
+    main_mod.refuse_a_decision_that_considered_nothing(empty, shown=[])
+    main_mod.refuse_a_decision_that_considered_nothing(
+        ModelDecision(
+            market_assessment="Quiet.", proposals=[], assessments=[_assessed("SPY")]
+        ),
+        shown=shown,
+    )

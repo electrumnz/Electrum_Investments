@@ -870,6 +870,163 @@ is a change. The old side is **the exact text on the line**, never a
 re-rendering of the parsed number — `90000` and `90000.0` are one limit and two
 different diffs.
 
+### Two transports, and which one runs is a property of the ENDPOINT
+
+Every Python model call — `propose`, `dream`, `confer` — goes to DigitalOcean
+when `DO_INFERENCE_KEY` is set. Empty means Anthropic, which is still a fully
+supported configuration, so the rollback is unsetting a variable.
+
+**It is not a base-URL swap, and the reason was measured rather than reasoned
+about.** DigitalOcean's `/v1/messages` accepts `output_config` with **HTTP 200
+and silently ignores it**, returning prose. Not a 400. That is the worst of the
+three possible answers: a caller checking only for an error would believe the
+schema was in force while it was not.
+
+So `ModelClient` has two transports. `messages.parse` where the schema is
+enforced server-side, and a **forced tool call** where it is not — one tool
+whose `input_schema` is the model's JSON schema, `tool_choice` pinned to it, and
+the arguments validated **here** by Pydantic.
+
+**It keys on `Env.inference_provider.is_digitalocean` and never on the model
+id.** Whether a schema is enforced is a property of the thing SERVING the
+request, not of the weights behind it; the same model is served with enforcement
+at one endpoint and without it at another. A check on the model name gets that
+exactly backwards the first time a familiar name appears in an unfamiliar
+catalogue.
+
+**That sentence was written before it was true, and an audit proved it false.**
+`Env.inference_provider` describes a CONFIGURATION; it did not describe the
+endpoint. The SDK resolves the base URL as `kwarg > ANTHROPIC_BASE_URL > a
+credentials profile on disk`, and `ModelClient` passed no `base_url` on the
+Anthropic branch — so a box with `ANTHROPIC_BASE_URL` aimed anywhere got the
+banner saying "Anthropic direct", the server-enforced transport with
+`output_config` attached to a proxy that may ignore it, and **the Anthropic key
+in the header, sent to that third party**. Not hypothetical: both timer units
+carry `EnvironmentFile=/opt/mudhorn/.env`, and `docs/DROPLET_AI.md` tells the
+operator to export exactly that variable.
+
+`base_url` is now passed explicitly on BOTH branches, which also closes the
+profile-file route — the SDK consults no other source once a kwarg arrives — and
+`Env.anthropic_base_url` is a declared field so the property can report the
+endpoint that will actually be called. A deliberate proxy is NAMED rather than
+refused, with the sentence saying this process cannot verify that endpoint
+enforces the schema.
+
+**The lesson is the one this file already records about the class hard-block: a
+guarantee written here is not a guarantee, and prose asserting one is how it
+stops being checked.** Where this file claims a structural property, there must
+be a test that fails when it is removed.
+
+**A reply with no tool call is a HARD FAILURE, and that is the one that
+matters.** A dropped schema breaks loudly in every case that produces a number
+and silently in exactly one: the quiet cycle. `proposals`, `assessments` and
+`position_plans` all default to `[]` in Python — correctly, an empty list is a
+real answer — so a bare `{"market_assessment": "..."}` parses as a completed
+cycle that considered nothing, which is indistinguishable afterwards from a loop
+that never looked. `qwen3.8-max` returned prose on 2 of 3 attempts against the
+real schema *with `tool_choice` forcing the call*, so this is live rather than
+hypothetical.
+
+**The same hole has a second entrance, and it is CLOSED too.** A tool call that
+IS made and comes back with `assessments: []` after being shown symbols arrives
+at the identical place — `llama3.3-70b-instruct` does that on 6 of 10 samples,
+in 2.2 seconds, and passes validation. `refuse_a_decision_that_considered_nothing`
+raises `ConsideredNothing` into the existing `model_call_failed` path.
+
+It lives in `main.py` rather than in the schema or the transport **because the
+fault is a RATIO and only `cmd_loop` knows the denominator** — and which
+denominator is the whole decision. It is `indicators`, not the symbols the loop
+intended to look at (a cycle whose bars all failed would be refused as a model
+fault when it was a feed fault) and not the ones carrying a quote (a symbol with
+no history is one the context tells the model to propose nothing on, so
+demanding an assessment for it would fail the cycle for obeying an instruction).
+`indicators` is what the output contract is written against and is the same
+object handed to `build_market_context`, so the check cannot drift from what was
+rendered.
+
+**Zero is the trip, never a shortfall**, and `position_plans` is reported rather
+than refused. Same shape, different stake: an unassessed symbol is
+unrecoverable, because the audit log is the only place a considered-and-passed
+symbol is ever written down, while an unplanned position is in the journal, on
+the Board, in `reconcile`, in `stop_watch` and behind a resting stop leg.
+
+Three refusals rather than one, kept apart because they are three different
+findings about the far end: no tool call at all, a tool call whose argument KEYS
+are the model's own markup (`glm-5.2` half-parsed by the proxy), and arguments
+Pydantic rejects (`openai-gpt-oss-20b` inventing `ticker`/`action`/`shares`
+against a schema demanding `symbol`/`direction`/`qty`).
+
+**What is lost is narrower than it sounds; what is kept is the part that
+matters.** Pydantic still rejects a malformed object, so a `qty` or a
+`stop_loss_price` that comes back wrong is refused rather than coerced,
+`model_call_failed` is logged and `RiskGate` never sees it. What degrades is
+RELIABILITY: the model is asked for the shape rather than constrained to it, so
+the rejection rate rises and every rejection costs a cycle.
+
+**An OMITTED key is a third case, and it used to be the worst of the three.**
+`EVERY_FIELD_REQUIRED` puts every property into the schema's `required` list, so
+the API's grammar makes an absence impossible on the server-enforced path.
+`model_validate` does not: it honours the Python defaults, which every one of
+these fields has. Measured across the five shapes actually sent, **24 properties
+could be left out** — and an omission was not rejected, it became a value
+invented HERE and attributed to the model. A `PositionPlan` carrying only
+`symbol` and `reasoning` was recorded as `action=hold, thesis_intact=True`: an
+opinion about an open position that nothing on the far end expressed, rendered
+to the operator as one that was.
+
+`_missing_required` walks the emitted schema and refuses an ABSENT key while
+never refusing an empty one — so `assessments: []` still reaches `cmd_loop`'s
+ratio check rather than being swallowed here. The two failures are different and
+are caught in different places on purpose.
+
+**`scripts/do_schema_fidelity.py` graded with the loose rule**, so every score
+in `docs/DROPLET_AI.md` recorded before 13 Aug was measured against a laxer
+system than the one that runs. It uses the transport's own check now. Re-run
+under it, the four candidates came back 10/10 with zero omissions — the hole was
+real and these models did not walk into it.
+
+**Nothing falls back, in either sense.** No prose parsing after a failed tool
+call — that hands back exactly the freedom the schema exists to remove. No retry
+onto a second model. And **no falling back to the other PROVIDER**: a
+`DO_INFERENCE_KEY` that is set but unusable REFUSES rather than quietly
+answering from Anthropic, which would run, bill the wrong account and leave
+nothing on any surface saying which model produced the orders.
+
+**A Claude tier default named against DigitalOcean refuses at construction.**
+That endpoint calls Anthropic models by different ids (`anthropic-claude-5-sonnet`,
+not `claude-sonnet-5`) and 403s the ones it lists on this account's tier, so it
+is a guaranteed failure — caught once, rather than 96 times a day inside the
+loop's broad `except` as one more skipped cycle. `DECISION_MODEL_ID` and
+`DREAM_MODEL_ID` are how a model is named.
+
+**The guards moved because they were asking the wrong question.** `smoketest`,
+`dream` and `confer` each tested `ANTHROPIC_API_KEY`. With two endpoints that
+passes over a half-finished swap — endpoint set, model access key not, Anthropic
+key present — which is a configuration the operator believes is live.
+`model_calls_are_impossible` asks about the CONFIGURED provider's own
+credential. The loop asks the narrower `provider_is_unusable`, and that
+asymmetry is deliberate: a cycle with no model call still reconciles the journal
+and runs `stop_watch`, and that safety work is worth more than the proposal.
+
+**Three groups of vendor names are deliberately NOT renamed**, and each would
+break something. `import anthropic` and `ANTHROPIC_BASE_URL`/`ANTHROPIC_API_KEY`
+are read BY the SDK — DigitalOcean speaks the Anthropic wire format, so renaming
+them breaks the transport. `sends_anthropic_thinking` and
+`sends_anthropic_effort` are named after the wire fields they control, so a
+generically-named flag would send the wrong field in the wrong shape at an
+endpoint that wants a flat `reasoning_effort`. And the `claude_*_tokens` fields
+are written into `audit/*.jsonl`, which is append-only and never migrated — a
+rename would read every historical cycle back as `0 in / 0 out`. The
+model-facing half is already clean and `tests/test_model_client.py` pins it: no
+schema, prompt, soul, journal or audit value sent to a model carries a vendor
+name, because Pydantic turns a docstring into the schema's `description`.
+
+**Caching is unverified at that endpoint and fails silently in the money
+direction.** `cache_control` is not in DigitalOcean's published request schema,
+and a dropped one does not raise — it bills 10x on the system block forever.
+`cached_tokens` is already on the `cycle_complete` line, so a run of cycles
+reading zero is the answer; nothing needs building to check it.
+
 ### The model call is a feed too, and prose truncates while numbers reject
 
 The same rule as the feeds below, learned the hard way. `claude.propose` was
@@ -2580,10 +2737,29 @@ Four things about it are load-bearing:
   work: that was static files in a public GitHub repo, so the password would
   have been readable in the repo and in the page source, and there was no
   server there to check it against. The site is gone; the rule is not.
-- **`POST /chat` keeps its own separate token on top.** Viewing an account and
-  driving an agent that can reach the broker are different privileges, and one
-  secret must not grant both. Exposure used to risk disclosure; with chat it
-  risks action.
+- **`POST /chat` keeps its own separate token on top — and that separation is
+  narrower than it reads.** Viewing an account and driving an agent that can
+  reach the broker are different privileges, and the token is what keeps them
+  apart from someone holding NEITHER secret. It does not keep them apart from
+  someone holding the password: `app.py` passes `dashboard_chat_token` into
+  `chat_page` and `settings_page`, which render it into the markup as
+  `var TOKEN = "..."`, because the browser genuinely needs the value to POST
+  with. So anyone who can sign in can read the chat token out of the page
+  source and drive the agent.
+
+  **Say it that way round rather than "one secret must not grant both", which
+  is what this said and is not what the code does.** The claim that survives is
+  the one that was always doing the work: `RiskGate.evaluate` runs on every
+  order path behind chat, so what is gained is an agent that can propose, not a
+  route around the four rules. Exposure without chat risks disclosure; exposure
+  with chat risks action, and the password is the whole gate on both.
+
+  Fixing it properly means the browser never holding the token — a per-session
+  CSRF-style value minted after sign-in, or moving the check to the session
+  cookie the middleware already validates. Not done, and it is only worth doing
+  if the account stops being paper: see `TODO.md`, where the operator's decision
+  to rely on Tailscale device access instead is recorded with what would change
+  it.
 - **Chat working at all costs the web unit two sandbox settings**, and the
   operator turned it on knowing that. `NoNewPrivileges` and `RestrictSUIDSGID`
   both block `sudo` (systemd makes the second imply the first), so they are

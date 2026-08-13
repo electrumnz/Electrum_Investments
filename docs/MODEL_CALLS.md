@@ -21,6 +21,36 @@ the point. `docs/DROPLET_AI.md` closes by saying "everything above was read, not
 run"; most of what follows has now been run, and three of the things it inferred
 turn out to be wrong in the direction that matters.
 
+> ## SUPERSEDED 13 Aug 2026 — read this before the short version below
+>
+> **Vercel is gone entirely, so every recommendation in this document pointing
+> at it is a dead end.** The operator: *"we killed vercel. we are just on DO
+> now."* The Vercel project is deleted, `brand/` and the demo site it served
+> were deleted before it — *"we didnt need the demo and landing page anymore"* —
+> and there is one provider and one account, which was the whole point of the
+> consolidation.
+>
+> That matters because the box below closes by recommending Vercel AI Gateway
+> as **the better target for the structured Python calls**, on the strength of a
+> real measurement: its validator models `output_config.format` in depth and
+> accepts both of this repository's schemas, where DigitalOcean's endpoint
+> accepts the field and silently ignores it. **The measurement stands and the
+> recommendation does not.** It was made against a premise the operator has
+> since removed — a second provider, a second account and a second balance,
+> for a component whose entire bill is single-digit dollars.
+>
+> What actually shipped is the other branch: `propose`, `dream` and `confer`
+> all reach DigitalOcean through a **forced tool call** validated by Pydantic on
+> this side, with a reply carrying no tool call treated as a hard failure. See
+> `CLAUDE.md`, "Two transports, and which one runs is a property of the
+> ENDPOINT", and TODO item 20.
+>
+> Everything below is kept because the per-call-site measurements are still the
+> best record of what each call actually sends, and because the Vercel findings
+> are what proved the blocker was DigitalOcean's rather than every proxy's —
+> which is a fact about the endpoint worth keeping even though nobody will act
+> on it.
+
 > ## The short version
 >
 > **The blocker that made every structured call unmovable is a DigitalOcean
@@ -648,7 +678,36 @@ MOVE** as instructed.
 | **`scripts/dream_cycle_live.py`** | Judge **STAY** | MOVE WITH CHANGES | MOVE WITH CHANGES |
 | **`scripts/confer_live.py`** | — | MOVE FREELY with `confer` | MOVE FREELY with `confer` |
 
-### `claude.propose` — DO NOT MOVE, and the reason has narrowed
+### `claude.propose` — ~~DO NOT MOVE~~ MOVED 13 Aug 2026, to DigitalOcean
+
+**Superseded, and the sentence below that survives is the one about the
+quiet-cycle hole.** Read the rest for the reasoning; read this for what is
+actually true now.
+
+The verdict here rested on *"it still buys nothing"* — price parity on a
+like-for-like swap. That is correct about Anthropic models reached from further
+away, and it was never the thing being proposed. The operator's instruction was
+to reach a different catalogue: *"there's a full base of models there including
+better ones for the task."* This section anticipated exactly that and called it
+two decisions in two commits — the second having nothing to do with providers —
+which is a fair description of what was done, in one commit rather than two,
+with the model still unpinned pending a behaviour run.
+
+Of the two extra preconditions this audit added:
+
+- **Read the served model off the response and treat a mismatch as a failed
+  cycle** — STILL OPEN. `ModelClient.model_id` is recorded, so what was
+  *requested* is on file; nothing reads what was *served*.
+- **Fix the quiet-cycle hole** — DONE, both entrances. A reply carrying no tool
+  call is a hard failure, which closes the route this move created; and a tool
+  call that IS made and comes back with `assessments: []` — which
+  `llama3.3-70b-instruct` does on 6 of 10 samples — now fails the cycle too,
+  through `refuse_a_decision_that_considered_nothing`. That one had to live in
+  `cmd_loop` rather than in the schema, because the fault is a ratio and only
+  the loop knows the denominator.
+
+Vercel is moot — see `TODO.md` item 18, the gateway is dropped on one-account
+grounds. What follows is the original assessment.
 
 It had two independent reasons. **One is now gone on Vercel and one is not.**
 

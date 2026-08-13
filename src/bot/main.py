@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import sys
 import time
+from collections.abc import Collection
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -19,7 +20,13 @@ from . import jobs, stop_watch
 from .announce import announce_inference
 from .audit import AuditLog, AuditView
 from .broker import AlpacaBroker, Broker, MockBroker
-from .config import Env, LiveTradingRefused, Rules
+from .config import (
+    Env,
+    LiveTradingRefused,
+    ModelSpec,
+    Rules,
+    is_claude_tier_default,
+)
 from .context import (
     build_market_context,
     fetch_indicators,
@@ -61,7 +68,13 @@ from .indicators import snapshot as snapshot_indicators
 from .indicators import summarise as summarise_indicators
 from .intraday import summarise as summarise_intraday
 from .journal import Journal
-from .model_client import CallUsage, ModelClient, build_system_prompt
+from .model_client import (
+    CallUsage,
+    ModelCallFailed,
+    ModelClient,
+    ModelDecision,
+    build_system_prompt,
+)
 from .models import (
     AccountSnapshot,
     Decision,
@@ -158,6 +171,120 @@ def _note_unpriced_call(audit: AuditLog, usage: CallUsage, *, model_id: str, whe
     )
 
 
+def provider_is_unusable(env: Env, *, spec: ModelSpec | None = None) -> str | None:
+    """Why `ModelClient` will REFUSE TO CONSTRUCT here, or None if it will build.
+
+    The narrower of the two questions, and the one the decision loop asks. A
+    provider that is CONFIGURED AND WRONG is a different fault from one with no
+    credential yet: `ModelClient` refuses to construct against the first, and
+    that refusal happens once at loop start, outside the per-cycle `except` that
+    turns a bad model call into a skipped cycle. Uncaught it is a traceback, and
+    under systemd a traceback is a restart into the identical failure.
+
+    The loop deliberately does NOT refuse for a merely missing key, and that is
+    the pre-existing contract rather than an oversight: a cycle still reconciles
+    the journal against the broker and still runs `stop_watch` over open
+    positions when the model call fails. That safety work is worth more than the
+    proposal, so the loop degrades rather than refusing, exactly as it does when
+    a feed is down.
+
+    **The question is "will the constructor refuse", never "is this
+    configuration tidy", and asking the second one was wrong in both
+    directions.** It read `provider.usable` alone, and audit found one hole of
+    each kind:
+
+    - **A guaranteed failure it let through.** `DO_INFERENCE_KEY` set with no
+      `DECISION_MODEL_ID` leaves `usable=True` and a Claude tier default as the
+      model id, which `ModelClient.__init__` refuses outright. Measured: the
+      loop cleared this guard and then raised out of `cmd_loop` — the exact
+      traceback-under-systemd shape the guard exists to prevent, and the most
+      likely half-configuration there is, since the key is the switch an
+      operator is told to set.
+    - **A working configuration it refused.** `DO_INFERENCE_BASE_URL` set
+      without the key reports `usable=False` while the detail sentence says in
+      as many words that model calls go to Anthropic and nothing has moved.
+      `ModelClient` builds, the calls succeed — and the loop exited 1, taking
+      `reconcile`, `stop_watch` and the expiry alerts down with it over a stray
+      variable `.env.example` describes as moving nothing.
+
+    So both refusals are read off the constructor's own two conditions.
+    `tests/test_loop.py::test_the_loop_refuses_exactly_what_the_client_refuses`
+    drives the real `ModelClient` across the configurations and fails if the two
+    ever disagree, which is what stops this drifting into a second, softer copy
+    of the constructor.
+
+    `spec` names which model would be used, because that is half the question:
+    the loop and the smoketest run `decision_spec` and the dreamer and the
+    conference run `dream_spec`, and a tier default in one is not a tier default
+    in the other.
+    """
+    provider = env.inference_provider
+    if not provider.is_digitalocean:
+        # `ModelClient` raises on nothing here. An Anthropic configuration that
+        # is merely INCOMPLETE is `model_calls_are_impossible`'s to report, and
+        # a loop that refuses on it loses the safety work for no gain.
+        return None
+    if not provider.usable:
+        return provider.detail
+    model_id = (spec or env.decision_spec).model_id
+    if is_claude_tier_default(model_id):
+        return (
+            f"Model {model_id!r} is a Claude tier default and this process is "
+            f"configured for DigitalOcean at {provider.base_url}, which names "
+            f"Anthropic models differently and 403s the ones it lists on this "
+            f"account's tier. Name the model outright with DECISION_MODEL_ID or "
+            f"DREAM_MODEL_ID, or unset DO_INFERENCE_KEY to go back to Anthropic."
+        )
+    return None
+
+
+def model_calls_are_impossible(env: Env, *, spec: ModelSpec | None = None) -> str | None:
+    """Why this process cannot make a model call, or None if it can try.
+
+    **One question asked in one place, because it used to be asked three times
+    in a form that stopped being right.** `smoketest`, `dream` and `confer` each
+    tested `env.anthropic_api_key` and reported `ANTHROPIC_API_KEY is not set`.
+    That was the correct question while there was one endpoint. With two it is
+    wrong in both directions, and the second is the dangerous shape: on a box
+    configured for DigitalOcean the check PASSES with an Anthropic key present
+    that nothing is going to use, and FAILS with a perfectly good model access
+    key set. A guard that says yes about the wrong credential is worse than no
+    guard, because it hands the failure to the model call and the operator to
+    the wrong console.
+
+    Two separate refusals, kept apart because they send an operator to different
+    places. An unusable provider is a configuration that is wrong; a missing key
+    is a configuration that is incomplete. `provider_is_unusable` is the first
+    of them on its own, for the caller that should refuse the wrong one and
+    tolerate the incomplete one.
+
+    It returns a sentence rather than raising. These are entry points, and a
+    command that exits non-zero with a line saying which variable to set is a
+    better answer than a traceback — particularly under systemd, where a
+    traceback becomes a restart into the identical failure.
+
+    **That last sentence was aspirational and is now true.** Every one of the
+    three callers cleared this guard on a DigitalOcean box with no model named
+    and then hit `ModelClient.__init__`'s own refusal as an uncaught
+    `ModelCallFailed` — `smoketest`, `dream` and `confer` all produced the
+    traceback the docstring above promised they would not. It asks
+    `provider_is_unusable` first now, which is the constructor's question rather
+    than a paraphrase of it.
+    """
+    blocked = provider_is_unusable(env, spec=spec)
+    if blocked:
+        return blocked
+    provider = env.inference_provider
+    if not provider.usable:
+        return provider.detail
+    if not env.model_api_key:
+        return (
+            f"{provider.credential_name} is not set, and that is the credential "
+            f"this process would authenticate with ({provider.detail})"
+        )
+    return None
+
+
 def build_broker(env: Env, *, force_mock: bool = False) -> Broker:
     """Return a live paper broker, or a MockBroker when credentials are absent."""
     if force_mock:
@@ -226,8 +353,9 @@ def cmd_smoketest(env: Env, rules: Rules, *, force_mock: bool = False) -> int:
             symbols_without_history=no_history,
         )
 
-        if not env.anthropic_api_key:
-            log.warning("smoketest_skipping_claude_no_api_key")
+        blocked = model_calls_are_impossible(env)
+        if blocked:
+            log.warning("smoketest_skipping_model_call", detail=blocked)
             audit.record_event(
                 "smoketest",
                 {"ok": True, "claude_called": False, "tick_count": len(ticks)},
@@ -296,6 +424,150 @@ def _standing(
     )
 
 
+# ------------------------------------- a decision that considered nothing at all
+
+
+class ConsideredNothing(ModelCallFailed):
+    """A structurally valid decision that assessed none of the symbols it was shown.
+
+    **The second entrance to the quiet-cycle hole.** `UnstructuredReply` closes
+    the first — a reply with no tool call at all, where `proposals`,
+    `assessments` and `position_plans` all default to `[]` in Python and a bare
+    `{"market_assessment": "..."}` therefore parses as a completed cycle that
+    considered nothing. A tool call that IS made and comes back with
+    `assessments: []` arrives at exactly the same place, passes Pydantic, and
+    used to be recorded as a considered decision.
+
+    It is measured rather than feared. `llama3.3-70b-instruct` returns an
+    almost-empty decision — `assessments=0`, `position_plans=0` — on **6 of 10**
+    samples after being shown four symbols and an open position, with a
+    2.2-second median (`docs/DROPLET_AI.md`, "Which models hold the real
+    schema"). Three samples scored it 3/3 and would have shipped it.
+
+    **It lives here rather than in `ModelDecision` or in `ModelClient`, and that
+    is forced rather than chosen.** The fault is a RATIO — assessments against
+    symbols shown — and neither the schema nor the transport knows the
+    denominator. `cmd_loop` is the only place that does, because it built the
+    context.
+
+    It subclasses `ModelCallFailed` so that every existing handler treats it as
+    what it is: a call that could not produce a usable answer. `cmd_loop` logs
+    `model_call_failed`, records the job as failed and emits no
+    `cycle_complete`, exactly as it does for a timeout or a validation error.
+    """
+
+
+def refuse_a_decision_that_considered_nothing(
+    decision: ModelDecision, *, shown: Collection[str]
+) -> None:
+    """Raise when the model assessed NONE of the symbols it was given figures for.
+
+    `assessments` exists so that "nothing met the conditions" and "the loop
+    never looked at QQQ" are different entries afterwards. An empty list against
+    a non-empty set of symbols collapses them back into one, and the collapse is
+    silent: the audit row, the Decisions page and the heartbeat all read exactly
+    like a careful cycle that stood pat.
+
+    **`shown` is the INDICATOR set, and the choice of denominator is the whole
+    correctness of this check.** Three candidates and only one is honest:
+
+    - `symbols_in_play` (`allowed_symbols | granted`) is what the loop INTENDED
+      to look at, not what the model saw. A cycle where every symbol's bars
+      failed to fetch would be refused as a model failure when the fault was a
+      feed — mislabelling the defect, and doing it on the cycle where the data
+      is already degraded.
+    - `ticks` is over-broad in the other direction. A symbol with a live quote
+      and no history is one the context tells the model to *treat as having no
+      indicators at all* and to propose nothing on, so requiring an assessment
+      for it would fail the cycle for obeying an instruction.
+    - `indicators` is the set the output contract is written against — the
+      system prompt asks for *"one entry for every symbol you were given
+      indicators for"* — and it is the same object handed to
+      `build_market_context`, so the check cannot drift from what was rendered.
+
+    **Zero assessments given zero symbols is not the same fault**, and it is a
+    correct quiet cycle rather than a failed one: a pass where every class was
+    shut, or where no symbol produced usable history, has nothing to assess.
+    Refusing that would turn an honest empty answer into an outage.
+
+    **Zero is the trip, not a shortfall.** A model that assesses three of six
+    has made a judgement that a reader can see and argue with on the Decisions
+    page; a model that assesses none of six has produced a record
+    indistinguishable from never having looked. Only the second is the failure
+    this closes — and the ratio goes on the `cycle_complete` line so a partial
+    answer is visible rather than merely unrefused.
+
+    Never a downgrade. No retry, no second model, no "record it but flag it": a
+    recorded decision that considered nothing is the thing being prevented, so
+    recording it with a warning attached is the bug wearing a warning label.
+
+    **What is counted is assessments that name a symbol from `shown`, not
+    assessments.** It counted the list's LENGTH, which is a different question
+    from the one every sentence above asks, and audit reproduced the gap: shown
+    `SPY` and `QQQ`, answered with two assessments naming neither, the cycle was
+    recorded — and `cycle_complete` read `symbols_shown=2, assessments=2`, so
+    the ratio put there to make a partial answer visible reported a complete
+    one.
+
+    That is not a hypothetical hallucination. `SymbolAssessment.symbol` is free
+    text with no allowlist behind it, and the context block *asks* for symbols
+    outside the current indicator set: "What you said last cycle" lists the
+    previous cycle's assessments and the prompt tells the model to report on
+    each. A symbol whose bars failed this cycle, or whose grant lapsed, is in
+    that list and not in `shown` — so a model that answers only the recall
+    section, which is the cheapest way to look diligent, lands exactly here.
+
+    Case is normalised on both sides. Refusing a correct answer because it came
+    back `spy` would be a false refusal on a cycle that was fine, which is the
+    one outcome worse than the gap being closed.
+    """
+    if not shown:
+        return
+    answered, off_list = split_assessments_by_what_was_shown(decision, shown=shown)
+    if answered:
+        # At least one assessment is about something the model was given
+        # figures for. A shortfall is reported on the cycle line, never refused.
+        return
+
+    named = ", ".join(sorted(shown))
+    instead = (
+        f" It returned {len(off_list)} assessment(s), and every one names a "
+        f"symbol it was shown no indicators for ({', '.join(off_list)}), which "
+        f"answers a question nobody asked."
+        if off_list
+        else ""
+    )
+    raise ConsideredNothing(
+        f"The model was shown indicators for {len(shown)} symbol(s) ({named}) "
+        f"and assessed none of them.{instead} An assessment list that names none "
+        f"of the indicator set cannot be told apart afterwards from a loop that "
+        f"never looked, so this cycle is refused rather than recorded."
+    )
+
+
+def split_assessments_by_what_was_shown(
+    decision: ModelDecision, *, shown: Collection[str]
+) -> tuple[list[str], list[str]]:
+    """`(assessed among the symbols shown, assessed outside them)`.
+
+    One reading of "was this assessment about anything we asked about", returned
+    as a pair, because both halves are wanted and by two different callers: the
+    refusal above needs "none of them were", the `cycle_complete` line needs
+    "which ones were strays". Two functions would be two places for the
+    case-folding rule to live and one place for it to drift.
+
+    Sorted and de-duplicated: both halves reach a log line or a message, and a
+    model that repeated itself should not make the field longer than the fault.
+    """
+    wanted = {s.strip().upper() for s in shown}
+    answered: set[str] = set()
+    strays: set[str] = set()
+    for assessment in decision.assessments:
+        target = answered if assessment.symbol.strip().upper() in wanted else strays
+        target.add(assessment.symbol)
+    return sorted(answered), sorted(strays)
+
+
 def cmd_loop(
     env: Env, rules: Rules, *, execute: bool = False, force_mock: bool = False
 ) -> int:
@@ -306,6 +578,15 @@ def cmd_loop(
     # a docstring calling itself a startup banner, and nothing had ever printed
     # it -- see `announce.py`.
     announce_inference(env)
+
+    # See `provider_is_unusable` for why this is the narrow question and not the
+    # one the dreamer asks: a missing key still leaves a cycle worth running,
+    # and a wrong endpoint is a raise at loop start that systemd would restart
+    # into forever.
+    unusable = provider_is_unusable(env)
+    if unusable:
+        log.error("loop_provider_unusable", detail=unusable)
+        return 1
 
     audit = AuditLog()
     broker = build_broker(env, force_mock=force_mock)
@@ -740,8 +1021,22 @@ def cmd_loop(
             # is also the honest description of what happened. Everything
             # safety-critical above this line — reconcile, the stand-down
             # state, the expiry alerts — has already run.
+            #
+            # `refuse_a_decision_that_considered_nothing` is INSIDE this try on
+            # purpose. It raises a `ModelCallFailed`, and the point of raising
+            # rather than branching is that a decision which considered nothing
+            # takes the identical path to a timeout or a validation error: the
+            # cycle is skipped, the job is recorded as failed, and no
+            # `cycle_complete` is emitted. A separate branch would be a second
+            # way to end a cycle, and the two would drift.
+            #
+            # `shown=indicators` — the indicator mapping itself, keyed by symbol
+            # and the same object handed to `build_market_context` above. See
+            # that function for why it is the denominator and `ticks` and
+            # `symbols_in_play` are not.
             try:
                 decision, usage = claude.propose(context)
+                refuse_a_decision_that_considered_nothing(decision, shown=indicators)
             except Exception as exc:
                 detail = f"{type(exc).__name__}: {exc}"
                 log.error("model_call_failed", error=detail)
@@ -760,6 +1055,54 @@ def cmd_loop(
                 )
                 time.sleep(env.decision_interval_seconds)
                 continue
+
+            # An open position the model returned no plan for. The SAME SHAPE of
+            # defect as the empty assessment list above — the fidelity probe
+            # grades the pair together as `empty_arrays`, and the model that
+            # produced one produced the other — and deliberately **reported
+            # rather than refused.** The split is not squeamishness about a
+            # second refusal; it is that the two gaps cost different things.
+            #
+            # An unassessed symbol is unrecoverable. The audit log is the ONLY
+            # place a symbol the loop considered and passed on is ever written
+            # down, so an empty list erases the fact that it was looked at, and
+            # nothing later can establish it.
+            #
+            # An unplanned position is not. The position is in the journal, on
+            # the Board, in `reconcile`, in `stop_watch` and behind a resting
+            # broker-side stop; a plan is advisory and is never executed unless
+            # the operator has switched `position_actions` on. So the exposure
+            # stays visible and stays protected, and what is missing is one
+            # opinion about it. That is the repository's standing rule — report
+            # the gap, do not refuse — and refusing here would be a SECOND
+            # departure from it added by pattern-matching on the first, which
+            # `CLAUDE.md` names as the stated exception rather than the new
+            # default.
+            #
+            # It would also refuse the wrong cycles. A decision can carry four
+            # good assessments and a sound proposal while saying nothing about
+            # an open position, and throwing that away would cost a trade to
+            # punish a missing sentence.
+            #
+            # On the cycle line as well as in a warning, for the reason
+            # `stops_breached` is: a stated empty list each cycle is a fact,
+            # where a warning that only appears when something is wrong makes an
+            # outage look like a clean run.
+            positions_without_a_plan = sorted(
+                {p.symbol for p in account.open_positions}
+                - {plan.symbol for plan in decision.position_plans}
+            )
+            if positions_without_a_plan:
+                log.warning(
+                    "positions_without_a_plan",
+                    symbols=positions_without_a_plan,
+                    detail=(
+                        "The model was asked for one plan per open position and "
+                        "returned none for these. The positions are untouched "
+                        "and still protected; what is missing is the reasoning "
+                        "for holding them."
+                    ),
+                )
 
             # Recorded alongside the decision, not merely rendered into the
             # prompt and discarded. "Why did it pass on SPY on Tuesday" cannot
@@ -1061,6 +1404,32 @@ def cmd_loop(
                 proposals=len(decision.proposals),
                 approved=sum(1 for v in verdicts if v.approved),
                 executed=len(executed),
+                # What the model was given figures for, and how much of it it
+                # actually wrote down. A cycle reaching this line has already
+                # cleared `refuse_a_decision_that_considered_nothing`, so
+                # `assessments` is never zero against a non-empty
+                # `symbols_shown` — but a PARTIAL answer is deliberately not
+                # refused, and without the ratio here nothing states it. Three
+                # of six looks identical to six of six in every other field on
+                # this line.
+                symbols_shown=len(indicators),
+                assessments=len(decision.assessments),
+                # And the strays, because `assessments` alone cannot carry the
+                # ratio it was put here for. An assessment naming a symbol this
+                # cycle showed no figures for still lengthens that count, so
+                # `shown=2, assessments=2` read as a complete answer while one
+                # of the two symbols had never been mentioned. Not a refusal —
+                # the "What you said last cycle" block deliberately invites a
+                # report on a symbol that has since dropped out of the indicator
+                # set, so a stray is frequently the model doing as it was told.
+                # It is a fact about the record either way and belongs stated.
+                assessments_off_list=split_assessments_by_what_was_shown(
+                    decision, shown=indicators
+                )[1],
+                # The other half of that answer, and the one that is reported
+                # rather than refused. See the block above the warning for why
+                # a missing plan is not treated like a missing assessment.
+                positions_without_a_plan=positions_without_a_plan,
                 stand_down_stage=stand_down_state.stage
                 if stand_down_state.is_active(datetime.now(UTC))
                 else 0,
@@ -1230,8 +1599,14 @@ def cmd_dream(env: Env, rules: Rules) -> int:
 
     announce_inference(env)
 
-    if not env.anthropic_api_key:
-        log.error("dream_no_api_key", detail="ANTHROPIC_API_KEY is not set")
+    # `dream_spec`, not the default. The dreamer runs its OWN model — that is
+    # the whole reason `DREAM_MODEL_ID` exists beside `DECISION_MODEL_ID` — so a
+    # guard asked about the loop's model would clear a dreamer whose own model
+    # the endpoint will refuse, and `Dreamer.__init__` builds the client outside
+    # any `except`.
+    blocked = model_calls_are_impossible(env, spec=env.dream_spec)
+    if blocked:
+        log.error("dream_no_api_key", detail=blocked)
         return 1
 
     # The same feeds the decision loop reads, and for the opposite purpose: the
@@ -1582,8 +1957,12 @@ def cmd_confer(env: Env, rules: Rules) -> int:
 
     announce_inference(env)
 
-    if not env.anthropic_api_key:
-        log.error("confer_no_api_key", detail="ANTHROPIC_API_KEY is not set")
+    # `dream_spec` here too: `Conference._build` constructs both speakers'
+    # clients with it, so the loop's model has nothing to do with whether this
+    # command can run.
+    blocked = model_calls_are_impossible(env, spec=env.dream_spec)
+    if blocked:
+        log.error("confer_no_api_key", detail=blocked)
         return 1
 
     store = DreamStore()

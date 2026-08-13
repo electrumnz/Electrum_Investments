@@ -302,12 +302,20 @@ Everything that makes Yoda a bad candidate makes Grogu a good one:
   `web_search_enabled: false`, `web_fetch_enabled: false`. Section 3.
 
 One real cost, stated plainly: **`claude.dream` and the Hermes dreamer panel
-are two different things and only one of them moves.** `electrum-bot dream` is
-a Python Anthropic SDK call in `dreamer.py`; the panel on `/dreaming` is a
-Hermes turn through `run-dream.sh`. A hosted agent replaces the *panel*. The
-daily dream that actually fills the shelf is untouched, and pointing that at an
-agent endpoint is a different and much larger change — it uses structured
-output, which section "What agents cannot do" says is unavailable.
+are two different things and a hosted agent replaces only one of them.**
+`electrum-bot dream` is a Python call through the Anthropic SDK in `dreamer.py`;
+the panel on `/dreaming` is a Hermes turn through `run-dream.sh`. A hosted agent
+replaces the *panel*.
+
+**Both now reach DigitalOcean, and that does not make them the same thing** —
+they take different transports, hold different credentials and fail differently.
+`electrum-bot dream` goes through `/v1/messages` with a **forced tool call**
+validated by Pydantic on this side, using the key in `/opt/mudhorn/.env`. Its
+schema requirement is exactly why an agent endpoint is still the wrong home for
+it: section "What agents cannot do" records that structured output is
+unavailable there, and the substitute this repository built depends on
+`tools` + `tool_choice`, which is a property of the inference endpoint rather
+than of an agent.
 
 ### What the "root-owned souls" property becomes
 

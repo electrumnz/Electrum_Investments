@@ -196,6 +196,23 @@ CLAUDE_MODEL_IDS: dict[ClaudeTier, str] = _claude_model_ids()
 CLAUDE_PRICING_USD_PER_MTOK: dict[ClaudeTier, tuple[float, float, float]] = _claude_prices()
 
 
+def is_claude_tier_default(model_id: str) -> bool:
+    """Is this id one of the three a `ClaudeTier` resolves to when none is named?
+
+    Asked by `ModelClient` and by nothing else, for one narrow purpose: these
+    three ids reach a DigitalOcean endpoint as a **guaranteed** failure, and it
+    is worth saying so at construction rather than 96 times a day at call time.
+    Two independent reasons, both measured — DigitalOcean names Anthropic models
+    differently (`anthropic-claude-5-sonnet`, not `claude-sonnet-5`), and the
+    ones it does list answer **403 "not available for your subscription tier"**
+    on this account. `docs/DROPLET_AI.md` §2.
+
+    Derived from the spec table rather than written out, so a fourth tier cannot
+    arrive without this following it.
+    """
+    return model_id.strip() in set(CLAUDE_MODEL_IDS.values())
+
+
 # ----------------------------------------------------------------- inference
 #
 # DigitalOcean Gradient serverless inference, as an alternative endpoint for
@@ -212,20 +229,79 @@ CLAUDE_PRICING_USD_PER_MTOK: dict[ClaudeTier, tuple[float, float, float]] = _cla
 # variable rather than two, and so the string exists in exactly one place.
 DO_INFERENCE_DEFAULT_BASE_URL = "https://inference.do-ai.run"
 
+# Anthropic's own endpoint, written out rather than left to the SDK's default.
+#
+# **The SDK has a switch of its own and this repository did not know about it.**
+# `anthropic.Anthropic()` resolves its base URL as *kwarg > `ANTHROPIC_BASE_URL`
+# > a credentials profile on disk*, so a client constructed without one talks to
+# whatever the environment says while every surface here reports "Anthropic
+# direct". Measured: with `ANTHROPIC_BASE_URL` set and `DO_INFERENCE_KEY` unset,
+# `ModelClient` sent `output_config` and the Anthropic API key to that endpoint
+# and `_forces_tool_call` stayed False. `mudhorn-dream.service` and
+# `mudhorn-confer.service` both carry `EnvironmentFile=/opt/mudhorn/.env`, so a
+# line in that file is a real environment variable on two of the three paths.
+#
+# Naming it here means `inference_provider` can DESCRIBE the endpoint that will
+# actually be called, and `ModelClient` can pass it explicitly — which also
+# closes the profile-file route, because the SDK skips every other source once a
+# base URL is passed as a kwarg.
+ANTHROPIC_DEFAULT_BASE_URL = "https://api.anthropic.com"
+
 ANTHROPIC = "anthropic"
 DIGITALOCEAN = "digitalocean"
 
+
+def _names_anthropic_direct(url: str) -> bool:
+    """Is this value Anthropic's own endpoint written out rather than an override?
+
+    **Setting `ANTHROPIC_BASE_URL` to Anthropic's own URL is not a swap**, and
+    reporting it as one would be a banner saying calls go somewhere other than
+    Anthropic when they go to Anthropic. It is a live case rather than a tidy
+    one: the container this was written in exports exactly that, and the first
+    version of the check called it a proxy.
+
+    Host and path both, so `https://api.anthropic.com/proxy` stays an override.
+    """
+    from urllib.parse import urlsplit
+
+    if _host_of(url) != _host_of(ANTHROPIC_DEFAULT_BASE_URL):
+        return False
+    try:
+        return urlsplit(url.strip()).path.strip("/") == ""
+    except ValueError:
+        return False
+
+
+def _host_of(url: str) -> str:
+    """The lowercase host of a URL, or empty when there is not one to read.
+
+    Compared rather than the whole string, because `https://inference.do-ai.run`,
+    `https://inference.do-ai.run/` and `https://inference.do-ai.run/v1` are one
+    endpoint written three ways and an equality test would call two of them
+    somewhere else.
+    """
+    from urllib.parse import urlsplit
+
+    try:
+        return (urlsplit(url.strip()).hostname or "").lower()
+    except ValueError:
+        # A URL the parser refuses is not a host anybody can match against.
+        # Answering "no host" is the safe reading: it cannot make a comparison
+        # below claim the endpoint is somewhere it is not.
+        return ""
+
 # Whether any PYTHON model call actually goes through DigitalOcean.
 #
-# **It is False, and this exists so that stays checkable rather than
-# remembered.** Phase 1 moves the three souls, which run on Hermes and read
-# their own environment — no Python is involved in that path at all. So a key
-# in `.env` today is a DECLARATION and not yet a route, and
-# `Env.inference_provider` says so in the sentence it hands a startup banner.
+# **It is True now, and this exists so that stays checkable rather than
+# remembered.** It was False through phase 1, which moved the three souls —
+# they run on Hermes and read their own environment, so no Python was involved
+# and a key in `.env` was a DECLARATION rather than a route.
 #
-# Phase 2 (`claude.dream`, then `claude.confer`) is what flips this, in its own
-# commit, once the forced tool-call substitute for server-enforced structured
-# output has been proven on the one structured call that cannot lose money.
+# Phase 2 is this flip. `propose`, `dream` and `confer` all reach the endpoint
+# named by `DO_INFERENCE_KEY` when one is set, and they get there through a
+# **forced tool call** rather than through `output_config`, because the
+# server-enforced route measurably does not exist at that endpoint. See
+# `model_client.ModelClient._by_forced_tool_call` and `docs/DROPLET_AI.md` §2.
 #
 # **`claude.propose` was once written here as "never in scope", and that word
 # was withdrawn.** The argument behind it was purely economic — DigitalOcean
@@ -240,18 +316,23 @@ DIGITALOCEAN = "digitalocean"
 # What does NOT change with the destination, because it is a property of the
 # path rather than of the vendor:
 #
-# - **The schema must be ENFORCED, not requested.** `propose` produces order
-#   quantities and stop prices. A model asked nicely for a shape is a model that
-#   can return a plausible wrong one.
+# - **The schema is still ENFORCED, and where it is enforced moved.** It used to
+#   be the API compiling a grammar; on this path it is Pydantic rejecting the
+#   tool payload on this side. `propose` produces order quantities and stop
+#   prices, so what may never happen is the shape being merely *requested* and
+#   whatever comes back being used — which is why a reply carrying no tool call
+#   at all is a hard failure rather than a partial answer.
 # - **The model is PINNED per path, and nothing may re-route on failure.**
 #   Automatic fallback to a second model is a silent downgrade that still emits
-#   `cycle_complete`.
+#   `cycle_complete`. Falling back to the OTHER PROVIDER is the same fault
+#   wearing a bigger coat, which is why an unusable DigitalOcean configuration
+#   refuses rather than quietly answering from Anthropic.
 #
 # Note which way the evidence actually points. Alpha Arena is this repository's
 # founding lesson and it is not a Claude endorsement: Claude Sonnet finished
 # -$3,081, second-worst of six flagships. The rule was never "use this vendor",
 # it is "the gate holds whoever is talking".
-PYTHON_MODEL_PATH_USES_DO = False
+PYTHON_MODEL_PATH_USES_DO = True
 
 
 @dataclass(frozen=True)
@@ -269,12 +350,13 @@ class InferenceProvider:
     contains the key, in the same way the Settings page reports a credential as
     configured or not configured and never renders one.
 
-    Nothing here raises. A misconfigured endpoint for a path that has not moved
-    yet must not be able to stop the trading loop booting: refusing at startup
-    is a denial at the least useful moment, and this repository puts that
-    friction where the setting is actually USED. For phase 1 that is
-    `deploy/run-chat.sh` and `deploy/run-dream.sh`, which refuse the turn —
-    costing a chat message rather than a session's trading.
+    Nothing here raises, and that is unchanged now the Python path has moved.
+    This is a description of a configuration, and a description that could stop
+    a process from booting would be a denial at the least useful moment. The
+    friction belongs where the setting is USED: `deploy/run-chat.sh` and
+    `deploy/run-dream.sh` refuse the turn, `main.py` refuses the command with a
+    log line, and `ModelClient` refuses to construct. Every one of those costs a
+    call rather than a session, and every one of them says which.
     """
 
     name: str
@@ -286,11 +368,36 @@ class InferenceProvider:
     def is_digitalocean(self) -> bool:
         return self.name == DIGITALOCEAN
 
+    @property
+    def credential_name(self) -> str:
+        """The environment variable this provider authenticates with.
+
+        Named rather than assumed, because the guard that checks for a missing
+        key is the line an operator reads while wondering which key to go and
+        set. `ANTHROPIC_API_KEY is not set` on a box configured for
+        DigitalOcean would send them to the wrong console.
+        """
+        return "DO_INFERENCE_KEY" if self.is_digitalocean else "ANTHROPIC_API_KEY"
+
 
 class Env(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
     anthropic_api_key: str = Field(default="", alias="ANTHROPIC_API_KEY")
+
+    # **The SDK's own endpoint switch, read here so it stops being invisible.**
+    # It is not this repository's variable — `anthropic.Anthropic` reads it out
+    # of the environment on its own — and that is exactly why it has to be
+    # declared: a setting the configuration cannot see is a setting no banner,
+    # no Settings page and no guard can report. Measured, this silently pointed
+    # every Python model call somewhere else while `inference_provider` said
+    # "Anthropic direct". See `ANTHROPIC_DEFAULT_BASE_URL`.
+    #
+    # Empty means Anthropic's own endpoint, which is the default and the
+    # supported configuration. `DO_INFERENCE_KEY` still overrides it: when the
+    # DigitalOcean switch is thrown, `ModelClient` passes that endpoint
+    # explicitly and this value is not consulted.
+    anthropic_base_url: str = Field(default="", alias="ANTHROPIC_BASE_URL")
 
     # DigitalOcean Gradient serverless inference. Both optional, both empty by
     # default, and **empty means Anthropic** — see the block above this class.
@@ -436,33 +543,97 @@ class Env(BaseSettings):
         out loud: a provider swap is invisible afterwards, so the moment the
         process starts is the only moment anyone can be told.
 
-        The sentence is written to be true rather than encouraging. While
-        `PYTHON_MODEL_PATH_USES_DO` is False it says the switch is NOT IN FORCE
-        for any Python model call, because it is not — phase 1 moves Hermes,
-        and a banner claiming otherwise would be exactly the confident partial
-        answer this repository exists to prevent.
+        The sentence is written to be true rather than encouraging. It said the
+        switch was NOT IN FORCE for any Python model call all through phase 1,
+        because it was not — that phase moved the souls on Hermes and nothing
+        else, and a banner claiming otherwise would have been exactly the
+        confident partial answer this repository exists to prevent. It now says
+        what actually happens instead, including the half an operator cannot
+        see: the schema is held by Pydantic on this side rather than by the
+        endpoint.
         """
         key = self.do_inference_key.strip()
         declared = self.do_inference_base_url.strip()
+        # The SDK's switch. `base_url` on the Anthropic branch is now the
+        # endpoint that will actually be called rather than an empty string,
+        # because `ModelClient` passes it through — the two must not be able to
+        # describe different endpoints. A value that spells out Anthropic's own
+        # endpoint is not an override and is read as unset, so the ordinary
+        # banner keeps saying the ordinary thing.
+        sdk_url = self.anthropic_base_url.strip()
+        if _names_anthropic_direct(sdk_url):
+            sdk_url = ""
+        anthropic_url = sdk_url or ANTHROPIC_DEFAULT_BASE_URL
 
         if not key:
+            # **The SDK's switch pointed at the endpoint the repo's switch
+            # exists for.** Measured: this sends `output_config` — which that
+            # endpoint accepts with a 200 and ignores — plus the ANTHROPIC key,
+            # on the transport that assumes the schema is enforced server-side.
+            # Every part of that is wrong and none of it announced itself.
+            #
+            # Reported as DigitalOcean-and-unusable rather than as a new state,
+            # because it IS a DigitalOcean configuration: `ModelClient` already
+            # refuses an unusable one, `provider_is_unusable` already degrades
+            # the loop and `model_calls_are_impossible` already refuses the
+            # command. A fourth state would be a fourth thing for each of those
+            # to have been taught about.
+            do_hosts = {
+                _host_of(DO_INFERENCE_DEFAULT_BASE_URL),
+                _host_of(declared),
+            } - {""}
+            if sdk_url and _host_of(sdk_url) in do_hosts:
+                return InferenceProvider(
+                    name=DIGITALOCEAN,
+                    base_url=sdk_url,
+                    usable=False,
+                    detail=(
+                        f"ANTHROPIC_BASE_URL points at the DigitalOcean endpoint "
+                        f"({sdk_url}) but DO_INFERENCE_KEY is not set. The Anthropic "
+                        "SDK honours that variable, so model calls would go there "
+                        "carrying the ANTHROPIC key and the output_config that "
+                        "endpoint accepts with a 200 and ignores -- the schema would "
+                        "be enforced nowhere and nothing would say so. "
+                        "DO_INFERENCE_KEY is the switch: set it, or unset "
+                        "ANTHROPIC_BASE_URL."
+                    ),
+                )
             if declared:
                 # Half a configuration. Reported rather than ignored: an
                 # operator who set the endpoint and not the key would otherwise
                 # believe the swap had happened.
                 return InferenceProvider(
                     name=ANTHROPIC,
-                    base_url="",
+                    base_url=anthropic_url,
                     usable=False,
                     detail=(
                         f"DO_INFERENCE_BASE_URL is set ({declared}) but DO_INFERENCE_KEY "
                         "is not, so nothing has moved. The key is the switch; a base URL "
-                        "on its own does nothing. Model calls go to Anthropic directly."
+                        f"on its own does nothing. Model calls go to {anthropic_url}."
+                    ),
+                )
+            if sdk_url:
+                # A deliberate proxy is a supported thing to do and is NOT
+                # refused — but it is named, because this repository cannot know
+                # whether an arbitrary endpoint enforces `output_config` and the
+                # transport assumes it does. Reporting the weaker fact rather
+                # than implying the stronger one.
+                return InferenceProvider(
+                    name=ANTHROPIC,
+                    base_url=sdk_url,
+                    usable=True,
+                    detail=(
+                        f"Inference provider: the Anthropic SDK, pointed at {sdk_url} by "
+                        "ANTHROPIC_BASE_URL rather than at Anthropic's own endpoint "
+                        "(DO_INFERENCE_KEY is not set). The schema is sent as "
+                        "output_config and is assumed to be enforced there; this "
+                        "process cannot check that, and an endpoint which accepts it "
+                        "and ignores it would leave the schema enforced nowhere."
                     ),
                 )
             return InferenceProvider(
                 name=ANTHROPIC,
-                base_url="",
+                base_url=anthropic_url,
                 usable=True,
                 detail=(
                     "Inference provider: Anthropic direct (DO_INFERENCE_KEY is not set). "
@@ -485,11 +656,20 @@ class Env(BaseSettings):
             )
 
         # The clause that stops this claiming a switch that has not been
-        # thrown. It comes off when phase 2 lands, in the same commit that
-        # flips `PYTHON_MODEL_PATH_USES_DO`, and `tests/test_config.py` fails
-        # until one moves with the other.
-        not_yet = (
-            ""
+        # thrown, and `tests/test_config.py` fails until the sentence and the
+        # constant move together in one commit.
+        #
+        # The in-force half names the schema mechanism deliberately. An
+        # operator reading "DigitalOcean serverless" has no way to know that
+        # `output_config` is accepted with a 200 and ignored there, so the one
+        # sentence they are guaranteed to see is where that belongs.
+        in_force = (
+            (
+                " Every Python model call goes here, as a forced tool call "
+                "validated by Pydantic on this side -- this endpoint accepts "
+                "output_config with a 200 and ignores it, so the schema is held "
+                "here rather than served."
+            )
             if PYTHON_MODEL_PATH_USES_DO
             else (
                 " It is NOT IN FORCE for any Python model call: phase 1 moves the three "
@@ -503,9 +683,31 @@ class Env(BaseSettings):
             usable=True,
             detail=(
                 f"Inference provider: DigitalOcean serverless at {base_url} "
-                f"(DO_INFERENCE_KEY is set).{not_yet}"
+                f"(DO_INFERENCE_KEY is set).{in_force}"
             ),
         )
+
+    @property
+    def model_api_key(self) -> str:
+        """The credential the PYTHON model path actually authenticates with.
+
+        One question, one answer. Three call sites used to test
+        `anthropic_api_key` directly and report `ANTHROPIC_API_KEY is not set`,
+        which stopped being the right question the moment a second endpoint
+        existed: on a box configured for DigitalOcean that check passes with no
+        Anthropic key needed and fails with one present but no model access key.
+        Both answers are wrong, and the second is the dangerous shape — a guard
+        that says yes about a credential nothing is going to use.
+
+        It is deliberately NOT a fallback. When DigitalOcean is configured this
+        returns the DigitalOcean key and never reaches for the Anthropic one, so
+        an empty answer means "the configured provider has no credential" rather
+        than "no credential anywhere". Falling back would be the silent
+        downgrade the whole arrangement refuses.
+        """
+        if self.inference_provider.is_digitalocean:
+            return self.do_inference_key.strip()
+        return self.anthropic_api_key.strip()
 
     @property
     def alpaca_base_url(self) -> str:

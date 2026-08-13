@@ -78,10 +78,13 @@ def announce_inference(env: Env, *, stream: TextIO | None = None) -> None:
     """Which endpoint this process's model calls are configured for.
 
     The sentence comes from `Env.inference_provider`, which is written to be
-    true rather than encouraging: while `PYTHON_MODEL_PATH_USES_DO` is False it
-    says the switch is NOT IN FORCE for any Python model call, because it is
-    not. A banner claiming otherwise is the confident partial answer this
-    repository exists to refuse.
+    true rather than encouraging. It said the switch was NOT IN FORCE for any
+    Python model call all through phase 1, because it was not; it now names the
+    transport instead, including the half nobody could infer — that the endpoint
+    accepts `output_config` and ignores it, so the schema is held by this
+    process rather than served. A banner claiming more than is true is the
+    confident partial answer this repository exists to refuse, and a banner
+    claiming a guarantee that moved is the same fault.
 
     `usable=False` is reported at the same volume rather than louder. It is a
     configuration finding, not an error, and the process is about to carry on

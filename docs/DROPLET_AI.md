@@ -4,22 +4,38 @@ Researched **10 August 2026**, against the live DigitalOcean docs. Everything
 below is either cited or explicitly marked unverified. Re-check the pricing and
 the model list before acting on the arithmetic; both move.
 
-> ## The short version
+> ## The short version — SUPERSEDED 13 Aug 2026, and the reversal is the point
 >
-> **Do the chat and dreaming halves. Do not do the trading loop.**
+> **Every model call moves, including the trading loop.** `PYTHON_MODEL_PATH_USES_DO`
+> is True, and `propose`, `dream` and `confer` reach DigitalOcean through a
+> **forced tool call** validated by Pydantic on this side.
 >
-> DigitalOcean resells Anthropic's models at **exactly Anthropic's list price**,
-> so routing `model_client.py` through it saves nothing and costs one more hop,
-> one more credential and one more prepaid balance to keep topped up. Its
-> Anthropic-compatible endpoint also **does not document the structured-output
-> parameter that `claude.propose` depends on** — the field is absent from the
-> published request schema. That is the whole decision.
+> What this box used to say, kept because the reasoning is what makes the
+> reversal legible rather than a change of mind: *"Do the chat and dreaming
+> halves. Do not do the trading loop."* Two arguments held it up and **exactly
+> one of them survived contact with a measurement.**
 >
-> Where DigitalOcean genuinely pays is the *other* model path: Hermes, which
-> drives the three souls on `/chat`, `/dreaming` and `/settings`. That is where
-> "allocate tasks to better models if needed" is a real feature rather than a
-> risk, because none of those agents propose an order, and it is a
-> configuration change on the box rather than a code change in this repository.
+> - **The cost argument was answered by a different question.** It compared
+>   Anthropic models at DigitalOcean against Anthropic models at Anthropic —
+>   identical prices, one extra hop — and silently assumed the destination was
+>   the same model at the other end of a longer wire. The operator's instruction
+>   was the other thing entirely: *"there's a full base of models there
+>   including better ones for the task."* Open models run $0.18–$0.99 per
+>   million against Sonnet's $2/$10.
+> - **The schema argument was right, and got worse rather than better.**
+>   `output_config` is not merely undocumented there: it is accepted with HTTP
+>   200 and **silently ignored**. That is why the swap is a code change rather
+>   than a base-URL line, and why the thing built is a forced tool call with
+>   client-side validation and a hard failure on a reply that carries no tool
+>   call at all.
+>
+> The judgement below — *"Is it worth it? No"* — is left in place under §2a
+> because it is a correct reading of the trade it was weighing. What changed is
+> the trade: the thing being bought is no longer "the same model, further away".
+>
+> Hermes and the three souls moved first, on 12 Aug, and for the reason that is
+> unchanged: none of those agents proposes an order, so a soul that answers
+> badly is a bad answer rather than a bad order.
 
 ---
 
@@ -463,13 +479,26 @@ forced-tool-call substitute for structured output on `claude.dream` — the one
 structured call in the system that cannot lose money and that nothing waits on.
 If it holds, `confer` follows.
 
-**Phase 3 — `claude.propose`. Do not do this.**
+**Phase 3 — `claude.propose`. ~~Do not do this.~~ DONE, on the operator's
+instruction and on evidence this section did not have.**
 
-Not "not yet" — not on this evidence. It buys nothing (price parity), it costs a
-server-enforced schema on the order path, and the only version of it that saves
-money is the version that changes the model that proposes trades. If the
-operator wants it anyway, the prerequisites are in "If the loop moves anyway"
-below, and it should be its own commit with its own reason, like a limit change.
+The paragraph below is what this said, and it is worth reading before assuming
+it was simply overruled: *"Not 'not yet' — not on this evidence. It buys nothing
+(price parity), it costs a server-enforced schema on the order path, and the
+only version of it that saves money is the version that changes the model that
+proposes trades."*
+
+Every clause of that is correct about the trade it was weighing, and the last
+one names the change of premise exactly. **The version that saves money IS the
+version that changes the model** — that is not a hidden cost of the move, it is
+the operator's instruction. Price parity was an argument about Anthropic models
+at a longer distance, and nobody wants those.
+
+What did not change is the safety half, and it is built rather than waived: the
+schema is enforced by Pydantic on this side, a reply with no tool call is a hard
+failure, the model is pinned per path, and nothing re-routes on failure. The
+checklist in "If the loop moves anyway" is the standard this was held to; its
+status is recorded there item by item.
 
 ---
 
@@ -547,28 +576,47 @@ not exist.
 commands (`electrum-bot dream`, `electrum-bot confer`) on separate timers, so
 neither can take the trading loop down with it.
 
-### If the loop moves anyway
+### If the loop moves anyway — it did. Status, item by item.
 
-The operator may decide otherwise, and this section exists so the decision is
-made with the consequences visible rather than discovered afterwards. Every one
-of these is a precondition, not a nice-to-have:
+The operator decided otherwise, and this section exists so the decision is made
+with the consequences visible rather than discovered afterwards. Every one of
+these is a precondition, not a nice-to-have. **Two are still open, and they are
+open rather than waived — the honest state of the move is "built and not yet
+proven live".**
 
-- **Prove caching first.** Two identical `/v1/messages` calls a minute apart;
-  assert `cache_read_input_tokens > 0` on the second. If it is zero, stop — the
-  swap costs money instead of saving it.
-- **Prove the structured substitute** against `ModelDecision` over at least a
-  week of real cycles, comparing rejection rates against the current path.
-- **Pin the model. No router.** `model` is a fixed string, never
-  `router:something`.
-- **Record the served model** in the `cycle_complete` line and in the audit
-  event, and treat a mismatch as a failed cycle. A silent downgrade must not be
-  able to look like a normal decision.
-- **Keep `model_call_failed` fail-closed.** No prose fallback, no cross-provider
-  retry, no second attempt on a different model.
-- **`take_profit_price` is optional and `stop_loss_price` is required.** Whatever
-  produces the object, `OrderProposal`'s validation is what still has to reject.
-- **A test that proves it rejects**, per the repository's own convention for new
-  risk-adjacent behaviour.
+- ~~**Prove caching first.**~~ **STILL OPEN, and it is the one with money on
+  it.** Two identical `/v1/messages` calls a minute apart; assert
+  `cache_read_input_tokens > 0` on the second. A dropped `cache_control` does
+  not raise — it bills 10x on the system block forever. The count already
+  reaches the `cycle_complete` line as `cached_tokens`, so the check is
+  available from the first day of real cycles rather than needing a harness:
+  **a run of cycles reading zero is the answer.** Note the failure direction is
+  money and not correctness, which is why it did not block the move.
+- ~~**Prove the structured substitute against `ModelDecision`**~~ — **DONE for
+  the shape, OPEN for the rate.** `scripts/do_schema_fidelity.py` measured the
+  real schema over 10 samples per model; four models hold it 10/10. What has
+  not happened is a week of real cycles comparing rejection rates, and that
+  cannot happen before a deploy.
+- ~~**Pin the model. No router.**~~ **DONE.** `DECISION_MODEL_ID` and
+  `DREAM_MODEL_ID` are fixed strings. The router was ruled out separately and
+  for a stronger reason — a downgrade nobody can observe is worse than a failed
+  call.
+- ~~**Record the served model.**~~ **DONE.** `ModelClient.model_id` is on the
+  `loop_start` line. The mismatch half is *not* built: DigitalOcean reports the
+  served model in a response field that nothing here reads, and treating a
+  mismatch as a failed cycle needs that read first.
+- ~~**Keep `model_call_failed` fail-closed.**~~ **DONE, and it is now three
+  refusals rather than one.** No prose fallback, no cross-provider retry, no
+  second attempt on a different model — and a reply carrying no tool call is a
+  raise rather than an empty object. `tests/test_model_client.py` pins all
+  three, each verified to fail when its guard is removed.
+- ~~**`take_profit_price` is optional and `stop_loss_price` is required.**~~
+  **DONE and unchanged.** `OrderProposal`'s validation is what rejects, and it
+  runs on the tool payload exactly as it ran on the parsed output.
+- ~~**A test that proves it rejects.**~~ **DONE.**
+  `test_arguments_the_schema_forbids_are_refused_here` uses the vocabulary
+  `openai-gpt-oss-20b` and `gemma-4-31B-it` actually invented (`ticker`,
+  `action`, `shares`) rather than a made-up malformation.
 
 ---
 

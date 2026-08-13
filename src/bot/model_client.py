@@ -3,7 +3,9 @@
 Design:
 - Frozen system prompt (no datetimes, IDs, or volatile content) so prompt caching works
 - Volatile market state goes in the user message, after the cache breakpoint
-- Structured outputs via `messages.parse()` against a Pydantic schema
+- Structured output two ways, chosen by the ENDPOINT rather than by the model:
+  `messages.parse()` where the schema is enforced server-side, and a forced tool
+  call validated by Pydantic where it is not
 - Spec-aware: the model, its prices and which optional request fields it takes
   all travel together on a `ModelSpec`, so naming a model is not the same thing
   as choosing one of three Claude tiers
@@ -12,17 +14,45 @@ Caching note: the system prompt is marked with a 1-hour TTL. At the default
 15-minute decision cadence a 5-minute cache would expire between every call and
 never pay for itself, whereas a 1-hour cache is read roughly four times per
 write. See docs/COSTS.md.
+
+## Two transports, and which one is used is a property of the ENDPOINT
+
+`ANTHROPIC_BASE_URL`-style swaps are usually a base URL and nothing else. This
+one is not, and the reason was measured rather than reasoned about:
+**DigitalOcean's `/v1/messages` accepts `output_config` with HTTP 200 and
+silently ignores it.** Not a 400, not an error — a 200 and a paragraph of prose.
+That is the worst of the three possible answers, because a caller that only
+checked for an error would believe the schema was in force while it was not.
+Measured 12 Aug 2026 on four models; `docs/DROPLET_AI.md` §2 has the detail.
+
+So `_forces_tool_call` selects the substitute the same document names: one tool
+whose `input_schema` is the model's JSON schema, `tool_choice` set to that tool,
+and the arguments validated **here** by Pydantic.
+
+**It keys on `Env.inference_provider.is_digitalocean` and never on the model
+id**, and that is the distinction to preserve. Whether a schema is enforced is a
+property of the thing serving the request, not of the weights behind it — the
+same model is served with enforcement at one endpoint and without it at another,
+and a check on the model name would get that exactly backwards the first time a
+familiar name appeared in an unfamiliar catalogue.
+
+What is *lost* by the substitute is narrower than it sounds, and what is *kept*
+is the part that matters. Pydantic still rejects a malformed object, so a `qty`
+or a `stop_loss_price` that comes back wrong is refused rather than coerced, the
+cycle logs `model_call_failed` and `RiskGate` never sees it. What degrades is
+reliability: the model is asked for the shape rather than constrained to it, so
+the rejection rate rises and every rejection costs a cycle.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, TypeVar, cast
 
 import anthropic
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
-from .config import DAY_NAMES, Env, ModelSpec, Rules
+from .config import DAY_NAMES, Env, ModelSpec, Rules, is_claude_tier_default
 from .models import (
     # `x as x` is mypy's explicit re-export form under --strict, and the
     # re-export is the point: the models this applies to live in `models.py`,
@@ -33,6 +63,12 @@ from .models import (
     EVERY_FIELD_REQUIRED as EVERY_FIELD_REQUIRED,
 )
 from .models import OrderProposal, PositionPlan, SymbolAssessment
+
+# What a structured call comes back as. A TypeVar rather than `BaseModel` so
+# `propose` keeps its `ModelDecision` return type through the shared transport:
+# widening it to `Any` at the one junction every call now passes through would
+# quietly switch off type checking for all three of them.
+_Schema = TypeVar("_Schema", bound=BaseModel)
 
 # Attach to any Pydantic model handed to `messages.parse` as an `output_format`.
 #
@@ -179,6 +215,231 @@ DREAM_TIMEOUT_SECONDS = 240.0
 DREAM_MAX_RETRIES = 1
 
 
+# The single tool every forced-tool-call request declares. One name, because a
+# reply is only accepted when it calls THIS tool — a model that invents a second
+# one has not answered the question it was asked.
+STRUCTURED_TOOL_NAME = "record"
+
+# The output budget every measurement of this path was taken at. See
+# `ModelClient._by_forced_tool_call` for why it is a floor rather than a value.
+FORCED_TOOL_CALL_MAX_TOKENS = 8192
+
+# How much model-controlled text any refusal below may quote back.
+#
+# **Every quote-back in this module is bounded, and one of them was not.** The
+# markup-key refusal rendered `sorted(arguments)[:4]` — four keys, each of
+# whatever length the far end chose. Measured: a single 200,000-character key
+# produced a 200,116-character exception, which becomes a log line, an
+# `audit/*.jsonl` row and an `insight.py` index entry, once per cycle, against
+# an audit log measured at ~500 KiB a DAY and deliberately never pruned. The
+# bound is the count of keys AND the length of each, because either one alone
+# leaves the other unbounded.
+QUOTED_TEXT_MAX_CHARS = 300
+QUOTED_KEYS_MAX = 4
+
+
+def _has_markup_keys(arguments: dict[str, Any]) -> bool:
+    """The `glm-5.2` failure: tool-call markup leaking into the argument keys.
+
+    Checked on the KEYS rather than by looking for a field that should be
+    there, because the giveaway is a key nobody named. A check that merely
+    confirmed one recognised field would pass `{'<tool_call>record
+    <arg_key>symbol': 'SPY', 'market_assessment': '...'}` — nine-tenths markup
+    with one real key in it.
+
+    Pydantic would reject most of these anyway, on the required fields the
+    mangling swallowed. That is not a reason to drop this: the two produce the
+    same outcome and different DIAGNOSES, and "this model cannot serve this
+    path" is worth telling apart from "this cycle went wrong".
+
+    **A key that is not a string counts as corrupt**, rather than being asked
+    the question. `"<" in key` raises `TypeError` on an int, which escaped
+    `ModelCallFailed` entirely and reached the caller as a crash from inside a
+    module whose whole contract is that it raises one of three named errors.
+    JSON cannot produce one, so the shape only arrives from a proxy or an SDK
+    that constructs its own objects — which is precisely the case this check is
+    about, and precisely the case where a `TypeError` is the least useful thing
+    to say.
+    """
+    return any(
+        not isinstance(key, str) or "<" in key or ">" in key or key.strip() != key
+        for key in arguments
+    )
+
+
+def _quote_keys(arguments: dict[str, Any]) -> str:
+    """A bounded rendering of the argument keys, for a refusal message."""
+    shown = [str(key)[:QUOTED_TEXT_MAX_CHARS] for key in sorted(arguments, key=str)]
+    return repr(shown[:QUOTED_KEYS_MAX])
+
+
+def _tool_arguments(response: Any, what: str) -> dict[str, Any]:
+    """The forced tool call's arguments, or a raise naming what came back instead.
+
+    Three refusals, kept apart because they are three different findings about
+    the far end. The first is the one that must never become a warning: see
+    `UnstructuredReply`.
+    """
+    blocks = getattr(response, "content", None) or []
+    calls = [
+        block
+        for block in blocks
+        if getattr(block, "type", None) == "tool_use"
+        and getattr(block, "name", None) == STRUCTURED_TOOL_NAME
+    ]
+    if not calls:
+        # Quoted back deliberately. The whole failure is that this text is
+        # plausible, so an operator reading the log line needs to see what the
+        # model said instead of answering — a bare "no tool call" reads like a
+        # transport fault. Whitespace collapsed to keep it one log line.
+        prose = " ".join(
+            " ".join(str(getattr(block, "text", "")).split())
+            for block in blocks
+            if getattr(block, "type", None) == "text"
+        ).strip()
+        raise UnstructuredReply(
+            f"The model returned no {STRUCTURED_TOOL_NAME!r} tool call for the "
+            f"{what}, so nothing was recorded. This is a hard failure and not a "
+            "partial answer: an empty structured object parses as a completed "
+            "cycle that considered nothing. "
+            + (
+                f"It said instead: {prose[:QUOTED_TEXT_MAX_CHARS]!r}"
+                if prose
+                else "It said nothing at all."
+            )
+        )
+
+    arguments = getattr(calls[0], "input", None)
+    if not isinstance(arguments, dict):
+        raise CorruptToolCall(
+            f"The {what} tool call carried {type(arguments).__name__} rather than "
+            f"an object: {str(arguments)[:QUOTED_TEXT_MAX_CHARS]!r}"
+        )
+    if _has_markup_keys(arguments):
+        raise CorruptToolCall(
+            f"The {what} tool call's argument keys carry the model's own tool-call "
+            f"markup, so the endpoint half-parsed it: {_quote_keys(arguments)}"
+        )
+    return arguments
+
+
+def _missing_required(
+    payload: Any, schema: dict[str, Any], defs: dict[str, Any], path: str = ""
+) -> list[str]:
+    """Every property the SENT schema marks required that the payload omits.
+
+    **The transport sends one contract and used to check a different one.**
+    `EVERY_FIELD_REQUIRED` puts every property of these models into the
+    schema's `required` list, and on the server-enforced path the API compiles
+    that into a grammar the model cannot leave a key out of. `model_validate`
+    does not: it honours the PYTHON defaults, which every one of these fields
+    has. Measured on the shapes actually sent — `ModelDecision` accepts three
+    absent properties, `OrderProposal` three, `SymbolAssessment` two,
+    `PositionPlan` five and `DreamStep` eleven, twenty-four in all.
+
+    The result is not a rejection, which is what makes it worth closing: an
+    omission becomes a VALUE, invented here and attributed to the model. A
+    `position_plan` of `{"symbol": ..., "reasoning": ...}` is recorded as
+    `action=hold, thesis_intact=True` — an opinion about an open position that
+    nothing on the far end ever expressed, rendered to the operator as one that
+    was. That is a plausible wrong figure, which is the failure this repository
+    exists to refuse.
+
+    **It refuses an ABSENT key and never an empty one.** `assessments: []` is a
+    real answer and passes here untouched; `main.py` is where an empty list is
+    weighed against what the model was shown, and this must not become a second
+    opinion about that. The two faults are different: one is the model saying
+    nothing met the conditions, the other is the model not answering that part
+    of the contract at all.
+
+    Only the four keywords these schemas actually contain are handled —
+    `$ref`, `anyOf`, `items` and `properties`/`required` — checked by walking
+    the emitted schemas rather than assumed. An `anyOf` is always `[X, null]`
+    here, so a null payload is a legitimate answer and anything else is checked
+    against the one non-null branch; a union with two real branches is left
+    alone rather than guessed at, because requiring both would reject a valid
+    payload and picking one would be arbitrary.
+    """
+    ref = schema.get("$ref")
+    if isinstance(ref, str):
+        target = defs.get(ref.rsplit("/", 1)[-1])
+        return _missing_required(payload, target, defs, path) if target else []
+
+    options = schema.get("anyOf") or schema.get("oneOf")
+    if isinstance(options, list):
+        real = [o for o in options if isinstance(o, dict) and o.get("type") != "null"]
+        if payload is None or len(real) != 1:
+            return []
+        return _missing_required(payload, real[0], defs, path)
+
+    items = schema.get("items")
+    if isinstance(items, dict) and isinstance(payload, list):
+        return [
+            gap
+            for index, element in enumerate(payload)
+            for gap in _missing_required(element, items, defs, f"{path}[{index}]")
+        ]
+
+    properties = schema.get("properties")
+    if not isinstance(properties, dict) or not isinstance(payload, dict):
+        return []
+
+    here = f"{path}." if path else ""
+    gaps = [
+        f"{here}{name}"
+        for name in schema.get("required", ())
+        if name in properties and name not in payload
+    ]
+    for name, sub in properties.items():
+        if name in payload and isinstance(sub, dict):
+            gaps.extend(_missing_required(payload[name], sub, defs, f"{here}{name}"))
+    return gaps
+
+
+class ModelCallFailed(RuntimeError):
+    """A model call that cannot produce a usable answer, for any reason.
+
+    A base class rather than three unrelated errors, because every caller wants
+    the same thing from all of them — `cmd_loop` logs `model_call_failed` and
+    skips the cycle without emitting `cycle_complete`. It subclasses
+    `RuntimeError` so the existing `except Exception` wrappers, and the callers
+    that were written against the plain `RuntimeError` this module used to
+    raise, keep behaving exactly as they did.
+    """
+
+
+class UnstructuredReply(ModelCallFailed):
+    """The reply carried no tool call at all. Prose where a schema was forced.
+
+    **This is the one that has to be a hard failure, and it is the reason this
+    class has a name of its own.** A dropped schema breaks loudly in every case
+    that produces a number and silently in exactly one: the quiet cycle. A model
+    that answers `{"market_assessment": "the market is mixed"}` and stops has
+    returned something `ModelDecision` accepts — `proposals`, `assessments` and
+    `position_plans` all default to `[]` in Python — so a cycle that considered
+    NOTHING is recorded as a cycle that looked at six symbols and chose to stand
+    pat. Those are opposite findings and only one of them is a working bot.
+
+    It is not hypothetical. `qwen3.8-max` returned prose on 2 of 3 attempts
+    against the real `ModelDecision` schema with `tool_choice` forcing the call
+    (`docs/DROPLET_AI.md`, 13 Aug 2026), which is why the check is a raise and
+    not a log line: a partial answer here is indistinguishable from a good one
+    downstream.
+    """
+
+
+class CorruptToolCall(ModelCallFailed):
+    """A tool call whose ARGUMENT KEYS are the model's own tool-call markup.
+
+    Kept apart from a plain validation failure because it is a different fault
+    with a different remedy: `{'<tool_call>record  <arg_key>symbol': 'SPY'}` is
+    the model emitting markup as text and the proxy half-parsing it, which means
+    that model cannot serve this path at all, where an invalid payload from a
+    capable model is a bad cycle. `glm-5.2` does this, and a check that looked
+    for one field it recognised would pass a payload that is nine-tenths markup.
+    """
+
+
 @dataclass(frozen=True)
 class CallUsage:
     """What one model call spent, and what that cost — when that is knowable.
@@ -220,6 +481,59 @@ will not change the outcome. Your job is to make proposals it will approve.
 ## Hard rules (mirrored from config/rules.yaml)
 
 {rules_summary}
+
+## Sizing: those limits are PERCENTAGES, and you are handed the dollars
+
+Every limit above is a percentage of equity. Every figure you are given about
+this account is in dollars. Converting between the two is arithmetic across two
+documents, and it has already been done for you: the market context carries a
+**Sizing ceilings, in dollars** block holding each of those limits multiplied
+out against the live account, with what is already at risk ALREADY SUBTRACTED.
+
+Read that block. Do not re-derive a ceiling from the percentages above. This is
+the same rule as the Indicators section — the averages are computed in Python so
+that you never state a figure you worked out yourself — applied to the one
+figure that turns directly into an order quantity.
+
+**The combined-risk cap is a BUDGET SHARED with the positions already open, not
+a second per-trade allowance.** It is the only ceiling that requires a
+subtraction, it is the one that binds most often, and it is the one that has
+been got wrong: a proposal sized against the per-trade cap alone came out at
+twice the permissible size, because most of the combined budget was already
+spent on an open position. The block states what is LEFT after that subtraction.
+That figure is the answer; the percentage above is not.
+
+Sizing is then one division:
+
+    qty = tightest RISK ceiling / |limit_price - stop_loss_price|
+
+Round DOWN. Then check what that quantity is worth against the tightest POSITION
+VALUE ceiling and take the smaller — the two units do not convert into one
+another without your stop distance. Every figure in that block is a ceiling, not
+a target, and a size that fits it is not thereby a trade worth making.
+
+**Two of those lines are WORDS instead of a figure. Neither one means a small
+budget, and neither is a formatting quirk.**
+
+- `BUDGET SPENT` — the headroom is gone. Nothing fits at ANY size, however
+  small. Do not scale down to a token quantity to squeeze in; propose nothing
+  there and say why.
+- `HEADROOM UNKNOWN` — the ceiling could not be established at all, usually
+  because a position is held that the journal has no row for, so its stop and
+  therefore its risk cannot be read. Missing is not zero and it is not room.
+  Propose nothing that ceiling governs, and name it in the assessment as
+  `blocked`.
+
+**Do not move the stop to make a size fit.** Size is computed FROM the stop
+distance, so a wider stop buys fewer shares at the same risk and a tighter one
+buys more. A stop chosen to justify a quantity is a quantity with no stop behind
+it — and the gate will approve it, because the gate checks the arithmetic and
+not the intent. If the size you wanted does not fit, the trade is smaller, or it
+is not a trade.
+
+If the market context carries no ceilings block at all, then you have not been
+given them. Propose nothing rather than working them out from the percentages —
+the same rule as a symbol reported with no price history.
 
 ## Output contract
 
@@ -579,10 +893,72 @@ class ModelClient:
         $0.0095 a run cached-and-missing against $0.0071 uncached, a third more
         for a feature sold as an optimisation. The loop wakes every fifteen
         minutes and gets roughly four reads per write, so it keeps caching on.
+
+        **Which endpoint it talks to comes from the environment, and a broken
+        configuration REFUSES here rather than answering from the other one.**
+        `Env.inference_provider` has three states precisely so the third one can
+        be acted on: a key that is present but unusable must not read as
+        "Anthropic, all fine". Quietly serving the loop from a provider the
+        operator did not choose is the silent downgrade this whole arrangement
+        exists to refuse — it would run, bill the wrong account, and leave
+        nothing on any surface to say which model produced the orders.
+
+        Raising is the right shape *here* while `Env.inference_provider` itself
+        never raises. That property describes a configuration and is read by
+        banners and by the Settings page, where an exception would take a page
+        down over a setting nobody was using. This is the point of USE: past it
+        there is a model call, and there is no honest way to make one.
         """
-        self._client = anthropic.Anthropic(api_key=env.anthropic_api_key)
+        provider = env.inference_provider
         self._spec = spec or env.decision_spec
         self._model = self._spec.model_id
+
+        if provider.is_digitalocean and not provider.usable:
+            raise ModelCallFailed(
+                f"{provider.detail} No model call is made and nothing falls back "
+                "to Anthropic: a provider the operator did not choose is not a "
+                "safe default for the path that produces order quantities."
+            )
+
+        if provider.is_digitalocean and is_claude_tier_default(self._model):
+            # Both halves of this are measured, and it is worth refusing at
+            # construction because neither produces a useful error at call time:
+            # a wrong id is a 404 and a right one is a 403 about a subscription
+            # tier, ninety-six times a day, with the loop's own broad `except`
+            # turning each into one skipped cycle.
+            raise ModelCallFailed(
+                f"Model {self._model!r} is a Claude tier default and this process is "
+                f"configured for DigitalOcean at {provider.base_url}. That endpoint "
+                "names Anthropic models differently (anthropic-claude-5-sonnet, not "
+                "claude-sonnet-5) and 403s the ones it does list on this account's "
+                "tier. Name the model outright with DECISION_MODEL_ID or "
+                "DREAM_MODEL_ID, or unset DO_INFERENCE_KEY to go back to Anthropic."
+            )
+
+        # **`base_url` is passed on BOTH branches, and the Anthropic one is why
+        # this line exists.** It used to be omitted there, which is not the same
+        # as asking for Anthropic: the SDK resolves its endpoint as *kwarg >
+        # `ANTHROPIC_BASE_URL` > a credentials profile on disk*, so a client
+        # built without one talks to whatever the environment says while
+        # `inference_provider` reports "Anthropic direct" and
+        # `_forces_tool_call` stays False. Measured against a stub that behaves
+        # like DigitalOcean — 200, `output_config` ignored, prose back — the
+        # Anthropic key went to that endpoint, the schema was enforced nowhere,
+        # and a JSON-shaped reply of `{"market_assessment": "..."}` was accepted
+        # as a completed cycle. Passing the value the provider NAMES is what
+        # makes the banner, the Settings page and the wire agree, and it closes
+        # the profile-file route too: the SDK consults no other source once a
+        # base URL arrives as a kwarg.
+        self._client = anthropic.Anthropic(
+            api_key=(
+                env.do_inference_key.strip()
+                if provider.is_digitalocean
+                else env.anthropic_api_key
+            ),
+            base_url=provider.base_url,
+        )
+
+        self._forces_tool_call = provider.is_digitalocean
         self._system_prompt = system_prompt
         self._cache_system = cache_system
 
@@ -625,6 +1001,110 @@ class ModelClient:
             block["cache_control"] = {"type": "ephemeral", "ttl": "1h"}
         return [block]
 
+    def _structured(
+        self,
+        client: Any,
+        kwargs: dict[str, Any],
+        output_format: type[_Schema],
+        what: str,
+    ) -> tuple[_Schema, CallUsage]:
+        """One structured answer, however this endpoint is willing to give one.
+
+        The two branches differ in WHERE the schema is enforced and nowhere
+        else. Both return a validated object or raise; neither returns a partial
+        one, and neither falls back to the other — a transport that retried the
+        forced tool call as prose parsing would be handing back exactly the
+        freedom the schema exists to remove.
+        """
+        if self._forces_tool_call:
+            return self._by_forced_tool_call(client, kwargs, output_format, what)
+
+        response = client.messages.parse(**kwargs, output_format=output_format)
+        parsed = response.parsed_output
+        if parsed is None:
+            raise ModelCallFailed(
+                f"The model returned no parsable {what}; check the output schema "
+                "and whether the response hit max_tokens."
+            )
+        return cast("_Schema", parsed), self._usage_from(response)
+
+    def _by_forced_tool_call(
+        self,
+        client: Any,
+        kwargs: dict[str, Any],
+        output_format: type[_Schema],
+        what: str,
+    ) -> tuple[_Schema, CallUsage]:
+        """The substitute for server-enforced structured output.
+
+        One tool, `tool_choice` pinned to it, and the arguments validated here.
+        The schema goes out as `model_json_schema()` **unflattened** — `$defs`
+        and `$ref` intact — because that is the shape the fidelity measurement
+        was taken against, and resolving refs before sending would silently
+        change what is being asked of the model from what was actually graded.
+        """
+        request = dict(kwargs)
+        # Raised rather than replaced, so a caller that asked for more keeps it.
+        # 8192 is the budget `scripts/do_schema_fidelity.py` measured these
+        # models at, and shipping under a figure the evidence was gathered at
+        # would make the evidence describe a different request. It is a ceiling
+        # and not a spend: a short answer costs what a short answer costs.
+        request["max_tokens"] = max(
+            int(kwargs.get("max_tokens", 0)), FORCED_TOOL_CALL_MAX_TOKENS
+        )
+        # **`output_config` comes off HERE rather than being left to the spec.**
+        # A request carrying it reads to anybody debugging as though the schema
+        # were being enforced server-side, at the one endpoint measured to
+        # accept it with a 200 and ignore it. Today no spec that reaches this
+        # branch sets it — the three that do are Claude ids and are refused at
+        # construction — so the guarantee rested entirely on that coincidence,
+        # and the test asserting its absence was passing by finding nothing to
+        # check. Dropping it structurally is what makes the claim true of the
+        # branch rather than of today's table. Translating `effort` into
+        # DigitalOcean's flat `reasoning_effort` is a separate change with its
+        # own evidence and is deliberately not guessed at.
+        request.pop("output_config", None)
+        schema = output_format.model_json_schema()
+        request["tools"] = [
+            {
+                "name": STRUCTURED_TOOL_NAME,
+                "description": (
+                    f"Record your {what}. You MUST call this tool, and it is the "
+                    "only way to answer: text outside it is discarded."
+                ),
+                "input_schema": schema,
+            }
+        ]
+        request["tool_choice"] = {"type": "tool", "name": STRUCTURED_TOOL_NAME}
+
+        response = client.messages.create(**request)
+        arguments = _tool_arguments(response, what)
+        # Checked against the schema that was SENT, before Pydantic gets to fill
+        # a default in for a property that schema declared required. See
+        # `_missing_required`: the server-enforced path compiles `required` into
+        # a grammar, and this path had nothing standing in for it, so an
+        # omission became a value invented here and attributed to the model.
+        missing = _missing_required(arguments, schema, schema.get("$defs", {}))
+        if missing:
+            raise ModelCallFailed(
+                f"The model's {what} left out {len(missing)} propert"
+                f"{'y' if len(missing) == 1 else 'ies'} the schema it was sent "
+                f"declares required: {missing[:QUOTED_KEYS_MAX]}. Absent is not "
+                "the same as empty -- an omitted key would take this side's "
+                "default and be recorded as the model's own answer."
+            )
+        try:
+            parsed = output_format.model_validate(arguments)
+        except ValidationError as exc:
+            # Loud and safe. The client-side half of the guarantee doing exactly
+            # its job: a `qty` or a `stop_loss_price` the schema forbids is
+            # refused here rather than coerced and passed to the gate.
+            raise ModelCallFailed(
+                f"The model's {what} did not satisfy the schema: "
+                f"{' '.join(str(exc).split())[:400]}"
+            ) from exc
+        return parsed, self._usage_from(response)
+
     def propose(self, market_context: str) -> tuple[ModelDecision, CallUsage]:
         """Send the market context, get back a structured decision plus token accounting."""
         kwargs: dict[str, Any] = {
@@ -632,18 +1112,13 @@ class ModelClient:
             "max_tokens": 4096,
             "system": self._system_block(),
             "messages": [{"role": "user", "content": market_context}],
-            "output_format": ModelDecision,
         }
         kwargs.update(self._reasoning_kwargs("medium"))
 
-        response = self._client.messages.parse(**kwargs)
-        decision = response.parsed_output
-        if decision is None:
-            raise RuntimeError(
-                "Claude returned no parsable decision; check the output schema "
-                "and whether the response hit max_tokens."
-            )
-        return decision, self._usage_from(response)
+        decision, usage = self._structured(
+            self._client, kwargs, ModelDecision, "decision"
+        )
+        return decision, usage
 
     def dream(self, prompt: str) -> tuple[Any, CallUsage]:
         """One dream step. Same transport as `propose`, tuned the opposite way.
@@ -676,7 +1151,6 @@ class ModelClient:
             "model": self._model,
             "system": self._system_block(),
             "messages": [{"role": "user", "content": prompt}],
-            "output_format": DreamStep,
         }
         kwargs.update(self._reasoning_kwargs("high"))
 
@@ -688,14 +1162,7 @@ class ModelClient:
         client = self._client.with_options(
             timeout=DREAM_TIMEOUT_SECONDS, max_retries=DREAM_MAX_RETRIES
         )
-        response = client.messages.parse(**kwargs)
-        step = response.parsed_output
-        if step is None:
-            raise RuntimeError(
-                "Claude returned no parsable dream step; check the output schema "
-                "and whether the response hit max_tokens."
-            )
-        return step, self._usage_from(response)
+        return self._structured(client, kwargs, DreamStep, "dream step")
 
     def confer(
         self, prompt: str, output_format: type[BaseModel]
@@ -734,28 +1201,61 @@ class ModelClient:
             "model": self._model,
             "system": self._system_block(),
             "messages": [{"role": "user", "content": prompt}],
-            "output_format": output_format,
         }
         kwargs.update(self._reasoning_kwargs("medium"))
 
         client = self._client.with_options(
             timeout=DREAM_TIMEOUT_SECONDS, max_retries=DREAM_MAX_RETRIES
         )
-        response = client.messages.parse(**kwargs)
-        turn = response.parsed_output
-        if turn is None:
-            raise RuntimeError(
-                "Claude returned no parsable conference turn; check the output "
-                "schema and whether the response hit max_tokens."
-            )
-        return turn, self._usage_from(response)
+        return self._structured(client, kwargs, output_format, "conference turn")
 
     def _usage_from(self, response: anthropic.types.Message) -> CallUsage:
+        # **The SDK does not validate this block, and that was measured rather
+        # than assumed.** Responses are built with `construct_type`, which is
+        # unchecked construction: a `usage` of `{"input_tokens": "10"}` yields a
+        # `Usage` carrying the string, `{"input_tokens": 10}` alone yields
+        # `output_tokens=None`, and both reach here. `u.output_tokens` on the
+        # second raised `AttributeError` — outside this module's own three named
+        # errors — and threw away a decision that had already validated, over an
+        # accounting field. The first stored a `str` in a field typed `int` and,
+        # on a priced model, made the cost arithmetic raise `TypeError`.
+        #
+        # An unreadable count is 0 and never a guess, and it makes the COST
+        # unknown rather than small: `None` already means "nobody has priced
+        # this model", and "nobody could read what it spent" is the same answer
+        # to the same question. A zero token count reading as an outage is the
+        # existing convention here — `cached_tokens` reading zero across a run
+        # of cycles is how caching is checked at all.
         u = response.usage
-        in_tokens = u.input_tokens
-        out_tokens = u.output_tokens
-        cache_read = getattr(u, "cache_read_input_tokens", 0) or 0
-        cache_write = getattr(u, "cache_creation_input_tokens", 0) or 0
+        readable = True
+
+        def count(name: str, *, optional: bool) -> int:
+            """One token count, or 0 with the reading marked unusable.
+
+            `optional` separates the two cache fields, which a response is
+            entitled not to carry — an uncached call reports neither, and
+            treating that as unknown would make every ordinary Anthropic call
+            cost an unknown amount — from the two that the wire format always
+            has, where an absence means the block could not be read.
+            """
+            nonlocal readable
+            raw = getattr(u, name, None)
+            if raw is None:
+                readable = readable and optional
+                return 0
+            if isinstance(raw, bool) or not isinstance(raw, int | float | str):
+                readable = False
+                return 0
+            try:
+                return int(raw)
+            except ValueError:
+                readable = False
+                return 0
+
+        in_tokens = count("input_tokens", optional=False)
+        out_tokens = count("output_tokens", optional=False)
+        cache_read = count("cache_read_input_tokens", optional=True)
+        cache_write = count("cache_creation_input_tokens", optional=True)
 
         # **`None` rather than a fallback price.** A model with no entry in
         # `MODEL_SPECS` costs an amount this process cannot compute, and the
@@ -769,7 +1269,7 @@ class ModelClient:
         # second one is unanswerable here.
         pricing = self._spec.pricing
         cost: float | None = None
-        if pricing is not None:
+        if pricing is not None and readable:
             # 1-hour cache writes bill at 2x base input.
             cost = (
                 in_tokens * pricing.input_usd_per_mtok
