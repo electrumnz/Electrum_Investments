@@ -1707,10 +1707,34 @@ run the measurements below, so it should not be the one left in service.
 
 **What is NOT done, and none of it can be done from a container:**
 
-- **No model is pinned yet.** The fidelity table below says which models hold
-  the shape. **Do not pin `propose` on it alone** — it grades the shape, never
-  the judgement, and `RiskGate` checks arithmetic rather than reasoning, so a
-  model can comply perfectly and propose nonsense.
+- **No model is pinned yet, and the judgement half is now MEASURED** — see
+  items 24 and 25, and the recommendation below. The fidelity table says which
+  models hold the shape; it never said whether the numbers are any good, and
+  that turned out to separate the four completely.
+
+  **Recommended: `nemotron-3-ultra-550b` for `DECISION_MODEL_ID`.** 97%
+  proposal rate, 95% gate-approved, sizes to the rendered ceiling in both units
+  on 35 of 37 proposals, and puts its stops at the swing level the indicators
+  printed (1.65 ATR). Costs 57s median and 2 of 40 calls failed the schema.
+
+  **Recommended: `deepseek-v4-pro` for `DREAM_MODEL_ID`.** Its rails breaches
+  are the milder pair and it is the stronger reasoner for a second-order chain,
+  which is what the dreamer is for. Its sizing weaknesses do not apply — the
+  dreamer proposes no orders and carries no `qty` field at all.
+
+  **Rejected, and the reasons are not interchangeable.** `mistral-3-14B`
+  proposed 4 times in 38 cycles at 8–30% of permitted size — a 100% approval
+  rate that is worthless, and the exact "never proposes" case the harness was
+  built to tell apart from competence. `qwen3-coder-flash` proposed 7 times in
+  40, and four of those carried a `qty` **identical to a quantity already held**
+  on the account (740 KO against a 740 KO position). That is not a low rate, it
+  is a wrong answer that would read as an ordinary proposal in a log.
+
+  **What this does NOT establish**, and it should be re-run before anyone
+  relies on it: one market fixture, a single textbook `mean_reversion` setup on
+  NVDA; cold-start cycles only, so the previous cycle's gate verdicts — the
+  shipped mitigation, and the one most likely to help deepseek — were never fed
+  back; and 10 samples per cell, which cannot see a 1-in-40 behaviour.
 - **Caching — MEASURED 13 Aug 2026, and it does NOT engage.** The real
   `build_system_prompt(load_rules())` block (4,791 tokens) sent twice, eight
   seconds apart, with `cache_control` ttl 1h, to `deepseek-v4-pro` and
@@ -1973,6 +1997,81 @@ Staged so nothing that can lose money moves first:
 4. **`propose` last.** It feeds the risk gate. Whatever model ends up here is
    PINNED, and the failure path stays `model_call_failed` plus a skipped cycle
    — never a retry onto a second model.
+
+---
+
+## 24. The ceilings closed the SUBTRACTION hole and left a CROSS-UNIT one open
+
+**Measured 13 Aug 2026**, 160 live calls through the real `ModelClient`, the
+real `build_market_context`, and every proposal put through the real
+`RiskGate` over a snapshot populated by `reconcile.apply_journal_state`. Four
+accounts, each engineered so a different ceiling binds. Probe and per-sample
+data in the session scratchpad (`sizing_probe.py`, `samples.json`).
+
+**Item 21 worked.** The combined-risk subtraction — the failure that produced
+185 shares where 91 was permitted — was handled by every model that proposed at
+all. `nemotron-3-ultra-550b` landed on 72 against a permitted 72.1, 53 against
+53.0, 144 against 144.3: it divides the printed dollar figure by its own stop
+and rounds down.
+
+**What replaced it is a UNIT confusion, and the block is what makes it
+possible.** The sizing block prints ceilings in two units — a RISK ceiling in
+dollars-at-risk and a VALUE ceiling in dollars-of-position — and every material
+over-size in this run was a model doing the risk division and never checking the
+value one. `deepseek-v4-pro`: five proposals `did[combined-risk]
+needed[buying-power]` at 7.06–7.27x, three `needed[gross-exposure]` at
+2.06–2.13x, one at **14.39x**. `nemotron`'s single material miss is the same
+shape.
+
+So the fix for item 21 moved the error rather than removing it, which is worth
+stating plainly: five steps became one division, and the model now reliably does
+*that* division and stops. Whatever is done here must not simply add a second
+worked figure and assume the model will take the minimum of two — that is the
+same assumption that failed, one level along.
+
+**A one-share round-up is a different and much smaller defect.** Seven of
+deepseek's sixteen over-size proposals are 1.00–1.01x — 145 where 144.3 was
+permitted. The gate refuses them, correctly, and the remedy is one sentence in
+the prompt telling the model to round DOWN. Do not conflate the two when
+counting failures.
+
+---
+
+## 25. A stop tightened to nothing buys an arbitrarily large position
+
+Found by the same run, and it is a property of the design rather than a bug in
+it — which is why it is recorded here rather than fixed in passing.
+
+Size is the ceiling divided by the stop distance, and **`RiskGate` deliberately
+holds no opinion on where the stop goes**: `_stops_on_correct_side` checks only
+which SIDE of entry each level sits on. `CLAUDE.md` is explicit that this is
+intentional — *"the honest answer to 'is this stop any good' is not the gate's
+to give"* — and the reasoning behind it is sound: a wider stop buys a smaller
+position, so placement is the agent's and the cost is what the gate measures.
+
+**The measurement shows the other end of that.** `qwen3-coder-flash` proposed KO
+with a $0.05 stop against a $1.32 ATR — 0.04 ATR, inside the spread — which at
+the same stated risk buys a position roughly twenty-six times larger than a
+1-ATR stop would. It also once proposed a stop exactly equal to entry, which
+`_stops_on_correct_side` did catch. Nothing catches 0.04 ATR.
+
+The sizing-ceilings block cannot see this either: every figure it prints is
+correct, and the division is performed honestly. The exposure arrives through
+the denominator.
+
+**Do not "fix" this by having the gate reject a tight stop.** That is exactly
+the opinion-on-placement this repository refuses to put in the gate, and a
+minimum stop distance is a rule nobody agreed to, arriving through the back
+door. The candidates worth thinking about, none of them chosen:
+
+- The VALUE ceilings already bound the position — a 0.04-ATR stop hits
+  concentration or buying power long before it hits the risk cap. **That is the
+  real protection and it is already in force**; item 24 is about the model not
+  reading those ceilings, which makes closing item 24 the first move here too.
+- Report it rather than refuse it: a stop under some fraction of ATR is a fact
+  the Decisions page could state, in the same shape as `stops_unchecked`.
+- The prompt already has the figures. It does not say that a stop is a claim
+  about where the thesis is wrong rather than a lever on size.
 
 ---
 
