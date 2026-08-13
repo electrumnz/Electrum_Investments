@@ -1523,6 +1523,60 @@ def test_a_shelf_is_ordered_by_when_a_dream_ARRIVED_not_when_it_changed(store):
     assert next(d.title for d in reversed(shelf)) == "waiting since March"
 
 
+def test_a_dream_stamp_is_normalised_to_UTC_on_the_way_into_the_row(store):
+    """**`in_vault` orders on TEXT, so every offset in the column must match.**
+
+    `_iso_utc` exists so that "text ordering is instant ordering", and
+    `adoptions`, `dream_messages` and `_apply_move` all went through it while
+    `save` called `.isoformat()` on whatever the object carried. That is the
+    string-comparison bug this repository has already paid for twice, sitting
+    in the one table nobody had checked.
+
+    Pacific/Auckland is not a hypothetical offset here: it is what the dream
+    timer's schedule is written in, by design.
+    """
+    nz = timezone(timedelta(hours=13))
+    store.save(
+        Dream(
+            title="stamped in Auckland",
+            seed="s",
+            vault=Vault.VAULT,
+            created_at=datetime(2026, 8, 12, 9, 0, tzinfo=nz),
+            updated_at=datetime(2026, 8, 12, 9, 0, tzinfo=nz),
+            vault_entered_at=datetime(2026, 8, 12, 9, 0, tzinfo=nz),
+        )
+    )
+
+    with sqlite3.connect(store.path) as conn:
+        row = conn.execute(
+            "SELECT created_at, updated_at, vault_entered_at FROM dreams"
+        ).fetchone()
+
+    assert all(str(stamp).endswith("+00:00") for stamp in row)
+
+
+def test_a_shelf_ordered_on_text_still_answers_the_longest_wait_first(store):
+    """The consequence, measured rather than reasoned about.
+
+    A dream shelved at 2026-08-11 20:00Z but stamped `+13:00` sorted AFTER one
+    shelved ten hours later, so `confer.run`'s reversal answered it LAST — the
+    exact starvation the reversal exists to prevent.
+    """
+    nz = timezone(timedelta(hours=13))
+    store.save(
+        Dream(title="waiting longest", seed="s", vault=Vault.VAULT,
+              vault_entered_at=datetime(2026, 8, 12, 9, 0, tzinfo=nz))
+    )
+    store.save(
+        Dream(title="shelved later", seed="s", vault=Vault.VAULT,
+              vault_entered_at=datetime(2026, 8, 12, 6, 0, tzinfo=UTC))
+    )
+
+    shelf = store.in_vault(Vault.VAULT)
+
+    assert next(d.title for d in reversed(shelf)) == "waiting longest"
+
+
 # ------------------------------------------------------ promotion off the bench
 #
 # The gap that made the whole feature inert. `is_offerable` was defined and

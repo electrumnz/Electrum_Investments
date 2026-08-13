@@ -2554,6 +2554,24 @@ def _dream_payload(dream: Dream) -> tuple[object, ...]:
     One tuple shared by the INSERT and the UPDATE, so a column added to one
     cannot be forgotten in the other — which is a silent write of a stale value
     rather than an error.
+
+    **Every stamp goes through `_iso_utc`, and this was the one place it did
+    not.** `adoptions`, `dream_messages` and `_apply_move` all normalise;
+    `save` called `.isoformat()` on whatever the object carried. That matters
+    because `in_vault` orders on `vault_entered_at` as TEXT, and ISO text only
+    sorts by instant when every row carries the same offset — which is exactly
+    the bug this repository has now paid for twice. A `+13:00` stamp
+    (Pacific/Auckland, which the dream timer's schedule uses BY DESIGN) sorts
+    thirteen hours later than it is: measured, a dream shelved at
+    2026-08-11 20:00Z sorted AFTER one shelved ten hours later, so
+    `confer.run`'s longest-waiting-first reversal answered it LAST — the
+    starvation that reversal exists to prevent, with the code that prevents it
+    still in place.
+
+    No production caller writes a non-UTC stamp today, so this closed a latent
+    instance rather than a live fault. It is closed anyway: the invariant is
+    the thing `_iso_utc` was written to make unnecessary to think about, and an
+    invariant with an exception is an invariant nobody can rely on.
     """
     return (
         dream.title,
@@ -2566,10 +2584,10 @@ def _dream_payload(dream: Dream) -> tuple[object, ...]:
         json.dumps([h.to_row() for h in dream.chain]),
         json.dumps([t.to_row() for t in dream.thoughts]),
         json.dumps(dream.instruments),
-        dream.created_at.isoformat(),
-        dream.updated_at.isoformat(),
+        _iso_utc(dream.created_at),
+        _iso_utc(dream.updated_at),
         str(dream.vault),
-        dream.vault_entered_at.isoformat(),
+        _iso_utc(dream.vault_entered_at),
         json.dumps([c.to_row() for c in dream.conditions]),
         json.dumps(_symbols(dream.symbols)),
         dream.asset_class_key,
@@ -4431,17 +4449,40 @@ class DreamStore:
             id=int(cursor.lastrowid or 0),
         )
 
-    def messages(self, dream_id: int, limit: int = 200) -> list[DreamMessage]:
+    def messages(
+        self, dream_id: int, limit: int | None = 200
+    ) -> list[DreamMessage]:
         """The conversation on one dream, oldest first.
 
         Oldest first because this is a transcript rather than a feed: a
         negotiation read newest-first is a negotiation read backwards.
+
+        **`limit=None` reads all of it, and a caller COUNTING has to.** The
+        default returns the oldest 200 and says nothing when it truncates,
+        which is right for rendering a transcript into a prompt and wrong for
+        arithmetic. Every conference cap is counted over this list —
+        `exchanges_so_far` counts opening offers, `epoch_started_at` reads the
+        newest change signal, `last_agent_turn_at` is the marker the change
+        gate measures against — and measured on 232 rows, twelve honest
+        exchanges past the window read as ZERO: the lifetime ceiling unreached,
+        the epoch empty, and the marker `None`, which
+        `has_something_changed` reads as "no exchange on this dream yet" and
+        answers True to forever. The cap the module calls *the one that
+        actually stops them talking* was off, on a read nobody had noticed was
+        partial.
+
+        `render_transcript`'s own note says it is "bounded by the caps rather
+        than by a slice here", which is circular while the caps are bounded by
+        the slice. The two questions are separated instead: counting reads all
+        of it, rendering keeps the default.
         """
+        sql = "SELECT * FROM dream_messages WHERE dream_id=? ORDER BY at, id"
+        params: tuple[object, ...] = (dream_id,)
+        if limit is not None:
+            sql += " LIMIT ?"
+            params = (dream_id, limit)
         with self._connect() as conn:
-            rows = conn.execute(
-                "SELECT * FROM dream_messages WHERE dream_id=? ORDER BY at, id LIMIT ?",
-                (dream_id, limit),
-            ).fetchall()
+            rows = conn.execute(sql, params).fetchall()
         return [
             DreamMessage(
                 id=int(r["id"]),
