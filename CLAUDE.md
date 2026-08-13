@@ -27,6 +27,32 @@ the first thing to replace, and re-read `reference/STATUS.md` too.
 
 ---
 
+## Handing the operator a command: ONE step, only when it is ready
+
+The operator runs everything on the droplet by hand, so every command in a reply
+is a paste into a live root shell. Three rules, and the first one cost a deploy.
+
+- **One command per message. Never a block of several.** On 13 Aug 2026 the
+  update runbook was four lines pasted together. The `git pull` ABORTED, the
+  three after it ran against the old checkout, `bootstrap.sh` printed
+  "Provisioned.", and the verification step reproduced the exact bug the pull
+  was meant to fix. Every line of output was true and the deploy had not
+  happened, because the abort scrolled past under a wall of successful-looking
+  output. **Three of those four commands could not tell whether the first one
+  worked.** `deploy/update.sh` now asserts each step, and the interaction rule
+  is the other half of the same fix.
+- **Wait for the output before giving the next one.** Read what came back and
+  say whether it worked. A step whose result nobody checked is a step that may
+  not have happened, which is this repository's founding failure wearing a
+  terminal's clothes.
+- **A code block means RUN THIS NOW.** Never paste a command as illustration, a
+  preview of a later step, or "here is what you will do after". The operator
+  asked for this directly — *"only give me code blocks when you are ready"* —
+  because a speculative block is indistinguishable from an instruction.
+
+Say plainly what should happen and what to send back. If a step is not ready
+yet, say so in words and give no block at all.
+
 ## The one rule that matters
 
 **`src/bot/risk.py` decides what may be traded. You do not.**

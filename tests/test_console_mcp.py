@@ -258,3 +258,78 @@ def test_turning_it_off_says_the_funnel_outlives_the_service():
 
     assert "funnel" in off_block.lower()
     assert "outlives" in off_block.lower()
+
+
+def test_a_proxied_host_is_allowed_only_when_configured(monkeypatch: pytest.MonkeyPatch):
+    """**The bug a live Funnel found, and the order that hid it.**
+
+    The MCP SDK validates the Host header against an allowlist that ships as
+    loopback only. A Tailscale Funnel forwards to 127.0.0.1 with the ORIGINAL
+    Host intact, so a real request arrives as `mudhorn.tailc04415.ts.net` and is
+    refused 421 — *after* the bearer gate has already passed it.
+
+    That order is what made it invisible: an unauthenticated probe gets a clean
+    401 from the token gate and never reaches the host check, so the endpoint
+    tests correct from outside while every authenticated request fails. Only a
+    request carrying a VALID token would have shown it.
+
+    **Driven over HTTP rather than by reading the settings off the app.** The
+    first version of this walked `app.user_middleware` looking for the settings
+    object and fell back to CONSTRUCTING one when it could not find it — which
+    it never could, since the SDK holds it on the route. So it asserted against
+    a list the test itself had built, and passed no matter what the code did.
+    That is the third tautological test written today, and the pattern is
+    always the same: an assertion that reaches for the implementation instead
+    of the behaviour.
+    """
+    from starlette.testclient import TestClient
+
+    monkeypatch.setenv("MUDHORN_CONSOLE_HOSTS", "box.example.ts.net, second.ts.net")
+    token = "t" * 32
+
+    body = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2025-06-18",
+            "capabilities": {},
+            "clientInfo": {"name": "test", "version": "1"},
+        },
+    }
+    headers = {
+        "content-type": "application/json",
+        "accept": "application/json, text/event-stream",
+        "authorization": f"Bearer {token}",
+    }
+
+    def post(host: str) -> int:
+        # A fresh app per call: the SDK's session manager refuses to `run()`
+        # twice on one instance, so a shared app would fail the SECOND request
+        # for a reason that has nothing to do with hosts.
+        app = console_mcp.build_app(token, port=9999)
+        with TestClient(app, base_url=f"http://{host}") as client:
+            return client.post("/mcp", json=body, headers={**headers, "host": host}).status_code
+
+    assert post("box.example.ts.net") != 421, "the configured Funnel name was refused"
+    assert post("second.ts.net") != 421, "a comma-separated second name was dropped"
+    # The Host header carries the PORT, so the allowlist must too: a list
+    # holding `127.0.0.1` does not match `127.0.0.1:9999`. The first fix
+    # hardcoded 8788 and refused its own loopback on every other port.
+    assert post("127.0.0.1:9999") != 421, "the port must travel with loopback"
+    assert post("evil.example.com") == 421, "an unconfigured host was accepted"
+
+
+def test_the_enable_script_detects_the_tailnet_name():
+    """A hand-copied hostname is a hand-copied hostname.
+
+    It is knowable on the box, so it is read from `tailscale status` rather
+    than asked for — and when it cannot be read the script says which error the
+    operator will see (421) and how to fix it, rather than staying quiet and
+    leaving them to debug a working-looking 401.
+    """
+    script = (REPO_ROOT / "deploy" / "enable-console.sh").read_text()
+
+    assert "MUDHORN_CONSOLE_HOSTS" in script
+    assert "tailscale status --json" in script
+    assert "421" in script, "the failure the operator would otherwise see is not named"
