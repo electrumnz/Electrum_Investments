@@ -2080,6 +2080,193 @@ Staged so nothing that can lose money moves first:
 
 ---
 
+## 26. BUILT — a researcher that can reach the web and nothing else
+
+**Shipped, and deliberately with no caller yet.** The containment had to be
+right before the wiring, the same order the grant path was built in.
+
+The dreamer reasons about cicada broods and smelter restarts with no way to
+look anything up, so every hop it writes is reference knowledge it already had
+or an invention — `Hop.checked` exists because some of those sentences were
+invented.
+
+`deploy/run-research.sh` is a third Hermes home: the `web` toolset, **no
+`mcp_servers` block at all**, and therefore no route to the broker, the dream
+store or the journal. The argument runs both ways round — a web reader must
+not sit in the instance holding `place_order`, and the dreamer's instance must
+not be where a fetched page and a speculative chain meet with nothing between
+them.
+
+Three things make it worth having rather than dangerous, and all three are
+structural:
+
+- **Quotes and URLs, never conclusions.** `research.Citation` has nowhere to
+  put one: no summary, no implication, no significance, and the field overlap
+  with `OrderProposal` AND with `Dream` is pinned empty. `Dream` is the subtle
+  half — it carries `symbols` and `asset_class_key`, which are a live
+  permission once adopted, and a route from a fetched page to a
+  tradeable-symbol claim is the connection this must never make.
+- **Its own caps**, separate from the conference's because they bound
+  different things. Three questions a run, five citations a question, 600
+  characters a quote, and every cap counts what it dropped. The unattributable
+  are dropped BEFORE the cap applies, or five unusable items crowd out five
+  usable ones and report a clean five-of-five.
+- **Nothing web-derived becomes a gating input.** The AST test proves the
+  module imports none of risk, broker, journal, reconcile, mcp_server, grants,
+  models, dreaming or position_actions, and makes no network call itself.
+
+The A2A third speaker cost a constant, because `DreamMessage.speaker` was
+already open. `RESEARCHER` is not an `AGENT_SPEAKER`, so it does not move
+`last_agent_turn_at` — a citation is not a negotiation, and moving the marker
+would silence the change it just created. It IS a new voice to
+`has_something_changed`, which is correct: a published source under the
+weakest hop genuinely changes what adopting the dream means, and every other
+cap still holds while they discuss it.
+
+**The toolset was checked rather than guessed**, which is the half that could
+have made this inert. `web` provides `web_search` and `web_extract` and works
+remotely; `browser` is thirteen tools driving a local browser this headless
+droplet does not have, which is why `deploy/hermes-config.yaml` already
+disables it. Its config uses an ALLOWLIST where the other two use a denylist —
+a denylist admits whatever the next release adds, and here that would be a
+web-reading process gaining a capability nobody chose, invisibly. An allowlist
+got wrong yields an agent that says it has no tool.
+
+### What is UNVERIFIED, and must be settled on the box before it is useful
+
+A wrong toolset name is discarded in silence, the same trap `skills.disabled`
+sets with category names. So:
+
+- **That `web` is the exact key.** The documentation names the toolset and its
+  two tools; nothing here has run the resolver against it.
+- **Whether `web_search` needs a Nous Portal subscription or its own provider
+  credential.** The documentation mentions a "Tool Gateway" for subscribers as
+  an alternative to individual API keys.
+
+Confirm by ASKING THE AGENT to look something up, never by reading `/tools`,
+which renders the unfiltered catalogue and misleads in both directions.
+
+### Still to build
+
+Nothing calls it. A caller means deciding what the dreamer is allowed to ASK —
+a question is where a research budget is spent, and letting the dreamer write
+its own is how three questions a day becomes a crawler pointed at whatever it
+was last thinking about. That is its own commit.
+
+---
+
+## 27. A fourth adversarial audit — 21 findings, and the production URL is not the dashboard
+
+**13 Aug 2026.** Four agents over disjoint file sets, each in its own git
+worktree so nothing could be lost to a concurrent write. **2,227 tests were
+green over every one of these.** Every finding has a reproduction that was
+actually run, and every fix has a test that was verified to FAIL when the fix
+is reverted. Baseline 2,227 → 2,316.
+
+### The one to act on first, and it needs a shell on the box
+
+**`https://mudhorn.tailc04415.ts.net` does not serve the dashboard. It serves
+the MCP server.** Reproduced with `curl`: every dashboard path — `/`,
+`/login`, `/healthz`, `/board`, `/live`, `/decisions` — answers **404 from
+`server: uvicorn`**, while `POST /mcp` answers `401 {"error":"unauthorized"}`.
+So the Funnel for that hostname is pointed at the wrong port.
+
+`mudhorn-web.service` is `active (running)` and healthy on `127.0.0.1:8787`,
+the checkout is clean on `main` at `86b518a`, and the startup banner is
+correct. **Systemd is green, the journal is filling, and the only symptom is a
+URL that does not answer** — which is precisely the failure `tailnet.py` and
+its dashboard banner were written for, arriving through a cause that check
+cannot see. `tailnet.py` watches KEY EXPIRY; nothing watches what the Funnel is
+actually pointed at.
+
+Fixing it needs `tailscale serve status` on the droplet. Worth considering
+afterwards: `tailnet.py` already shells to `tailscale`, so reading the serve
+target and reporting a mismatch is the same shape as the check it already does.
+
+### What the four agents found
+
+**Risk, journal, breaker, metrics (5).** The concentration cap measured the
+ORDER rather than the POSITION, so a second 45%-of-equity order in a held
+symbol was approved under a 50% cap — Alpaca aggregates per symbol, and
+nothing else catches it because the position COUNT does not change. Rule 2
+counted an unknown position as risking zero, reproduced at 2.79% against a 2%
+cap; `_total_risk` refuses now, and **the live consequence is that nothing new
+opens while the AAPL row in CURRENT STATE is unjournalled** — recoverable by
+closing or journalling it, and better than a 2% rule that binds only when the
+paperwork is complete. The stand-down re-imposed itself on any later SCRATCH,
+unboundedly. `journal._iso` compared ISO strings with mixed offsets — the
+`grants.py` bug again, latent, and Pacific/Auckland is the operator's own
+clock. A break-even trade was charged as an average loss in `expectancy_usd`.
+
+**Dreams, grants, confer (6).** CRITICAL: `carry_forward_grading` refused to
+let a RESTATED claim erase an operator's refusal and let an OMITTED one delete
+it silently — driven end to end through the real dreamer, a ruled-out
+condition vanished, the dream promoted to the vault, was adopted, and issued a
+live symbol grant. `checked=True` with no source read as SOURCED and switched
+off the weakest-hop clause. Every conference cap was counted over a transcript
+silently truncated at 200 rows, so the change gate's marker was `None` forever
+and two agents ran a full exchange twelve past their lifetime ceiling. Parent
+ORDER decided which of two opposite operator answers a fusion carried. Plus a
+stamp not normalised on write, and `expired()` raising on a naive clock where
+`is_live` did not.
+
+**Clock, feeds, options (5).** Friday's after-hours session told the model the
+market reopens as OVERNIGHT in 2½ hours when it reopens in 52 — found by
+sweeping a week minute by minute, not by writing a case; the existing Friday
+test checked 20:30, after the boundary. Two of the three fields in a headline
+bullet were still raw, so the newline channel closed for the title was open
+twice over beside it. Five 200-shaped Finnhub failures reported the calendar
+HEALTHY and cached it for six hours. A short option position was priced,
+funded and described as a long one — `can_fund_exercise` True for any account,
+on the most dangerous position on the book. `parse_occ_symbol` raised where
+its docstring promises `None`, out of a path the gate calls.
+
+**MCP, insight, live, seen (5).** An unreadable Tailscale `Self` node read as
+"expiry disabled, nothing to do". A calendar failure took the whole account
+read down every five seconds. `news_history` clipped `first_seen` to the
+window, understating a headline's age in the direction of FRESHER. `load_soul`
+did not refuse a traversal — `load_soul('../CLAUDE')` returned 180 KB of the
+repository root wrapped as a personality, unreachable in production only
+because four callers remember to check. `insight`'s progress handler bounds
+STEPS, and `randomblob(1000000000)` is one step: 988 MB peak on a 2 GB droplet.
+
+### Clean, so it is not re-checked
+
+`insight.run_query`'s SQL guard (ATTACH in every disguise, `load_extension`,
+`WITH RECURSIVE`, `mode=ro`); `seen.py` end to end including a backwards
+clock; `triggers.py` every op at its boundary and all four verdicts;
+`indicators.py` N-1/N/N+1 per window with Wilder ATR hand-checked;
+`stop_watch` long and short and the mid-versus-touch case; `exchange_hours`
+with the optional dependency made genuinely unimportable; `session_calendar`
+both window edges; the `mcp_server` order path; all four journal migrations
+column by column; the settings agent's 26 limit directions including the four
+inversions where smaller is looser; every fusion property; the grants class
+fence.
+
+### The human experience
+
+Driven in Chromium against a local `--mock` instance, signed in, all seven
+pages walked with JavaScript ON and OFF.
+
+- **Fail-to-visible holds.** JS off, nothing is hidden anywhere on any page,
+  and the login form still submits. Under `prefers-reduced-motion` the
+  projection layer switches off rather than down, and the only hidden element
+  is the duplicated marquee copy, correctly.
+- **The Armorer is genuinely good.** Asked to take risk-per-trade 1.0 → 2.0 it
+  answered with correct arithmetic — $2,000 instead of $1,000 at the last
+  equity reading, "1 full-size trade fits at the new size", "size is computed
+  from stop distance, so this does not buy a wider stop" — recorded nothing,
+  and asked for a second confirmation. With Hermes absent the page says the
+  forge does not need it because the arithmetic is Python, which is true.
+- **The Board states the same fact twice in two wordings** — a bordered banner
+  naming a timestamp and an amber line naming "the last 24h". Not wrong, and
+  one of them should go.
+- **Yoda and the Armorer's conversational panels could not be exercised.**
+  Hermes is not installed in a container and production is unreachable (above).
+  The forge's arithmetic path was driven; the model-backed halves were not.
+
+---
+
 ## 24. The ceilings closed the SUBTRACTION hole and left a CROSS-UNIT one open
 
 **Measured 13 Aug 2026**, 160 live calls through the real `ModelClient`, the
