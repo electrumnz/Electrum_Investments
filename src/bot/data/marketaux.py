@@ -117,14 +117,31 @@ def _parse(payload: Any) -> list[str]:
         if not title:
             continue
 
+        # EVERY field that lands in the rendered line gets the same treatment,
+        # not only the title. The title was fixed first because it is the
+        # obvious one, and that left two other feed-controlled strings — the
+        # entity symbols and the publication stamp — going into the same bullet
+        # untouched. Both were measured emitting a multi-line bullet from a
+        # single article, so the injection channel the title fix closed was
+        # still open twice over beside it.
+        #
+        # `[{tickers}] {title} ({published})` is one line of a markdown document
+        # the model reads, so a newline in ANY of the three closes the bullet
+        # and lets whatever follows open its own `##` section — the section
+        # worth forging being "Gate verdicts (previous cycle)", which the prompt
+        # tells the model is deterministic and not to be argued with.
+        #
+        # `[:16]` does not help: it bounds the length and says nothing about
+        # what is in those sixteen characters, and a newline fits in one.
         tickers = sorted(
             {
-                str(e.get("symbol"))
+                " ".join(str(e.get("symbol")).split())
                 for e in article.get("entities") or []
                 if isinstance(e, dict) and e.get("symbol")
             }
+            - {""}
         )
-        published = str(article.get("published_at") or "")[:16]
+        published = " ".join(str(article.get("published_at") or "").split())[:16]
 
         prefix = f"[{', '.join(tickers)}] " if tickers else ""
         suffix = f" ({published})" if published else ""

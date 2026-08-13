@@ -101,10 +101,88 @@ class FinnhubCalendar:
             # Not cached: a failure must be retried, not held for six hours.
             return []
 
+        wanted = set(self.symbols)
+        windows = _parse(result.payload, wanted=wanted)
+
+        # A 200 is not a read. `is_degraded` was set from `result.ok` alone, so
+        # it answered "did the transport work" while claiming to answer "does
+        # the gate have a calendar" — and every failure that arrives WITH a 200
+        # slipped through: an `{"error": "Invalid API key"}` body, a rate-limit
+        # page, a renamed top-level key. `_parse` is tolerant by design and
+        # returns `[]` for all of them, so the loop logged
+        # `calendar_degraded=False`, the empty list was CACHED for six hours,
+        # and `RiskGate._news_blackout` ran blind while every surface said the
+        # calendar was healthy.
+        #
+        # That is this module's own docstring — "zero windows and we could not
+        # ask look identical to the gate" — one layer in from where the guard
+        # was put. Measured against five payload shapes; all five reported
+        # healthy.
+        #
+        # An EMPTY but well-formed calendar stays clean: a genuinely quiet week
+        # is a real answer and must not be reported as an outage, or the flag
+        # becomes noise and stops being read.
+        if not _is_readable(result.payload, wanted=wanted):
+            self._last_fetch_ok = False
+            log.warning(
+                "news_blackout_running_blind",
+                detail=(
+                    "Earnings calendar answered but could not be read; the news "
+                    "blackout gate has no windows to check against this cycle."
+                ),
+            )
+            # Not cached, for the same reason a transport failure is not: an
+            # unreadable answer held for six hours is six hours of the gate
+            # running blind with nothing retrying.
+            return windows
+
         self._last_fetch_ok = True
-        windows = _parse(result.payload, wanted=set(self.symbols))
         self._cache.put(windows)
         return windows
+
+
+def _is_readable(payload: Any, *, wanted: set[str]) -> bool:
+    """Could this payload be read as an earnings calendar at all?
+
+    A separate question from what `_parse` found in it, and kept as its own
+    function for that reason: `_parse` must stay tolerant — a feed that changes
+    shape should cost windows, not raise inside a trading loop — and tolerance
+    is exactly what makes its `[]` unreadable as evidence.
+
+    Two signals, and both are "we could not ask" rather than "there is
+    nothing":
+
+    - the envelope is not an earnings calendar. Not a dict, or no
+      `earningsCalendar` list in it. That is an error body, an HTML page, or a
+      renamed field, none of which is a quiet week.
+    - a row for a symbol we WATCH carries a date this cannot read. One such row
+      is a window the gate will not enforce; every row being one is a date
+      format that changed under us, which produces an empty calendar that looks
+      exactly like a quiet week.
+
+    Deliberately NOT flagged: a well-formed calendar with no entries, and rows
+    for symbols outside `wanted`. Most of the calendar is other people's
+    earnings and dropping those is the normal path — flagging it would make the
+    degraded signal fire every cycle, and a warning that always fires is one
+    nobody reads.
+    """
+    if not isinstance(payload, dict):
+        return False
+    entries = payload.get("earningsCalendar")
+    if not isinstance(entries, list):
+        return False
+
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        symbol = str(entry.get("symbol") or "").strip().upper()
+        if not symbol or (wanted and symbol not in wanted):
+            continue
+        try:
+            date.fromisoformat(str(entry.get("date")))
+        except ValueError:
+            return False
+    return True
 
 
 def _parse(payload: Any, *, wanted: set[str]) -> list[NewsWindow]:
