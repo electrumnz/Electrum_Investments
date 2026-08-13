@@ -224,6 +224,19 @@ STRUCTURED_TOOL_NAME = "record"
 # `ModelClient._by_forced_tool_call` for why it is a floor rather than a value.
 FORCED_TOOL_CALL_MAX_TOKENS = 8192
 
+# How much model-controlled text any refusal below may quote back.
+#
+# **Every quote-back in this module is bounded, and one of them was not.** The
+# markup-key refusal rendered `sorted(arguments)[:4]` — four keys, each of
+# whatever length the far end chose. Measured: a single 200,000-character key
+# produced a 200,116-character exception, which becomes a log line, an
+# `audit/*.jsonl` row and an `insight.py` index entry, once per cycle, against
+# an audit log measured at ~500 KiB a DAY and deliberately never pruned. The
+# bound is the count of keys AND the length of each, because either one alone
+# leaves the other unbounded.
+QUOTED_TEXT_MAX_CHARS = 300
+QUOTED_KEYS_MAX = 4
+
 
 def _has_markup_keys(arguments: dict[str, Any]) -> bool:
     """The `glm-5.2` failure: tool-call markup leaking into the argument keys.
@@ -238,8 +251,26 @@ def _has_markup_keys(arguments: dict[str, Any]) -> bool:
     mangling swallowed. That is not a reason to drop this: the two produce the
     same outcome and different DIAGNOSES, and "this model cannot serve this
     path" is worth telling apart from "this cycle went wrong".
+
+    **A key that is not a string counts as corrupt**, rather than being asked
+    the question. `"<" in key` raises `TypeError` on an int, which escaped
+    `ModelCallFailed` entirely and reached the caller as a crash from inside a
+    module whose whole contract is that it raises one of three named errors.
+    JSON cannot produce one, so the shape only arrives from a proxy or an SDK
+    that constructs its own objects — which is precisely the case this check is
+    about, and precisely the case where a `TypeError` is the least useful thing
+    to say.
     """
-    return any("<" in key or ">" in key or key.strip() != key for key in arguments)
+    return any(
+        not isinstance(key, str) or "<" in key or ">" in key or key.strip() != key
+        for key in arguments
+    )
+
+
+def _quote_keys(arguments: dict[str, Any]) -> str:
+    """A bounded rendering of the argument keys, for a refusal message."""
+    shown = [str(key)[:QUOTED_TEXT_MAX_CHARS] for key in sorted(arguments, key=str)]
+    return repr(shown[:QUOTED_KEYS_MAX])
 
 
 def _tool_arguments(response: Any, what: str) -> dict[str, Any]:
@@ -271,21 +302,98 @@ def _tool_arguments(response: Any, what: str) -> dict[str, Any]:
             f"{what}, so nothing was recorded. This is a hard failure and not a "
             "partial answer: an empty structured object parses as a completed "
             "cycle that considered nothing. "
-            + (f"It said instead: {prose[:300]!r}" if prose else "It said nothing at all.")
+            + (
+                f"It said instead: {prose[:QUOTED_TEXT_MAX_CHARS]!r}"
+                if prose
+                else "It said nothing at all."
+            )
         )
 
     arguments = getattr(calls[0], "input", None)
     if not isinstance(arguments, dict):
         raise CorruptToolCall(
             f"The {what} tool call carried {type(arguments).__name__} rather than "
-            f"an object: {str(arguments)[:200]!r}"
+            f"an object: {str(arguments)[:QUOTED_TEXT_MAX_CHARS]!r}"
         )
     if _has_markup_keys(arguments):
         raise CorruptToolCall(
             f"The {what} tool call's argument keys carry the model's own tool-call "
-            f"markup, so the endpoint half-parsed it: {sorted(arguments)[:4]!r}"
+            f"markup, so the endpoint half-parsed it: {_quote_keys(arguments)}"
         )
     return arguments
+
+
+def _missing_required(
+    payload: Any, schema: dict[str, Any], defs: dict[str, Any], path: str = ""
+) -> list[str]:
+    """Every property the SENT schema marks required that the payload omits.
+
+    **The transport sends one contract and used to check a different one.**
+    `EVERY_FIELD_REQUIRED` puts every property of these models into the
+    schema's `required` list, and on the server-enforced path the API compiles
+    that into a grammar the model cannot leave a key out of. `model_validate`
+    does not: it honours the PYTHON defaults, which every one of these fields
+    has. Measured on the shapes actually sent — `ModelDecision` accepts three
+    absent properties, `OrderProposal` three, `SymbolAssessment` two,
+    `PositionPlan` five and `DreamStep` eleven, twenty-four in all.
+
+    The result is not a rejection, which is what makes it worth closing: an
+    omission becomes a VALUE, invented here and attributed to the model. A
+    `position_plan` of `{"symbol": ..., "reasoning": ...}` is recorded as
+    `action=hold, thesis_intact=True` — an opinion about an open position that
+    nothing on the far end ever expressed, rendered to the operator as one that
+    was. That is a plausible wrong figure, which is the failure this repository
+    exists to refuse.
+
+    **It refuses an ABSENT key and never an empty one.** `assessments: []` is a
+    real answer and passes here untouched; `main.py` is where an empty list is
+    weighed against what the model was shown, and this must not become a second
+    opinion about that. The two faults are different: one is the model saying
+    nothing met the conditions, the other is the model not answering that part
+    of the contract at all.
+
+    Only the four keywords these schemas actually contain are handled —
+    `$ref`, `anyOf`, `items` and `properties`/`required` — checked by walking
+    the emitted schemas rather than assumed. An `anyOf` is always `[X, null]`
+    here, so a null payload is a legitimate answer and anything else is checked
+    against the one non-null branch; a union with two real branches is left
+    alone rather than guessed at, because requiring both would reject a valid
+    payload and picking one would be arbitrary.
+    """
+    ref = schema.get("$ref")
+    if isinstance(ref, str):
+        target = defs.get(ref.rsplit("/", 1)[-1])
+        return _missing_required(payload, target, defs, path) if target else []
+
+    options = schema.get("anyOf") or schema.get("oneOf")
+    if isinstance(options, list):
+        real = [o for o in options if isinstance(o, dict) and o.get("type") != "null"]
+        if payload is None or len(real) != 1:
+            return []
+        return _missing_required(payload, real[0], defs, path)
+
+    items = schema.get("items")
+    if isinstance(items, dict) and isinstance(payload, list):
+        return [
+            gap
+            for index, element in enumerate(payload)
+            for gap in _missing_required(element, items, defs, f"{path}[{index}]")
+        ]
+
+    properties = schema.get("properties")
+    if not isinstance(properties, dict) or not isinstance(payload, dict):
+        return []
+
+    here = f"{path}." if path else ""
+    gaps = [
+        f"{here}{name}"
+        for name in schema.get("required", ())
+        if name in properties and name not in payload
+    ]
+    for name, sub in properties.items():
+        if name in payload and isinstance(sub, dict):
+            gaps.extend(_missing_required(payload[name], sub, defs, f"{here}{name}"))
+    return gaps
 
 
 class ModelCallFailed(RuntimeError):
@@ -827,12 +935,28 @@ class ModelClient:
                 "DREAM_MODEL_ID, or unset DO_INFERENCE_KEY to go back to Anthropic."
             )
 
-        if provider.is_digitalocean:
-            self._client = anthropic.Anthropic(
-                api_key=env.do_inference_key.strip(), base_url=provider.base_url
-            )
-        else:
-            self._client = anthropic.Anthropic(api_key=env.anthropic_api_key)
+        # **`base_url` is passed on BOTH branches, and the Anthropic one is why
+        # this line exists.** It used to be omitted there, which is not the same
+        # as asking for Anthropic: the SDK resolves its endpoint as *kwarg >
+        # `ANTHROPIC_BASE_URL` > a credentials profile on disk*, so a client
+        # built without one talks to whatever the environment says while
+        # `inference_provider` reports "Anthropic direct" and
+        # `_forces_tool_call` stays False. Measured against a stub that behaves
+        # like DigitalOcean — 200, `output_config` ignored, prose back — the
+        # Anthropic key went to that endpoint, the schema was enforced nowhere,
+        # and a JSON-shaped reply of `{"market_assessment": "..."}` was accepted
+        # as a completed cycle. Passing the value the provider NAMES is what
+        # makes the banner, the Settings page and the wire agree, and it closes
+        # the profile-file route too: the SDK consults no other source once a
+        # base URL arrives as a kwarg.
+        self._client = anthropic.Anthropic(
+            api_key=(
+                env.do_inference_key.strip()
+                if provider.is_digitalocean
+                else env.anthropic_api_key
+            ),
+            base_url=provider.base_url,
+        )
 
         self._forces_tool_call = provider.is_digitalocean
         self._system_prompt = system_prompt
@@ -928,6 +1052,19 @@ class ModelClient:
         request["max_tokens"] = max(
             int(kwargs.get("max_tokens", 0)), FORCED_TOOL_CALL_MAX_TOKENS
         )
+        # **`output_config` comes off HERE rather than being left to the spec.**
+        # A request carrying it reads to anybody debugging as though the schema
+        # were being enforced server-side, at the one endpoint measured to
+        # accept it with a 200 and ignore it. Today no spec that reaches this
+        # branch sets it — the three that do are Claude ids and are refused at
+        # construction — so the guarantee rested entirely on that coincidence,
+        # and the test asserting its absence was passing by finding nothing to
+        # check. Dropping it structurally is what makes the claim true of the
+        # branch rather than of today's table. Translating `effort` into
+        # DigitalOcean's flat `reasoning_effort` is a separate change with its
+        # own evidence and is deliberately not guessed at.
+        request.pop("output_config", None)
+        schema = output_format.model_json_schema()
         request["tools"] = [
             {
                 "name": STRUCTURED_TOOL_NAME,
@@ -935,13 +1072,27 @@ class ModelClient:
                     f"Record your {what}. You MUST call this tool, and it is the "
                     "only way to answer: text outside it is discarded."
                 ),
-                "input_schema": output_format.model_json_schema(),
+                "input_schema": schema,
             }
         ]
         request["tool_choice"] = {"type": "tool", "name": STRUCTURED_TOOL_NAME}
 
         response = client.messages.create(**request)
         arguments = _tool_arguments(response, what)
+        # Checked against the schema that was SENT, before Pydantic gets to fill
+        # a default in for a property that schema declared required. See
+        # `_missing_required`: the server-enforced path compiles `required` into
+        # a grammar, and this path had nothing standing in for it, so an
+        # omission became a value invented here and attributed to the model.
+        missing = _missing_required(arguments, schema, schema.get("$defs", {}))
+        if missing:
+            raise ModelCallFailed(
+                f"The model's {what} left out {len(missing)} propert"
+                f"{'y' if len(missing) == 1 else 'ies'} the schema it was sent "
+                f"declares required: {missing[:QUOTED_KEYS_MAX]}. Absent is not "
+                "the same as empty -- an omitted key would take this side's "
+                "default and be recorded as the model's own answer."
+            )
         try:
             parsed = output_format.model_validate(arguments)
         except ValidationError as exc:
@@ -1059,11 +1210,52 @@ class ModelClient:
         return self._structured(client, kwargs, output_format, "conference turn")
 
     def _usage_from(self, response: anthropic.types.Message) -> CallUsage:
+        # **The SDK does not validate this block, and that was measured rather
+        # than assumed.** Responses are built with `construct_type`, which is
+        # unchecked construction: a `usage` of `{"input_tokens": "10"}` yields a
+        # `Usage` carrying the string, `{"input_tokens": 10}` alone yields
+        # `output_tokens=None`, and both reach here. `u.output_tokens` on the
+        # second raised `AttributeError` — outside this module's own three named
+        # errors — and threw away a decision that had already validated, over an
+        # accounting field. The first stored a `str` in a field typed `int` and,
+        # on a priced model, made the cost arithmetic raise `TypeError`.
+        #
+        # An unreadable count is 0 and never a guess, and it makes the COST
+        # unknown rather than small: `None` already means "nobody has priced
+        # this model", and "nobody could read what it spent" is the same answer
+        # to the same question. A zero token count reading as an outage is the
+        # existing convention here — `cached_tokens` reading zero across a run
+        # of cycles is how caching is checked at all.
         u = response.usage
-        in_tokens = u.input_tokens
-        out_tokens = u.output_tokens
-        cache_read = getattr(u, "cache_read_input_tokens", 0) or 0
-        cache_write = getattr(u, "cache_creation_input_tokens", 0) or 0
+        readable = True
+
+        def count(name: str, *, optional: bool) -> int:
+            """One token count, or 0 with the reading marked unusable.
+
+            `optional` separates the two cache fields, which a response is
+            entitled not to carry — an uncached call reports neither, and
+            treating that as unknown would make every ordinary Anthropic call
+            cost an unknown amount — from the two that the wire format always
+            has, where an absence means the block could not be read.
+            """
+            nonlocal readable
+            raw = getattr(u, name, None)
+            if raw is None:
+                readable = readable and optional
+                return 0
+            if isinstance(raw, bool) or not isinstance(raw, int | float | str):
+                readable = False
+                return 0
+            try:
+                return int(raw)
+            except ValueError:
+                readable = False
+                return 0
+
+        in_tokens = count("input_tokens", optional=False)
+        out_tokens = count("output_tokens", optional=False)
+        cache_read = count("cache_read_input_tokens", optional=True)
+        cache_write = count("cache_creation_input_tokens", optional=True)
 
         # **`None` rather than a fallback price.** A model with no entry in
         # `MODEL_SPECS` costs an amount this process cannot compute, and the
@@ -1077,7 +1269,7 @@ class ModelClient:
         # second one is unanswerable here.
         pricing = self._spec.pricing
         cost: float | None = None
-        if pricing is not None:
+        if pricing is not None and readable:
             # 1-hour cache writes bill at 2x base input.
             cost = (
                 in_tokens * pricing.input_usd_per_mtok

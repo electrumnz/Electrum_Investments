@@ -1129,9 +1129,347 @@ def test_a_forced_tool_call_is_not_sent_under_the_budget_it_was_measured_at(monk
     """
     from bot.model_client import FORCED_TOOL_CALL_MAX_TOKENS
 
-    decision = {"market_assessment": "quiet"}
-    client = _do_client(_reply(_tool_block(decision)), monkeypatch)
+    client = _do_client(_reply(_tool_block(_QUIET_DECISION)), monkeypatch)
 
     client.propose("context")  # propose asks for 4096
 
     assert client._client.captured["max_tokens"] == FORCED_TOOL_CALL_MAX_TOKENS
+
+
+# ------------------------------------------------ the audit's findings, pinned
+#
+# Everything below was found by ATTACKING the forced-tool-call transport rather
+# than by reading it, and every one of them was invisible to a suite of 2,185
+# green tests. They are grouped here because they share one shape: the module
+# claimed a property in prose, and the code held a weaker one.
+
+
+# A complete decision, in the shape the wire schema actually asks for. Used
+# wherever a test is about something OTHER than the payload, so that a fixture
+# cannot quietly become the thing under test — which is how the budget test
+# above ended up demonstrating the hole `_missing_required` now closes.
+_QUIET_DECISION: dict[str, Any] = {
+    "market_assessment": "quiet",
+    "proposals": [],
+    "assessments": [],
+    "position_plans": [],
+}
+
+
+def _proposal(**overrides: Any) -> dict[str, Any]:
+    base = {
+        "symbol": "SPY",
+        "asset_class": "us_equity",
+        "direction": "buy",
+        "qty": 10,
+        "limit_price": 600.0,
+        "stop_loss_price": 590.0,
+        "take_profit_price": None,
+        "trail_percent": None,
+        "rationale": "Long SPY off the 20-day, invalidated below 590.",
+    }
+    base.update(overrides)
+    return base
+
+
+# ------------------------------------------- the schema sent is the schema checked
+
+
+def test_a_property_the_sent_schema_requires_may_not_simply_be_absent(monkeypatch):
+    """The transport sent one contract and used to check a different one.
+
+    `EVERY_FIELD_REQUIRED` puts every property into the schema's `required`
+    list, and the server-enforced path compiles that into a grammar the model
+    cannot leave a key out of. `model_validate` honours the PYTHON defaults
+    instead — and every one of these fields has one — so on this path an
+    omission was not rejected, it became a VALUE, invented here and attributed
+    to the model.
+
+    Measured across the shapes actually sent: `ModelDecision` accepted three
+    absent properties, `OrderProposal` three, `SymbolAssessment` two,
+    `PositionPlan` five and `DreamStep` eleven.
+    """
+    from bot.model_client import ModelCallFailed
+
+    client = _do_client(_reply(_tool_block({"market_assessment": "quiet"})), monkeypatch)
+
+    with pytest.raises(ModelCallFailed) as raised:
+        client.propose("context")
+
+    said = str(raised.value)
+    assert "proposals" in said and "assessments" in said and "position_plans" in said
+
+
+def test_an_omission_and_an_empty_list_are_different_answers(monkeypatch):
+    """The check refuses an ABSENT key and never an empty one.
+
+    `assessments: []` is a real answer — a quiet cycle is most cycles — and
+    weighing it against what the model was actually shown is `cmd_loop`'s job,
+    with the denominator only it holds. This must not become a second opinion
+    about that. What it refuses is the model not answering that part of the
+    contract at all, which is a different fault with a different remedy.
+    """
+    client = _do_client(_reply(_tool_block(_QUIET_DECISION)), monkeypatch)
+
+    decision, _ = client.propose("context")
+
+    assert decision.assessments == [] and decision.position_plans == []
+
+
+def test_a_nested_omission_is_caught_where_the_default_would_be_invented(monkeypatch):
+    """The one with a figure on it, and the reason the check walks the whole tree.
+
+    `PositionPlan.action` defaults to `hold` and `thesis_intact` to `True`, so a
+    plan of `{"symbol": ..., "reasoning": ...}` used to be recorded and rendered
+    as an opinion about an open position that nothing on the far end ever
+    expressed. That is a plausible wrong figure, arriving through the transport
+    rather than through the model.
+    """
+    from bot.model_client import ModelCallFailed
+
+    payload: dict[str, Any] = dict(_QUIET_DECISION)
+    payload["position_plans"] = [{"symbol": "SPY", "reasoning": "Still working."}]
+    client = _do_client(_reply(_tool_block(payload)), monkeypatch)
+
+    with pytest.raises(ModelCallFailed) as raised:
+        client.propose("context")
+
+    said = str(raised.value)
+    assert "position_plans[0].action" in said
+    assert "position_plans[0].thesis_intact" in said
+
+
+def test_a_complete_nested_payload_still_passes(monkeypatch):
+    """Or the check above passes by refusing everything.
+
+    A proposal stating every property — including the two nulls that say "no
+    target, no trail" — is what the contract asks for and has to survive it.
+    """
+    payload: dict[str, Any] = dict(_QUIET_DECISION)
+    payload["proposals"] = [_proposal()]
+    client = _do_client(_reply(_tool_block(payload)), monkeypatch)
+
+    decision, _ = client.propose("context")
+
+    assert decision.proposals[0].qty == 10
+    assert decision.proposals[0].take_profit_price is None
+
+
+def test_a_null_inside_an_optional_object_is_not_read_as_a_missing_object(monkeypatch):
+    """`anyOf: [ref, null]` is how every optional model here is written.
+
+    A null is the answer the schema asks for when there is nothing to say, so
+    descending into the non-null branch to demand its required properties would
+    reject the correct payload. Pinned because it is the one recursion step that
+    fails in the direction of refusing good work.
+    """
+    payload: dict[str, Any] = dict(_QUIET_DECISION)
+    payload["assessments"] = [
+        {"symbol": "QQQ", "stance": "pass", "reasoning": "Nothing there today.",
+         "waiting_for": "", "trigger": None}
+    ]
+    client = _do_client(_reply(_tool_block(payload)), monkeypatch)
+
+    decision, _ = client.propose("context")
+
+    assert decision.assessments[0].trigger is None
+
+
+# --------------------------------------- the endpoint the SDK would have chosen
+
+
+def test_the_anthropic_branch_names_its_endpoint_instead_of_letting_the_sdk_pick(
+    monkeypatch,
+):
+    """**The SDK has an endpoint switch of its own and this module did not know.**
+
+    `anthropic.Anthropic` resolves its base URL as *kwarg > `ANTHROPIC_BASE_URL`
+    > a credentials profile on disk*, so a client built without one talks to
+    whatever the environment says. Measured against a stub behaving like
+    DigitalOcean — 200, `output_config` accepted and ignored, prose back — the
+    ANTHROPIC key went to that endpoint, `_forces_tool_call` stayed False, the
+    schema was enforced nowhere, and `inference_provider` reported "Anthropic
+    direct" throughout.
+
+    `mudhorn-dream.service` and `mudhorn-confer.service` both carry
+    `EnvironmentFile=/opt/mudhorn/.env`, so this is a line in a file rather than
+    a hypothetical.
+    """
+    from bot.config import ANTHROPIC_DEFAULT_BASE_URL, Env, ModelSpec
+    from bot.model_client import ModelClient
+
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://somewhere.else.example")
+    env = Env(_env_file=None)  # type: ignore[call-arg]
+    env.anthropic_api_key = "sk-ant-test"
+    env.do_inference_key = ""
+    env.anthropic_base_url = ""  # nobody configured one HERE
+
+    client = ModelClient(env, "system", spec=ModelSpec(model_id="x"), cache_system=False)
+
+    assert str(client._client.base_url).rstrip("/") == ANTHROPIC_DEFAULT_BASE_URL
+
+
+def test_a_configured_proxy_is_honoured_and_is_the_url_that_was_reported(monkeypatch):
+    """Pointing the SDK somewhere deliberately is supported; it just has to be
+    the same endpoint every surface names.
+
+    The banner, the Settings page and the wire read one value now, so a swap
+    cannot be invisible afterwards — which is the whole argument for announcing
+    the provider at startup.
+    """
+    from bot.config import Env, ModelSpec
+    from bot.model_client import ModelClient
+
+    env = Env(_env_file=None)  # type: ignore[call-arg]
+    env.anthropic_api_key = "sk-ant-test"
+    env.do_inference_key = ""
+    env.anthropic_base_url = "https://gateway.example/anthropic"
+
+    provider = env.inference_provider
+    client = ModelClient(env, "system", spec=ModelSpec(model_id="x"), cache_system=False)
+
+    assert provider.usable and provider.base_url == "https://gateway.example/anthropic"
+    assert str(client._client.base_url).rstrip("/") == "https://gateway.example/anthropic"
+    assert client._forces_tool_call is False
+
+
+def test_the_sdk_switch_pointed_at_digitalocean_without_the_key_refuses():
+    """The one arrangement that is wrong in every part at once.
+
+    `output_config` goes to an endpoint measured to accept it with a 200 and
+    ignore it, on the transport that assumes it was enforced, carrying the
+    Anthropic credential. Refused at construction for the same reason a Claude
+    tier default is: nothing about it produces a useful error later, and the
+    good outcome must never be what a broken configuration looks like.
+    """
+    from bot.config import Env
+    from bot.model_client import ModelCallFailed, ModelClient
+
+    env = Env(_env_file=None)  # type: ignore[call-arg]
+    env.anthropic_api_key = "sk-ant-test"
+    env.do_inference_key = ""
+    env.anthropic_base_url = "https://inference.do-ai.run/"
+
+    with pytest.raises(ModelCallFailed) as raised:
+        ModelClient(env, "system")
+
+    assert "DO_INFERENCE_KEY" in str(raised.value)
+
+
+# ------------------------------------------------- what a refusal may quote back
+
+
+def test_a_corrupt_key_refusal_cannot_be_made_arbitrarily_long(monkeypatch):
+    """Every quote-back here is bounded, and this one was not.
+
+    Measured: one 200,000-character argument key produced a
+    200,116-character exception, which becomes a log line, an `audit/*.jsonl`
+    row and an `insight.py` index entry — once per cycle, against an audit log
+    measured at ~500 KiB a day and deliberately never pruned.
+    """
+    from bot.model_client import QUOTED_KEYS_MAX, QUOTED_TEXT_MAX_CHARS, CorruptToolCall
+
+    client = _do_client(_reply(_tool_block({"<" + "z" * 200_000: 1})), monkeypatch)
+
+    with pytest.raises(CorruptToolCall) as raised:
+        client.propose("context")
+
+    assert len(str(raised.value)) < 300 + QUOTED_KEYS_MAX * (QUOTED_TEXT_MAX_CHARS + 8)
+
+
+def test_an_argument_key_that_is_not_a_string_is_corrupt_rather_than_a_crash(
+    monkeypatch,
+):
+    """`"<" in key` raises `TypeError` on an int.
+
+    That escaped `ModelCallFailed` entirely and reached the caller as a crash
+    out of a module whose contract is that it raises one of three named errors.
+    JSON cannot produce a non-string key, so the shape only ever arrives from a
+    proxy or an SDK building its own objects — which is exactly the case this
+    check exists for, and exactly the case where a `TypeError` says least.
+    """
+    from bot.model_client import CorruptToolCall
+
+    client = _do_client(_reply(_tool_block({1: "a", "market_assessment": "x"})), monkeypatch)
+
+    with pytest.raises(CorruptToolCall):
+        client.propose("context")
+
+
+# ----------------------------------------------------------- cost accounting
+
+
+def test_a_usage_block_the_far_end_did_not_fill_in_does_not_cost_the_answer(monkeypatch):
+    """The SDK does not validate this block, and that was measured.
+
+    Responses are built with `construct_type`, which is unchecked construction:
+    a `usage` of `{"input_tokens": 10}` alone yields `output_tokens=None` and
+    `{"input_tokens": "10"}` yields the string. Reading them directly raised
+    `AttributeError` on the first — outside this module's own three named
+    errors — and threw away a decision that had already validated, over an
+    accounting field.
+    """
+    reply = SimpleNamespace(
+        content=[_tool_block(_QUIET_DECISION)],
+        usage=SimpleNamespace(input_tokens="1200"),  # no output_tokens at all
+    )
+    client = _do_client(reply, monkeypatch)
+
+    decision, usage = client.propose("context")
+
+    assert decision.market_assessment == "quiet"
+    assert usage.input_tokens == 1200
+    assert usage.output_tokens == 0
+
+
+def test_a_count_nobody_could_read_makes_the_COST_unknown_rather_than_small():
+    """`None` already means "nobody has priced this model". "Nobody could read
+    what it spent" is the same answer to the same question, and a cost computed
+    from a count that could not be read would be a figure nobody measured
+    printed beside figures that were.
+    """
+    from bot.config import CLAUDE_MODEL_SPECS, ClaudeTier, Env
+    from bot.model_client import ModelClient
+
+    env = Env(_env_file=None)  # type: ignore[call-arg]
+    env.anthropic_api_key = "k"
+    env.do_inference_key = ""
+    client = ModelClient(
+        env, "system", spec=CLAUDE_MODEL_SPECS[ClaudeTier.SONNET], cache_system=False
+    )
+
+    def response(**usage: Any) -> Any:
+        return SimpleNamespace(usage=SimpleNamespace(**usage))
+
+    priced = client._usage_from(response(input_tokens=1_000_000, output_tokens=0))
+    unreadable = client._usage_from(response(input_tokens=[1], output_tokens=0))
+
+    assert priced.estimated_cost_usd == 2.0
+    assert unreadable.estimated_cost_usd is None
+
+
+# ------------------------------------------------------ output_config on this path
+
+
+def test_the_forced_tool_call_never_carries_output_config(monkeypatch):
+    """The existing assertion was passing by finding nothing to check.
+
+    It ran against a spec with both Anthropic-only flags False, so
+    `output_config` could not have been set whatever the transport did. The
+    three specs that DO set it are Claude ids and are refused at construction,
+    so the property rested entirely on that coincidence rather than on the
+    branch. This spec sets it, and the request must still not carry it: at an
+    endpoint measured to accept `output_config` with a 200 and ignore it, a
+    request holding both reads to anybody debugging as though the schema were
+    being enforced server-side.
+    """
+    from bot.config import ModelSpec
+
+    spec = ModelSpec(model_id="deepseek-v4-pro", sends_anthropic_effort=True)
+    client = _do_client(_reply(_tool_block(_QUIET_DECISION)), monkeypatch, model_id="x")
+    client._spec = spec
+
+    client.propose("context")
+
+    assert "output_config" not in client._client.captured
+    assert client._client.captured["tool_choice"]["name"] == STRUCTURED_TOOL_NAME

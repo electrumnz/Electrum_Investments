@@ -235,9 +235,15 @@ def no_do_key(monkeypatch: pytest.MonkeyPatch) -> None:
     A developer with DO_INFERENCE_KEY exported would otherwise get a different
     answer from these tests than CI does, which is the one thing a test about
     "what is configured" must not do.
+
+    `ANTHROPIC_BASE_URL` is cleared for the same reason and is the one most
+    likely to be set: it is the Anthropic SDK's own switch, `scripts/` export it
+    to run a probe, and it now takes part in this answer rather than being
+    invisible to it.
     """
     monkeypatch.delenv("DO_INFERENCE_KEY", raising=False)
     monkeypatch.delenv("DO_INFERENCE_BASE_URL", raising=False)
+    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
 
 
 def test_the_inference_fields_default_to_empty_and_empty_means_anthropic(no_do_key):
@@ -1428,3 +1434,139 @@ def test_a_claude_tier_default_is_recognised_from_the_spec_table(no_do_key):
 
     assert not is_claude_tier_default("deepseek-v4-pro")
     assert not is_claude_tier_default("")
+
+
+# ------------------------------------------ the SDK's own switch, made visible
+#
+# Found by attacking the provider selection rather than by reading it. The
+# Anthropic SDK resolves its endpoint as *kwarg > `ANTHROPIC_BASE_URL` > a
+# credentials profile on disk*, so for as long as `ModelClient` passed no
+# `base_url` on the Anthropic branch, the endpoint was chosen by something this
+# configuration could not see and no surface could report.
+
+
+def test_the_default_anthropic_endpoint_is_named_rather_than_left_to_the_sdk(no_do_key):
+    """`base_url` was an empty string on this branch, which is not an endpoint.
+
+    It has to be the real one, because `ModelClient` passes it: a provider that
+    describes a configuration and a client that talks to a different endpoint
+    are two facts about one thing that can disagree, which is the arrangement
+    this repository refuses everywhere else.
+    """
+    from bot.config import ANTHROPIC, ANTHROPIC_DEFAULT_BASE_URL
+
+    provider = _env().inference_provider
+
+    assert provider.name == ANTHROPIC
+    assert provider.usable is True
+    assert provider.base_url == ANTHROPIC_DEFAULT_BASE_URL
+
+
+def test_an_sdk_base_url_is_reported_rather_than_honoured_in_silence(no_do_key):
+    """A deliberate proxy is supported and is NOT refused — it is named.
+
+    This process cannot know whether an arbitrary endpoint enforces
+    `output_config`; the transport assumes it does. Reporting the weaker fact
+    rather than implying the stronger one is the same rule as
+    `FinnhubCalendar.is_degraded` and the tailnet status.
+    """
+    from bot.config import ANTHROPIC
+
+    provider = _env(ANTHROPIC_BASE_URL="https://gateway.example/v1").inference_provider
+
+    assert provider.name == ANTHROPIC
+    assert provider.usable is True
+    assert provider.base_url == "https://gateway.example/v1"
+    assert "gateway.example" in provider.detail
+    assert "cannot check" in provider.detail
+
+
+def test_the_sdk_switch_aimed_at_digitalocean_without_the_key_is_unusable(no_do_key):
+    """The arrangement that is wrong in every part at once, and announced itself
+    in none of them.
+
+    `ANTHROPIC_BASE_URL=https://inference.do-ai.run` with no `DO_INFERENCE_KEY`
+    sent `output_config` — which that endpoint accepts with a 200 and IGNORES —
+    plus the Anthropic credential, on the transport that assumes the schema was
+    enforced server-side. Reported as DigitalOcean-and-unusable rather than as a
+    new state, so `ModelClient`, `provider_is_unusable` and
+    `model_calls_are_impossible` all refuse it with no new code.
+    """
+    provider = _env(ANTHROPIC_BASE_URL="https://inference.do-ai.run").inference_provider
+
+    assert provider.is_digitalocean
+    assert provider.usable is False
+    assert "DO_INFERENCE_KEY is the switch" in provider.detail
+
+
+def test_the_digitalocean_match_is_on_the_HOST_and_not_the_whole_string(no_do_key):
+    """One endpoint written three ways is one endpoint.
+
+    A trailing slash or a path would slip past an equality test, and the whole
+    value of the check is that it fires on the arrangement an operator actually
+    types.
+    """
+    for written in (
+        "https://inference.do-ai.run/",
+        "https://inference.do-ai.run/v1",
+        "HTTPS://INFERENCE.DO-AI.RUN",
+    ):
+        provider = _env(ANTHROPIC_BASE_URL=written).inference_provider
+        assert provider.usable is False, written
+
+
+def test_a_custom_digitalocean_endpoint_is_matched_too(no_do_key):
+    """The host to compare against is whichever one is configured, not only the
+    documented default — otherwise an operator on a private endpoint gets the
+    silent version of the same fault."""
+    provider = _env(
+        DO_INFERENCE_BASE_URL="https://private.example",
+        ANTHROPIC_BASE_URL="https://private.example/v1",
+    ).inference_provider
+
+    assert provider.is_digitalocean
+    assert provider.usable is False
+
+
+def test_the_digitalocean_key_still_wins_over_the_sdk_switch(no_do_key):
+    """When the repo's switch is thrown, `ModelClient` passes that endpoint
+    explicitly, so the SDK's variable cannot reach past it. Pinned so that a
+    later tidy-up cannot make the two fight."""
+    from bot.config import DO_INFERENCE_DEFAULT_BASE_URL
+
+    provider = _env(
+        DO_INFERENCE_KEY="do-model-access-key",
+        ANTHROPIC_BASE_URL="https://somewhere.else.example",
+    ).inference_provider
+
+    assert provider.is_digitalocean
+    assert provider.usable is True
+    assert provider.base_url == DO_INFERENCE_DEFAULT_BASE_URL
+
+
+def test_anthropics_own_url_written_out_is_not_reported_as_an_override(monkeypatch):
+    """Setting `ANTHROPIC_BASE_URL` to Anthropic is not a swap.
+
+    Found the way these things are found: the container this was written in
+    exports exactly that value, and the first version of the check announced it
+    as a proxy — a banner saying calls go somewhere other than Anthropic when
+    they go to Anthropic. The good outcome must not read as the unusual one.
+    """
+    from bot.config import ANTHROPIC_DEFAULT_BASE_URL
+
+    monkeypatch.delenv("DO_INFERENCE_KEY", raising=False)
+    monkeypatch.delenv("DO_INFERENCE_BASE_URL", raising=False)
+
+    for written in (
+        ANTHROPIC_DEFAULT_BASE_URL,
+        f"{ANTHROPIC_DEFAULT_BASE_URL}/",
+        "  https://api.anthropic.com  ",
+    ):
+        provider = _env(ANTHROPIC_BASE_URL=written).inference_provider
+        assert provider.base_url == ANTHROPIC_DEFAULT_BASE_URL, written
+        assert "Anthropic direct" in provider.detail, written
+
+    # A PATH on the same host is a different endpoint and is still named.
+    proxied = _env(ANTHROPIC_BASE_URL="https://api.anthropic.com/proxy").inference_provider
+    assert proxied.base_url == "https://api.anthropic.com/proxy"
+    assert "cannot check" in proxied.detail

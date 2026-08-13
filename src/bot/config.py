@@ -229,8 +229,66 @@ def is_claude_tier_default(model_id: str) -> bool:
 # variable rather than two, and so the string exists in exactly one place.
 DO_INFERENCE_DEFAULT_BASE_URL = "https://inference.do-ai.run"
 
+# Anthropic's own endpoint, written out rather than left to the SDK's default.
+#
+# **The SDK has a switch of its own and this repository did not know about it.**
+# `anthropic.Anthropic()` resolves its base URL as *kwarg > `ANTHROPIC_BASE_URL`
+# > a credentials profile on disk*, so a client constructed without one talks to
+# whatever the environment says while every surface here reports "Anthropic
+# direct". Measured: with `ANTHROPIC_BASE_URL` set and `DO_INFERENCE_KEY` unset,
+# `ModelClient` sent `output_config` and the Anthropic API key to that endpoint
+# and `_forces_tool_call` stayed False. `mudhorn-dream.service` and
+# `mudhorn-confer.service` both carry `EnvironmentFile=/opt/mudhorn/.env`, so a
+# line in that file is a real environment variable on two of the three paths.
+#
+# Naming it here means `inference_provider` can DESCRIBE the endpoint that will
+# actually be called, and `ModelClient` can pass it explicitly — which also
+# closes the profile-file route, because the SDK skips every other source once a
+# base URL is passed as a kwarg.
+ANTHROPIC_DEFAULT_BASE_URL = "https://api.anthropic.com"
+
 ANTHROPIC = "anthropic"
 DIGITALOCEAN = "digitalocean"
+
+
+def _names_anthropic_direct(url: str) -> bool:
+    """Is this value Anthropic's own endpoint written out rather than an override?
+
+    **Setting `ANTHROPIC_BASE_URL` to Anthropic's own URL is not a swap**, and
+    reporting it as one would be a banner saying calls go somewhere other than
+    Anthropic when they go to Anthropic. It is a live case rather than a tidy
+    one: the container this was written in exports exactly that, and the first
+    version of the check called it a proxy.
+
+    Host and path both, so `https://api.anthropic.com/proxy` stays an override.
+    """
+    from urllib.parse import urlsplit
+
+    if _host_of(url) != _host_of(ANTHROPIC_DEFAULT_BASE_URL):
+        return False
+    try:
+        return urlsplit(url.strip()).path.strip("/") == ""
+    except ValueError:
+        return False
+
+
+def _host_of(url: str) -> str:
+    """The lowercase host of a URL, or empty when there is not one to read.
+
+    Compared rather than the whole string, because `https://inference.do-ai.run`,
+    `https://inference.do-ai.run/` and `https://inference.do-ai.run/v1` are one
+    endpoint written three ways and an equality test would call two of them
+    somewhere else.
+    """
+    from urllib.parse import urlsplit
+
+    try:
+        return (urlsplit(url.strip()).hostname or "").lower()
+    except ValueError:
+        # A URL the parser refuses is not a host anybody can match against.
+        # Answering "no host" is the safe reading: it cannot make a comparison
+        # below claim the endpoint is somewhere it is not.
+        return ""
 
 # Whether any PYTHON model call actually goes through DigitalOcean.
 #
@@ -326,6 +384,20 @@ class Env(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
     anthropic_api_key: str = Field(default="", alias="ANTHROPIC_API_KEY")
+
+    # **The SDK's own endpoint switch, read here so it stops being invisible.**
+    # It is not this repository's variable — `anthropic.Anthropic` reads it out
+    # of the environment on its own — and that is exactly why it has to be
+    # declared: a setting the configuration cannot see is a setting no banner,
+    # no Settings page and no guard can report. Measured, this silently pointed
+    # every Python model call somewhere else while `inference_provider` said
+    # "Anthropic direct". See `ANTHROPIC_DEFAULT_BASE_URL`.
+    #
+    # Empty means Anthropic's own endpoint, which is the default and the
+    # supported configuration. `DO_INFERENCE_KEY` still overrides it: when the
+    # DigitalOcean switch is thrown, `ModelClient` passes that endpoint
+    # explicitly and this value is not consulted.
+    anthropic_base_url: str = Field(default="", alias="ANTHROPIC_BASE_URL")
 
     # DigitalOcean Gradient serverless inference. Both optional, both empty by
     # default, and **empty means Anthropic** — see the block above this class.
@@ -482,25 +554,86 @@ class Env(BaseSettings):
         """
         key = self.do_inference_key.strip()
         declared = self.do_inference_base_url.strip()
+        # The SDK's switch. `base_url` on the Anthropic branch is now the
+        # endpoint that will actually be called rather than an empty string,
+        # because `ModelClient` passes it through — the two must not be able to
+        # describe different endpoints. A value that spells out Anthropic's own
+        # endpoint is not an override and is read as unset, so the ordinary
+        # banner keeps saying the ordinary thing.
+        sdk_url = self.anthropic_base_url.strip()
+        if _names_anthropic_direct(sdk_url):
+            sdk_url = ""
+        anthropic_url = sdk_url or ANTHROPIC_DEFAULT_BASE_URL
 
         if not key:
+            # **The SDK's switch pointed at the endpoint the repo's switch
+            # exists for.** Measured: this sends `output_config` — which that
+            # endpoint accepts with a 200 and ignores — plus the ANTHROPIC key,
+            # on the transport that assumes the schema is enforced server-side.
+            # Every part of that is wrong and none of it announced itself.
+            #
+            # Reported as DigitalOcean-and-unusable rather than as a new state,
+            # because it IS a DigitalOcean configuration: `ModelClient` already
+            # refuses an unusable one, `provider_is_unusable` already degrades
+            # the loop and `model_calls_are_impossible` already refuses the
+            # command. A fourth state would be a fourth thing for each of those
+            # to have been taught about.
+            do_hosts = {
+                _host_of(DO_INFERENCE_DEFAULT_BASE_URL),
+                _host_of(declared),
+            } - {""}
+            if sdk_url and _host_of(sdk_url) in do_hosts:
+                return InferenceProvider(
+                    name=DIGITALOCEAN,
+                    base_url=sdk_url,
+                    usable=False,
+                    detail=(
+                        f"ANTHROPIC_BASE_URL points at the DigitalOcean endpoint "
+                        f"({sdk_url}) but DO_INFERENCE_KEY is not set. The Anthropic "
+                        "SDK honours that variable, so model calls would go there "
+                        "carrying the ANTHROPIC key and the output_config that "
+                        "endpoint accepts with a 200 and ignores -- the schema would "
+                        "be enforced nowhere and nothing would say so. "
+                        "DO_INFERENCE_KEY is the switch: set it, or unset "
+                        "ANTHROPIC_BASE_URL."
+                    ),
+                )
             if declared:
                 # Half a configuration. Reported rather than ignored: an
                 # operator who set the endpoint and not the key would otherwise
                 # believe the swap had happened.
                 return InferenceProvider(
                     name=ANTHROPIC,
-                    base_url="",
+                    base_url=anthropic_url,
                     usable=False,
                     detail=(
                         f"DO_INFERENCE_BASE_URL is set ({declared}) but DO_INFERENCE_KEY "
                         "is not, so nothing has moved. The key is the switch; a base URL "
-                        "on its own does nothing. Model calls go to Anthropic directly."
+                        f"on its own does nothing. Model calls go to {anthropic_url}."
+                    ),
+                )
+            if sdk_url:
+                # A deliberate proxy is a supported thing to do and is NOT
+                # refused — but it is named, because this repository cannot know
+                # whether an arbitrary endpoint enforces `output_config` and the
+                # transport assumes it does. Reporting the weaker fact rather
+                # than implying the stronger one.
+                return InferenceProvider(
+                    name=ANTHROPIC,
+                    base_url=sdk_url,
+                    usable=True,
+                    detail=(
+                        f"Inference provider: the Anthropic SDK, pointed at {sdk_url} by "
+                        "ANTHROPIC_BASE_URL rather than at Anthropic's own endpoint "
+                        "(DO_INFERENCE_KEY is not set). The schema is sent as "
+                        "output_config and is assumed to be enforced there; this "
+                        "process cannot check that, and an endpoint which accepts it "
+                        "and ignores it would leave the schema enforced nowhere."
                     ),
                 )
             return InferenceProvider(
                 name=ANTHROPIC,
-                base_url="",
+                base_url=anthropic_url,
                 usable=True,
                 detail=(
                     "Inference provider: Anthropic direct (DO_INFERENCE_KEY is not set). "
