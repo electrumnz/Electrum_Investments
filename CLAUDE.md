@@ -53,6 +53,118 @@ is a paste into a live root shell. Three rules, and the first one cost a deploy.
 Say plainly what should happen and what to send back. If a step is not ready
 yet, say so in words and give no block at all.
 
+## There is a console on the box, and it runs as root
+
+`src/bot/console_mcp.py` is an MCP server on the droplet, reachable over a
+Tailscale Funnel behind one token. If a session has tools named `deploy_update`,
+`git_state`, `journal_tail`, `service_status`, `disk_and_memory` or
+`wrapper_selftest`, **those run on the trading box** and there is no need to ask
+the operator to paste terminal output.
+
+It exists because the copy-paste loop is how a failed deploy went an hour
+unnoticed. SSH cannot serve it — measured from an agent container: outbound port
+22 is blocked, there is no `ssh` client, and every egress goes through an HTTPS
+proxy. So the only channel that can carry a console is one the agent's client
+dials, which is why this is a server here rather than a key in
+`authorized_keys`.
+
+**It runs as ROOT, and every other property follows from admitting that.** Its
+job is `update.sh` and `systemctl`, neither of which `mudhorn` can do, so it is
+the most privileged thing in `deploy/`:
+
+- **It reaches no broker and must never gain one.** `tests/test_console_mcp.py`
+  parses the AST and fails the build if it imports `broker`, `risk`, `journal`,
+  `models`, `reconcile`, `grants` or `mcp_server` — at any depth, so a deferred
+  import inside a function is caught. A console that could also trade would put
+  a command runner and the order path behind one secret, and those are different
+  privileges. Same reasoning as running chat as `hermes` and giving the dreamer
+  its own Hermes with no MCP registry.
+- **Six named operations.** `run_command` is not registered at all without
+  `MUDHORN_CONSOLE_SHELL=1`, so a caller cannot see it to try — the `--execute`
+  and `DASHBOARD_CHAT_TOKEN` pattern again.
+- **argv lists, never shell strings**, so `&&`, `|`, `>` and `$(...)` are
+  unreachable even with the shell on.
+- **A token of 32+ characters or it refuses to start.** Unlike
+  `DASHBOARD_PASSWORD` there is no deployment where an ungated console is right,
+  so there is no such configuration.
+- **Output is clipped from the START, keeping the tail**, because an error is at
+  the end of a build log and a truncated tail reads as a clean run.
+
+**Only `/mcp` is gated; every other path 404s**, and that is load-bearing rather
+than tidy. A client probes for OAuth before attaching, and a **401 is a positive
+claim** — *this endpoint exists and you are not authorised* — so it chases a
+sign-in service that is not there and gives up. The first fix enumerated
+`/.well-known/`, which was the wrong SHAPE: the next probe was `POST /register`.
+Enumerating a client's behaviour is a list that goes stale the first time the
+client changes.
+
+**The token travels in the URL** (`?key=...`) because claude.ai's connector form
+has no custom-header field. The header still wins when present. That is
+genuinely weaker — a URL reaches browser history, `Referer`, proxy logs and
+screenshots — and is accepted only because the exposure is a Funnel the operator
+controls and the box is paper-trading. It would not be acceptable for the order
+path, which is why the order path is a different process this one cannot reach.
+
+**Taking it down is two commands.** A Funnel outlives the service, so stopping
+the unit leaves a URL that works again the moment anything restarts it.
+
+**Three of the four things that stopped it connecting were invisible to the test
+suite and to `curl`.** The Funnel's `Host` header, the missing header field, and
+the `/register` probe. The only diagnosis that worked started by reading the
+box's own journal; the two before it reasoned from what the protocol says a
+client ought to do.
+
+## Say what only startup can say, and say it on stderr
+
+`src/bot/announce.py`. Two facts cannot be established from inside a running
+process later — **which inference provider its model calls go to**, and
+**whether the dashboard has a login** — because a Funnel and a local `curl` both
+arrive on loopback. The moment the process starts is the only moment anyone can
+be told.
+
+Both claims were false when they were written down.
+
+**The auth banner was buffered away.** `web/app.py` printed it to stdout and
+then called `uvicorn.run()`, which blocks forever. systemd gives a service a
+pipe rather than a terminal, so Python block-buffers stdout, and an 8 KiB buffer
+holding 200 bytes is never flushed by a process that does not exit. The journal
+showed a restart at 06:54:25 with the newest banner stamped 06:41:04 — the
+PREVIOUS process flushing on its way out.
+
+**The provider banner did not exist at all.** `Env.inference_provider` had five
+tests and a docstring calling itself "the line a startup banner prints", and
+nothing outside `config.py` ever called it. Same shape as `Dream.is_offerable`.
+
+So: **stderr, which Python line-buffers, plus `flush=True`** — the property is
+worth holding twice and costs nothing once per process. A module rather than a
+keyword argument, because four processes should announce and one did, and a
+named function is something a test can require. `tests/test_announce.py` runs a
+real subprocess with `PYTHONUNBUFFERED` stripped and reads while the child is
+still alive; the unit half of that file passes against the broken code, which is
+exactly why nothing caught it.
+
+## A test that reaches for the implementation instead of the behaviour
+
+Three of these were written in one day, and they are worth recognising by shape
+rather than by instance. Each passed while proving nothing:
+
+- **A text search that matched the comment explaining the rule.** `shell=True`
+  found in the docstring forbidding it; `MUDHORN_CONSOLE_TOKEN=` found in the
+  comment showing an operator how to create one. **A search over a file cannot
+  tell a rule from its explanation.** Parse the AST, or read directives and skip
+  comments.
+- **An assertion that restated the implementation.**
+  `assert APP_DIR == Path(os.environ.get("MUDHORN_APP_DIR", "/opt/mudhorn"))` is
+  the module's own expression compared with itself, and passes whatever the
+  module says.
+- **A fallback that constructed the value it meant to check.** A test walked
+  `app.user_middleware` for a settings object, could not find it — the SDK holds
+  it on the route — and built one, then asserted against its own list.
+
+The general form: **if a test can pass without the code being right, it is not a
+test.** The cure is the same each time — drive the thing and observe what it
+does. Delete the fix and watch it go red before believing it.
+
 ## The one rule that matters
 
 **`src/bot/risk.py` decides what may be traded. You do not.**
@@ -2711,6 +2823,17 @@ src/bot/
                         shares one session. Gates nothing, is never backed up,
                         and answers `None` for "could not ask" rather than
                         letting an outage read as a quiet quarter.
+  announce.py           The two things only startup can say: which inference
+                        provider this process calls, and whether the dashboard
+                        has a login. stderr plus flush, because stdout is
+                        block-buffered under systemd and a process that blocks
+                        forever never flushes it.
+  console_mcp.py        An MCP server that operates the BOX — deploy, service
+                        state, logs, git state. Runs as root, reaches no broker
+                        (AST-tested), six named operations, shell opt-in, and
+                        gates only /mcp so every other path 404s rather than
+                        401s. Installed disabled; deploy/enable-console.sh is
+                        the deliberate act.
   exchange_hours.py     Tokyo, Sydney and Auckland: which days they trade and
                         between what hours, from `exchange_calendars` offline.
                         An OPTIONAL dependency whose absence is exactly the old
@@ -2774,6 +2897,15 @@ deploy/                 VPS provisioning: bootstrap.sh + systemd units. The unit
                         account cannot edit its own limits -- or its own
                         safety rails, which souls.py reads from disk at call
                         time.
+                        update.sh is the whole deploy: it pulls, provisions,
+                        restarts and verifies, and ASSERTS each step rather
+                        than assuming it. It refuses to provision if the commit
+                        did not move, checks the services came back, and
+                        re-runs the wrapper's model-mismatch check in a
+                        sandbox that touches /home/hermes not at all.
+                        enable-console.sh turns the root console on, prints
+                        the token once, and detects the Funnel hostname the
+                        MCP SDK's Host check needs.
                         backup-journal.sh + mudhorn-backup.timer snapshot the
                         journal hourly with sqlite3 .backup, never cp — and the
                         audit log with plain gzip, which IS correct for
@@ -2826,9 +2958,15 @@ for a while and agree with them.
 dreaming, below — and everything else left needs something a session in a
 container does not have:
 
-- **A deploy.** The droplet still runs code from partway through the session,
-  and `deploy/bootstrap.sh` also closes the `souls/` ownership gap — the safety
-  rails were writable by the service account they restrain.
+- **The all-DigitalOcean migration** is the one substantial piece of code left,
+  and every measurement it needed is done. The souls are already there;
+  `propose`, `dream` and `confer` are not, because DigitalOcean accepts
+  `output_config` with HTTP 200 and silently ignores it. What has to be built
+  is the forced-tool-call path, and the part that matters is that **a reply
+  with no tool call must be a HARD FAILURE** — `qwen3.8-max` returned prose on
+  2 of 3 attempts against the real schema, and a schema-less
+  `{"market_assessment": "..."}` validates as a cycle that considered nothing.
+  `TODO.md` item 20 has the model table and the build order.
 - **A live pre-market window**, to verify the one documented-but-untested claim
   in the order path: Alpaca's docs say `extended_hours` is refused on a bracket
   and an OTO, and no such order has ever been sent from here to watch it be
