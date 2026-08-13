@@ -217,11 +217,62 @@ Sources: [Prompt caching how-to](https://docs.digitalocean.com/products/inferenc
 > `nemotron-3-nano-omni`, `nemotron-3-ultra-550b`, `openai-gpt-oss-20b`,
 > `qwen3-coder-flash`, `qwen3.8-max`.
 >
-> **Not yet measured:** whether any of them holds a `ModelDecision`-shaped
-> schema — nested array, enum, several numeric order fields — reliably across
-> repeated calls. A toy two-field schema is not evidence for the real payload,
-> and that run timed out before finishing. Do that before pinning anything to
-> `dream`, let alone `propose`.
+> **Now measured, 13 Aug 2026, by `scripts/do_schema_fidelity.py`** — the real
+> `ModelDecision` (11,234 bytes, 10 nested `$defs`) and the real `DreamStep`
+> (11,655 bytes, 6), as a forced tool call, validated client-side by Pydantic.
+> See "Which models hold the real schema" below. **The headline is that three
+> samples chose a broken model and ten samples caught it.**
+
+### Which models hold the real schema — MEASURED 13 Aug 2026
+
+`ModelDecision`, 10 samples each. `DreamStep`, 6.
+
+| Model | ModelDecision | median | DreamStep | median |
+|---|---|---|---|---|
+| `deepseek-v4-pro` | **10/10** | 26.1s | **6/6** | 21.2s |
+| `nemotron-3-ultra-550b` | **10/10** | 30.7s | **6/6** | 19.7s |
+| `mistral-3-14B` | **10/10** | 12.6s | **6/6** | 7.0s |
+| `qwen3-coder-flash` | **10/10** | 14.1s | **6/6** | 4.2s |
+| `deepseek-4-flash` | 10/10 | 70.1s | 4/6 | 102.5s |
+| `kimi-k2.5` | 8/10 | 81.7s | 3/6 | 233.4s |
+| `llama3.3-70b-instruct` | **4/10** | 2.2s | — | — |
+
+**`llama3.3-70b-instruct` is the finding, and it is a lesson about sampling
+rather than about that model.** It scored **3/3** on the first pass and **4/10**
+on the second. Its six failures are all `empty_arrays` — `assessments=0`,
+`position_plans=0` — after being shown four symbols and an open position. Its
+2.2-second median is the tell: it returns an almost-empty decision instantly.
+
+That output is structurally valid, passes Pydantic, and **reintroduces exactly
+the gap `assessments` exists to close**: a cycle that considered nothing becomes
+indistinguishable from a loop that never looked. Three samples would have
+shipped it. `propose` runs 96 times a day, and 3 samples cannot separate 0% from
+10%.
+
+**Two failure classes are kept apart on purpose.** `kimi-k2.5` and
+`deepseek-4-flash` fail on read TIMEOUTS, which is transport and is recoverable
+by retry — genuinely different from returning a wrong shape. They are still
+unsuitable for `propose` at 82s and 233s medians, but for a reason about latency
+rather than about correctness, and conflating the two would misattribute the
+defect.
+
+**Disqualified outright**, from the first pass:
+
+- **`qwen3.8-max` returned PROSE on 2 of 3** — no `tool_use` block at all. That
+  is the silent quiet-cycle failure `docs/MODEL_CALLS.md` names, and it is
+  disqualifying for `propose` at any price.
+- **`openai-gpt-oss-20b` and `gemma-4-31B-it`, 0/3 each.** Both invent their own
+  vocabulary against the schema — `{'action': 'BUY', 'shares': '30', 'side':
+  ..., 'ticker': 'AAPL'}` where the schema demands `direction`, `qty`, `symbol`.
+  Client-side Pydantic catches every one, which is precisely why the validation
+  has to stay when the server-side guarantee goes away.
+
+**What this does NOT measure, and nothing should read it as measuring:
+reasoning quality.** It grades whether a model can hold the shape, not whether
+its numbers are any good. A 14B model can comply perfectly and propose nonsense,
+and `RiskGate` checks arithmetic rather than judgement. `scripts/agent_behaviour_live.py`
+is the harness for that half and it has not been run on these candidates.
+**Do not pin `propose` on the strength of this table alone.**
 
 ### 2a. What the documentation said, before it was run
 
