@@ -366,6 +366,28 @@ def build_app(token: str, *, port: int = 8788) -> Any:
 
     class BearerGate(BaseHTTPMiddleware):
         async def dispatch(self, request: Request, call_next: Any) -> Any:
+            # **OAuth discovery must 404, not 401, and the difference is the
+            # whole reason the connector would not attach.**
+            #
+            # A client probes `/.well-known/oauth-protected-resource` and
+            # `/.well-known/oauth-authorization-server` before connecting. A
+            # **401** there is a positive statement — *this resource is
+            # OAuth-protected, go and register* — so claude.ai attempted dynamic
+            # client registration against a server that has no OAuth at all and
+            # failed with "Couldn't register with ...'s sign-in service".
+            #
+            # A **404** is the honest answer: there is no authorisation server
+            # here, the credential is the one already in the URL. The gate
+            # therefore steps aside for these paths and lets the app answer,
+            # which is a 404 because nothing is mounted there.
+            #
+            # This exempts NOTHING that does work. The MCP app mounts `/mcp`
+            # alone, so every exempted path is one the application refuses by
+            # itself — the exemption reveals only that the server exists, which
+            # the URL already told anybody holding it.
+            if request.url.path.startswith("/.well-known/"):
+                return await call_next(request)
+
             supplied = request.headers.get("authorization", "")
             prefix = "Bearer "
             offered = supplied[len(prefix) :] if supplied.startswith(prefix) else ""
