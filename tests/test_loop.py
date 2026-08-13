@@ -2174,3 +2174,289 @@ def test_the_refusal_never_prints_the_key():
     )
 
     assert "do-secret-value" not in (main_mod.model_calls_are_impossible(env) or "")
+
+
+# --------------------------- a decision that considered nothing at all
+#
+# The second entrance to the quiet-cycle hole. A reply with NO tool call already
+# fails hard in `ModelClient`; a tool call that IS made and comes back with
+# `assessments: []` used to arrive at exactly the same place and be recorded as
+# a considered decision. `llama3.3-70b-instruct` does that on 6 of 10 samples
+# after being shown four symbols and an open position, in a 2.2-second median
+# (`docs/DROPLET_AI.md`). Structurally valid, passes Pydantic, and it puts back
+# the whole gap `assessments` exists to close.
+#
+# The rule these pin is a RATIO, which is why it can only live in `cmd_loop`:
+# neither `ModelDecision` nor `ModelClient` knows how many symbols were shown.
+
+
+def _bars(symbol: str, count: int = 30, start: float = 100.0) -> list[Any]:
+    """Enough daily history for `indicators.compute` to return something.
+
+    The figures are unimportant — what matters is that the symbol lands in the
+    INDICATOR set rather than in `symbols_without_history`, because that set is
+    the denominator the refusal is measured against.
+    """
+    from bot.models import Bar
+
+    return [
+        Bar(
+            symbol=symbol,
+            timestamp=datetime(2026, 7, 1, tzinfo=UTC) + timedelta(days=i),
+            open=start + i,
+            high=start + i + 1.0,
+            low=start + i - 1.0,
+            close=start + i,
+            volume=1_000_000.0,
+        )
+        for i in range(count)
+    ]
+
+
+def _broker_showing(*symbols: str) -> Any:
+    """A broker with daily bars for exactly these symbols and nothing else.
+
+    Every other name in `allowed_symbols` raises out of `get_daily_bars`, which
+    `fetch_indicators` reports as missing history — so the indicator set is
+    exactly what this names, and the test can say what the model was shown.
+    """
+    from bot.broker import MockBroker
+
+    broker = MockBroker(starting_equity=100_000.0)
+    broker.connect()
+    for symbol in symbols:
+        broker.set_price(symbol, bid=99.98, ask=100.02)
+        broker.set_bars(symbol, _bars(symbol))
+    return broker
+
+
+def _assessed(symbol: str) -> Any:
+    from bot.models import Stance, SymbolAssessment
+
+    return SymbolAssessment(
+        symbol=symbol,
+        stance=Stance.PASS,
+        reasoning=f"{symbol} is mid-range with no edge worth taking today.",
+    )
+
+
+def test_a_decision_assessing_none_of_the_symbols_shown_fails_the_cycle(
+    monkeypatch, tmp_path
+):
+    """The REJECT. Two symbols with indicators, zero assessments, cycle refused.
+
+    This is the `llama3.3-70b-instruct` answer exactly: valid against the
+    schema, instant, and empty. Recorded, it is indistinguishable afterwards
+    from a loop that never looked at either symbol — which is the one state
+    `assessments` exists to make impossible.
+
+    It takes the identical path to a timeout: `model_call_failed`, a failed job
+    record, and **no `cycle_complete`**. A cycle that could not get a usable
+    decision must never be readable as one that decided to do nothing.
+    """
+    logs = _cycle_with_broker(
+        monkeypatch,
+        tmp_path,
+        ModelDecision(market_assessment="Mixed tape.", proposals=[], assessments=[]),
+        _broker_showing("SPY", "QQQ"),
+    )
+
+    failures = [e for e in logs if e["event"] == "model_call_failed"]
+    assert len(failures) == 1
+    # The message names what it was shown, so the record says WHY it refused
+    # rather than only that it did.
+    assert "SPY" in failures[0]["error"] and "QQQ" in failures[0]["error"]
+    assert "ConsideredNothing" in failures[0]["error"]
+    assert not [e for e in logs if e["event"] == "cycle_complete"]
+
+
+def test_a_cycle_that_showed_no_symbols_is_quiet_rather_than_failed(
+    monkeypatch, tmp_path
+):
+    """The other half, and the one that would break a correct bot if it were
+    wrong.
+
+    Nothing was seeded, so every symbol raises out of `get_daily_bars` and lands
+    in `symbols_without_history`. The model was given no indicators at all, so
+    an empty assessment list is the only honest answer it could return — and
+    refusing it would turn a data outage, or a shut market, into a failed cycle
+    every fifteen minutes.
+    """
+    from bot.broker import MockBroker
+
+    broker = MockBroker(starting_equity=100_000.0)
+    broker.connect()
+
+    logs = _cycle_with_broker(
+        monkeypatch,
+        tmp_path,
+        ModelDecision(market_assessment="Nothing to read.", proposals=[], assessments=[]),
+        broker,
+    )
+
+    assert not [e for e in logs if e["event"] == "model_call_failed"]
+    beat = _heartbeat(logs)
+    assert beat["symbols_shown"] == 0
+    assert beat["assessments"] == 0
+
+
+def test_a_quote_without_history_is_not_counted_as_a_symbol_shown(
+    monkeypatch, tmp_path
+):
+    """The denominator is the INDICATOR set, not the quotes and not the allowlist.
+
+    A symbol with a live quote and no bars is one the context tells the model to
+    treat as having no indicators at all and to propose nothing on. Counting it
+    would fail the cycle for obeying that instruction, and it would blame the
+    model for a feed that was down.
+    """
+    from bot.broker import MockBroker
+
+    broker = MockBroker(starting_equity=100_000.0)
+    broker.connect()
+    broker.set_price("SPY", bid=99.98, ask=100.02)  # a quote, and no bars
+
+    logs = _cycle_with_broker(
+        monkeypatch,
+        tmp_path,
+        ModelDecision(market_assessment="Quote only.", proposals=[], assessments=[]),
+        broker,
+    )
+
+    assert not [e for e in logs if e["event"] == "model_call_failed"]
+    beat = _heartbeat(logs)
+    assert beat["symbols_shown"] == 0
+    assert "SPY" in beat["symbols_without_history"]
+
+
+def test_a_partial_answer_is_not_refused_and_the_ratio_is_stated(monkeypatch, tmp_path):
+    """Zero is the trip, not a shortfall — and the shortfall is made visible.
+
+    A model that assessed one of two symbols has made a judgement a reader can
+    see and argue with on the Decisions page. A model that assessed none has
+    produced a record indistinguishable from never having looked. Only the
+    second is a failed cycle.
+
+    Because the first is deliberately allowed through, the ratio goes on the
+    cycle line: without it, one of two reads exactly like two of two in every
+    other field.
+    """
+    logs = _cycle_with_broker(
+        monkeypatch,
+        tmp_path,
+        ModelDecision(
+            market_assessment="Looked at one of them properly.",
+            proposals=[],
+            assessments=[_assessed("SPY")],
+        ),
+        _broker_showing("SPY", "QQQ"),
+    )
+
+    assert not [e for e in logs if e["event"] == "model_call_failed"]
+    beat = _heartbeat(logs)
+    assert beat["symbols_shown"] == 2
+    assert beat["assessments"] == 1
+
+
+def test_an_open_position_with_no_plan_is_reported_and_never_fails_the_cycle(
+    monkeypatch, tmp_path
+):
+    """The same shape of defect, deliberately answered differently.
+
+    `position_plans` empty against an open position is the other half of what
+    the fidelity probe grades as `empty_arrays`, and it is REPORTED rather than
+    refused. An unassessed symbol is unrecoverable — the audit log is the only
+    place it was ever written down. An unplanned position is not: it is in the
+    journal, on the Board, in `reconcile`, in `stop_watch` and behind a resting
+    stop leg, and the plan is advisory and never executed unless the operator
+    switched position actions on.
+
+    Refusing it would also throw away good work — a decision can carry sound
+    assessments and a sound proposal while saying nothing about a held
+    position.
+    """
+    broker = _short_spy_at_the_broker()
+    broker.set_bars("SPY", _bars("SPY", start=780.0))
+
+    logs = _cycle_with_broker(
+        monkeypatch,
+        tmp_path,
+        ModelDecision(
+            market_assessment="Short is fine, nothing new to add about it.",
+            proposals=[],
+            assessments=[_assessed("SPY")],
+            position_plans=[],
+        ),
+        broker,
+        journal=_journal_with_the_short(tmp_path),
+    )
+
+    assert not [e for e in logs if e["event"] == "model_call_failed"]
+    beat = _heartbeat(logs)
+    assert beat["positions_without_a_plan"] == ["SPY"]
+    # Stated where an operator is looking, not only counted.
+    gaps = [e for e in logs if e["event"] == "positions_without_a_plan"]
+    assert len(gaps) == 1 and gaps[0]["symbols"] == ["SPY"]
+
+
+def test_a_planned_position_leaves_the_field_empty_rather_than_absent(
+    monkeypatch, tmp_path
+):
+    """A stated empty list each cycle is a fact; a field that only appears when
+    something is wrong makes an outage look like a clean run. Same reasoning as
+    `stops_breached`."""
+    from bot.models import PositionAction, PositionPlan
+
+    broker = _short_spy_at_the_broker()
+    broker.set_bars("SPY", _bars("SPY", start=780.0))
+
+    logs = _cycle_with_broker(
+        monkeypatch,
+        tmp_path,
+        ModelDecision(
+            market_assessment="Short is fine.",
+            proposals=[],
+            assessments=[_assessed("SPY")],
+            position_plans=[
+                PositionPlan(
+                    symbol="SPY",
+                    action=PositionAction.HOLD,
+                    reasoning="Thesis intact; the stop is where it was sized.",
+                )
+            ],
+        ),
+        broker,
+        journal=_journal_with_the_short(tmp_path),
+    )
+
+    beat = _heartbeat(logs)
+    assert beat["positions_without_a_plan"] == []
+    assert not [e for e in logs if e["event"] == "positions_without_a_plan"]
+
+
+def test_the_refusal_is_a_model_call_failure_rather_than_a_new_kind_of_error():
+    """Raised, not branched on, and in the family every caller already handles.
+
+    `ModelCallFailed` is the base class `cmd_loop` turns into a skipped cycle.
+    A refusal outside that family would need its own handler, and the two would
+    drift the first time one of them changed.
+    """
+    from bot.model_client import ModelCallFailed
+
+    assert issubclass(main_mod.ConsideredNothing, ModelCallFailed)
+
+    shown = ["QQQ", "SPY"]
+    empty = ModelDecision(market_assessment="Quiet.", proposals=[], assessments=[])
+    with pytest.raises(ModelCallFailed) as caught:
+        main_mod.refuse_a_decision_that_considered_nothing(empty, shown=shown)
+    # Both symbols named: the record has to say what it was measured against.
+    assert "QQQ, SPY" in str(caught.value)
+
+    # And neither the empty denominator nor a non-empty answer raises.
+    main_mod.refuse_a_decision_that_considered_nothing(empty, shown=[])
+    main_mod.refuse_a_decision_that_considered_nothing(
+        ModelDecision(
+            market_assessment="Quiet.", proposals=[], assessments=[_assessed("SPY")]
+        ),
+        shown=shown,
+    )

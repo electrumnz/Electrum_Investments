@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import sys
 import time
+from collections.abc import Collection
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -61,7 +62,13 @@ from .indicators import snapshot as snapshot_indicators
 from .indicators import summarise as summarise_indicators
 from .intraday import summarise as summarise_intraday
 from .journal import Journal
-from .model_client import CallUsage, ModelClient, build_system_prompt
+from .model_client import (
+    CallUsage,
+    ModelCallFailed,
+    ModelClient,
+    ModelDecision,
+    build_system_prompt,
+)
 from .models import (
     AccountSnapshot,
     Decision,
@@ -351,6 +358,95 @@ def _standing(
         open_positions=len(account.open_positions),
         open_risk_usd=round(account.open_risk_usd, 2),
         stand_down_stage=stand_down.stage if stand_down.is_active(moment) else 0,
+    )
+
+
+# ------------------------------------- a decision that considered nothing at all
+
+
+class ConsideredNothing(ModelCallFailed):
+    """A structurally valid decision that assessed none of the symbols it was shown.
+
+    **The second entrance to the quiet-cycle hole.** `UnstructuredReply` closes
+    the first — a reply with no tool call at all, where `proposals`,
+    `assessments` and `position_plans` all default to `[]` in Python and a bare
+    `{"market_assessment": "..."}` therefore parses as a completed cycle that
+    considered nothing. A tool call that IS made and comes back with
+    `assessments: []` arrives at exactly the same place, passes Pydantic, and
+    used to be recorded as a considered decision.
+
+    It is measured rather than feared. `llama3.3-70b-instruct` returns an
+    almost-empty decision — `assessments=0`, `position_plans=0` — on **6 of 10**
+    samples after being shown four symbols and an open position, with a
+    2.2-second median (`docs/DROPLET_AI.md`, "Which models hold the real
+    schema"). Three samples scored it 3/3 and would have shipped it.
+
+    **It lives here rather than in `ModelDecision` or in `ModelClient`, and that
+    is forced rather than chosen.** The fault is a RATIO — assessments against
+    symbols shown — and neither the schema nor the transport knows the
+    denominator. `cmd_loop` is the only place that does, because it built the
+    context.
+
+    It subclasses `ModelCallFailed` so that every existing handler treats it as
+    what it is: a call that could not produce a usable answer. `cmd_loop` logs
+    `model_call_failed`, records the job as failed and emits no
+    `cycle_complete`, exactly as it does for a timeout or a validation error.
+    """
+
+
+def refuse_a_decision_that_considered_nothing(
+    decision: ModelDecision, *, shown: Collection[str]
+) -> None:
+    """Raise when the model assessed NONE of the symbols it was given figures for.
+
+    `assessments` exists so that "nothing met the conditions" and "the loop
+    never looked at QQQ" are different entries afterwards. An empty list against
+    a non-empty set of symbols collapses them back into one, and the collapse is
+    silent: the audit row, the Decisions page and the heartbeat all read exactly
+    like a careful cycle that stood pat.
+
+    **`shown` is the INDICATOR set, and the choice of denominator is the whole
+    correctness of this check.** Three candidates and only one is honest:
+
+    - `symbols_in_play` (`allowed_symbols | granted`) is what the loop INTENDED
+      to look at, not what the model saw. A cycle where every symbol's bars
+      failed to fetch would be refused as a model failure when the fault was a
+      feed — mislabelling the defect, and doing it on the cycle where the data
+      is already degraded.
+    - `ticks` is over-broad in the other direction. A symbol with a live quote
+      and no history is one the context tells the model to *treat as having no
+      indicators at all* and to propose nothing on, so requiring an assessment
+      for it would fail the cycle for obeying an instruction.
+    - `indicators` is the set the output contract is written against — the
+      system prompt asks for *"one entry for every symbol you were given
+      indicators for"* — and it is the same object handed to
+      `build_market_context`, so the check cannot drift from what was rendered.
+
+    **Zero assessments given zero symbols is not the same fault**, and it is a
+    correct quiet cycle rather than a failed one: a pass where every class was
+    shut, or where no symbol produced usable history, has nothing to assess.
+    Refusing that would turn an honest empty answer into an outage.
+
+    **Zero is the trip, not a shortfall.** A model that assesses three of six
+    has made a judgement that a reader can see and argue with on the Decisions
+    page; a model that assesses none of six has produced a record
+    indistinguishable from never having looked. Only the second is the failure
+    this closes — and the ratio goes on the `cycle_complete` line so a partial
+    answer is visible rather than merely unrefused.
+
+    Never a downgrade. No retry, no second model, no "record it but flag it": a
+    recorded decision that considered nothing is the thing being prevented, so
+    recording it with a warning attached is the bug wearing a warning label.
+    """
+    if not shown or decision.assessments:
+        return
+
+    named = ", ".join(sorted(shown))
+    raise ConsideredNothing(
+        f"The model was shown indicators for {len(shown)} symbol(s) ({named}) "
+        f"and assessed none of them. An empty assessment list against a "
+        f"non-empty indicator set cannot be told apart afterwards from a loop "
+        f"that never looked, so this cycle is refused rather than recorded."
     )
 
 
@@ -807,8 +903,22 @@ def cmd_loop(
             # is also the honest description of what happened. Everything
             # safety-critical above this line — reconcile, the stand-down
             # state, the expiry alerts — has already run.
+            #
+            # `refuse_a_decision_that_considered_nothing` is INSIDE this try on
+            # purpose. It raises a `ModelCallFailed`, and the point of raising
+            # rather than branching is that a decision which considered nothing
+            # takes the identical path to a timeout or a validation error: the
+            # cycle is skipped, the job is recorded as failed, and no
+            # `cycle_complete` is emitted. A separate branch would be a second
+            # way to end a cycle, and the two would drift.
+            #
+            # `shown=indicators` — the indicator mapping itself, keyed by symbol
+            # and the same object handed to `build_market_context` above. See
+            # that function for why it is the denominator and `ticks` and
+            # `symbols_in_play` are not.
             try:
                 decision, usage = claude.propose(context)
+                refuse_a_decision_that_considered_nothing(decision, shown=indicators)
             except Exception as exc:
                 detail = f"{type(exc).__name__}: {exc}"
                 log.error("model_call_failed", error=detail)
@@ -827,6 +937,54 @@ def cmd_loop(
                 )
                 time.sleep(env.decision_interval_seconds)
                 continue
+
+            # An open position the model returned no plan for. The SAME SHAPE of
+            # defect as the empty assessment list above — the fidelity probe
+            # grades the pair together as `empty_arrays`, and the model that
+            # produced one produced the other — and deliberately **reported
+            # rather than refused.** The split is not squeamishness about a
+            # second refusal; it is that the two gaps cost different things.
+            #
+            # An unassessed symbol is unrecoverable. The audit log is the ONLY
+            # place a symbol the loop considered and passed on is ever written
+            # down, so an empty list erases the fact that it was looked at, and
+            # nothing later can establish it.
+            #
+            # An unplanned position is not. The position is in the journal, on
+            # the Board, in `reconcile`, in `stop_watch` and behind a resting
+            # broker-side stop; a plan is advisory and is never executed unless
+            # the operator has switched `position_actions` on. So the exposure
+            # stays visible and stays protected, and what is missing is one
+            # opinion about it. That is the repository's standing rule — report
+            # the gap, do not refuse — and refusing here would be a SECOND
+            # departure from it added by pattern-matching on the first, which
+            # `CLAUDE.md` names as the stated exception rather than the new
+            # default.
+            #
+            # It would also refuse the wrong cycles. A decision can carry four
+            # good assessments and a sound proposal while saying nothing about
+            # an open position, and throwing that away would cost a trade to
+            # punish a missing sentence.
+            #
+            # On the cycle line as well as in a warning, for the reason
+            # `stops_breached` is: a stated empty list each cycle is a fact,
+            # where a warning that only appears when something is wrong makes an
+            # outage look like a clean run.
+            positions_without_a_plan = sorted(
+                {p.symbol for p in account.open_positions}
+                - {plan.symbol for plan in decision.position_plans}
+            )
+            if positions_without_a_plan:
+                log.warning(
+                    "positions_without_a_plan",
+                    symbols=positions_without_a_plan,
+                    detail=(
+                        "The model was asked for one plan per open position and "
+                        "returned none for these. The positions are untouched "
+                        "and still protected; what is missing is the reasoning "
+                        "for holding them."
+                    ),
+                )
 
             # Recorded alongside the decision, not merely rendered into the
             # prompt and discarded. "Why did it pass on SPY on Tuesday" cannot
@@ -1128,6 +1286,20 @@ def cmd_loop(
                 proposals=len(decision.proposals),
                 approved=sum(1 for v in verdicts if v.approved),
                 executed=len(executed),
+                # What the model was given figures for, and how much of it it
+                # actually wrote down. A cycle reaching this line has already
+                # cleared `refuse_a_decision_that_considered_nothing`, so
+                # `assessments` is never zero against a non-empty
+                # `symbols_shown` — but a PARTIAL answer is deliberately not
+                # refused, and without the ratio here nothing states it. Three
+                # of six looks identical to six of six in every other field on
+                # this line.
+                symbols_shown=len(indicators),
+                assessments=len(decision.assessments),
+                # The other half of that answer, and the one that is reported
+                # rather than refused. See the block above the warning for why
+                # a missing plan is not treated like a missing assessment.
+                positions_without_a_plan=positions_without_a_plan,
                 stand_down_stage=stand_down_state.stage
                 if stand_down_state.is_active(datetime.now(UTC))
                 else 0,
