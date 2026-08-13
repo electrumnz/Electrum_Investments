@@ -781,19 +781,61 @@ provenance guard covers the arithmetic as well as the query (7).
    expired, since `adopt` always writes one), and a naive `now` raises
    `TypeError` out of `grants.py` into the decision cycle.
 
-**And one that is live right now because the Funnel is up:** the sign-in rate
-limiter keys on `request.client.host`, so behind a Funnel or any reverse proxy
-every visitor shares one bucket. A remote guesser can therefore lock the
-**operator** out indefinitely, because the throttle also blocks the correct
-password. Availability rather than disclosure, and worth fixing before this is
-relied on.
+**FIXED — the sign-in rate limiter locked out the operator, not the guesser.**
+It keyed on `request.client.host`, which behind a Funnel or any reverse proxy is
+one string for every visitor, so five wrong guesses from a stranger shut the
+operator out of their own dashboard — and again, indefinitely, for as long as
+anyone cared to keep guessing. Availability rather than disclosure, and live
+from the day the Funnel went up.
+
+The fix is ORDERING, not a better key. A correct password is not a guess, so it
+is compared before anything is asked about the budget and is never refused; only
+wrong answers spend it. The throttle used to be consulted *before* the password
+was read, which is the one moment at which nothing can tell the operator from a
+stranger.
+
+**Two corrections to what this file used to say**, both worth keeping because
+each was believed for a while:
+
+- **"The rate limit is unmovable by `X-Forwarded-For`" was true only inside
+  `TestClient`.** `uvicorn.run()` defaults to `proxy_headers=True` with
+  `forwarded_allow_ips="127.0.0.1"` — exactly where a Funnel connects from — so
+  in production `scope["client"]` is rewritten out of that header before
+  `app.py` reads it, and the per-address bucket was forgeable as well as
+  useless. A test that never runs uvicorn's `ProxyHeadersMiddleware` cannot see
+  that, which is the green-suite lesson in a new place. The budget is global
+  now, so nothing outside the process can name it.
+- **Guessing is no longer bounded, and that is the operator's decision rather
+  than an oversight.** Past the budget a wrong answer is refused with a 429 but
+  is still compared and is not recorded, so the window decays and an attacker
+  gets unlimited online guesses. Measured: 10,000 wrong guesses all compared,
+  and a correct guess on attempt 10,006 still mints a session.
+
+  The conflict is real and has no clever resolution: you cannot tell the
+  operator from an attacker before comparing, so always-compare means unbounded
+  guessing and refuse-to-compare means the lockout above. Hardening it was
+  built and then **stood down at the operator's instruction**: *"im not super
+  concerned about that login issue, Josh will harden with Tailscale device
+  access or whatever it is, and you cant even place trades currently cz the
+  agent is doing it?? and its paper currently??"*
+
+  That reasoning holds and the mechanics check out. The account is PAPER, the
+  dashboard is read-only apart from `POST /chat`, chat needs
+  `DASHBOARD_CHAT_TOKEN` as a separate second secret on top of the password,
+  and every order path behind it still re-runs `RiskGate`. So the password buys
+  a VIEW of a paper account, not the ability to trade one — and device-level
+  access control in front of the whole thing makes an internet-facing guessing
+  bound moot.
+
+  **What would change it:** real money, or the dashboard fronting anything that
+  can move funds. `CLAUDE.md` already says `auth.py` is the file to replace
+  rather than extend if that ever happens, and this is one of the reasons.
 
 Clean on audit, recorded so it is not re-checked: `max_granted_symbols` has no
 bypass; `grants.py` returned `{}` for all eighteen malformed inputs tried;
 `evaluate` reads no file, network or clock; both migrations are additive,
 idempotent and preserve rows; and the auth surface refuses every route
-including `/live` and `/openapi.json`, with forged cookies rejected and the
-rate limit unmovable by `X-Forwarded-For`.
+including `/live` and `/openapi.json`, with forged cookies rejected.
 
 ### A second audit found six more, and they are closed too
 
