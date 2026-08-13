@@ -366,26 +366,35 @@ def build_app(token: str, *, port: int = 8788) -> Any:
 
     class BearerGate(BaseHTTPMiddleware):
         async def dispatch(self, request: Request, call_next: Any) -> Any:
-            # **OAuth discovery must 404, not 401, and the difference is the
-            # whole reason the connector would not attach.**
+            # **Gate `/mcp` and let everything else 404. A 401 anywhere else is
+            # a positive claim, and it is what stopped the connector attaching.**
             #
-            # A client probes `/.well-known/oauth-protected-resource` and
-            # `/.well-known/oauth-authorization-server` before connecting. A
-            # **401** there is a positive statement — *this resource is
-            # OAuth-protected, go and register* — so claude.ai attempted dynamic
-            # client registration against a server that has no OAuth at all and
-            # failed with "Couldn't register with ...'s sign-in service".
+            # Measured from the box's own journal rather than reasoned about,
+            # after two wrong guesses. The connector probes in this order:
             #
-            # A **404** is the honest answer: there is no authorisation server
-            # here, the credential is the one already in the URL. The gate
-            # therefore steps aside for these paths and lets the app answer,
-            # which is a 404 because nothing is mounted there.
+            #     GET  /.well-known/oauth-protected-resource   404
+            #     GET  /.well-known/oauth-authorization-server 404
+            #     POST /mcp                                    401
+            #     POST /mcp?key=...                            200   <- it works
+            #     POST /register                               401   <- it stops
             #
-            # This exempts NOTHING that does work. The MCP app mounts `/mcp`
-            # alone, so every exempted path is one the application refuses by
-            # itself — the exemption reveals only that the server exists, which
-            # the URL already told anybody holding it.
-            if request.url.path.startswith("/.well-known/"):
+            # The MCP connection itself succeeded. What failed was the
+            # registration fallback afterwards: a **401** on `/register` says
+            # *this endpoint exists and you are not authorised*, so the client
+            # concludes there is a sign-in service it cannot reach. **404** says
+            # there is no registration here and the credential in the URL is the
+            # whole story.
+            #
+            # Listing paths was the first fix and it was the wrong shape — it
+            # covered `/.well-known/` and the next probe was somewhere else. So
+            # the rule is inverted: **only the MCP endpoint is gated**, and every
+            # other path falls through to the application, which mounts nothing
+            # else and answers 404 by itself.
+            #
+            # That exempts nothing that works. A 404 discloses only that a
+            # server exists, which the URL already told whoever is holding it,
+            # and there is no route behind it to reach.
+            if not request.url.path.rstrip("/").startswith("/mcp"):
                 return await call_next(request)
 
             supplied = request.headers.get("authorization", "")

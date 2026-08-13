@@ -398,37 +398,53 @@ def test_the_url_flag_exists_so_printing_the_token_is_deliberate():
     assert "$TOKEN" not in on_path, "the token is printed outside --url"
 
 
-def test_oauth_discovery_answers_404_and_never_401():
-    """**A 401 on discovery is a positive claim, and it broke the connector.**
+def test_only_the_mcp_endpoint_is_gated_and_everything_else_404s():
+    """**Measured from the box's journal, after two wrong guesses.**
 
-    A client probes `/.well-known/oauth-protected-resource` and
-    `/.well-known/oauth-authorization-server` before attaching. A 401 there says
-    *this resource is OAuth-protected, go and register* — so claude.ai attempted
-    dynamic client registration against a server with no OAuth at all and failed
-    with "Couldn't register with ...'s sign-in service".
+    The connector probes in this order, and the log showed it exactly:
 
-    404 is the honest answer: no authorisation server here, the credential is
-    the one already in the URL.
+        GET  /.well-known/oauth-protected-resource   404
+        GET  /.well-known/oauth-authorization-server 404
+        POST /mcp                                    401
+        POST /mcp?key=...                            200   <- it works
+        POST /register                               401   <- it stops
 
-    **The exemption reveals nothing.** The MCP app mounts `/mcp` alone, so every
-    exempted path is one the application refuses by itself — a 404 discloses
-    only that a server exists, which the URL already told whoever holds it.
+    **The MCP connection itself succeeded.** What failed was the registration
+    fallback: a 401 on `/register` says *this endpoint exists and you are not
+    authorised*, so the client concludes there is a sign-in service it cannot
+    reach and gives up. 404 says there is no registration here and the
+    credential in the URL is the whole story.
+
+    The first fix listed `/.well-known/` and was the wrong SHAPE — the next
+    probe was somewhere else entirely. So the rule is inverted: only the MCP
+    endpoint is gated. This test covers the paths seen plus `/register`, and
+    would have caught that the list was incomplete.
     """
     from starlette.testclient import TestClient
 
     token = "t" * 32
 
-    def get(path: str) -> int:
+    def status(method: str, path: str) -> int:
         app = console_mcp.build_app(token, port=9999)
         with TestClient(app, base_url="http://127.0.0.1:9999") as client:
-            return client.get(path, headers={"host": "127.0.0.1:9999"}).status_code
+            return client.request(
+                method, path, headers={"host": "127.0.0.1:9999"}, json={}
+            ).status_code
 
-    for path in (
-        "/.well-known/oauth-protected-resource",
-        "/.well-known/oauth-authorization-server",
-        "/.well-known/openid-configuration",
+    for method, path in (
+        ("GET", "/.well-known/oauth-protected-resource"),
+        ("GET", "/.well-known/oauth-protected-resource/mcp"),
+        ("GET", "/.well-known/oauth-authorization-server"),
+        ("GET", "/.well-known/openid-configuration"),
+        ("POST", "/register"),
+        ("GET", "/"),
     ):
-        assert get(path) == 404, f"{path} must 404, or a client will try to register"
+        assert status(method, path) == 404, (
+            f"{method} {path} must 404 — a 401 reads as 'there is a sign-in "
+            f"service here', and the client will chase it"
+        )
 
-    # And the exemption is narrow: it must not have opened the real endpoint.
-    assert get("/mcp") == 401, "the MCP endpoint is no longer gated"
+    # The gate is still on the one thing that matters.
+    assert status("POST", "/mcp") == 401, "the MCP endpoint is no longer gated"
+
+
