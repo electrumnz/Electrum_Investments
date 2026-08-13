@@ -356,6 +356,74 @@ a day and Alpha Arena's lesson was that frequency is itself a risk parameter,
 so `journalctl -u mudhorn-bot -f` and the Decisions page are worth watching for
 the first few sessions rather than checked at the end of the week.
 
+## A console an agent can reach, if you want one
+
+`electrum-bot-console` is an MCP server that runs a small set of operations on
+this box — deploy, service status, journal tail, git state, disk and memory, and
+the wrapper self-test — so an agent can do the things you would otherwise paste
+into a terminal and paste back.
+
+**It is installed disabled and it is the most privileged unit here.** It runs as
+**root**, because its job is `deploy/update.sh`, `systemctl` and `journalctl`,
+and a console that could not deploy would not be worth its exposure. Published,
+it is one bearer token away from a shell on the machine holding your Alpaca
+keys. Decide that deliberately.
+
+```sh
+sudo /opt/mudhorn/deploy/enable-console.sh            # on, six named operations
+sudo /opt/mudhorn/deploy/enable-console.sh --shell    # on, arbitrary argv too
+sudo /opt/mudhorn/deploy/enable-console.sh --status   # what is set now
+sudo /opt/mudhorn/deploy/enable-console.sh --off      # off
+```
+
+It prints the token **once**. Copy it then; it is not shown again, and
+`--status` deliberately reports it as set-or-not rather than printing it, the
+same rule as the Settings page and the startup banner.
+
+Then publish it and add it as a connector:
+
+```sh
+sudo tailscale funnel --bg 8788
+tailscale funnel status                # note the https:// URL
+```
+
+At claude.ai → Settings → Connectors → Add custom connector, the URL is that
+one with `/mcp` on the end, and the header is `Authorization: Bearer <token>`.
+
+### What bounds it, and what does not
+
+- **No trading credential and no route to one.** `console_mcp.py` imports none
+  of `broker`, `risk`, `journal`, `models`, `reconcile`, `grants` or
+  `mcp_server`; `tests/test_console_mcp.py` parses the AST and fails the build
+  if that changes. `place_order` is a different process reached a different way,
+  and a console that could also trade would put a command runner and the order
+  path behind one secret.
+- **Six named operations**, each a fixed argv. `run_command` is not registered
+  at all without `--shell`, so a caller cannot see it to try — the same pattern
+  as `--execute` and `DASHBOARD_CHAT_TOKEN`.
+- **argv lists, never shell strings.** Nothing is word-split or globbed, so
+  `&&`, `|`, `>` and `$(...)` are unreachable even with `--shell` on.
+- **A token of 32 characters or more, or the server refuses to start.** Unlike
+  `DASHBOARD_PASSWORD`, absent is not a supported configuration: a dashboard
+  with no password leaks figures, and this runs commands.
+
+**What does not bound it: stopping the service.** A Funnel outlives the unit, so
+a URL pointing at a closed port starts working again the moment somebody
+restarts it. Take both down:
+
+```sh
+sudo /opt/mudhorn/deploy/enable-console.sh --off
+sudo tailscale funnel --https=443 off
+```
+
+**`bootstrap.sh` never creates the token file**, deliberately. A token generated
+by a provisioning script is a token in a provisioning log.
+
+**Worth weighing before you enable it at all:** `claude` installed on this box
+does the same job in two minutes with a full shell and no new network exposure.
+The console only wins if you want a *specific* agent conversation to reach the
+box without one.
+
 ## The settings agent can change settings, and that is a grant you install
 
 The Armorer on `/settings` argues about a limit, states what moving it costs in

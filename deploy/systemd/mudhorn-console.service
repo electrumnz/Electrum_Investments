@@ -1,0 +1,79 @@
+[Unit]
+Description=Mudhorn console MCP server (deploy and diagnose over HTTPS)
+Documentation=https://github.com/electrumnz/Electrum_Investments/blob/main/deploy/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+
+# **root, and that is the whole reason this unit is installed disabled.**
+#
+# It exists to run `deploy/update.sh`, which chowns files, installs systemd
+# units and restarts services. None of that is possible as `mudhorn`, and a
+# console that could not deploy would not be worth the exposure it costs.
+#
+# So this is the most privileged thing in the deployment, and every other
+# safeguard here is downstream of accepting that:
+#
+#   - It holds NO trading credential. `console_mcp.py` imports none of broker,
+#     risk, journal, models, reconcile, grants or mcp_server, and
+#     tests/test_console_mcp.py parses the AST and fails the build if that
+#     changes. `place_order` lives in a different process reached a different
+#     way. A console that could also trade would put a command runner and the
+#     order path behind one token.
+#   - Six NAMED operations. `run_command` is not registered at all unless
+#     MUDHORN_CONSOLE_SHELL=1 is set below, so a caller cannot see it to try.
+#   - Even enabled, it takes an argv LIST rather than a string, so nothing is
+#     word-split or reaches `&&`, `|`, `>` or `$(...)`.
+#   - It refuses to start without MUDHORN_CONSOLE_TOKEN, and refuses a token
+#     under 32 characters. Unlike DASHBOARD_PASSWORD there is no deployment
+#     where an ungated console is right, so there is no such configuration.
+User=root
+Group=root
+WorkingDirectory=/opt/mudhorn
+
+# The token lives in its own file, not in /opt/mudhorn/.env.
+#
+# That file is owned by `mudhorn` at mode 600 and holds the broker keys. This
+# process runs as root and could read it, which is exactly why it should not:
+# keeping the console's credential separate means the console's blast radius is
+# stated by which file leaked rather than inferred. Create it as:
+#
+#   printf 'MUDHORN_CONSOLE_TOKEN=%s\n' "$(openssl rand -hex 32)" \
+#     > /etc/mudhorn-console.env
+#   chmod 600 /etc/mudhorn-console.env
+#
+# Add MUDHORN_CONSOLE_SHELL=1 to that file to offer arbitrary argv. Off is the
+# documented state and the startup banner says which one is in force.
+EnvironmentFile=/etc/mudhorn-console.env
+
+# --host is not passed, so it binds 127.0.0.1. Reaching it from outside is
+# `tailscale funnel 8788`, which is a deliberate act with its own record.
+# **Never bind 0.0.0.0.** The token is the only gate, and a bare port on the
+# public internet is one scan away from being found.
+ExecStart=/opt/mudhorn/.venv/bin/electrum-bot-console --port 8788
+
+Restart=on-failure
+RestartSec=10s
+
+# Sandboxing is deliberately LIGHT here, and the reason is honest rather than
+# lazy: this unit's entire job is to run systemctl, git and a deploy script as
+# root. ProtectSystem=strict or NoNewPrivileges would break exactly the thing
+# it exists to do, and a unit that is sandboxed into uselessness gets the
+# sandbox removed by whoever debugs it next, at which point nobody remembers
+# why any of it was there.
+#
+# What is kept is what costs nothing:
+PrivateTmp=true
+ProtectHome=false
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=mudhorn-console
+
+[Install]
+WantedBy=multi-user.target
