@@ -89,6 +89,7 @@ from ..settings_agent import (
     effective_value,
     format_value,
 )
+from ..stop_width import measure_stop_widths
 from ..tailnet import TailnetStatus
 
 # At module scope for consistency with everything else here rather than for
@@ -914,6 +915,15 @@ tr.why .quote{border-left:2px solid var(--patina);padding-left:.875rem;
   text-transform:uppercase;color:var(--pewter);margin-right:.5rem}
 .chain .rung.gate.no{color:var(--loss)}
 .chain .rung.gate.ok{color:var(--gain)}
+/* Two-class modifiers under a descendant selector, matching `.rung.gate.no`
+   above rather than being written as bare `.tight` — a modifier must not
+   depend on winning a tie against whatever is declared later, which is the
+   collision that has already cost `.pill.seed`, `.rung.gate` and `.note.alert`
+   in this stylesheet. Amber rather than red on purpose: neither of these is a
+   rejection. A tight stop is a fact about the denominator the size came from,
+   and an unmeasured one is an indicator that did not arrive. */
+.chain .rung.stopw.tight{color:var(--amber)}
+.chain .rung.stopw.unmeasured{color:var(--amber)}
 .reasons{margin:.35rem 0 0;padding-left:1.1rem;color:var(--loss);font-size:.8125rem}
 .reasons li{margin:.15rem 0}
 .pill.watch{color:var(--amber)}
@@ -6020,6 +6030,20 @@ def _cycle(
             "assumed.</p></div>"
         )
 
+    # Derived here rather than read off a stored field, and derived from the
+    # readings THIS cycle recorded. `MarketInputs.readings` is what the model
+    # was shown, so the page states the stop's width against the same ATR the
+    # proposal was written over — not against a figure fetched today, which
+    # would answer a question nobody asked about a cycle three months old.
+    #
+    # A record predating `readings` has no figures at all, so every proposal on
+    # it renders as NOT MEASURED. That is the honest answer: nothing recovers a
+    # number that was never written down, and rendering an ordinary-looking
+    # width would be inventing one.
+    widths = measure_stop_widths(
+        d.proposals, d.inputs.readings if d.inputs is not None else {}
+    )
+
     for i, proposal in enumerate(d.proposals):
         verdict = entry.verdict_for(i)
         # Built as its own value first, never as a ternary trailing a
@@ -6069,6 +6093,35 @@ def _cycle(
             out += (
                 '<div class="rung gate no"><span class="lbl">Gate</span>rejected'
                 f'<ul class="reasons">{reasons}</ul></div>'
+            )
+
+        # AFTER the gate's verdict, deliberately. Size is the risk ceiling
+        # divided by the stop distance, so a stop inside the spread buys an
+        # arbitrarily large position at the same stated risk — TODO.md item 25,
+        # measured on a live KO proposal at 0.04 ATR. It belongs on this page
+        # because this is the only surface a rejected proposal exists on.
+        #
+        # It reads last so that nothing can mistake it for an input to the
+        # verdict above it. `RiskGate` holds no opinion on where the stop goes,
+        # deliberately and permanently, and a line rendered ahead of the gate's
+        # own reasons would look like the opinion arriving through the UI.
+        if i < len(widths):
+            width = widths[i]
+            # Both the tight case and the unmeasured one are called out, and
+            # they are different findings: one is a measurement that came back
+            # alarming, the other is a measurement that never happened. Folding
+            # them into one class would let an indicator outage render in the
+            # colour of a clean read.
+            mark = (
+                " tight"
+                if width.is_tight
+                else " unmeasured"
+                if width.is_unmeasured
+                else ""
+            )
+            out += (
+                f'<div class="rung stopw{mark}"><span class="lbl">Stop</span>'
+                f"{_e(width.render())}</div>"
             )
 
         result = d.executed[i] if i < len(d.executed) else None

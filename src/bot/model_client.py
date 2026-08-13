@@ -468,6 +468,44 @@ class CallUsage:
     cache_write_tokens: int
     estimated_cost_usd: float | None
 
+    # **Which model actually answered, as the far end names it — not which one
+    # was asked for.** Those are different facts and the whole reason this
+    # field exists is that they can disagree without anything raising.
+    # DigitalOcean serves Anthropic models under its own ids, a proxy named in
+    # `ANTHROPIC_BASE_URL` can route wherever it likes, and a catalogue can
+    # retire an id and alias it to a successor. In every one of those cases the
+    # call succeeds, the schema validates, the cost is computed from the
+    # REQUESTED model's price sheet, and the orders that come back were sized
+    # by weights nobody named.
+    #
+    # `None` means the response did not carry a model id, which is "could not
+    # ask" and never "the right one". The SDK builds responses with unchecked
+    # construction — see the note in `_usage_from` — so this can be absent or
+    # be a non-string, and both read as unknown rather than as agreement.
+    served_model: str | None = None
+    requested_model: str | None = None
+
+    @property
+    def served_as_requested(self) -> bool | None:
+        """Did the endpoint answer with the model that was asked for?
+
+        Three-valued, and the third value is the point. `None` is *nobody could
+        tell* — no model id came back, or none was recorded to compare against
+        — and it must never collapse into `False`, which is a positive finding
+        that the far end substituted something. The `has_cycles` rule with a
+        model id attached.
+
+        **This REPORTS and never refuses.** A mismatch does not fail the cycle:
+        an alias is a perfectly ordinary thing for a catalogue to do, and
+        throwing away a validated decision — with its proposals, its
+        assessments and its cost already spent — over a naming difference would
+        cost far more than it protects. It goes on the heartbeat and into the
+        audit record so a reader can find out that it happened.
+        """
+        if self.served_model is None or self.requested_model is None:
+            return None
+        return self.served_model == self.requested_model
+
 
 SYSTEM_PROMPT_TEMPLATE = """\
 You are the decision engine inside an automated trading bot running against an
@@ -1278,10 +1316,22 @@ class ModelClient:
                 + cache_write * pricing.input_usd_per_mtok * 2.0
             ) / 1_000_000
 
+        # Same defensive read as the token counts above, for the same measured
+        # reason: responses are built with `construct_type`, so `model` can be
+        # absent or can be something that is not a string. A non-string is
+        # unknown rather than coerced with `str()` — `str()` on an object that
+        # is not a name produces a plausible-looking string that would then be
+        # compared against the requested id and reported as a mismatch, which
+        # is a finding nobody measured.
+        raw_model = getattr(response, "model", None)
+        served: str | None = raw_model if isinstance(raw_model, str) else None
+
         return CallUsage(
             input_tokens=in_tokens,
             output_tokens=out_tokens,
             cache_read_tokens=cache_read,
             cache_write_tokens=cache_write,
             estimated_cost_usd=cost,
+            served_model=served,
+            requested_model=self._model,
         )

@@ -1563,3 +1563,15 @@ class Decision(BaseModel):
     claude_cached_tokens: int = 0
     estimated_cost_usd: float = 0.0
     notes: str = ""
+
+    # **Which model actually produced this decision, as the endpoint named it.**
+    # The token fields above are called `claude_*` because they are written into
+    # `audit/*.jsonl`, which is append-only and never migrated — renaming them
+    # would read every historical cycle back as `0 in / 0 out`. This one is new,
+    # so it gets the honest name.
+    #
+    # `None` means the response carried no model id, or the record predates this
+    # field. It is not "the requested one": a cycle whose served model is
+    # unknown and a cycle served by the model that was asked for are different
+    # findings, and only one of them is reassuring.
+    served_model_id: str | None = None

@@ -90,6 +90,11 @@ from .position_actions import execute_position_plan, loop_execution_state
 from .reconcile import apply_journal_state, reconcile, record_fill
 from .risk import RiskGate
 from .session_calendar import SessionCalendar
+from .stop_width import (
+    measure_stop_widths,
+    tight_stop_symbols,
+    unmeasured_stop_symbols,
+)
 from .triggers import CycleReadings
 
 log = structlog.get_logger()
@@ -388,6 +393,13 @@ def cmd_smoketest(env: Env, rules: Rules, *, force_mock: bool = False) -> int:
             input_tokens=usage.input_tokens,
             output_tokens=usage.output_tokens,
             cost_usd=_logged_cost(usage.estimated_cost_usd, 6),
+            # Which model actually answered, beside what it spent. The cost
+            # above is computed from the price sheet of the model that was
+            # ASKED for, so if these two disagree the figure on this line is
+            # priced against the wrong weights. Reported, never enforced — see
+            # `CallUsage.served_as_requested`.
+            served_model=usage.served_model,
+            served_as_requested=usage.served_as_requested,
         )
         _note_unpriced_call(audit, usage, model_id=claude.model_id, where="smoketest")
         audit.record(
@@ -398,6 +410,7 @@ def cmd_smoketest(env: Env, rules: Rules, *, force_mock: bool = False) -> int:
                 claude_output_tokens=usage.output_tokens,
                 claude_cached_tokens=usage.cache_read_tokens,
                 estimated_cost_usd=_recorded_cost(usage.estimated_cost_usd),
+                served_model_id=usage.served_model,
                 notes=f"smoketest assessment: {decision.market_assessment}",
             )
         )
@@ -1092,6 +1105,27 @@ def cmd_loop(
                 {p.symbol for p in account.open_positions}
                 - {plan.symbol for plan in decision.position_plans}
             )
+
+            # Measured against the SAME indicator mapping that was rendered
+            # into the context, so the figure on the heartbeat cannot drift
+            # from the figure the model was reasoning over. Computed for every
+            # proposal whether or not the gate went on to approve it: a stop
+            # inside the spread is a fact about the reasoning, and a rejected
+            # proposal is exactly where the Decisions page shows the reasoning.
+            stop_widths = measure_stop_widths(decision.proposals, indicators)
+            tight = [w for w in stop_widths if w.is_tight]
+            if tight:
+                log.warning(
+                    "tight_stops_proposed",
+                    symbols=[w.symbol for w in tight],
+                    # The consequence rather than the ratio, because the ratio
+                    # on its own reads as a small number and the consequence is
+                    # a large position. Nothing is refused here — the gate
+                    # holds no opinion on stop placement, deliberately, and
+                    # this warning is not that opinion arriving by the back
+                    # door. It is the denominator being stated out loud.
+                    detail=" | ".join(w.render() for w in tight),
+                )
             if positions_without_a_plan:
                 log.warning(
                     "positions_without_a_plan",
@@ -1328,6 +1362,11 @@ def cmd_loop(
                     claude_output_tokens=usage.output_tokens,
                     claude_cached_tokens=usage.cache_read_tokens,
                     estimated_cost_usd=_recorded_cost(usage.estimated_cost_usd),
+                    # The audit log is the only place this is recoverable
+                    # afterwards. The heartbeat says it once and scrolls; a
+                    # decision three months old still has to be able to answer
+                    # "which weights sized this position".
+                    served_model_id=usage.served_model,
                     notes=decision.market_assessment,
                 )
             )
@@ -1433,6 +1472,27 @@ def cmd_loop(
                 stand_down_stage=stand_down_state.stage
                 if stand_down_state.is_active(datetime.now(UTC))
                 else 0,
+                # How tight each proposed stop was against the symbol's own
+                # ATR, and how many could not be compared at all. Item 25: size
+                # is the ceiling divided by the stop distance, so a stop inside
+                # the spread buys an arbitrarily large position at the same
+                # stated risk — and every figure the sizing block prints stays
+                # correct while it happens, because the exposure arrives
+                # through the denominator.
+                #
+                # Two fields rather than one, and neither is a refusal. A
+                # symbol with no ATR is `stops_unmeasured`, never counted as
+                # not-tight: `stops_unchecked` again, one column across.
+                tight_stops=tight_stop_symbols(stop_widths),
+                stops_unmeasured=unmeasured_stop_symbols(stop_widths),
+                # Which model actually answered, on the pulse. `None` here is
+                # "the response carried no model id", not agreement — see
+                # `CallUsage.served_as_requested`. It is on this line because a
+                # substitution is invisible everywhere else: the call succeeds,
+                # the schema validates, and the cost is priced against the
+                # model that was asked for.
+                served_model=usage.served_model,
+                served_as_requested=usage.served_as_requested,
                 risk_understated=recon.risk_is_understated,
                 # On the cycle line rather than only in a warning, so a reader
                 # scanning the log sees it without grepping — and so "0" is a
