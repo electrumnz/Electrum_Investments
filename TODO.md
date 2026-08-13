@@ -1752,8 +1752,11 @@ same class of error as an invented indicator.
 
 Staged so nothing that can lose money moves first:
 
-1. **Hermes and the three souls** (`/chat`, `/dreaming`, `/settings`). A config
-   change on the box, **no code in this repository at all**, and none of those
+1. **DONE 12 Aug 2026 — Hermes and the three souls** (`/chat`, `/dreaming`,
+   `/settings`) answer from `llama-4-maverick` on DigitalOcean. It was NOT
+   "no code in this repository" as written here: the model lives in a
+   repo-managed config and both wrappers needed a mismatch check. Rails on the
+   new model are unverified — see item 22. Originally scoped as a config, and none of those
    agents proposes an order. This is three of the four model paths by count and
    it can ship the day a key exists — it does not wait on the sweep, because a
    soul that answers badly is a bad answer rather than a bad order.
@@ -1765,6 +1768,104 @@ Staged so nothing that can lose money moves first:
 4. **`propose` last.** It feeds the risk gate. Whatever model ends up here is
    PINNED, and the failure path stays `model_call_failed` plus a skipped cycle
    — never a retry onto a second model.
+
+---
+
+## 21. The model sizes over the cap, and it is an arithmetic-delegation bug
+
+**Live, measured twice, and the gate caught both.** Not a prompting-tone
+problem — the prompt already says the right thing and is ignored, so more
+instruction will not fix it.
+
+Every cap reaches the model as a PERCENTAGE and every input reaches it in
+DOLLARS. The system prompt (cached, static) says `Max risk per trade: 1.00% of
+equity`, `Max COMBINED risk: 2.00%`, `Max single position value: 50%`. The
+per-cycle context says `Equity: $99,383.00` and `Open risk: $1,486.95`. So
+before naming a quantity the model must, across two documents, multiply three
+caps by equity, **subtract open risk** from the combined budget, divide by stop
+distance, and take the minimum of the results.
+
+Recovered exactly from the gate's own rejection text, 12 Aug 2026:
+
+| ceiling | max shares |
+|---|---:|
+| per-trade risk cap ($993.83) | 180 |
+| **remaining combined-risk budget ($500.71)** | **91** ← binding |
+| concentration ($49,691.50) | 163 |
+
+**Permissible 91, proposed 185 — 2.03x over.** It sized to ~180, which is the
+per-trade cap done approximately, and never computed the one requiring a
+SUBTRACTION. The earlier instance fits the same shape: 87 AAPL, `risk 1,131.00
+exceeds the per-trade cap 1,000.00`, 13% over.
+
+**The prompt already says the combined cap "is the binding constraint most of
+the time — size each trade so the total stays under it."** It is stated
+explicitly and the subtraction still did not happen.
+
+### This is `indicators.py`'s rule broken where it matters most
+
+SMA and ATR are computed in Python precisely so the model never derives a
+number it would then state confidently — *the model reads figures, it does not
+derive them*. Position sizing is the exception, and it is the exception that
+directly produces the order quantity.
+
+**The fix:** compute the ceilings in Python and render them in DOLLARS in the
+context block — per-trade cap, remaining combined-risk budget, concentration
+ceiling. Five steps become one division, and the three error-prone operations
+move into Python where they are testable.
+
+Two decisions already taken, so they are not re-litigated:
+
+- **No worked max-quantity line.** It cannot be precomputed — it depends on the
+  stop, which is the agent's choice — and a worked example at the current price
+  would read as a recommendation to trade at that size.
+- **Zero or negative headroom renders in WORDS, never `$0.00`.** A zero reads
+  as "cheap, just size small" rather than "the portfolio budget is spent", which
+  is the missing-versus-zero rule with money attached. Same shape as
+  `STOP UNKNOWN`.
+
+Needs a test that proves the gate still REJECTS an over-cap proposal, per the
+standing rule for anything touching the risk path.
+
+---
+
+## 22. The souls run on Llama now, and their rails are unverified there
+
+Phase 1 of item 20 shipped on 12 Aug 2026: Yoda, Grogu and the Armorer answer
+from `llama-4-maverick` on DigitalOcean.
+
+**The 15 rails and 3 character checks in `tests/test_agent_behaviour.py` were
+measured on `claude-sonnet-5` and have never been run against the new model.**
+Those rails are PROSE, not structure — *"never dream into a blocked instrument
+class"*, *"never state a figure you did not read"*, *"push back without
+refusing"*. Prose rails are exactly what varies between models, and they fail
+quietly.
+
+`scripts/agent_behaviour_live.py` takes the models from the environment now, so
+the check is one command and costs the operator's prepaid balance rather than
+mine:
+
+```sh
+AGENT_MODEL=llama-4-maverick JUDGE_MODEL=deepseek-v4-pro \
+ANTHROPIC_BASE_URL=https://inference.do-ai.run \
+ANTHROPIC_API_KEY_ELECTRUM=<do model access key> \
+.venv/bin/python scripts/agent_behaviour_live.py --section rails
+```
+
+**A breach is a finding, not a failure of the move.** The Grogu BTC/USD breach
+was fixed by sharpening the soul clause rather than loosening the rail, and the
+same rule applies here — if a rail does not hold on Llama, the answers are a
+sharper clause or a different model, never a weaker rail.
+
+Two smaller things from the same deployment:
+
+- **`model.default` is edited on the box and not in the repo.** It survives a
+  re-merge (the repo sets no `model:` block) but NOT a fresh provision, which
+  would land back on `claude-sonnet-5`. Close it in `deploy/hermes-config.yaml`.
+- **No separate dreamer instance exists.** `/home/hermes/dreamer` is absent, so
+  Grogu shares the chat Hermes and the Dreaming page's "sharing the account
+  agent" banner is the accurate one. Per-agent model routing works through
+  `HERMES_HOME` and a second config directory, which is built and uninstalled.
 
 ---
 
