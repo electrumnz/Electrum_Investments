@@ -339,6 +339,41 @@ and the broker had no calendar to give — which is every mock deployment. The t
 states are now reported apart. Found by loading the page with the suite green,
 which is the third time that has been the only way to find something.
 
+**Alpaca's calendar speaks for New York and for nothing else, so the tape's
+other three badges get `exchange_hours.py`.** Tokyo, Sydney and Auckland were
+weekday-shaped, which rendered the ASX as trading on Boxing Day — a plausible
+wrong figure on the one strip whose entire job is orientation.
+`exchange_calendars` supplies XTKS, XASX and XNZE with real holiday rules,
+computed offline, behind five pure functions and the same three-valued answer
+as `SessionCalendar`.
+
+**The dependency is OPTIONAL, and that is what resolved a trade-off rather than
+waving it away.** It is a package on the box that runs the trading loop, added
+to colour a badge for three markets the bot does not trade. It is imported
+lazily inside a function, every failure answers `None`, and uninstalling it
+reproduces the old behaviour EXACTLY — `ClockFace.tracks_holidays` goes back to
+False, Boxing Day opens again, and the suite stays green. That was measured by
+uninstalling it, not asserted. Nothing raises, and nothing keeps claiming to
+know.
+
+**There is no network call, and that is measured too.**
+`tests/test_market_clock.py` blocks `socket.socket`, `socket.create_connection`
+and `socket.getaddrinfo` before touching the library, so a release that started
+fetching fails the suite rather than putting a network call on a render path.
+It gates nothing, for the same reason `session_calendar` does not.
+
+**New York is deliberately NOT answered here.** Alpaca's calendar already does,
+and it is the broker this bot actually trades through, so its reading is the one
+that matters when two sources disagree. `ClockFace.calendar_code` is empty for
+New York on purpose — a second source for the same fact is a second fact that
+can disagree with the first, which is the reasoning that keeps
+`Adoption.is_live` computed and `Dream`'s back-reference derived.
+
+**Do not replace it with three hardcoded holiday lists.** They go stale in
+silence, and a stale list still looks answered, which is strictly worse than a
+stated limit. **yfinance is not the tool either** — it serves quotes, not
+calendars.
+
 This exists because a single global `sessions_utc` is wrong the moment there is
 more than one class. Equities trade a fixed window, crypto trades continuously,
 so a shared window meant enabling crypto silently forbade trading it for three
@@ -2553,6 +2588,12 @@ src/bot/
                         shares one session. Gates nothing, is never backed up,
                         and answers `None` for "could not ask" rather than
                         letting an outage read as a quiet quarter.
+  exchange_hours.py     Tokyo, Sydney and Auckland: which days they trade and
+                        between what hours, from `exchange_calendars` offline.
+                        An OPTIONAL dependency whose absence is exactly the old
+                        weekday-shaped behaviour, measured by uninstalling it.
+                        Deliberately silent about New York, which Alpaca answers.
+                        Display badges only; gates nothing, no network.
   news_history.py       What the loop was SHOWN, recalled out of the audit log
                         and deduped across cycles. Reads rather than fetches,
                         because the Marketaux quota belongs to the loop. Pure
@@ -2718,23 +2759,6 @@ The list below is the older deferred set and is duplicated there.
   trades is noise, a model shown three losses will confidently change approach,
   and that is the Alpha Arena failure arriving as a feature request. The
   operator learns from the track record; the model learns from nothing.
-- **Holiday calendars for TSE, ASX and NZX.** The tape's exchange badges are
-  weekday-shaped for those three, so Boxing Day renders the ASX as open. The
-  badge says so in its own tooltip — `ClockFace.tracks_holidays` is False and
-  the limit travels with the claim — which is why this is deferred rather than
-  wrong. New York is already covered, through `session_calendar` and Alpaca.
-  **yfinance is NOT the tool**, despite being the obvious guess: it serves
-  quotes, not calendars. The nearest thing is `Ticker.info["marketState"]` on
-  an index like `^N225`, which is a live per-symbol state from an unofficial
-  scraped API, one network call per exchange per poll, answering "now" rather
-  than "which days". `exchange_calendars` is the right library — XTKS, XASX
-  and XNZE with real holiday rules, offline — and it is a dependency on the
-  box that runs the trading loop, added to colour a badge for three markets
-  the bot does not trade. That is the trade-off to weigh, and today it does
-  not clear. **Do not hardcode three holiday lists instead.** They go stale in
-  silence, and a stale list still looks answered, which is strictly worse than
-  a stated limit.
-
 - **Multi-agent dreaming.** Several dreamers working a topic independently and
   then debating it out before a verdict. `Thought.by` already carries the
   attribution that needs.

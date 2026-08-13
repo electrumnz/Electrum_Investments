@@ -1364,20 +1364,38 @@ job turns out to be, it should not be a second mechanism for the same idea.
 
 ---
 
-## 14. Holiday calendars for TSE, ASX and NZX
+## 14. DONE — holiday calendars for TSE, ASX and NZX
 
-The tape's exchange badges are weekday-shaped for those three, so Boxing Day
-renders the ASX as open. `ClockFace.tracks_holidays` is False for them and the
-badge's own tooltip says so, which is why this is deferred rather than wrong.
-New York is covered, via `session_calendar` and Alpaca.
+The tape's badges for those three were weekday-shaped, so Boxing Day rendered
+the ASX as trading. `src/bot/exchange_hours.py` puts `exchange_calendars`
+behind five pure functions — XTKS, XASX and XNZE, real holiday rules computed
+offline — and `ClockFace` reads them.
 
-**yfinance is NOT the tool.** `exchange_calendars` is the right library — XTKS,
-XASX, XNZE with real holiday rules, offline — and it is a dependency on the box
-that runs the trading loop, added to colour a badge for three markets the bot
-does not trade.
+**The trade-off that kept this deferred was resolved by making the dependency
+OPTIONAL, not by deciding the cost was fine.** It is a package on the box that
+runs the trading loop, added to colour a badge for three markets the bot does
+not trade. It is imported lazily inside a function, every failure answers
+`None`, and uninstalling it reproduces the old behaviour **exactly** —
+`tracks_holidays` goes back to False, Boxing Day opens again, and the suite
+stays green. Measured, not promised. So the limit still travels with the claim,
+which is what made this honest while it was unbuilt.
 
-**Do not hardcode three holiday lists instead.** They go stale in silence, and a
-stale list still looks answered.
+Three-valued like `SessionCalendar`: `None` = could not ask, `()` = does not
+trade that day, a populated tuple = the real session. It gates nothing, and
+`tests/test_market_clock.py` blocks `socket` before touching the library, so a
+release that started fetching would fail the suite rather than put a network
+call on the render path.
+
+**New York is deliberately still Alpaca's answer**, through `session_calendar`.
+That is the broker this bot actually trades through, so its reading is the one
+that matters when two sources disagree — the same reasoning that keeps
+`Adoption.is_live` computed rather than stored. `ClockFace.calendar_code` is
+empty for New York on purpose.
+
+Two things that were true when this was written and stay true: **yfinance was
+not the tool** — it serves quotes, not calendars — and **three hardcoded
+holiday lists would have been worse than the gap**, because they go stale in
+silence and a stale list still looks answered.
 
 ---
 
