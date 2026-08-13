@@ -2168,7 +2168,32 @@ fetch-shaped toolset may be the lighter answer and wants checking first.
 
 ---
 
-## 24. The ceilings closed the SUBTRACTION hole and left a CROSS-UNIT one open
+## 24. DONE — the two units are made comparable, not printed side by side
+
+**Shipped.** `crossover_stop_pct` renders one dimensionless figure — `R/V`,
+carrying no price and no stop — so the model makes ONE comparison against its
+own stop and ONE division, instead of being asked to take the smaller of two
+numbers in different units.
+
+**The finding that reframes this item: the crossover for `us_equity` is 2.000%
+of entry on the shipped rules.** One ATR on a $500 name is well under that, so
+POSITION VALUE binds for essentially every realistic equity stop — the block was
+presenting the ceiling that binds most of the time as the afterthought. That
+also confirms item 25's note that the value ceilings are the real protection,
+and closing this was the first move there.
+
+**There was no test holding the four VALUE ceilings to `risk.py`** — both
+existing flip tests drive RISK gates. On exactly the unit the models were
+measured skipping. There is one now.
+
+The 1.00–1.01x round-up is closed in the same breath: round DOWN, either branch.
+
+**Left wired but not surfaced**, and it is two one-line changes: `cmd_loop` can
+call `measure_stop_widths` and put `tight_stops=` / `stops_unmeasured=` on the
+cycle line, and the Decisions page can render `StopWidth.render()` where the
+gate's reasons already go.
+
+## 24a. The original item, kept for the reasoning
 
 **Measured 13 Aug 2026**, 160 live calls through the real `ModelClient`, the
 real `build_market_context`, and every proposal put through the real
@@ -2205,7 +2230,7 @@ counting failures.
 
 ---
 
-## 25. A stop tightened to nothing buys an arbitrarily large position
+## 25. DONE (reported, never gated) — a stop tightened to nothing
 
 Found by the same run, and it is a property of the design rather than a bug in
 it — which is why it is recorded here rather than fixed in passing.
