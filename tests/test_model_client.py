@@ -511,3 +511,80 @@ def test_the_real_api_compiles_the_real_dream_schema():
     step = response.parsed_output
     assert isinstance(step, DreamStep), "the API returned no parsable dream step"
     assert step.title
+
+
+# ------------------------------------- nothing on the wire names a vendor
+
+
+def _wire_schemas() -> list[type[BaseModel]]:
+    """Every Pydantic model actually sent to a model as an output schema.
+
+    Found by the marker rather than by a hand-kept list, so a schema added
+    later is covered without anybody remembering to add it here.
+    `EVERY_FIELD_REQUIRED` is documented in `model_client` as the config to
+    "attach to any Pydantic model handed to `messages.parse` as an
+    `output_format`", which makes it exactly the set of wire schemas.
+    """
+    import importlib
+    import inspect
+    import pkgutil
+
+    import bot
+    from bot.models import EVERY_FIELD_REQUIRED
+
+    marker = EVERY_FIELD_REQUIRED["json_schema_extra"]
+    found: dict[str, type[BaseModel]] = {}
+    for info in pkgutil.walk_packages(bot.__path__, prefix="bot."):
+        try:
+            module = importlib.import_module(info.name)
+        except Exception:  # a module needing optional deps is not a wire schema
+            continue
+        for _, obj in vars(module).items():
+            if not (inspect.isclass(obj) and issubclass(obj, BaseModel)):
+                continue
+            if obj.model_config.get("json_schema_extra") is marker:
+                found[f"{obj.__module__}.{obj.__name__}"] = obj
+    return list(found.values())
+
+
+def test_no_schema_sent_to_a_model_names_a_vendor():
+    """**A Pydantic docstring becomes the schema's `description`, and the schema
+    is sent to the model.**
+
+    Caught by the operator asking whether the Anthropic environment variable
+    names could influence a model. They cannot — those are read by the client
+    library to choose an endpoint and a credential, and never leave the
+    process. But the question was right about the *category*, and this is where
+    it was true: `OrderProposal`'s docstring read "What Claude proposes", and
+    that string went over the wire inside `output_config.format`.
+
+    The souls moved to `llama-4-maverick` on 12 Aug 2026, so a schema saying
+    "Claude" tells whichever model is reading it that the output belongs to a
+    different one. At best noise in the context; at worst an invitation to
+    answer as something it is not.
+
+    Env var names are deliberately NOT covered by this: `ANTHROPIC_API_KEY` and
+    `ANTHROPIC_BASE_URL` are the SDK's own, renaming them breaks the client,
+    and they never reach a model. The rule is about what crosses the wire.
+    """
+    import json
+
+    offenders: list[str] = []
+    for model in _wire_schemas():
+        schema = json.dumps(model.model_json_schema())
+        for word in ("Claude", "claude", "Anthropic", "anthropic"):
+            if word in schema:
+                offenders.append(f"{model.__module__}.{model.__name__} contains {word!r}")
+
+    assert not offenders, (
+        "A vendor name reaches the model inside an output schema:\n  "
+        + "\n  ".join(offenders)
+        + "\n\nPydantic turns a class docstring into the schema's `description` "
+        "and a field name into its `title`, so both are sent. Reword them."
+    )
+
+
+def test_the_wire_schema_marker_actually_finds_something():
+    """Or the check above passes by finding nothing to check."""
+    names = {f"{m.__module__}.{m.__name__}" for m in _wire_schemas()}
+    assert "bot.model_client.ModelDecision" in names, names

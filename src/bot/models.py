@@ -1,4 +1,4 @@
-"""Domain models — orders, positions, market snapshots, Claude decisions.
+"""Domain models — orders, positions, market snapshots, model decisions.
 
 Terminology note: these models describe an **Alpaca** account (US equities and
 crypto), not an FX/CFD account. Quantities are shares or coin units, never
@@ -453,7 +453,7 @@ class TradingActivity(BaseModel):
 
 
 class OrderProposal(BaseModel):
-    """What Claude proposes — must pass the risk gate before execution.
+    """What the model proposes — must pass the risk gate before execution.
 
     **Every property is REQUIRED on the wire** and none is required in Python.
     See `EVERY_FIELD_REQUIRED`: this is the schema the decision loop sends 96
@@ -1540,7 +1540,7 @@ class StandDownState(BaseModel):
 
 
 class Decision(BaseModel):
-    """One full pass of the loop — what we asked, what Claude said, what we did.
+    """One full pass of the loop — what we asked, what the model said, what we did.
 
     Every field added after `notes` is optional with a default, so a record
     written by an older build still parses. The audit log is append-only and

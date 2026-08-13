@@ -105,7 +105,7 @@ from .models import OrderProposal, PositionPlan, SymbolAssessment
 
 
 class ModelDecision(BaseModel):
-    """Top-level output Claude must produce on every call.
+    """Top-level output the model must produce on every call.
 
     `assessments` and `position_plans` cost output tokens on a cycle that
     proposes nothing, which is most cycles. That is the point. Without them a
