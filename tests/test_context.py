@@ -21,16 +21,21 @@ from bot.context import (
     BUDGET_SPENT,
     HEADROOM_UNKNOWN,
     RISK_UNIT,
+    TIGHT_STOP_ATR,
+    VALUE_UNIT,
     Ceiling,
     build_market_context,
+    crossover_stop_pct,
     fetch_indicators,
     fetch_market_ticks,
+    measure_stop_widths,
     render_grants,
     render_sizing_ceilings,
     sizing_ceilings,
 )
 from bot.dreaming import Dream, Hop
 from bot.grants import GrantBriefing
+from bot.indicators import Indicators
 from bot.model_client import build_system_prompt
 from bot.models import (
     AccountSnapshot,
@@ -830,6 +835,300 @@ def test_a_position_held_under_a_grant_counts_against_its_class_ceiling():
     assert _headroom(ceilings, "Combined risk left inside us_equity") == 300.0
 
 
+# ------------------------------------ the two units, and which one binds
+#
+# Item 21's fix moved the error rather than removing it. Five arithmetic steps
+# became one division, the models do that division reliably, and every material
+# over-size in a 160-call run on 13 Aug 2026 was a model that did it and never
+# looked at a POSITION VALUE ceiling — `deepseek-v4-pro` at 7.06-7.27x on buying
+# power, 2.06-2.13x on gross exposure, once 14.39x, and `nemotron-3-ultra-550b`
+# once at 1.51x.
+#
+# The block already printed both units and already said "take the smaller".
+# These pin the replacement: the stop distance at which the two CROSS, which is
+# one number, needs no price and no stop, and turns "check a second figure" into
+# one comparison the model makes against its own choice.
+
+
+def _flat_account(
+    *,
+    open_positions: list[Position] | None = None,
+    symbols_with_unknown_risk: list[str] | None = None,
+) -> AccountSnapshot:
+    """$100,000, nothing at risk. Round figures on purpose.
+
+    On the shipped rules that makes every ceiling exact: $1,000 of risk (the
+    per-trade cap, tighter than the $2,000 portfolio budget) and $50,000 of
+    position value (concentration, tighter than $100,000 of buying power and
+    $150,000 of gross exposure). So the crossover is 1,000/50,000 = 2.000% and
+    every figure below can be checked by hand.
+    """
+    return AccountSnapshot(
+        equity_usd=100_000.0,
+        cash_usd=100_000.0,
+        buying_power_usd=200_000.0,
+        open_positions=open_positions or [],
+        symbols_with_unknown_risk=symbols_with_unknown_risk or [],
+    )
+
+
+def test_the_rendered_value_ceiling_is_where_the_gate_flips():
+    """The same guarantee the two RISK ceilings already have, in the other unit.
+
+    Both existing flip tests drive `_total_risk` and `_class_total_risk`, which
+    are RISK. Nothing held the four POSITION VALUE ceilings to the gate at all —
+    and this is the unit the model was measured skipping, so a figure here that
+    disagreed with `risk.py` would be wrong on exactly the line the fix now
+    sends it to.
+    """
+    rules = load_rules()
+    account = _flat_account()
+    headroom = _headroom(
+        sizing_ceilings(account=account, rules=rules), "Most ONE us_equity position"
+    )
+    assert headroom == 50_000.0
+
+    gate = RiskGate(rules, equity_at_session_start=100_000.0, now=IN_SESSION)
+
+    def sized(notional: float) -> OrderProposal:
+        """$5 of stop distance, so the RISK ceilings keep slack either side.
+
+        The value ceiling has to be the ONLY gate that moves across the cent, or
+        the test would pass on a rejection the risk cap produced.
+        """
+        return OrderProposal(
+            symbol="QQQ",
+            direction=Direction.BUY,
+            qty=notional / 500.0,
+            limit_price=500.00,
+            stop_loss_price=495.00,
+            rationale="Sized against the position value ceiling as rendered.",
+        )
+
+    # $50,000 is exactly the rendered ceiling, and `_position_size` compares
+    # with `>`, so the figure itself is approved.
+    at_the_ceiling = gate.evaluate(
+        sized(headroom), account=account, tick=_qqq_tick()
+    )
+    assert at_the_ceiling.approved, at_the_ceiling.reasons
+
+    one_cent_over = gate.evaluate(
+        sized(headroom + 0.01), account=account, tick=_qqq_tick()
+    )
+    assert not one_cent_over.approved
+    assert any("of equity (max 50.0%)" in r for r in one_cent_over.reasons)
+
+
+def test_the_two_units_cross_exactly_where_the_gate_stops_approving():
+    """**The whole claim of the fix, driven through the real gate.**
+
+    The rendered crossover says a stop that far from entry is the point at which
+    RISK stops being the binding unit. So at exactly that stop the two divisions
+    must give the SAME quantity and the gate must approve it; and one tick
+    tighter, the RISK division alone — the arithmetic every model in the run
+    performed correctly — must produce a size the gate REFUSES, while the
+    POSITION VALUE division on the same stop is approved.
+
+    That last pair is the standing REJECT test for this change. It is not a
+    formatting assertion: if the crossover ever drifts from where `risk.py`
+    flips, the approved half or the refused half fails.
+    """
+    rules = load_rules()
+    account = _flat_account()
+    ceilings = sizing_ceilings(account=account, rules=rules)
+
+    crossover = crossover_stop_pct(ceilings, "us_equity")
+    assert crossover is not None
+    assert crossover == pytest.approx(2.0)
+
+    entry = 500.00
+    risk_ceiling = _headroom(ceilings, "Most ONE us_equity trade may risk")
+    value_ceiling = _headroom(ceilings, "Most ONE us_equity position")
+    gate = RiskGate(rules, equity_at_session_start=100_000.0, now=IN_SESSION)
+
+    def sized(qty: float, stop: float) -> OrderProposal:
+        return OrderProposal(
+            symbol="QQQ",
+            direction=Direction.BUY,
+            qty=qty,
+            limit_price=entry,
+            stop_loss_price=stop,
+            rationale="Sized through the branch the ceilings block selects.",
+        )
+
+    # --- At the crossover the two branches agree, to the share.
+    at_stop = entry * crossover / 100          # $10.00 away
+    by_risk = risk_ceiling / at_stop
+    by_value = value_ceiling / entry
+    assert by_risk == by_value == 100.0
+    both = gate.evaluate(
+        sized(by_risk, entry - at_stop), account=account, tick=_qqq_tick()
+    )
+    assert both.approved, both.reasons
+
+    # --- Tighter than the crossover, the RISK division alone is refused. This
+    # is the measured failure reproduced exactly: correct risk arithmetic,
+    # 2.0x the permitted size, because the other unit was never consulted.
+    tight_stop = entry * 1.0 / 100             # $5.00 away, 1% of entry
+    over = gate.evaluate(
+        sized(risk_ceiling / tight_stop, entry - tight_stop),
+        account=account,
+        tick=_qqq_tick(),
+    )
+    assert risk_ceiling / tight_stop == 200.0
+    assert not over.approved
+    assert any("of equity (max 50.0%)" in r for r in over.reasons)
+
+    # --- And the branch the block now sends it to is approved on that same stop.
+    correct = gate.evaluate(
+        sized(value_ceiling / entry, entry - tight_stop),
+        account=account,
+        tick=_qqq_tick(),
+    )
+    assert correct.approved, correct.reasons
+
+
+def test_the_block_names_the_binding_unit_rather_than_printing_two_figures():
+    """The repair that was explicitly ruled out was a second worked figure.
+
+    Both units were already printed and the instruction to check both was
+    already there, so what is pinned here is the SHAPE of the replacement: a
+    crossover, and two branches of one division, rather than a third number to
+    take a minimum over.
+    """
+    blob = "\n".join(render_sizing_ceilings(account=_flat_account(), rules=load_rules()))
+
+    assert "### Which ceiling binds — ONE comparison, then ONE division" in blob
+    assert "us_equity: the two ceilings cross at a stop 2.000% of your entry price" in blob
+    assert "RISK binds: qty = $1,000.00 / |limit_price - stop_loss_price|" in blob
+    assert "POSITION VALUE binds: qty = $50,000.00 / limit_price" in blob
+    # The instruction that was measured failing is gone rather than restated —
+    # and it is named as unfollowable rather than merely dropped, or the next
+    # reader adds it back as an obvious omission.
+    assert "ceiling and take the smaller" not in blob
+    assert "'take the smaller of the two' is not a rule that can be followed" in blob
+
+
+def test_every_figure_carries_its_own_unit():
+    """A line lifted out of its section must not be readable as the other unit.
+
+    That is what the measured failure looks like from the inside: the model
+    reaches for a dollar figure and divides into it. A heading four lines up is
+    not attached to the number.
+    """
+    lines = render_sizing_ceilings(account=_flat_account(), rules=load_rules())
+    figures = [x for x in lines if x.startswith("- ") and "$" in x and "ceiling" not in x]
+
+    assert figures, "no ceiling lines rendered at all"
+    for line in figures:
+        # Against the constants, so a rename reaches the assertion rather than
+        # leaving it passing on a string nothing produces any more.
+        assert f" of {RISK_UNIT} (" in line or f" of {VALUE_UNIT} (" in line, line
+
+
+def test_the_crossover_is_not_offered_as_a_minimum_stop_distance():
+    """**The failure mode this fix could itself create.**
+
+    `RiskGate` deliberately holds no opinion on where a stop goes, and neither
+    does this file. A crossover phrased as "your stop must be at least X%" is
+    that opinion arriving through the renderer — a minimum stop distance nobody
+    agreed to, and one that would be obeyed by WIDENING the stop, which buys a
+    larger loss at the same size.
+    """
+    blob = "\n".join(render_sizing_ceilings(account=_flat_account(), rules=load_rules()))
+
+    assert "NOT a minimum stop distance" in blob
+    assert "Nothing here has an opinion on placement" in blob
+    assert "buys a larger loss at the same size" in blob
+    # Stated as a property of the arithmetic, never as a requirement on the stop.
+    assert "your stop must be at least" not in blob
+
+
+def test_a_spent_value_ceiling_has_no_crossover_rather_than_a_number():
+    """A crossover computed from a spent budget is a plausible wrong figure.
+
+    "No crossover" also has to say WHY, in the words the units already use.
+    Left bare it invites the reading that nothing constrains the class, which is
+    the exact inversion of the state that produces it.
+    """
+    rules = load_rules()
+    # Gross exposure already at 150% of equity, so the tightest value ceiling is
+    # spent while every risk ceiling is untouched.
+    account = _flat_account(open_positions=[_held("SPY", qty=1_000, price=150.0)])
+
+    ceilings = sizing_ceilings(account=account, rules=rules)
+    assert crossover_stop_pct(ceilings, "us_equity") is None
+
+    blob = "\n".join(render_sizing_ceilings(account=account, rules=rules))
+    assert "NO CROSSOVER TO STATE" in blob
+    assert f"the tightest position value ceiling is {BUDGET_SPENT}" in blob
+    assert "no stop distance makes a us_equity position fit" in blob
+
+
+def test_an_unknown_risk_ceiling_leaves_no_crossover_either():
+    """`HEADROOM UNKNOWN` on one unit is not a smaller number on the other.
+
+    Same precedence the tightest line already uses: an unknown could be smaller
+    than anything established, so dividing what happens to be known would answer
+    a question nobody asked, and answer it optimistically.
+    """
+    rules = _with_class_total_cap(1.0)
+    account = _flat_account(
+        open_positions=[_held("SPY")], symbols_with_unknown_risk=["SPY"]
+    )
+
+    ceilings = sizing_ceilings(account=account, rules=rules)
+    assert crossover_stop_pct(ceilings, "us_equity") is None
+
+    blob = "\n".join(render_sizing_ceilings(account=account, rules=rules))
+    assert f"the tightest risk ceiling is {HEADROOM_UNKNOWN}" in blob
+
+
+def test_a_crossover_built_on_an_overstated_ceiling_says_it_is_an_upper_bound():
+    """The overstatement travels into anything derived from the figure.
+
+    It travels in the safe direction here — an overstated RISK ceiling makes the
+    crossover too HIGH, which sends more stops into the POSITION VALUE branch
+    and therefore to a smaller size — and it is still said out loud, because a
+    figure that is an upper bound must not print as a measurement whichever way
+    the error runs.
+    """
+    account = _flat_account(
+        open_positions=[_held("SPY")], symbols_with_unknown_risk=["SPY"]
+    )
+
+    lines = render_sizing_ceilings(account=account, rules=load_rules())
+    crossover = next(x for x in lines if "the two ceilings cross" in x)
+    index = lines.index(crossover)
+
+    assert "UPPER BOUND" in "\n".join(lines[index : index + 5])
+    assert "the safe direction" in "\n".join(lines[index : index + 5])
+
+
+def test_a_class_whose_value_ceiling_is_unreachable_says_which_branch_that_leaves():
+    """A crossover at or above 100% of entry cannot be reached by a long.
+
+    Left unsaid it reads as an unreachable requirement rather than as "POSITION
+    VALUE binds on everything", which is what it actually means.
+    """
+    rules = load_rules()
+    # Risk ceilings above the concentration one, in both places they are set:
+    # 60% of equity of risk against 50% of equity of position value.
+    rules.account = rules.account.model_copy(update={"max_total_risk_pct": 100.0})
+    rules.instruments["us_equity"] = rules.instruments["us_equity"].model_copy(
+        update={"max_risk_per_trade_pct": 60.0}
+    )
+    account = _flat_account()
+
+    ceilings = sizing_ceilings(account=account, rules=rules)
+    crossover = crossover_stop_pct(ceilings, "us_equity")
+    assert crossover is not None and crossover >= 100
+
+    blob = "\n".join(render_sizing_ceilings(account=account, rules=rules))
+    assert "which a long's stop cannot reach" in blob
+    assert "POSITION VALUE binds on every long here" in blob
+
+
 # ------------------------------------------- zero and unknown, both in words
 
 
@@ -1165,6 +1464,187 @@ def test_a_looser_class_limit_is_named_as_the_class_own_rather_than_a_mistake():
 
     assert "Most ONE us_equity trade may risk: $3,000.00" in blob
     assert "looser than the 1.00% default" in blob
+
+
+# ------------------------------- how wide a stop is, reported and never refused
+#
+# Size is a ceiling divided by the stop distance, so a stop tightened towards
+# nothing buys a position tending towards infinity. Measured 13 Aug 2026:
+# `qwen3-coder-flash` proposed KO with a $0.05 stop against a $1.32 ATR — 0.04
+# ATR, inside the spread — where its own median was 0.83 ATR and
+# `nemotron-3-ultra-550b` and `deepseek-v4-pro` ran 1.65-1.66.
+#
+# **The standing rule for a new RULE is a test that proves it rejects. There is
+# no new rule here, so the load-bearing test proves the opposite**: the gate
+# still approves a 0.008-ATR stop, exactly as it did before, and what changed is
+# that the fact is now stated. A minimum stop distance would be the
+# opinion-on-placement `RiskGate` exists without, arriving through a renderer.
+
+
+def _reading(symbol: str, *, atr: float | None) -> Indicators:
+    return Indicators(
+        symbol=symbol, bar_count=250, last_close=100.0, last_volume=1.0, atr_14=atr
+    )
+
+
+def _ko(stop: float) -> OrderProposal:
+    """The proposal from the run, to the cent."""
+    return OrderProposal(
+        symbol="KO",
+        direction=Direction.BUY,
+        qty=100,
+        limit_price=68.50,
+        stop_loss_price=stop,
+        rationale="The stop that was measured at four hundredths of an ATR.",
+    )
+
+
+def test_a_stop_is_measured_against_the_atr_the_loop_recorded():
+    """The ATR is READ, never derived — the same rule as everywhere else here."""
+    widths = measure_stop_widths(
+        [_ko(68.45)], {"KO": _reading("KO", atr=1.32)}
+    )
+
+    assert len(widths) == 1
+    assert widths[0].stop_distance_usd == pytest.approx(0.05)
+    assert widths[0].atr_multiple == pytest.approx(0.05 / 1.32)
+    assert widths[0].is_tight
+    assert "0.04 ATR" in widths[0].render()
+
+
+def test_a_symbol_with_no_atr_is_unmeasured_rather_than_acceptable():
+    """`fetch_indicators` DROPS a symbol whose bars failed, so an absent ATR
+    means "could not ask". Reading that as a stop of acceptable width is the
+    `calendar_degraded` mistake with a position attached — and `is_tight` must
+    stay False without that ever meaning fine."""
+    absent = measure_stop_widths([_ko(68.45)], {})[0]
+    flat = measure_stop_widths([_ko(68.45)], {"KO": _reading("KO", atr=0.0)})[0]
+
+    for width in (absent, flat):
+        assert width.atr_multiple is None
+        assert width.is_measured is False
+        assert width.is_tight is False, "an unknown must not read as a tight stop"
+        assert "ATR UNMEASURED" in width.render()
+        assert "not the same as fine" in width.render()
+
+
+def test_a_wide_stop_is_measured_and_carries_no_warning():
+    """The threshold has to mean something, so it cannot fire on every stop.
+
+    1.65 ATR is what the two best models in the run actually proposed. A caveat
+    printed on those would train a reader to stop seeing it before the 0.04 one
+    arrived.
+    """
+    width = measure_stop_widths(
+        [_ko(66.32)], {"KO": _reading("KO", atr=1.32)}
+    )[0]
+
+    assert width.atr_multiple == pytest.approx(1.65, abs=0.005)
+    assert width.is_tight is False
+    # Still stated, though: a zero-breach cycle must be a stated fact rather
+    # than the absence of a warning, which is what an outage looks like too.
+    assert "1.65 ATR" in width.render()
+    assert "inside a single day" not in width.render()
+
+
+def test_two_proposals_on_one_symbol_are_measured_separately():
+    """A mapping keyed by symbol would silently report one of the two."""
+    widths = measure_stop_widths(
+        [_ko(68.45), _ko(66.32)], {"KO": _reading("KO", atr=1.32)}
+    )
+
+    assert [w.is_tight for w in widths] == [True, False]
+
+
+def test_a_tight_stop_is_reported_and_the_gate_still_approves_it():
+    """**The whole shape of this change, and the assertion that guards it.**
+
+    `RiskGate` deliberately holds no opinion on where a stop goes:
+    `_stops_on_correct_side` checks which SIDE of entry a level sits on and
+    nothing else, because a wider stop already buys a smaller position and the
+    cost is what the gate measures. A floor on stop distance would be a rule
+    nobody agreed to, arriving through the back door.
+
+    So this drives the real gate at a 0.008-ATR stop and asserts it is APPROVED.
+    If somebody later closes item 25 by adding a minimum stop distance, this
+    fails and says why.
+    """
+    rules = load_rules()
+    account = _flat_account()
+    proposal = OrderProposal(
+        symbol="QQQ",
+        direction=Direction.BUY,
+        qty=100,
+        limit_price=500.00,
+        stop_loss_price=499.95,
+        rationale="A stop far inside the noise, sized small enough to fit.",
+    )
+
+    verdict = RiskGate(
+        rules, equity_at_session_start=100_000.0, now=IN_SESSION
+    ).evaluate(proposal, account=account, tick=_qqq_tick())
+    assert verdict.approved, verdict.reasons
+
+    width = measure_stop_widths([proposal], {"QQQ": _reading("QQQ", atr=6.0)})[0]
+    assert width.is_tight
+    assert "Reported, not refused" in width.render()
+    assert "where the stop goes is yours" in width.render()
+
+
+def test_the_measurement_reaches_the_model_beside_the_gates_own_verdict(account):
+    """It rides the feedback block that already exists, so no caller changes.
+
+    Deterministic, outcome-free and true regardless of how the trade would have
+    gone — the same test the gate's verdicts pass and a P&L history fails, which
+    is why this may be fed back at all.
+    """
+    proposal = _ko(68.45)
+    # The real verdict, from the real gate, on the real proposal: APPROVED at
+    # four hundredths of an ATR. The feedback block therefore carries an
+    # approval and a measurement side by side, which is the arrangement — the
+    # gate said yes and the document still says how wide the stop was.
+    verdict = RiskGate(
+        load_rules(), equity_at_session_start=100_000.0, now=IN_SESSION
+    ).evaluate(
+        proposal,
+        account=account,
+        tick=Tick(symbol="KO", bid=68.49, ask=68.51, timestamp=IN_SESSION),
+    )
+    assert verdict.approved, verdict.reasons
+
+    blob = build_market_context(
+        account=account,
+        ticks={},
+        headlines=[],
+        news_windows=[],
+        indicators={"KO": _reading("KO", atr=1.32)},
+        previous_verdicts=[(proposal, verdict)],
+    )
+
+    assert "0.04 ATR" in blob
+    assert "inside a single day's average range" in blob
+    # The vintage of the figure is stated. Cycles are skipped while the market
+    # is shut, so "last cycle" on a Monday can be Friday afternoon.
+    assert "not the reading you had when you proposed it" in blob
+    assert "No gate refuses a stop for being tight" in blob
+
+
+def test_the_prompt_says_a_stop_is_a_claim_rather_than_a_lever_on_size():
+    """The other half of the seam, and the half item 25 named as missing.
+
+    The block warns against MOVING a stop to reach a size, which is a different
+    sentence: it does not say what a stop is FOR. Without that the arithmetic is
+    the only guidance in the document, and the arithmetic rewards tightening.
+    """
+    prompt = " ".join(build_system_prompt(load_rules()).split())
+
+    assert "statement of where the thesis is WRONG" in prompt
+    assert "the tighter the stop the larger the position" in prompt
+    assert "atr_14" in prompt
+    # And it must not become a limit in prose: a threshold stated in the prompt
+    # is a limit nobody can read off config/rules.yaml.
+    assert str(TIGHT_STOP_ATR) not in prompt
+    assert "no proposal has ever been refused for a tight stop" in prompt
 
 
 # --------------------------------------------------- placement in the document
