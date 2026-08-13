@@ -9,20 +9,35 @@ history and nothing to say so.
 
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime, timedelta
 
 import pytest
 
 from bot.broker import MockBroker
+from bot.config import Rules, load_rules
 from bot.context import (
+    BUDGET_SPENT,
+    HEADROOM_UNKNOWN,
+    Ceiling,
     build_market_context,
     fetch_indicators,
     fetch_market_ticks,
     render_grants,
+    render_sizing_ceilings,
+    sizing_ceilings,
 )
 from bot.dreaming import Dream, Hop
 from bot.grants import GrantBriefing
-from bot.models import AccountSnapshot, Bar, Tick
+from bot.models import (
+    AccountSnapshot,
+    Bar,
+    Direction,
+    OrderProposal,
+    Position,
+    Tick,
+)
+from bot.risk import RiskGate
 
 START = datetime(2026, 1, 5, tzinfo=UTC)
 
@@ -544,3 +559,393 @@ def test_the_grant_block_is_rendered_last(account):
 
     assert blob.index("adopted dream permits") > blob.index("## Indicators")
     assert blob.index("adopted dream permits") > blob.index("## Recent headlines")
+
+
+# --------------------------------------------------------- sizing ceilings
+#
+# The model sized over the cap twice, and both times the gate caught it. Every
+# limit reached it as a PERCENTAGE in the cached system prompt and every input
+# in DOLLARS here, so naming a quantity meant multiplying three caps by equity,
+# SUBTRACTING the open risk from the combined budget, dividing by the stop
+# distance and taking the minimum — across two documents. It skipped the
+# subtraction, which is the only one of those steps the percentages cannot be
+# read off directly.
+#
+# These pin the fix. The load-bearing ones are the two that drive the REAL
+# `RiskGate` at the rendered figure and one cent past it: a ceiling that
+# disagrees with `risk.py` is worse than the arithmetic it replaced, because it
+# looks measured.
+
+# A Monday, 15:00 UTC — inside the us_equity window in the shipped rules.
+IN_SESSION = datetime(2026, 5, 4, 15, 0, tzinfo=UTC)
+
+
+def _held(symbol: str, *, qty: float = 10, price: float = 580.0) -> Position:
+    return Position(
+        symbol=symbol,
+        direction=Direction.BUY,
+        qty=qty,
+        entry_price=price,
+        opened_at=START,
+        current_price=price,
+    )
+
+
+def _with_class_total_cap(pct: float) -> Rules:
+    """The shipped rules with a us_equity class total-risk cap bolted on.
+
+    `config/rules.yaml` sets one on crypto, which is DISABLED and therefore
+    renders nothing, so the class branch has to be exercised on the class that
+    is actually enabled.
+    """
+    rules = load_rules()
+    rules.instruments["us_equity"] = rules.instruments["us_equity"].model_copy(
+        update={"max_class_total_risk_pct": pct}
+    )
+    return rules
+
+
+def _headroom(ceilings: list[Ceiling], label_fragment: str) -> float:
+    match = next(c for c in ceilings if label_fragment in c.label)
+    assert match.headroom_usd is not None
+    return match.headroom_usd
+
+
+def _proposal(*, qty: float, symbol: str = "QQQ") -> OrderProposal:
+    """20 dollars of stop distance, so risk is exactly `20 x qty`."""
+    return OrderProposal(
+        symbol=symbol,
+        direction=Direction.BUY,
+        qty=qty,
+        limit_price=500.00,
+        stop_loss_price=480.00,
+        rationale="Sized against the ceiling the context block rendered.",
+    )
+
+
+def _qqq_tick() -> Tick:
+    return Tick(symbol="QQQ", bid=499.98, ask=500.02, timestamp=IN_SESSION)
+
+
+# ---------------------------------------------------- the figures themselves
+
+
+def test_the_caps_reach_the_model_in_dollars_with_the_subtraction_done():
+    """The exact account that produced the 2.03x over-size, from the gate's own
+    rejection text on 12 Aug 2026.
+
+    Three ceilings, and the one requiring a subtraction is the binding one. All
+    three are recovered here to the cent, which is what makes this a regression
+    test rather than a formatting test.
+    """
+    account = AccountSnapshot(
+        equity_usd=99_383.00,
+        cash_usd=116_239.81,
+        buying_power_usd=198_766.00,
+        open_positions=[_held("SPY", qty=21, price=774.18)],
+        open_risk_usd=1_486.95,
+        open_risk_by_symbol={"SPY": 1_486.95},
+        planned_stop_by_symbol={"SPY": 820.0},
+    )
+
+    blob = "\n".join(render_sizing_ceilings(account=account, rules=load_rules()))
+
+    assert "$993.83" in blob        # per-trade risk cap, 1.00% of equity
+    assert "$500.71" in blob        # remaining COMBINED risk budget — the binding one
+    assert "$49,691.50" in blob     # concentration, 50% of equity
+    # And the binding one is named as such rather than left to a comparison.
+    assert "Tightest risk ceiling for a us_equity trade: $500.71" in blob
+
+
+def test_the_combined_risk_headroom_is_exactly_where_the_gate_flips():
+    """**The property that makes rendering these figures safe at all.**
+
+    A ceiling that disagrees with `risk.py` is not a convenience — it is a new
+    way to mislead the model, and a worse one than the arithmetic it replaced,
+    because it looks measured. So this drives the real gate at the rendered
+    figure and one cent past it.
+    """
+    rules = load_rules()
+    account = AccountSnapshot(
+        equity_usd=100_000.0,
+        cash_usd=100_000.0,
+        buying_power_usd=200_000.0,
+        open_positions=[_held("SPY")],
+        open_risk_usd=1_500.0,
+        open_risk_by_symbol={"SPY": 1_500.0},
+        planned_stop_by_symbol={"SPY": 575.0},
+    )
+    headroom = _headroom(
+        sizing_ceilings(account=account, rules=rules), "Combined risk left across"
+    )
+    assert headroom == 500.0
+
+    gate = RiskGate(rules, equity_at_session_start=100_000.0, now=IN_SESSION)
+
+    at_the_ceiling = gate.evaluate(
+        _proposal(qty=headroom / 20.0), account=account, tick=_qqq_tick()
+    )
+    assert at_the_ceiling.approved, at_the_ceiling.reasons
+
+    one_cent_over = gate.evaluate(
+        _proposal(qty=(headroom + 0.01) / 20.0), account=account, tick=_qqq_tick()
+    )
+    assert not one_cent_over.approved
+    assert any("total risk would reach" in r for r in one_cent_over.reasons)
+
+
+def test_the_rendered_class_headroom_is_where_the_gate_flips():
+    """The same guarantee for a per-class cap, and the reason `_symbols_counting_as`
+    may exist beside `RiskGate._class_symbols` at all.
+
+    The membership rule is written twice — the gate's copy is a private method
+    taking a `ResolvedClass` built inside `evaluate`, and `risk.py` must not
+    grow a public API for a renderer — so this is what holds the two in step. If
+    it goes, the block is free to quote a cap nobody enforces.
+    """
+    rules = _with_class_total_cap(1.0)
+    account = AccountSnapshot(
+        equity_usd=100_000.0,
+        cash_usd=100_000.0,
+        buying_power_usd=200_000.0,
+        open_positions=[_held("SPY")],
+        open_risk_usd=600.0,
+        open_risk_by_symbol={"SPY": 600.0},
+        planned_stop_by_symbol={"SPY": 520.0},
+    )
+    ceilings = sizing_ceilings(account=account, rules=rules)
+
+    # The class cap binds well before the portfolio one, which is the case the
+    # per-class figure exists for: 1,400 left across the book, 400 in the class.
+    assert _headroom(ceilings, "Combined risk left across") == 1_400.0
+    headroom = _headroom(ceilings, "Combined risk left inside us_equity")
+    assert headroom == 400.0
+
+    gate = RiskGate(rules, equity_at_session_start=100_000.0, now=IN_SESSION)
+
+    at_the_ceiling = gate.evaluate(
+        _proposal(qty=headroom / 20.0), account=account, tick=_qqq_tick()
+    )
+    assert at_the_ceiling.approved, at_the_ceiling.reasons
+
+    one_cent_over = gate.evaluate(
+        _proposal(qty=(headroom + 0.01) / 20.0), account=account, tick=_qqq_tick()
+    )
+    assert not one_cent_over.approved
+    assert any("class cap" in r for r in one_cent_over.reasons)
+
+
+def test_a_position_held_under_a_grant_counts_against_its_class_ceiling():
+    """A grant buys entry to the allowlist and must not buy an exemption.
+
+    `AA` is in no `allowed_symbols` list, so a ceiling computed from that list
+    alone would report the whole class cap as free while $700 of it was live —
+    which is `RiskGate._class_symbols`'s bypass, arriving through the renderer
+    instead of through the gate.
+    """
+    rules = _with_class_total_cap(1.0)
+    account = AccountSnapshot(
+        equity_usd=100_000.0,
+        cash_usd=100_000.0,
+        buying_power_usd=200_000.0,
+        open_positions=[_held("AA", qty=10, price=40.0)],
+        open_risk_usd=700.0,
+        open_risk_by_symbol={"AA": 700.0},
+        planned_stop_by_symbol={"AA": 30.0},
+    )
+
+    ceilings = sizing_ceilings(
+        account=account, rules=rules, granted_symbols={"AA": "us_equity"}
+    )
+
+    assert _headroom(ceilings, "Combined risk left inside us_equity") == 300.0
+
+
+# ------------------------------------------- zero and unknown, both in words
+
+
+def test_a_spent_budget_renders_in_words_and_never_as_a_zero():
+    """A zero reads as "cheap, size small". It means "nothing fits at any size".
+
+    Same shape as the `STOP UNKNOWN` treatment beside an open position: the
+    missing-versus-zero rule with money attached.
+    """
+    account = AccountSnapshot(
+        equity_usd=100_000.0,
+        cash_usd=100_000.0,
+        buying_power_usd=200_000.0,
+        open_positions=[_held("SPY")],
+        open_risk_usd=2_000.0,
+        open_risk_by_symbol={"SPY": 2_000.0},
+        planned_stop_by_symbol={"SPY": 480.0},
+    )
+
+    lines = render_sizing_ceilings(account=account, rules=load_rules())
+    spent = next(line for line in lines if "Combined risk left across" in line)
+
+    assert BUDGET_SPENT in spent
+    assert "$0.00" not in spent
+    assert "No new position fits at ANY size" in spent
+    # And the summary line does not quietly fall back to a number.
+    assert any(
+        "Tightest risk ceiling" in line and BUDGET_SPENT in line for line in lines
+    )
+
+
+def test_a_headroom_that_rounds_to_zero_is_spent_rather_than_printed():
+    """Three tenths of a cent is a POSITIVE number that prints as `$0.00`.
+
+    That is the exact string the operator ruled out, arriving through the
+    formatter rather than through the arithmetic — so the words have to start
+    above the rounding boundary, not at zero.
+    """
+    account = AccountSnapshot(
+        equity_usd=100_000.0,
+        cash_usd=100_000.0,
+        buying_power_usd=200_000.0,
+        open_risk_usd=1_999.997,
+    )
+
+    lines = render_sizing_ceilings(account=account, rules=load_rules())
+    line = next(x for x in lines if "Combined risk left across" in x)
+
+    assert BUDGET_SPENT in line
+    assert "$0.00" not in line
+
+
+def test_an_unestablishable_class_total_says_the_gate_will_refuse():
+    """`_class_total_risk` is the one gate in the repository that fails CLOSED.
+
+    A held position with no journal row has an unknowable planned stop, so the
+    class total cannot be computed and the gate REJECTS rather than counting the
+    unknown as zero. Rendering a figure there would invent the one input the
+    gate declines to invent.
+    """
+    rules = _with_class_total_cap(1.0)
+    account = AccountSnapshot(
+        equity_usd=100_000.0,
+        cash_usd=100_000.0,
+        buying_power_usd=200_000.0,
+        open_positions=[_held("SPY")],
+        symbols_with_unknown_risk=["SPY"],
+    )
+
+    lines = render_sizing_ceilings(account=account, rules=rules)
+    unknown = next(x for x in lines if "Combined risk left inside us_equity" in x)
+
+    assert HEADROOM_UNKNOWN in unknown
+    assert "REJECTS every new us_equity position" in unknown
+    # An unknown could be smaller than anything established, so the summary must
+    # not take a minimum over what happens to be known.
+    assert any(
+        "Tightest risk ceiling" in line and HEADROOM_UNKNOWN in line for line in lines
+    )
+
+
+def test_the_portfolio_figure_is_still_the_gates_own_but_flagged_as_overstated():
+    """`_total_risk` does NOT refuse on an unknown — it computes with the
+    understated total — so going `HEADROOM UNKNOWN` here would disagree with the
+    gate, which is the one thing this block may not do. What is added is the
+    direction of the error, in `reconcile`'s own words."""
+    account = AccountSnapshot(
+        equity_usd=100_000.0,
+        cash_usd=100_000.0,
+        buying_power_usd=200_000.0,
+        open_positions=[_held("SPY")],
+        symbols_with_unknown_risk=["SPY"],
+    )
+
+    blob = "\n".join(render_sizing_ceilings(account=account, rules=load_rules()))
+
+    assert "Combined risk left across ALL open positions: $2,000.00" in blob
+    assert "OVERSTATED: SPY held with no journal row" in blob
+
+
+def test_zero_equity_cannot_be_stated_rather_than_being_a_small_budget():
+    """A percentage of nothing is not a tight limit, it is no limit anybody can
+    read. The two would be acted on completely differently."""
+    account = AccountSnapshot(equity_usd=0.0, cash_usd=0.0, buying_power_usd=0.0)
+
+    lines = render_sizing_ceilings(account=account, rules=load_rules())
+
+    assert sizing_ceilings(account=account, rules=load_rules()) == []
+    assert any(HEADROOM_UNKNOWN in line for line in lines)
+    assert not any("$0.00" in line and "ceiling" in line.lower() for line in lines)
+
+
+# ------------------------------------------------- what is deliberately absent
+
+
+def test_no_worked_maximum_quantity_is_offered(account):
+    """The operator's decision, and there are two reasons for it.
+
+    It cannot be precomputed — it depends on the stop, which is the agent's own
+    choice — and a worked example at the current price would read as a
+    recommendation to trade at that size.
+    """
+    lines = render_sizing_ceilings(account=account, rules=load_rules())
+    blob = "\n".join(lines)
+
+    assert "No maximum quantity is given here" in blob
+    # Nothing in the block resolves to a share count. Every figure is money, so
+    # no number anywhere in it is followed by a unit of quantity. (The word
+    # "shares" appears once, in the sentence telling the agent not to move the
+    # stop to reach one — a warning, never a worked figure.)
+    assert not re.search(r"\d[\d,.]*\s*(shares|units|contracts)", blob)
+    assert "A figure below is a ceiling, not a target." in blob
+
+
+def test_the_block_states_that_it_bounds_size_and_nothing_else(account):
+    """Half the gates in `risk.py` are not about size. A block that implied
+    completeness would turn "fits every ceiling" into "will be approved"."""
+    blob = "\n".join(render_sizing_ceilings(account=account, rules=load_rules()))
+
+    assert "These bound SIZE only" in blob
+    assert "stand-down" in blob
+
+
+def test_a_looser_class_limit_is_named_as_the_class_own_rather_than_a_mistake():
+    """`account:` is the default, not a ceiling, and an override is deliberately
+    not floored back with a `min`. A figure above the account default is a real
+    setting, and saying which direction it moved stops it reading as an error."""
+    rules = load_rules()
+    rules.instruments["us_equity"] = rules.instruments["us_equity"].model_copy(
+        update={"max_risk_per_trade_pct": 3.0}
+    )
+    account = AccountSnapshot(
+        equity_usd=100_000.0, cash_usd=100_000.0, buying_power_usd=100_000.0
+    )
+
+    blob = "\n".join(render_sizing_ceilings(account=account, rules=rules))
+
+    assert "Most ONE us_equity trade may risk: $3,000.00" in blob
+    assert "looser than the 1.00% default" in blob
+
+
+# --------------------------------------------------- placement in the document
+
+
+def test_no_rules_means_no_ceilings_block_rather_than_a_guessed_one(account):
+    """Same rule as the session block: a limit computed from nothing would be a
+    confident statement about an account nobody described."""
+    blob = build_market_context(
+        account=account, ticks={}, headlines=[], news_windows=[]
+    )
+
+    assert "## Sizing ceilings" not in blob
+
+
+def test_the_ceilings_sit_directly_under_the_account_figures(account):
+    """Adjacency is the point. The line above says what is already at risk; this
+    block is that figure already subtracted from the cap it eats into. A page of
+    quotes between the two is what left the subtraction to the model."""
+    blob = build_market_context(
+        account=account,
+        ticks={},
+        headlines=[],
+        news_windows=[],
+        rules=load_rules(),
+    )
+
+    assert blob.index("## Account") < blob.index("## Sizing ceilings")
+    assert blob.index("## Sizing ceilings") < blob.index("## Market snapshot")

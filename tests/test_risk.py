@@ -516,6 +516,63 @@ def test_third_full_size_trade_breaches_the_total_risk_cap(rules, spy_tick):
     assert _reasons_mention(verdict, "total risk")
 
 
+def test_the_measured_over_size_is_still_rejected(rules):
+    """**The live failure that `context.sizing_ceilings` was written for.**
+
+    Recovered from the gate's own rejection text, 12 Aug 2026. Equity $99,383,
+    $1,486.95 already at risk, a $5.50 stop distance on a $305 name:
+
+        per-trade risk cap    $993.83    ->  180 shares
+        remaining combined    $500.71    ->   91 shares  <- binding
+        concentration      $49,691.50    ->  163 shares
+
+    It proposed 185, which is 2.03x the permissible size. It had sized to
+    roughly 180 — the per-trade cap done approximately — and never computed the
+    one ceiling requiring a SUBTRACTION.
+
+    The fix is a rendering change: the ceilings reach the model in dollars now,
+    with the subtraction already done. **This test exists because the fix must
+    not be mistaken for a relaxation.** The gate is unchanged and is still the
+    thing that refuses; the block only saves the model from having to derive
+    what the gate already knows. A rendering change that made this pass would
+    be the failure it was written to prevent.
+    """
+    account = AccountSnapshot(
+        equity_usd=99_383.00,
+        cash_usd=116_239.81,
+        buying_power_usd=198_766.00,
+        open_positions=[],
+        open_risk_usd=1_486.95,
+    )
+    tick = Tick(symbol="MSFT", bid=304.98, ask=305.02, timestamp=INSIDE_SESSION)
+
+    def sized(qty: float) -> OrderProposal:
+        return OrderProposal(
+            symbol="MSFT",
+            direction=Direction.BUY,
+            qty=qty,
+            limit_price=305.00,
+            stop_loss_price=299.50,
+            rationale="The size the model named, against the size the gate allows.",
+        )
+
+    over = _gate(rules, equity=99_383.00).evaluate(sized(185), account=account, tick=tick)
+    assert not over.approved
+    assert _reasons_mention(over, "total risk would reach")
+    # Every reason at once, as ever: 185 breaches the per-trade cap and the
+    # concentration limit too, and a proposal told only the first would be
+    # re-sized to 180 and refused again.
+    assert _reasons_mention(over, "per-trade cap")
+    assert _reasons_mention(over, "of equity")
+
+    # And 91 — the figure the block now renders the numerator for — is approved,
+    # so the ceiling shown is a real ceiling rather than a conservative guess.
+    permitted = _gate(rules, equity=99_383.00).evaluate(
+        sized(91), account=account, tick=tick
+    )
+    assert permitted.approved, permitted.reasons
+
+
 def test_four_half_size_trades_fit(rules, spy_tick):
     """The cap counts risk, not positions — half-size means twice as many."""
     half_size = OrderProposal(

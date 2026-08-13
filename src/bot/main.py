@@ -169,6 +169,11 @@ def cmd_smoketest(env: Env, rules: Rules, *, force_mock: bool = False) -> int:
             indicators=indicators,
             symbols_without_history=no_history,
             instruments=rules.instruments,
+            # The whole `Rules`, not only `instruments`, so the context can
+            # render the SIZING CEILINGS in dollars. Without this line the
+            # block is built and renders nowhere — the wired-and-inert state
+            # that made the dream vault do nothing for a week.
+            rules=rules,
             broker_clock=broker.get_clock(),
         )
         decision, usage = claude.propose(context)
@@ -602,6 +607,11 @@ def cmd_loop(
                 social_posts=posts,
                 social_degraded=social_degraded,
                 instruments=rules.instruments,
+                # The whole `Rules`, not only `instruments`, so the context can
+                # render the SIZING CEILINGS in dollars. Without this line the
+                # block is built and renders nowhere — the wired-and-inert state
+                # that made the dream vault do nothing for a week.
+                rules=rules,
                 # One extra call per cycle, and it buys what `market_clock`
                 # structurally cannot compute: whether the broker agrees the
                 # regular session is running right now. Returns None rather
