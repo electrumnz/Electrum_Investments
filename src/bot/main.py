@@ -933,6 +933,9 @@ def cmd_loop(
                     entries_corrected=len(recon.entries_corrected),
                     entries_resting=recon.entries_resting,
                     entries_mid_fill=recon.entries_mid_fill,
+                    entries_unchecked=recon.entries_unchecked,
+                    entries_unresolved=recon.entries_unresolved,
+                    entries_never_opened=recon.entries_never_opened,
                     closes_deferred=recon.closes_deferred,
                     plan_abandoned=len(recon.plan_abandoned),
                     next_cycle_seconds=env.decision_interval_seconds,
@@ -1376,6 +1379,8 @@ def cmd_loop(
                     "entries_resting": recon.entries_resting,
                     "entries_mid_fill": recon.entries_mid_fill,
                     "entries_unchecked": recon.entries_unchecked,
+                    "entries_unresolved": recon.entries_unresolved,
+                    "entries_never_opened": recon.entries_never_opened,
                     "entries_ambiguous": recon.entries_ambiguous,
                     "closes_deferred": recon.closes_deferred,
                     # Why each position that closed this cycle closed — the
@@ -1481,6 +1486,26 @@ def cmd_loop(
                 entries_corrected=len(recon.entries_corrected),
                 entries_resting=recon.entries_resting,
                 entries_mid_fill=recon.entries_mid_fill,
+                # The three states where the entry order could not be squared,
+                # and they are three different findings rather than one.
+                # `closes_deferred` below names WHICH symbol was held back and
+                # never WHY, so on its own it cannot tell a routine
+                # out-of-hours entry from an order the broker says was
+                # cancelled — and only one of those needs somebody.
+                #
+                # `unchecked` is no order id on the row or a degraded order
+                # read: nothing was asked. `unresolved` is asked and still
+                # unanswered — a failed lookup, an unclassifiable status, or an
+                # answer that contradicts what is held. `never_opened` is the
+                # settled one: the broker says cancelled, expired or rejected
+                # with nothing filled, so the trade never opened, the row is
+                # still counting planned risk it will never lose, and it takes
+                # an operator to retire it. On the line for the reason
+                # `stops_breached` is: a stated empty list each cycle is a
+                # fact, and an absent field is what an outage looks like.
+                entries_unchecked=recon.entries_unchecked,
+                entries_unresolved=recon.entries_unresolved,
+                entries_never_opened=recon.entries_never_opened,
                 # A close withheld because the entry may still be resting. An
                 # out-of-hours order rests until the next open, and without this
                 # it was closed as a trade on the very next cycle.

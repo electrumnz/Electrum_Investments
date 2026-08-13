@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
+from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 import structlog
@@ -240,6 +241,173 @@ def plan_extended_hours_fill(
     )
 
 
+# ----------------------------------------------------- asking about ONE order
+#
+# `get_open_orders` answers "what is resting right now", and the ABSENCE of an
+# id from that answer is not a statement about that id. It asks Alpaca for the
+# orders it classifies as OPEN, bounded at 100, so an id that does not come back
+# may be filled, cancelled, expired, rejected, past the bound, or in a status
+# that query does not return. Only the first of those is a position.
+#
+# Reading that absence as "terminal, and therefore filled" is what closed a live
+# 107-share AAPL position out of the journal on 11 Aug 2026. `_confirm_entries`
+# stopped inferring and started DEFERRING, which fails closed — and a deferral
+# is still not an answer. This is the direct question, so there is one.
+
+
+def _enum_word(raw: Any) -> str:
+    """The broker's own word for something, from an SDK enum or a bare string.
+
+    **`str()` on an alpaca-py enum is a silent, total mapping failure.** Those
+    enums subclass `(str, Enum)`, so they compare equal to their value and read
+    like strings everywhere except here: `str(OrderStatus.HELD)` is
+    `"OrderStatus.HELD"`, not `"held"`. Every arm of a table written against the
+    values misses, every order falls through to the fallback the table has for
+    an unknown value, and nothing raises — so the Board rendered `other` for
+    every resting order for weeks, including the live stop leg protecting a
+    short, which is how that leg came to be mistaken for junk.
+
+    One function rather than the idiom written out at each call site, because
+    `order_type` walked into the identical trap days after `status` was fixed.
+    """
+    return str(getattr(raw, "value", raw) or "").lower().strip()
+
+
+# Alpaca's terminal order statuses: the order is over and will fill no further.
+_STATUSES_TERMINAL = frozenset({"canceled", "cancelled", "expired", "rejected"})
+
+# ...and the ones that mean it can still become a position. Deliberately
+# enumerated rather than derived as "everything else", so a status this build
+# has never seen is UNCLASSIFIED instead of being assumed alive.
+#
+# `replaced` is in NEITHER set, on purpose. It means Alpaca cancelled this order
+# in favour of a new one with a different id, so the order is over and a
+# successor may still fill — which is neither "never filled" nor "still
+# working", and nothing here can follow the chain to the new id. It reports as
+# unclassified, which defers, which is the honest answer.
+_STATUSES_WORKING = frozenset(
+    {
+        "new",
+        "accepted",
+        "pending_new",
+        "accepted_for_bidding",
+        "partially_filled",
+        "held",
+        "calculated",
+        "stopped",
+        "suspended",
+        "done_for_day",
+        "pending_cancel",
+        "pending_replace",
+        "pending_review",
+    }
+)
+
+
+class OrderDisposition(StrEnum):
+    """What a direct read of ONE order establishes about it.
+
+    Five members rather than a boolean, because the four real answers and "the
+    broker said a word this build cannot classify" are different findings and
+    must not share a representation — the same rule as `has_cycles`,
+    `can_grade_anything` and first-visit.
+
+    **A mistake in which set a status word falls into costs a LABEL and never an
+    action**, and that is the property to preserve when this is edited. Only
+    `FILLED` causes anything to be written, and it requires the exact word
+    `filled`; `WORKING`, `UNCLASSIFIED`, `NEVER_FILLED` and `PART_FILLED` all
+    leave the caller deferring, which is where it already was. So the two
+    frozensets above can be argued with safely, and the classification of
+    `filled` cannot be got wrong.
+    """
+
+    # The broker says this order filled. The only disposition anything acts on.
+    FILLED = "filled"
+
+    # Terminal — cancelled, expired or rejected — with NOTHING filled. **The
+    # trade never opened**, so there is no position, no exit and no P&L, and
+    # anything that closes the journal row as a trade is inventing all three.
+    NEVER_FILLED = "never_filled"
+
+    # Terminal with SOME of it filled. Settled: the rest is not coming.
+    PART_FILLED = "part_filled"
+
+    # Still capable of filling. An entry in this state has not failed to fill —
+    # it has not finished trying, which is what an out-of-hours entry looks
+    # like for as long as the market is shut.
+    WORKING = "working"
+
+    # The broker answered, and with a word this build does not classify. **Not
+    # an error and not a quiet fallback**: it is reported so that "everything is
+    # unknown" is loud, which is the half a lenient mapping always leaves out.
+    UNCLASSIFIED = "unclassified"
+
+
+@dataclass(frozen=True)
+class OrderLookup:
+    """What the broker says about one order, asked about directly.
+
+    `broker_status` is the raw word, lowercased and untranslated, carried beside
+    the disposition for the reason `WorkingOrder.broker_status` is carried
+    beside `status`: "this build cannot classify it" is an honest answer and a
+    useless one to an operator, and the broker's own word is at least
+    reportable.
+    """
+
+    order_id: str
+    broker_status: str
+    disposition: OrderDisposition
+    filled_qty: float = 0.0
+    filled_avg_price: float | None = None
+
+    @classmethod
+    def classify(
+        cls,
+        order_id: str,
+        *,
+        broker_status: Any,
+        filled_qty: float = 0.0,
+        filled_avg_price: float | None = None,
+    ) -> OrderLookup:
+        """One classifier, shared by `AlpacaBroker` and `MockBroker`.
+
+        Shared deliberately, and it is the `is_crypto_symbol` reasoning in a new
+        place: a double that classifies a status differently from the thing it
+        doubles pins a path production never takes. A test seeds Alpaca's own
+        word here and gets the answer production would get from it.
+
+        `broker_status` goes through `_enum_word`, so an SDK enum, a bare string
+        and `None` all arrive normalised — and an empty word classifies as
+        UNCLASSIFIED rather than as anything cheerful.
+        """
+        word = _enum_word(broker_status)
+        filled = max(0.0, filled_qty)
+        if word == "filled":
+            disposition = OrderDisposition.FILLED
+        elif word in _STATUSES_TERMINAL:
+            disposition = (
+                OrderDisposition.PART_FILLED
+                if filled > 0
+                else OrderDisposition.NEVER_FILLED
+            )
+        elif word in _STATUSES_WORKING:
+            disposition = OrderDisposition.WORKING
+        else:
+            disposition = OrderDisposition.UNCLASSIFIED
+        return cls(
+            order_id=order_id,
+            broker_status=word,
+            disposition=disposition,
+            filled_qty=filled,
+            filled_avg_price=filled_avg_price,
+        )
+
+    def describe(self) -> str:
+        """One line naming both the broker's word and what it establishes."""
+        word = self.broker_status or "no status reported"
+        return f"{self.order_id}: {word} ({self.disposition.value})"
+
+
 @runtime_checkable
 class Broker(Protocol):
     @property
@@ -287,6 +455,32 @@ class Broker(Protocol):
         self, symbol: str, minutes: int = ..., lookback: int = ...
     ) -> list[Bar]: ...
     def get_open_orders(self) -> list[WorkingOrder]: ...
+
+    def get_order(self, order_id: str) -> OrderLookup | None:
+        """Ask about ONE order by id. `None` means the question could not be asked.
+
+        The counterpart to `get_open_orders`, and the reason it exists is that
+        the two answer different questions. That one is a status-filtered,
+        limit-100 list of what is RESTING, so an id missing from it establishes
+        nothing about the id — and `_confirm_entries` read that absence as
+        "terminal, and therefore filled", which closed a live 107-share AAPL
+        position out of the journal with a realised figure nobody had traded.
+
+        **`None` is "could not ask", never "does not exist".** That is the same
+        rule as `get_clock`, `get_calendar` and `FinnhubCalendar.is_degraded`,
+        and here it is load-bearing rather than tidy: the caller's whole job is
+        telling a cancelled entry from one it cannot establish, and a failed
+        lookup that came back as CANCELLED would put the original bug back with
+        a network error as its new trigger. A broker that answers `None` leaves
+        the caller exactly where it was — deferring, with the risk overstated,
+        which is the direction this repository picks.
+
+        A 404 is deliberately inside that: an id the broker has never heard of
+        is a plausible reading, and so are an expired key, a timeout and a 500,
+        and this cannot tell them apart. It does not guess.
+        """
+        ...
+
     def get_activity(self) -> TradingActivity: ...
     def place_order(self, proposal: OrderProposal) -> OrderResult: ...
     def close_position(self, symbol: str) -> OrderResult: ...
@@ -342,6 +536,8 @@ class MockBroker:
         self._bars: dict[str, list[Bar]] = {}
         self._intraday: dict[str, list[Bar]] = {}
         self._open_orders: list[WorkingOrder] = []
+        self._orders: dict[str, OrderLookup] = {}
+        self._order_lookup_fails = False
         self._orders_degraded = False
         self._replace_refused: str | None = None
         self._clock: BrokerClock | None = None
@@ -447,6 +643,59 @@ class MockBroker:
     def get_open_orders(self) -> list[WorkingOrder]:
         return list(self._open_orders)
 
+    def set_order(
+        self,
+        order_id: str,
+        *,
+        broker_status: str,
+        filled_qty: float = 0.0,
+        filled_avg_price: float | None = None,
+    ) -> None:
+        """Test hook: say what the broker will report about ONE order.
+
+        `broker_status` takes ALPACA'S OWN WORD — "canceled", "expired",
+        "rejected", "filled", "held" — and goes through the same
+        `OrderLookup.classify` the real broker's answer does. A hook that took a
+        ready-made `OrderDisposition` would let a test assert against a
+        classification production never performs, which is the `orders_degraded`
+        trap: a double that answers differently from the thing it doubles pins a
+        path that is never taken.
+        """
+        self._orders[order_id] = OrderLookup.classify(
+            order_id,
+            broker_status=broker_status,
+            filled_qty=filled_qty,
+            filled_avg_price=filled_avg_price,
+        )
+
+    def set_order_lookup_fails(self, fails: bool) -> None:
+        """Test hook: make `get_order` fail the way the real one can.
+
+        Nothing in memory can fail, so without this the "could not ask" path is
+        unreachable from a test — and that path is the whole reason `get_order`
+        returns `None` rather than a status. Same reason `set_orders_degraded`
+        and `set_replace_refused` exist.
+        """
+        self._order_lookup_fails = fails
+
+    def get_order(self, order_id: str) -> OrderLookup | None:
+        """What this mock knows about one order, or `None`.
+
+        **An id this mock has never issued answers `None`, and that is faithful
+        rather than lazy.** `AlpacaBroker.get_order` catches its own failures
+        and returns `None`, and a 404 for an unknown id is one of them — so both
+        brokers answer "could not establish" to an id they have no record of.
+        Synthesising a cancellation here instead would be the exact divergence
+        that made `orders_degraded` dead code for the only broker that can
+        actually fail.
+
+        Orders this mock PLACED are recorded as filled, because it fills
+        instantly. That is the one thing it knows for certain about them.
+        """
+        if self._order_lookup_fails:
+            return None
+        return self._orders.get(order_id)
+
     def set_replace_refused(self, reason: str | None) -> None:
         """Test hook: make the next `replace_stop` fail the way Alpaca can.
 
@@ -531,6 +780,16 @@ class MockBroker:
         )
         self._cash -= proposal.qty * fill_price
         self._fills.append((now, proposal.symbol))
+        # So `get_order` can answer about it afterwards. This mock fills
+        # instantly, so "filled" is the one thing it knows for certain — and a
+        # broker that placed an order and could then say nothing about it would
+        # make the round trip untestable.
+        self._orders[order_id] = OrderLookup.classify(
+            order_id,
+            broker_status="filled",
+            filled_qty=proposal.qty,
+            filled_avg_price=fill_price,
+        )
         return OrderResult(
             accepted=True,
             order_id=order_id,
@@ -953,7 +1212,7 @@ class AlpacaBroker:
             # that stringify to things like "OrderType.STOP_LIMIT", so take the
             # `.value` when there is one and normalise what is left.
             raw_type = getattr(o, "order_type", None) or getattr(o, "type", None)
-            order_type = str(getattr(raw_type, "value", raw_type) or "").lower()
+            order_type = _enum_word(raw_type)
             # The status gets the same `.value`-first treatment, and it is not
             # cosmetic: `alpaca.trading.enums.OrderStatus` is a `(str, Enum)`,
             # so `str()` on a member yields "OrderStatus.HELD" rather than
@@ -963,10 +1222,7 @@ class AlpacaBroker:
             # resting order on the Board read "OTHER". Observed on the live
             # stop leg. The raw word is carried alongside the bucket for the
             # reason `WorkingOrder.broker_status` gives.
-            raw_status = getattr(o, "status", None)
-            broker_status = str(
-                getattr(raw_status, "value", raw_status) or ""
-            ).lower().strip()
+            broker_status = _enum_word(getattr(o, "status", None))
             orders.append(
                 WorkingOrder(
                     order_id=str(o.id),
@@ -988,6 +1244,55 @@ class AlpacaBroker:
                 )
             )
         return orders
+
+    def get_order(self, order_id: str) -> OrderLookup | None:
+        """Ask Alpaca about one order by id. `None` means it could not be asked.
+
+        Deliberately narrow: `get_open_orders` is the list a display renders and
+        this is a question one caller asks about one id, in the one branch where
+        an inference used to stand in for an answer. It is not called per trade
+        per cycle — `_confirm_entries` reaches it only when the entry is absent
+        from the resting list AND no position is held, which is the state that
+        cost a live position.
+
+        **Every failure answers `None`, including a 404.** The catch is broad
+        for the reason `get_clock` and `fetch_market_ticks` catch broadly — this
+        sits inside the decision loop and an SDK error escaping it would stop
+        the journal being reconciled and open positions being watched. And the
+        breadth is what makes `None` honest: a missing order, an expired key, a
+        timeout and a 500 all arrive here and this cannot tell them apart, so it
+        reports that it could not establish anything rather than picking the
+        reading that happens to be actionable.
+
+        A raw-dict response — the SDK's return type allows one — leaves every
+        `getattr` at its default, so the status reads as empty and classifies as
+        UNCLASSIFIED. That defers, which is the safe direction.
+        """
+        try:
+            raw: Any = self._trading.get_order_by_id(order_id)
+        except Exception as exc:
+            log.warning(
+                "order_lookup_failed",
+                order_id=order_id,
+                error=f"{type(exc).__name__}: {exc}",
+                detail=(
+                    "Could not establish what became of this order. That is "
+                    "not evidence it was cancelled and not evidence it filled, "
+                    "so the caller keeps deferring."
+                ),
+            )
+            return None
+
+        filled_price = getattr(raw, "filled_avg_price", None)
+        return OrderLookup.classify(
+            order_id,
+            # `.value` first. `str()` on an alpaca-py enum yields
+            # "OrderStatus.CANCELED", which matches no arm of any table written
+            # against the values — see `_enum_word`.
+            broker_status=getattr(raw, "status", None),
+            filled_qty=float(getattr(raw, "filled_qty", 0) or 0),
+            filled_avg_price=float(filled_price) if filled_price else None,
+        )
 
     def get_activity(self) -> TradingActivity:
         """Derive recent trade counts from Alpaca's filled-order history."""
