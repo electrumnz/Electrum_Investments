@@ -41,6 +41,9 @@ DEFAULT_SOULS_DIR = Path(__file__).resolve().parents[2] / "souls"
 YODA = "yoda"
 GROGU = "grogu"
 ARMORER = "armorer"
+# The researcher (TODO item 26). Deliberately NOT in `KNOWN_SOULS` below, and
+# that is the interesting part rather than an omission — see the note there.
+KUIIL = "kuiil"
 
 # The set a request body is checked against before it reaches `load_soul`, which
 # builds a path from the name. One list, here, rather than a literal repeated at
@@ -52,6 +55,25 @@ ARMORER = "armorer"
 # worst case of getting it wrong is the wrong voice; refusing the question
 # outright would be the larger failure. See `bot.web.app.chat`.
 KNOWN_SOULS = frozenset({YODA, GROGU, ARMORER})
+
+# Every character file that ships, which is a DIFFERENT question from which
+# ones a chat request may name, and the two sets stopped being the same when
+# the researcher arrived.
+#
+# `KUIIL` is in this one and not in `KNOWN_SOULS`, deliberately. The researcher
+# is not a voice on the Chat page: it runs on the dream timer, in its own
+# Hermes home, with the `web` toolset and no MCP server — see
+# `deploy/run-research.sh`. Letting a request body select it would put a
+# character whose entire job is quoting other people's pages into the process
+# that answers questions about the account, which is the wrong voice on the
+# wrong tools.
+#
+# Both sets exist because the test that pins them is enumerating the DIRECTORY
+# now rather than a hand-maintained tuple. A soul added to `souls/` and
+# registered nowhere is a character nobody can reach; a soul in `KNOWN_SOULS`
+# with no file is a name that falls back silently. Only one list can be
+# checked against the filesystem, and it has to be this one.
+ALL_SOULS = frozenset({YODA, GROGU, ARMORER, KUIIL})
 
 
 @dataclass(frozen=True)

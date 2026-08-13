@@ -1,0 +1,248 @@
+# Hermes configuration for the RESEARCHER instance. TODO.md item 26.
+#
+# This is a SEPARATE HERMES_HOME from the account agent and the dreamer, and
+# this file belongs in that home only:
+#
+#     HERMES_HOME=/home/hermes/researcher
+#     /opt/mudhorn/.venv/bin/python /opt/mudhorn/deploy/merge-hermes-config.py \
+#         --config /home/hermes/researcher/.hermes/config.yaml \
+#         --source /opt/mudhorn/deploy/hermes-research-config.yaml
+#     # add --apply once the dry run reads correctly
+#
+# **Never `cat >>` it.** Hermes writes `approvals:`, `mcp_servers:`, `agent:`
+# and `skills:` itself on first run, `yaml.safe_load` keeps only the LAST
+# occurrence of a duplicate key rather than raising, and Hermes then starts on
+# whichever half survived. That failure is silent twice over. The header of
+# `deploy/hermes-config.yaml` has the full account.
+#
+# ============================================================================
+# THE ONE THING THAT MAKES THIS INSTANCE SAFE: there is no `mcp_servers:` key.
+# ============================================================================
+#
+# Not an empty one — none at all. This agent reads pages written by anybody,
+# and `run-mcp.sh` is the only path to `place_order`. `deploy/run-research.sh`
+# greps this file for `run-mcp.sh` and `electrum-bot` before it will run a
+# turn, and REFUSES if either appears or if the file cannot be read: "I could
+# not establish that this instance is isolated" and "this instance is isolated"
+# are different answers, and only one of them may run.
+#
+# That check is the difference between this file and the other two. On those,
+# the isolation rests on a deployment step somebody remembered; a deployment
+# step nobody verifies is prose.
+
+approvals:
+  # Same reasoning as the account agent: `smart` hands the decision to an
+  # auxiliary LLM, and a model deciding whether an action near a brokerage
+  # account is safe reintroduces exactly what `risk.py` exists to remove.
+  mode: manual
+
+  # This instance is driven from the dream timer, which has nobody to prompt.
+  cron_mode: deny
+
+  # Checked BEFORE --yolo and before `mode: off`, so this is the only layer
+  # that refuses unconditionally. Everything above is a prompt somebody can
+  # wave through after a bad day.
+  #
+  # The list is the account agent's, unchanged, and it is kept even though this
+  # home has no MCP server and no shell. A denylist that only names things the
+  # instance can currently reach goes stale the moment a toolset is added, and
+  # the whole point of this home is that it holds the most untrusted input in
+  # the deployment.
+  deny:
+    - "*/opt/mudhorn/.env*"
+    - "*ALPACA_*KEY*"
+    - "*ANTHROPIC_API_KEY*"
+    - "*journal.db*"
+    - "*/opt/mudhorn/data/*"
+    - "*/opt/mudhorn/audit/*"
+    - "*rules.yaml*"
+    - "*--execute*"
+    - "*mudhorn-bot.service*"
+    - "*systemctl*mudhorn*"
+    - "*alpacahq/cli*"
+    - "*alpaca order*"
+    - "sudo -i*"
+    - "sudo su*"
+    - "sudo -u root*"
+
+agent:
+  # ==========================================================================
+  # AN ALLOWLIST, which is the OPPOSITE of deploy/hermes-config.yaml.
+  # ==========================================================================
+  #
+  # That file uses `disabled_toolsets:` and explains why `toolsets:` is left
+  # commented out there: it could not be verified end to end from outside the
+  # box, and getting it wrong yields an agent with almost no tools, which looks
+  # like a broken deployment.
+  #
+  # Here that trade-off inverts, and the inversion is the point. A denylist
+  # admits whatever the next Hermes release adds. On the other two instances
+  # the cost of that is a tool that cannot work on a headless droplet; on THIS
+  # one, the cost is a web-reading process quietly gaining a capability nobody
+  # chose. Getting an allowlist wrong is visible and safe — the agent says it
+  # has no tool. Getting a denylist wrong here is invisible.
+  #
+  # `web` is the fetch-shaped toolset and it is NOT `browser`. Checked against
+  # the Hermes documentation rather than guessed: `web` provides `web_search`
+  # and `web_extract` and performs remote operations, while `browser`
+  # (`browser_navigate`, `browser_snapshot`, `browser_vision`) drives a LOCAL
+  # browser that this headless droplet does not have. `deploy/hermes-config.yaml`
+  # disables `browser` on the other two instances for exactly that reason, and
+  # it stays absent here too — thirteen tools that cannot succeed are thirteen
+  # schemas in the context window every turn.
+  #
+  # **Two things about this list are UNVERIFIED from a container and must be
+  # confirmed on the box before the instance is useful**, because a wrong
+  # toolset name is discarded in silence — the same trap `skills.disabled`
+  # sets with category names:
+  #
+  #   1. That `web` is the exact key (the documentation names the toolset and
+  #      its two tools; nothing here has run the resolver against it).
+  #   2. Whether `web_search` needs a Nous Portal subscription or its own
+  #      provider credential. The documentation mentions a "Tool Gateway" for
+  #      subscribers as an alternative to individual API keys.
+  #
+  # Confirm with `hermes` in this home and by ASKING THE AGENT to look
+  # something up — never by reading `/tools`, which renders the unfiltered
+  # catalogue and will mislead you in both directions. If `web` turns out to be
+  # named something else, the agent will say it cannot search, which is the
+  # failure direction an allowlist was chosen for.
+  toolsets:
+    - web
+    # `memory` and `skills` are Hermes' own and carry no outward reach. Left in
+    # so the researcher can remember what it has already looked up rather than
+    # re-spending somebody's rate limit on the same question.
+    - memory
+    - skills
+
+  # Belt and braces, and not redundant. `toolsets:` selects; this subtracts
+  # afterwards regardless of what any platform bundle pulled in — measured on
+  # the account instance, where `disabled_toolsets` removed `terminal` even
+  # with `hermes-cli` enabled. If a future release makes a bundle implicit
+  # here, these stay gone.
+  #
+  # `terminal` first, and it is the one that matters. This process reads
+  # untrusted pages; a shell in the same context is prompt injection with a
+  # command line attached.
+  disabled_toolsets:
+    - terminal
+    - browser
+    - computer_use
+    - desktop_ui
+    - file
+    - code_execution
+    - coding
+    - debugging
+    - image_gen
+    - video_gen
+    - video
+    - bfl
+    - tts
+    - vision
+    - discord
+    - discord_admin
+    - spotify
+    - homeassistant
+    - feishu_doc
+    - feishu_drive
+    - yuanbao
+    - kanban
+    - delegation
+    # A scheduled turn runs with nobody watching. On the instance that reads
+    # the internet, that is the last thing to allow.
+    - cronjob
+
+skills:
+  # The same 77 names the account agent disables, minus nothing. A skill is
+  # description text in the context window on every turn, and this agent's
+  # entire job is to search, quote and cite — which is the `web` toolset, not
+  # a skill.
+  #
+  # Two are worth naming because they sound like exactly what this instance is
+  # for and are disabled anyway. `grounded-citations` and
+  # `research-paper-writing` both shape output into a WRITTEN-UP form, and the
+  # one rule this agent must not break is that it returns quotes and never
+  # conclusions. A skill whose job is to compose findings into prose is a skill
+  # whose job is to launder provenance.
+  #
+  # `competitor-news-monitor` and `blogwatcher` fetch on their own schedule,
+  # outside the Marketaux accounting that exists because the free tier allows
+  # 100 requests a day against a loop that wakes 96 times.
+  disabled:
+    - github-auth
+    - computer-use
+    - imessage
+    - apple-notes
+    - apple-reminders
+    - findmy
+    - claude-code
+    - codex
+    - opencode
+    - hermes-agent
+    - github-code-review
+    - github-issue-to-pr
+    - github-issues
+    - github-pr-workflow
+    - github-repo-management
+    - codebase-inspection
+    - architecture-diagram
+    - ascii-art
+    - ascii-video
+    - baoyu-infographic
+    - claude-design
+    - comfyui
+    - design-md
+    - excalidraw
+    - humanizer
+    - manim-video
+    - p5js
+    - popular-web-designs
+    - pretext
+    - sketch
+    - songwriting-and-ai-music
+    - touchdesigner-mcp
+    - gif-search
+    - songsee
+    - youtube-content
+    - airtable
+    - document-to-action-items
+    - docx
+    - google-workspace
+    - maps
+    - meeting-action-items
+    - nano-pdf
+    - notion
+    - obsidian
+    - ocr-and-documents
+    - pdf
+    - powerpoint
+    - product-price-monitor
+    - teams-meeting-pipeline
+    - weekly-review-planning
+    - xlsx
+    - email-inbox-triage
+    - himalaya
+    - openhue
+    - xurl
+    - evaluating-llms-harness
+    - weights-and-biases
+    - llama-cpp
+    - serving-llms-vllm
+    - huggingface-hub
+    - arxiv
+    - blogwatcher
+    - competitor-news-monitor
+    - grounded-citations
+    - llm-wiki
+    - research-paper-writing
+    - dogfood
+    - hermes-agent-skill-authoring
+    - inspecting-hermes-desktop-dom
+    - node-inspect-debugger
+    - plan
+    - python-debugpy
+    - requesting-code-review
+    - simplify-code
+    - spike
+    - systematic-debugging
+    - test-driven-development
