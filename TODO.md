@@ -1614,15 +1614,29 @@ Two that are worth stating as rules rather than as tests:
   journal and hands over the whole snapshot, which is the one function that
   derives all four figures from ONE journal read. The no-default property is
   preserved, so a caller that omits it still raises at wiring time.
-- **DELETE THE VERCEL PROJECT — it is orphaned now.** `brand/` and
-  `scripts/generate_demo_data.py` are gone, at the operator's instruction:
-  there is one user, he logs straight into the real app, and the demo site was
-  scaffolding to get started. The Vercel project `mudhorn-capital` is still
-  configured with Root Directory `brand`, which no longer exists, so **every
-  push will now fail its build and put a red mark on the PR**. Remove the
-  project in the Vercel UI; it cannot be done from a session (the connector
-  token's scope 404s on it, which was itself recorded here as a mystery and is
-  now moot).
+- **The orphaned Vercel project — NOT AFFECTING THIS REPO, checked 13 Aug
+  2026.** `brand/` and `scripts/generate_demo_data.py` are gone, at the
+  operator's instruction. This item claimed the `mudhorn-capital` project was
+  still configured with Root Directory `brand` and that **"every push will now
+  fail its build and put a red mark on the PR"**.
+
+  That is not happening. Two observations, and the second is the one that
+  settles it:
+
+  - The Vercel account reachable from a session (`keecenzvm-9355's projects`,
+    the only team the connector can see) lists nine projects and
+    `mudhorn-capital` is not among them.
+  - **No Vercel check has appeared on any check run for PR #18**, across six
+    pushes — only `checks`, which is the GitHub Actions job. A failing build
+    would be visible there and is not.
+
+  **This does not prove the project was deleted**, and the difference matters:
+  the connector sees one team, so a project on another account would be
+  invisible from here exactly as it was when this item was written and the
+  token 404'd on it. What is established is narrower and is the part anybody
+  cared about — nothing Vercel is failing on this repository's pull requests.
+  Left here rather than deleted, because "I could not see it" is not "it is
+  gone", and somebody with the console can close it in a moment.
 - **Multi-agent dreaming.** Several dreamers working a topic independently and
   debating it out before a verdict. `Thought.by` already carries the
   attribution, and the A2A message store from item 2 is most of the transcript
