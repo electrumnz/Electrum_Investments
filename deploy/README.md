@@ -798,20 +798,46 @@ should not live on the trading box.
 
 ## Updating
 
-**Run the pull on its own and read what it says**, then the rest. Pasting all
-four lines at once is how this goes wrong: an aborted `git pull` scrolls off the
-top under a wall of successful-looking output, and everything after it runs
-against the old checkout and reports success.
+```sh
+sudo /opt/mudhorn/deploy/update.sh
+```
+
+That is the whole thing. It pulls, provisions, restarts and verifies, and
+**every step is asserted rather than assumed** — which is the difference between
+it and the four commands it replaces.
+
+What it checks that a paste cannot:
+
+- **The commit actually moved.** `HEAD` is recorded before and after and
+  compared against the upstream ref. A pull that did not land is a hard stop
+  *before* anything is provisioned or restarted, so a failed update leaves the
+  box exactly as it was rather than half-done.
+- **A dirty tree stops it, with the diff printed.** Local changes are a refusal
+  unless you pass `--stash`, which sets them aside recoverably
+  (`sudo git -C /opt/mudhorn stash list`). It will not silently discard a
+  hand-edit — that is a legitimate thing to have been doing.
+- **The services came back.** It waits, then checks `is-active`, and prints
+  `systemctl status` on the one that did not.
+- **The deployed wrapper still refuses a model mismatch.** It puts a
+  deliberately mismatched `inference.env` and `.hermes/config.yaml` in a
+  temporary directory and runs the real `run-chat.sh` against them with a stub
+  binary, requiring exit 78 *and* both values in the message. **It touches
+  `/home/hermes` not at all** — mutating an agent's credentials file as a deploy
+  step is not a trade worth making for a check. `--skip-verify` turns it off.
+
+It does not switch on `--execute`, the dream timer or the confer timer. Those
+are a person's decision and a deploy is not it.
+
+### The four commands it replaces, and why they are no longer the runbook
+
+They are still what it does, and running them by hand still works. What made
+them unsafe was that **three of the four cannot tell whether the first one
+happened**:
 
 ```sh
 cd /opt/mudhorn
 sudo git pull                                  # STOP. Did it say "Updating ..."?
-```
-
-Once it did:
-
-```sh
-sudo /opt/mudhorn/deploy/bootstrap.sh          # picks up dependency changes
+sudo /opt/mudhorn/deploy/bootstrap.sh
 sudo systemctl restart mudhorn-bot mudhorn-web
 ```
 

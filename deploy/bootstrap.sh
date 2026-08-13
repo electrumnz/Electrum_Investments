@@ -178,7 +178,7 @@ install -m 644 "$APP_DIR/deploy/systemd/mudhorn-confer.timer" /etc/systemd/syste
 chmod 755 "$APP_DIR/deploy/backup-journal.sh" "$APP_DIR/deploy/check-tailscale.sh" \
           "$APP_DIR/deploy/run-mcp.sh" "$APP_DIR/deploy/run-chat.sh" \
           "$APP_DIR/deploy/run-dream.sh" "$APP_DIR/deploy/apply-settings.sh" \
-          "$APP_DIR/deploy/enable-forge.sh"
+          "$APP_DIR/deploy/enable-forge.sh" "$APP_DIR/deploy/update.sh"
 systemctl daemon-reload
 systemctl enable --quiet mudhorn-bot.service mudhorn-web.service
 echo "    enabled at boot, not started"
