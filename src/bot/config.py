@@ -196,6 +196,23 @@ CLAUDE_MODEL_IDS: dict[ClaudeTier, str] = _claude_model_ids()
 CLAUDE_PRICING_USD_PER_MTOK: dict[ClaudeTier, tuple[float, float, float]] = _claude_prices()
 
 
+def is_claude_tier_default(model_id: str) -> bool:
+    """Is this id one of the three a `ClaudeTier` resolves to when none is named?
+
+    Asked by `ModelClient` and by nothing else, for one narrow purpose: these
+    three ids reach a DigitalOcean endpoint as a **guaranteed** failure, and it
+    is worth saying so at construction rather than 96 times a day at call time.
+    Two independent reasons, both measured — DigitalOcean names Anthropic models
+    differently (`anthropic-claude-5-sonnet`, not `claude-sonnet-5`), and the
+    ones it does list answer **403 "not available for your subscription tier"**
+    on this account. `docs/DROPLET_AI.md` §2.
+
+    Derived from the spec table rather than written out, so a fourth tier cannot
+    arrive without this following it.
+    """
+    return model_id.strip() in set(CLAUDE_MODEL_IDS.values())
+
+
 # ----------------------------------------------------------------- inference
 #
 # DigitalOcean Gradient serverless inference, as an alternative endpoint for
@@ -217,15 +234,16 @@ DIGITALOCEAN = "digitalocean"
 
 # Whether any PYTHON model call actually goes through DigitalOcean.
 #
-# **It is False, and this exists so that stays checkable rather than
-# remembered.** Phase 1 moves the three souls, which run on Hermes and read
-# their own environment — no Python is involved in that path at all. So a key
-# in `.env` today is a DECLARATION and not yet a route, and
-# `Env.inference_provider` says so in the sentence it hands a startup banner.
+# **It is True now, and this exists so that stays checkable rather than
+# remembered.** It was False through phase 1, which moved the three souls —
+# they run on Hermes and read their own environment, so no Python was involved
+# and a key in `.env` was a DECLARATION rather than a route.
 #
-# Phase 2 (`claude.dream`, then `claude.confer`) is what flips this, in its own
-# commit, once the forced tool-call substitute for server-enforced structured
-# output has been proven on the one structured call that cannot lose money.
+# Phase 2 is this flip. `propose`, `dream` and `confer` all reach the endpoint
+# named by `DO_INFERENCE_KEY` when one is set, and they get there through a
+# **forced tool call** rather than through `output_config`, because the
+# server-enforced route measurably does not exist at that endpoint. See
+# `model_client.ModelClient._by_forced_tool_call` and `docs/DROPLET_AI.md` §2.
 #
 # **`claude.propose` was once written here as "never in scope", and that word
 # was withdrawn.** The argument behind it was purely economic — DigitalOcean
@@ -240,18 +258,23 @@ DIGITALOCEAN = "digitalocean"
 # What does NOT change with the destination, because it is a property of the
 # path rather than of the vendor:
 #
-# - **The schema must be ENFORCED, not requested.** `propose` produces order
-#   quantities and stop prices. A model asked nicely for a shape is a model that
-#   can return a plausible wrong one.
+# - **The schema is still ENFORCED, and where it is enforced moved.** It used to
+#   be the API compiling a grammar; on this path it is Pydantic rejecting the
+#   tool payload on this side. `propose` produces order quantities and stop
+#   prices, so what may never happen is the shape being merely *requested* and
+#   whatever comes back being used — which is why a reply carrying no tool call
+#   at all is a hard failure rather than a partial answer.
 # - **The model is PINNED per path, and nothing may re-route on failure.**
 #   Automatic fallback to a second model is a silent downgrade that still emits
-#   `cycle_complete`.
+#   `cycle_complete`. Falling back to the OTHER PROVIDER is the same fault
+#   wearing a bigger coat, which is why an unusable DigitalOcean configuration
+#   refuses rather than quietly answering from Anthropic.
 #
 # Note which way the evidence actually points. Alpha Arena is this repository's
 # founding lesson and it is not a Claude endorsement: Claude Sonnet finished
 # -$3,081, second-worst of six flagships. The rule was never "use this vendor",
 # it is "the gate holds whoever is talking".
-PYTHON_MODEL_PATH_USES_DO = False
+PYTHON_MODEL_PATH_USES_DO = True
 
 
 @dataclass(frozen=True)
@@ -269,12 +292,13 @@ class InferenceProvider:
     contains the key, in the same way the Settings page reports a credential as
     configured or not configured and never renders one.
 
-    Nothing here raises. A misconfigured endpoint for a path that has not moved
-    yet must not be able to stop the trading loop booting: refusing at startup
-    is a denial at the least useful moment, and this repository puts that
-    friction where the setting is actually USED. For phase 1 that is
-    `deploy/run-chat.sh` and `deploy/run-dream.sh`, which refuse the turn —
-    costing a chat message rather than a session's trading.
+    Nothing here raises, and that is unchanged now the Python path has moved.
+    This is a description of a configuration, and a description that could stop
+    a process from booting would be a denial at the least useful moment. The
+    friction belongs where the setting is USED: `deploy/run-chat.sh` and
+    `deploy/run-dream.sh` refuse the turn, `main.py` refuses the command with a
+    log line, and `ModelClient` refuses to construct. Every one of those costs a
+    call rather than a session, and every one of them says which.
     """
 
     name: str
@@ -285,6 +309,17 @@ class InferenceProvider:
     @property
     def is_digitalocean(self) -> bool:
         return self.name == DIGITALOCEAN
+
+    @property
+    def credential_name(self) -> str:
+        """The environment variable this provider authenticates with.
+
+        Named rather than assumed, because the guard that checks for a missing
+        key is the line an operator reads while wondering which key to go and
+        set. `ANTHROPIC_API_KEY is not set` on a box configured for
+        DigitalOcean would send them to the wrong console.
+        """
+        return "DO_INFERENCE_KEY" if self.is_digitalocean else "ANTHROPIC_API_KEY"
 
 
 class Env(BaseSettings):
@@ -436,11 +471,14 @@ class Env(BaseSettings):
         out loud: a provider swap is invisible afterwards, so the moment the
         process starts is the only moment anyone can be told.
 
-        The sentence is written to be true rather than encouraging. While
-        `PYTHON_MODEL_PATH_USES_DO` is False it says the switch is NOT IN FORCE
-        for any Python model call, because it is not — phase 1 moves Hermes,
-        and a banner claiming otherwise would be exactly the confident partial
-        answer this repository exists to prevent.
+        The sentence is written to be true rather than encouraging. It said the
+        switch was NOT IN FORCE for any Python model call all through phase 1,
+        because it was not — that phase moved the souls on Hermes and nothing
+        else, and a banner claiming otherwise would have been exactly the
+        confident partial answer this repository exists to prevent. It now says
+        what actually happens instead, including the half an operator cannot
+        see: the schema is held by Pydantic on this side rather than by the
+        endpoint.
         """
         key = self.do_inference_key.strip()
         declared = self.do_inference_base_url.strip()
@@ -485,11 +523,20 @@ class Env(BaseSettings):
             )
 
         # The clause that stops this claiming a switch that has not been
-        # thrown. It comes off when phase 2 lands, in the same commit that
-        # flips `PYTHON_MODEL_PATH_USES_DO`, and `tests/test_config.py` fails
-        # until one moves with the other.
-        not_yet = (
-            ""
+        # thrown, and `tests/test_config.py` fails until the sentence and the
+        # constant move together in one commit.
+        #
+        # The in-force half names the schema mechanism deliberately. An
+        # operator reading "DigitalOcean serverless" has no way to know that
+        # `output_config` is accepted with a 200 and ignored there, so the one
+        # sentence they are guaranteed to see is where that belongs.
+        in_force = (
+            (
+                " Every Python model call goes here, as a forced tool call "
+                "validated by Pydantic on this side -- this endpoint accepts "
+                "output_config with a 200 and ignores it, so the schema is held "
+                "here rather than served."
+            )
             if PYTHON_MODEL_PATH_USES_DO
             else (
                 " It is NOT IN FORCE for any Python model call: phase 1 moves the three "
@@ -503,9 +550,31 @@ class Env(BaseSettings):
             usable=True,
             detail=(
                 f"Inference provider: DigitalOcean serverless at {base_url} "
-                f"(DO_INFERENCE_KEY is set).{not_yet}"
+                f"(DO_INFERENCE_KEY is set).{in_force}"
             ),
         )
+
+    @property
+    def model_api_key(self) -> str:
+        """The credential the PYTHON model path actually authenticates with.
+
+        One question, one answer. Three call sites used to test
+        `anthropic_api_key` directly and report `ANTHROPIC_API_KEY is not set`,
+        which stopped being the right question the moment a second endpoint
+        existed: on a box configured for DigitalOcean that check passes with no
+        Anthropic key needed and fails with one present but no model access key.
+        Both answers are wrong, and the second is the dangerous shape — a guard
+        that says yes about a credential nothing is going to use.
+
+        It is deliberately NOT a fallback. When DigitalOcean is configured this
+        returns the DigitalOcean key and never reaches for the Anthropic one, so
+        an empty answer means "the configured provider has no credential" rather
+        than "no credential anywhere". Falling back would be the silent
+        downgrade the whole arrangement refuses.
+        """
+        if self.inference_provider.is_digitalocean:
+            return self.do_inference_key.strip()
+        return self.anthropic_api_key.strip()
 
     @property
     def alpaca_base_url(self) -> str:

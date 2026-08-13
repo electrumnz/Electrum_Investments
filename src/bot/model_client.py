@@ -3,7 +3,9 @@
 Design:
 - Frozen system prompt (no datetimes, IDs, or volatile content) so prompt caching works
 - Volatile market state goes in the user message, after the cache breakpoint
-- Structured outputs via `messages.parse()` against a Pydantic schema
+- Structured output two ways, chosen by the ENDPOINT rather than by the model:
+  `messages.parse()` where the schema is enforced server-side, and a forced tool
+  call validated by Pydantic where it is not
 - Spec-aware: the model, its prices and which optional request fields it takes
   all travel together on a `ModelSpec`, so naming a model is not the same thing
   as choosing one of three Claude tiers
@@ -12,17 +14,45 @@ Caching note: the system prompt is marked with a 1-hour TTL. At the default
 15-minute decision cadence a 5-minute cache would expire between every call and
 never pay for itself, whereas a 1-hour cache is read roughly four times per
 write. See docs/COSTS.md.
+
+## Two transports, and which one is used is a property of the ENDPOINT
+
+`ANTHROPIC_BASE_URL`-style swaps are usually a base URL and nothing else. This
+one is not, and the reason was measured rather than reasoned about:
+**DigitalOcean's `/v1/messages` accepts `output_config` with HTTP 200 and
+silently ignores it.** Not a 400, not an error — a 200 and a paragraph of prose.
+That is the worst of the three possible answers, because a caller that only
+checked for an error would believe the schema was in force while it was not.
+Measured 12 Aug 2026 on four models; `docs/DROPLET_AI.md` §2 has the detail.
+
+So `_forces_tool_call` selects the substitute the same document names: one tool
+whose `input_schema` is the model's JSON schema, `tool_choice` set to that tool,
+and the arguments validated **here** by Pydantic.
+
+**It keys on `Env.inference_provider.is_digitalocean` and never on the model
+id**, and that is the distinction to preserve. Whether a schema is enforced is a
+property of the thing serving the request, not of the weights behind it — the
+same model is served with enforcement at one endpoint and without it at another,
+and a check on the model name would get that exactly backwards the first time a
+familiar name appeared in an unfamiliar catalogue.
+
+What is *lost* by the substitute is narrower than it sounds, and what is *kept*
+is the part that matters. Pydantic still rejects a malformed object, so a `qty`
+or a `stop_loss_price` that comes back wrong is refused rather than coerced, the
+cycle logs `model_call_failed` and `RiskGate` never sees it. What degrades is
+reliability: the model is asked for the shape rather than constrained to it, so
+the rejection rate rises and every rejection costs a cycle.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, TypeVar, cast
 
 import anthropic
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
-from .config import DAY_NAMES, Env, ModelSpec, Rules
+from .config import DAY_NAMES, Env, ModelSpec, Rules, is_claude_tier_default
 from .models import (
     # `x as x` is mypy's explicit re-export form under --strict, and the
     # re-export is the point: the models this applies to live in `models.py`,
@@ -33,6 +63,12 @@ from .models import (
     EVERY_FIELD_REQUIRED as EVERY_FIELD_REQUIRED,
 )
 from .models import OrderProposal, PositionPlan, SymbolAssessment
+
+# What a structured call comes back as. A TypeVar rather than `BaseModel` so
+# `propose` keeps its `ModelDecision` return type through the shared transport:
+# widening it to `Any` at the one junction every call now passes through would
+# quietly switch off type checking for all three of them.
+_Schema = TypeVar("_Schema", bound=BaseModel)
 
 # Attach to any Pydantic model handed to `messages.parse` as an `output_format`.
 #
@@ -177,6 +213,123 @@ DREAM_MAX_TOKENS = 16000
 # the SDK at all, so retries never multiply a schema problem.
 DREAM_TIMEOUT_SECONDS = 240.0
 DREAM_MAX_RETRIES = 1
+
+
+# The single tool every forced-tool-call request declares. One name, because a
+# reply is only accepted when it calls THIS tool — a model that invents a second
+# one has not answered the question it was asked.
+STRUCTURED_TOOL_NAME = "record"
+
+# The output budget every measurement of this path was taken at. See
+# `ModelClient._by_forced_tool_call` for why it is a floor rather than a value.
+FORCED_TOOL_CALL_MAX_TOKENS = 8192
+
+
+def _has_markup_keys(arguments: dict[str, Any]) -> bool:
+    """The `glm-5.2` failure: tool-call markup leaking into the argument keys.
+
+    Checked on the KEYS rather than by looking for a field that should be
+    there, because the giveaway is a key nobody named. A check that merely
+    confirmed one recognised field would pass `{'<tool_call>record
+    <arg_key>symbol': 'SPY', 'market_assessment': '...'}` — nine-tenths markup
+    with one real key in it.
+
+    Pydantic would reject most of these anyway, on the required fields the
+    mangling swallowed. That is not a reason to drop this: the two produce the
+    same outcome and different DIAGNOSES, and "this model cannot serve this
+    path" is worth telling apart from "this cycle went wrong".
+    """
+    return any("<" in key or ">" in key or key.strip() != key for key in arguments)
+
+
+def _tool_arguments(response: Any, what: str) -> dict[str, Any]:
+    """The forced tool call's arguments, or a raise naming what came back instead.
+
+    Three refusals, kept apart because they are three different findings about
+    the far end. The first is the one that must never become a warning: see
+    `UnstructuredReply`.
+    """
+    blocks = getattr(response, "content", None) or []
+    calls = [
+        block
+        for block in blocks
+        if getattr(block, "type", None) == "tool_use"
+        and getattr(block, "name", None) == STRUCTURED_TOOL_NAME
+    ]
+    if not calls:
+        # Quoted back deliberately. The whole failure is that this text is
+        # plausible, so an operator reading the log line needs to see what the
+        # model said instead of answering — a bare "no tool call" reads like a
+        # transport fault. Whitespace collapsed to keep it one log line.
+        prose = " ".join(
+            " ".join(str(getattr(block, "text", "")).split())
+            for block in blocks
+            if getattr(block, "type", None) == "text"
+        ).strip()
+        raise UnstructuredReply(
+            f"The model returned no {STRUCTURED_TOOL_NAME!r} tool call for the "
+            f"{what}, so nothing was recorded. This is a hard failure and not a "
+            "partial answer: an empty structured object parses as a completed "
+            "cycle that considered nothing. "
+            + (f"It said instead: {prose[:300]!r}" if prose else "It said nothing at all.")
+        )
+
+    arguments = getattr(calls[0], "input", None)
+    if not isinstance(arguments, dict):
+        raise CorruptToolCall(
+            f"The {what} tool call carried {type(arguments).__name__} rather than "
+            f"an object: {str(arguments)[:200]!r}"
+        )
+    if _has_markup_keys(arguments):
+        raise CorruptToolCall(
+            f"The {what} tool call's argument keys carry the model's own tool-call "
+            f"markup, so the endpoint half-parsed it: {sorted(arguments)[:4]!r}"
+        )
+    return arguments
+
+
+class ModelCallFailed(RuntimeError):
+    """A model call that cannot produce a usable answer, for any reason.
+
+    A base class rather than three unrelated errors, because every caller wants
+    the same thing from all of them — `cmd_loop` logs `model_call_failed` and
+    skips the cycle without emitting `cycle_complete`. It subclasses
+    `RuntimeError` so the existing `except Exception` wrappers, and the callers
+    that were written against the plain `RuntimeError` this module used to
+    raise, keep behaving exactly as they did.
+    """
+
+
+class UnstructuredReply(ModelCallFailed):
+    """The reply carried no tool call at all. Prose where a schema was forced.
+
+    **This is the one that has to be a hard failure, and it is the reason this
+    class has a name of its own.** A dropped schema breaks loudly in every case
+    that produces a number and silently in exactly one: the quiet cycle. A model
+    that answers `{"market_assessment": "the market is mixed"}` and stops has
+    returned something `ModelDecision` accepts — `proposals`, `assessments` and
+    `position_plans` all default to `[]` in Python — so a cycle that considered
+    NOTHING is recorded as a cycle that looked at six symbols and chose to stand
+    pat. Those are opposite findings and only one of them is a working bot.
+
+    It is not hypothetical. `qwen3.8-max` returned prose on 2 of 3 attempts
+    against the real `ModelDecision` schema with `tool_choice` forcing the call
+    (`docs/DROPLET_AI.md`, 13 Aug 2026), which is why the check is a raise and
+    not a log line: a partial answer here is indistinguishable from a good one
+    downstream.
+    """
+
+
+class CorruptToolCall(ModelCallFailed):
+    """A tool call whose ARGUMENT KEYS are the model's own tool-call markup.
+
+    Kept apart from a plain validation failure because it is a different fault
+    with a different remedy: `{'<tool_call>record  <arg_key>symbol': 'SPY'}` is
+    the model emitting markup as text and the proxy half-parsing it, which means
+    that model cannot serve this path at all, where an invalid payload from a
+    capable model is a bad cycle. `glm-5.2` does this, and a check that looked
+    for one field it recognised would pass a payload that is nine-tenths markup.
+    """
 
 
 @dataclass(frozen=True)
@@ -579,10 +732,56 @@ class ModelClient:
         $0.0095 a run cached-and-missing against $0.0071 uncached, a third more
         for a feature sold as an optimisation. The loop wakes every fifteen
         minutes and gets roughly four reads per write, so it keeps caching on.
+
+        **Which endpoint it talks to comes from the environment, and a broken
+        configuration REFUSES here rather than answering from the other one.**
+        `Env.inference_provider` has three states precisely so the third one can
+        be acted on: a key that is present but unusable must not read as
+        "Anthropic, all fine". Quietly serving the loop from a provider the
+        operator did not choose is the silent downgrade this whole arrangement
+        exists to refuse — it would run, bill the wrong account, and leave
+        nothing on any surface to say which model produced the orders.
+
+        Raising is the right shape *here* while `Env.inference_provider` itself
+        never raises. That property describes a configuration and is read by
+        banners and by the Settings page, where an exception would take a page
+        down over a setting nobody was using. This is the point of USE: past it
+        there is a model call, and there is no honest way to make one.
         """
-        self._client = anthropic.Anthropic(api_key=env.anthropic_api_key)
+        provider = env.inference_provider
         self._spec = spec or env.decision_spec
         self._model = self._spec.model_id
+
+        if provider.is_digitalocean and not provider.usable:
+            raise ModelCallFailed(
+                f"{provider.detail} No model call is made and nothing falls back "
+                "to Anthropic: a provider the operator did not choose is not a "
+                "safe default for the path that produces order quantities."
+            )
+
+        if provider.is_digitalocean and is_claude_tier_default(self._model):
+            # Both halves of this are measured, and it is worth refusing at
+            # construction because neither produces a useful error at call time:
+            # a wrong id is a 404 and a right one is a 403 about a subscription
+            # tier, ninety-six times a day, with the loop's own broad `except`
+            # turning each into one skipped cycle.
+            raise ModelCallFailed(
+                f"Model {self._model!r} is a Claude tier default and this process is "
+                f"configured for DigitalOcean at {provider.base_url}. That endpoint "
+                "names Anthropic models differently (anthropic-claude-5-sonnet, not "
+                "claude-sonnet-5) and 403s the ones it does list on this account's "
+                "tier. Name the model outright with DECISION_MODEL_ID or "
+                "DREAM_MODEL_ID, or unset DO_INFERENCE_KEY to go back to Anthropic."
+            )
+
+        if provider.is_digitalocean:
+            self._client = anthropic.Anthropic(
+                api_key=env.do_inference_key.strip(), base_url=provider.base_url
+            )
+        else:
+            self._client = anthropic.Anthropic(api_key=env.anthropic_api_key)
+
+        self._forces_tool_call = provider.is_digitalocean
         self._system_prompt = system_prompt
         self._cache_system = cache_system
 
@@ -625,6 +824,83 @@ class ModelClient:
             block["cache_control"] = {"type": "ephemeral", "ttl": "1h"}
         return [block]
 
+    def _structured(
+        self,
+        client: Any,
+        kwargs: dict[str, Any],
+        output_format: type[_Schema],
+        what: str,
+    ) -> tuple[_Schema, CallUsage]:
+        """One structured answer, however this endpoint is willing to give one.
+
+        The two branches differ in WHERE the schema is enforced and nowhere
+        else. Both return a validated object or raise; neither returns a partial
+        one, and neither falls back to the other — a transport that retried the
+        forced tool call as prose parsing would be handing back exactly the
+        freedom the schema exists to remove.
+        """
+        if self._forces_tool_call:
+            return self._by_forced_tool_call(client, kwargs, output_format, what)
+
+        response = client.messages.parse(**kwargs, output_format=output_format)
+        parsed = response.parsed_output
+        if parsed is None:
+            raise ModelCallFailed(
+                f"The model returned no parsable {what}; check the output schema "
+                "and whether the response hit max_tokens."
+            )
+        return cast("_Schema", parsed), self._usage_from(response)
+
+    def _by_forced_tool_call(
+        self,
+        client: Any,
+        kwargs: dict[str, Any],
+        output_format: type[_Schema],
+        what: str,
+    ) -> tuple[_Schema, CallUsage]:
+        """The substitute for server-enforced structured output.
+
+        One tool, `tool_choice` pinned to it, and the arguments validated here.
+        The schema goes out as `model_json_schema()` **unflattened** — `$defs`
+        and `$ref` intact — because that is the shape the fidelity measurement
+        was taken against, and resolving refs before sending would silently
+        change what is being asked of the model from what was actually graded.
+        """
+        request = dict(kwargs)
+        # Raised rather than replaced, so a caller that asked for more keeps it.
+        # 8192 is the budget `scripts/do_schema_fidelity.py` measured these
+        # models at, and shipping under a figure the evidence was gathered at
+        # would make the evidence describe a different request. It is a ceiling
+        # and not a spend: a short answer costs what a short answer costs.
+        request["max_tokens"] = max(
+            int(kwargs.get("max_tokens", 0)), FORCED_TOOL_CALL_MAX_TOKENS
+        )
+        request["tools"] = [
+            {
+                "name": STRUCTURED_TOOL_NAME,
+                "description": (
+                    f"Record your {what}. You MUST call this tool, and it is the "
+                    "only way to answer: text outside it is discarded."
+                ),
+                "input_schema": output_format.model_json_schema(),
+            }
+        ]
+        request["tool_choice"] = {"type": "tool", "name": STRUCTURED_TOOL_NAME}
+
+        response = client.messages.create(**request)
+        arguments = _tool_arguments(response, what)
+        try:
+            parsed = output_format.model_validate(arguments)
+        except ValidationError as exc:
+            # Loud and safe. The client-side half of the guarantee doing exactly
+            # its job: a `qty` or a `stop_loss_price` the schema forbids is
+            # refused here rather than coerced and passed to the gate.
+            raise ModelCallFailed(
+                f"The model's {what} did not satisfy the schema: "
+                f"{' '.join(str(exc).split())[:400]}"
+            ) from exc
+        return parsed, self._usage_from(response)
+
     def propose(self, market_context: str) -> tuple[ModelDecision, CallUsage]:
         """Send the market context, get back a structured decision plus token accounting."""
         kwargs: dict[str, Any] = {
@@ -632,18 +908,13 @@ class ModelClient:
             "max_tokens": 4096,
             "system": self._system_block(),
             "messages": [{"role": "user", "content": market_context}],
-            "output_format": ModelDecision,
         }
         kwargs.update(self._reasoning_kwargs("medium"))
 
-        response = self._client.messages.parse(**kwargs)
-        decision = response.parsed_output
-        if decision is None:
-            raise RuntimeError(
-                "Claude returned no parsable decision; check the output schema "
-                "and whether the response hit max_tokens."
-            )
-        return decision, self._usage_from(response)
+        decision, usage = self._structured(
+            self._client, kwargs, ModelDecision, "decision"
+        )
+        return decision, usage
 
     def dream(self, prompt: str) -> tuple[Any, CallUsage]:
         """One dream step. Same transport as `propose`, tuned the opposite way.
@@ -676,7 +947,6 @@ class ModelClient:
             "model": self._model,
             "system": self._system_block(),
             "messages": [{"role": "user", "content": prompt}],
-            "output_format": DreamStep,
         }
         kwargs.update(self._reasoning_kwargs("high"))
 
@@ -688,14 +958,7 @@ class ModelClient:
         client = self._client.with_options(
             timeout=DREAM_TIMEOUT_SECONDS, max_retries=DREAM_MAX_RETRIES
         )
-        response = client.messages.parse(**kwargs)
-        step = response.parsed_output
-        if step is None:
-            raise RuntimeError(
-                "Claude returned no parsable dream step; check the output schema "
-                "and whether the response hit max_tokens."
-            )
-        return step, self._usage_from(response)
+        return self._structured(client, kwargs, DreamStep, "dream step")
 
     def confer(
         self, prompt: str, output_format: type[BaseModel]
@@ -734,21 +997,13 @@ class ModelClient:
             "model": self._model,
             "system": self._system_block(),
             "messages": [{"role": "user", "content": prompt}],
-            "output_format": output_format,
         }
         kwargs.update(self._reasoning_kwargs("medium"))
 
         client = self._client.with_options(
             timeout=DREAM_TIMEOUT_SECONDS, max_retries=DREAM_MAX_RETRIES
         )
-        response = client.messages.parse(**kwargs)
-        turn = response.parsed_output
-        if turn is None:
-            raise RuntimeError(
-                "Claude returned no parsable conference turn; check the output "
-                "schema and whether the response hit max_tokens."
-            )
-        return turn, self._usage_from(response)
+        return self._structured(client, kwargs, output_format, "conference turn")
 
     def _usage_from(self, response: anthropic.types.Message) -> CallUsage:
         u = response.usage

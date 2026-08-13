@@ -7171,6 +7171,11 @@ def settings_page(
         "cannot write the file and this process could not if it tried.",
     )
 
+    # Read once. It is a pure property over the environment, but it is asked
+    # three times on this page and one call means the three rows cannot disagree
+    # about which provider is in force.
+    provider = env.inference_provider
+
     a = rules.account
     # The reasoning beside each figure comes from `settings_agent.limits_for`
     # rather than being written out again here. One story per limit: the same
@@ -7426,11 +7431,43 @@ def settings_page(
             "it. A model with no prices on file still runs — its calls report "
             "an unknown cost rather than a zero.",
         )
+        # Which endpoint answers, and the half of it nobody could infer. A
+        # provider swap leaves no trace in a figure, so a page reporting only
+        # the model id would say `deepseek-v4-pro` and leave "where does that
+        # run, and is the schema still enforced" unanswerable from any surface.
+        # `provider.detail` is written to be printed and never contains the key.
+        + _row(
+            "Inference",
+            provider.base_url if provider.is_digitalocean else "Anthropic direct",
+            provider.detail,
+        )
+        + (
+            ""
+            if provider.usable
+            else _row(
+                "Provider state",
+                "UNUSABLE",
+                "Configured and wrong. Model calls refuse rather than falling "
+                "back to the other provider: answering from an endpoint the "
+                "operator did not choose is the silent downgrade this refuses.",
+            )
+        )
         + '</dl><p class="source">Whether orders are actually placed is decided by '
         "the <code>--execute</code> flag on the service unit, not from here.</p></div>"
         '<div class="card"><h3>Credentials and feeds</h3><dl class="kv">'
         + _row("Alpaca", "configured" if env.alpaca_api_key else "not configured")
-        + _row("Anthropic", "configured" if env.anthropic_api_key else "not configured")
+        # The row names the variable the configured provider actually reads. It
+        # said "Anthropic" against `ANTHROPIC_API_KEY` unconditionally, which
+        # became a plausible wrong answer the moment a second endpoint existed:
+        # on a DigitalOcean box it reported the key nothing uses and stayed
+        # silent about the one everything depends on.
+        + _row(
+            provider.credential_name,
+            "configured" if env.model_api_key else "not configured",
+            "The credential the Python model path authenticates with. It "
+            "follows the provider above; the other one is not read and not "
+            "reported here.",
+        )
         + _row(
             "Finnhub",
             "configured" if env.finnhub_api_key else "not configured",
@@ -7544,13 +7581,25 @@ def settings_page(
         )
         + dream_cost_row
         + _row(
-            "Anthropic key",
-            "configured" if env.anthropic_api_key else "not configured",
+            f"{provider.credential_name}",
+            "configured" if env.model_api_key else "not configured",
             (
                 ""
-                if env.anthropic_api_key
+                if env.model_api_key
                 else "Without it the command exits non-zero and writes nothing."
             ),
+        )
+        # Named here as well as in Runtime, because this card is read on its own
+        # by somebody asking why the dream timer produced nothing this morning,
+        # and "which key" is the first thing they need.
+        + _row(
+            "Endpoint",
+            provider.base_url if provider.is_digitalocean else "Anthropic direct",
+            "Where the dream call goes. The schema is enforced by this process "
+            "rather than by the endpoint when that is DigitalOcean, so a reply "
+            "carrying no tool call fails the run instead of half-filling it."
+            if provider.is_digitalocean
+            else "The schema is enforced server-side here.",
         )
         + '</dl><p class="source">Nothing here reaches the broker. A dream '
         "carries no quantity, entry, stop or side, so it cannot describe an "

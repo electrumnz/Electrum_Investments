@@ -158,6 +158,63 @@ def _note_unpriced_call(audit: AuditLog, usage: CallUsage, *, model_id: str, whe
     )
 
 
+def provider_is_unusable(env: Env) -> str | None:
+    """Why the configured endpoint cannot be talked to at all, or None.
+
+    The narrower of the two questions, and the one the decision loop asks. A
+    provider that is CONFIGURED AND WRONG is a different fault from one with no
+    credential yet: `ModelClient` refuses to construct against the first, and
+    that refusal happens once at loop start, outside the per-cycle `except` that
+    turns a bad model call into a skipped cycle. Uncaught it is a traceback, and
+    under systemd a traceback is a restart into the identical failure.
+
+    The loop deliberately does NOT refuse for a merely missing key, and that is
+    the pre-existing contract rather than an oversight: a cycle still reconciles
+    the journal against the broker and still runs `stop_watch` over open
+    positions when the model call fails. That safety work is worth more than the
+    proposal, so the loop degrades rather than refusing, exactly as it does when
+    a feed is down.
+    """
+    provider = env.inference_provider
+    return None if provider.usable else provider.detail
+
+
+def model_calls_are_impossible(env: Env) -> str | None:
+    """Why this process cannot make a model call, or None if it can try.
+
+    **One question asked in one place, because it used to be asked three times
+    in a form that stopped being right.** `smoketest`, `dream` and `confer` each
+    tested `env.anthropic_api_key` and reported `ANTHROPIC_API_KEY is not set`.
+    That was the correct question while there was one endpoint. With two it is
+    wrong in both directions, and the second is the dangerous shape: on a box
+    configured for DigitalOcean the check PASSES with an Anthropic key present
+    that nothing is going to use, and FAILS with a perfectly good model access
+    key set. A guard that says yes about the wrong credential is worse than no
+    guard, because it hands the failure to the model call and the operator to
+    the wrong console.
+
+    Two separate refusals, kept apart because they send an operator to different
+    places. An unusable provider is a configuration that is wrong; a missing key
+    is a configuration that is incomplete. `provider_is_unusable` is the first
+    of them on its own, for the caller that should refuse the wrong one and
+    tolerate the incomplete one.
+
+    It returns a sentence rather than raising. These are entry points, and a
+    command that exits non-zero with a line saying which variable to set is a
+    better answer than a traceback — particularly under systemd, where a
+    traceback becomes a restart into the identical failure.
+    """
+    provider = env.inference_provider
+    if not provider.usable:
+        return provider.detail
+    if not env.model_api_key:
+        return (
+            f"{provider.credential_name} is not set, and that is the credential "
+            f"this process would authenticate with ({provider.detail})"
+        )
+    return None
+
+
 def build_broker(env: Env, *, force_mock: bool = False) -> Broker:
     """Return a live paper broker, or a MockBroker when credentials are absent."""
     if force_mock:
@@ -226,8 +283,9 @@ def cmd_smoketest(env: Env, rules: Rules, *, force_mock: bool = False) -> int:
             symbols_without_history=no_history,
         )
 
-        if not env.anthropic_api_key:
-            log.warning("smoketest_skipping_claude_no_api_key")
+        blocked = model_calls_are_impossible(env)
+        if blocked:
+            log.warning("smoketest_skipping_model_call", detail=blocked)
             audit.record_event(
                 "smoketest",
                 {"ok": True, "claude_called": False, "tick_count": len(ticks)},
@@ -306,6 +364,15 @@ def cmd_loop(
     # a docstring calling itself a startup banner, and nothing had ever printed
     # it -- see `announce.py`.
     announce_inference(env)
+
+    # See `provider_is_unusable` for why this is the narrow question and not the
+    # one the dreamer asks: a missing key still leaves a cycle worth running,
+    # and a wrong endpoint is a raise at loop start that systemd would restart
+    # into forever.
+    unusable = provider_is_unusable(env)
+    if unusable:
+        log.error("loop_provider_unusable", detail=unusable)
+        return 1
 
     audit = AuditLog()
     broker = build_broker(env, force_mock=force_mock)
@@ -1230,8 +1297,9 @@ def cmd_dream(env: Env, rules: Rules) -> int:
 
     announce_inference(env)
 
-    if not env.anthropic_api_key:
-        log.error("dream_no_api_key", detail="ANTHROPIC_API_KEY is not set")
+    blocked = model_calls_are_impossible(env)
+    if blocked:
+        log.error("dream_no_api_key", detail=blocked)
         return 1
 
     # The same feeds the decision loop reads, and for the opposite purpose: the
@@ -1582,8 +1650,9 @@ def cmd_confer(env: Env, rules: Rules) -> int:
 
     announce_inference(env)
 
-    if not env.anthropic_api_key:
-        log.error("confer_no_api_key", detail="ANTHROPIC_API_KEY is not set")
+    blocked = model_calls_are_impossible(env)
+    if blocked:
+        log.error("confer_no_api_key", detail=blocked)
         return 1
 
     store = DreamStore()
