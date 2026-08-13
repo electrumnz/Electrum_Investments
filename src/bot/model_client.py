@@ -62,7 +62,12 @@ from .models import (
     # every reader keeps importing it from where the reasoning is.
     EVERY_FIELD_REQUIRED as EVERY_FIELD_REQUIRED,
 )
-from .models import OrderProposal, PositionPlan, SymbolAssessment
+from .models import (
+    OrderProposal,
+    PositionPlan,
+    SymbolAssessment,
+    served_matches_requested,
+)
 
 # What a structured call comes back as. A TypeVar rather than `BaseModel` so
 # `propose` keeps its `ModelDecision` return type through the shared transport:
@@ -460,6 +465,31 @@ class CallUsage:
 
     The token counts are never None. They come off the response, so they are
     known whoever served it; it is only the price that can be missing.
+
+    ## What was asked for, and what actually answered
+
+    `ModelClient.model_id` records what was REQUESTED, and until now that was
+    the only model id anywhere in the record. DigitalOcean names the model it
+    served in the response body and nothing read it, so a request routed to
+    something else — a deprecated id silently aliased, a catalogue entry
+    repointed, a proxy substituting a cheaper model — was invisible: the audit
+    log, the cost arithmetic and the Settings page would all keep naming the
+    model nobody had actually run.
+
+    Two raw strings and ONE derived comparison, deliberately. A stored
+    "mismatch" flag would be a third fact about the same thing that can
+    disagree with the other two, which is the reasoning that keeps
+    `Adoption.is_live` computed.
+
+    **`served_model_id` is `""` when the reply named no model at all**, and that
+    is the could-not-ask state rather than agreement — the same three-valued
+    shape as `FinnhubCalendar.is_degraded` and `BrokerClock`. An absence must
+    never read as a match.
+
+    **This REPORTS. Nothing here fails a cycle.** Whether a mismatch should is a
+    behaviour change on the path that produces order quantities and is the
+    operator's to make deliberately; `docs/DROPLET_AI.md` carries it as an open
+    precondition. What is closed is that the fact can now be stated at all.
     """
 
     input_tokens: int
@@ -467,44 +497,36 @@ class CallUsage:
     cache_read_tokens: int
     cache_write_tokens: int
     estimated_cost_usd: float | None
-
-    # **Which model actually answered, as the far end names it — not which one
-    # was asked for.** Those are different facts and the whole reason this
-    # field exists is that they can disagree without anything raising.
-    # DigitalOcean serves Anthropic models under its own ids, a proxy named in
-    # `ANTHROPIC_BASE_URL` can route wherever it likes, and a catalogue can
-    # retire an id and alias it to a successor. In every one of those cases the
-    # call succeeds, the schema validates, the cost is computed from the
-    # REQUESTED model's price sheet, and the orders that come back were sized
-    # by weights nobody named.
-    #
-    # `None` means the response did not carry a model id, which is "could not
-    # ask" and never "the right one". The SDK builds responses with unchecked
-    # construction — see the note in `_usage_from` — so this can be absent or
-    # be a non-string, and both read as unknown rather than as agreement.
-    served_model: str | None = None
-    requested_model: str | None = None
+    # Defaults, so every existing construction keeps working — including the
+    # ones in tests, which is not merely convenience: a caller that never set
+    # these gets the honest "nothing was read" answer rather than a claim.
+    requested_model_id: str = ""
+    served_model_id: str = ""
 
     @property
     def served_as_requested(self) -> bool | None:
         """Did the endpoint answer with the model that was asked for?
 
-        Three-valued, and the third value is the point. `None` is *nobody could
-        tell* — no model id came back, or none was recorded to compare against
-        — and it must never collapse into `False`, which is a positive finding
-        that the far end substituted something. The `has_cycles` rule with a
-        model id attached.
+        Three-valued. `None` means the reply carried no model id, or none was
+        requested — the question could not be settled, which is not a yes.
 
-        **This REPORTS and never refuses.** A mismatch does not fail the cycle:
-        an alias is a perfectly ordinary thing for a catalogue to do, and
-        throwing away a validated decision — with its proposals, its
-        assessments and its cost already spent — over a naming difference would
-        cost far more than it protects. It goes on the heartbeat and into the
-        audit record so a reader can find out that it happened.
+        **A dated snapshot of the requested alias counts as the same model.**
+        Anthropic resolves `claude-sonnet-5` to `claude-sonnet-5-20260401`, so
+        exact equality would report a mismatch on every ordinary Anthropic call
+        — and a warning that fires on every call is a warning nobody reads,
+        which would leave the real substitution as invisible as it is now.
+
+        The exemption is deliberately NARROW: the suffix has to be a hyphen and
+        eight digits. `nemotron-3-ultra` answered by `nemotron-3-ultra-550b` is
+        a different model with a plausible name, and it reads as False.
         """
-        if self.served_model is None or self.requested_model is None:
-            return None
-        return self.served_model == self.requested_model
+        # One implementation, in `models.served_matches_requested`, shared with
+        # `Decision.served_as_requested`. Two copies of this comparison would
+        # be two answers to one question, and the one rendered on the Decisions
+        # page is the one nobody re-checks.
+        return served_matches_requested(
+            requested=self.requested_model_id, served=self.served_model_id
+        )
 
 
 SYSTEM_PROMPT_TEMPLATE = """\
@@ -541,14 +563,38 @@ twice the permissible size, because most of the combined budget was already
 spent on an open position. The block states what is LEFT after that subtraction.
 That figure is the answer; the percentage above is not.
 
-Sizing is then one division:
+**The ceilings come in TWO UNITS and they cannot be compared as numbers.** RISK
+is `|limit_price - stop_loss_price| x qty`; POSITION VALUE is `limit_price x
+qty`. A $500 risk ceiling and a $50,000 value ceiling say nothing about each
+other until your stop exists to convert between them, so "take the smaller of
+the two" is not a rule anyone can follow — the smaller number is not the tighter
+constraint.
 
-    qty = tightest RISK ceiling / |limit_price - stop_loss_price|
+Which unit binds is decided by how far your stop sits from your entry, and the
+block computes that crossover for you, per instrument class, as a percentage of
+entry price. So sizing is ONE COMPARISON and then ONE division:
 
-Round DOWN. Then check what that quantity is worth against the tightest POSITION
-VALUE ceiling and take the smaller — the two units do not convert into one
-another without your stop distance. Every figure in that block is a ceiling, not
-a target, and a size that fits it is not thereby a trade worth making.
+    if |limit_price - stop_loss_price| / limit_price  >=  the crossover
+        qty = tightest RISK ceiling / |limit_price - stop_loss_price|
+    else
+        qty = tightest POSITION VALUE ceiling / limit_price
+
+**Round DOWN, in either branch.** A quantity rounded up is refused by the gate,
+and it is refused for a single share.
+
+**Take the branch. Do not do the RISK division and stop.** A stop tighter than
+the crossover is the ORDINARY case for an equity — one ATR on a $500 name is
+well under 1% of it — so POSITION VALUE is the unit that binds most of the time.
+Skipping that branch has been measured at 2x, 7x and once 14x over what the gate
+will accept, on proposals whose risk arithmetic was performed perfectly.
+
+The crossover is not a minimum stop distance and not a view on where your stop
+belongs; it is where two ceilings cross. Do not widen a stop to land the other
+side of it — that buys a larger loss at the same size, and it changes which
+division you do rather than which trade is worth making.
+
+Every figure in that block is a ceiling, not a target, and a size that fits it is
+not thereby a trade worth making.
 
 **Two of those lines are WORDS instead of a figure. Neither one means a small
 budget, and neither is a formatting quirk.**
@@ -572,6 +618,27 @@ is not a trade.
 If the market context carries no ceilings block at all, then you have not been
 given them. Propose nothing rather than working them out from the percentages —
 the same rule as a symbol reported with no price history.
+
+## The stop is a claim, not a lever
+
+`stop_loss_price` is your statement of where the thesis is WRONG. It is worth
+saying which way round that is, because the arithmetic runs the other way: size
+is a ceiling divided by the stop distance, so the tighter the stop the larger
+the position — without limit, and with no gate objecting. Nothing in the risk
+module has a view on where a stop belongs; it only measures what one costs. That
+freedom is yours on purpose and it is not a gap to size into.
+
+Measure the level you have chosen against `atr_14` in the Indicators section,
+which is what a day of ordinary movement in that instrument looks like. A stop
+well inside a single day's range is not a tight stop, it is a level that noise
+reaches before the thesis has been tested — and it will have bought the largest
+position the ceilings allow to be stopped out of. If you cannot say what your
+stop level MEANS other than that it makes the size work, it is not a stop and
+the trade is not ready.
+
+The market context reports the stop width of each of your previous proposals in
+ATRs. That is a description of the plan, never a rejection: no proposal has ever
+been refused for a tight stop and none will be.
 
 ## Output contract
 
@@ -1316,15 +1383,15 @@ class ModelClient:
                 + cache_write * pricing.input_usd_per_mtok * 2.0
             ) / 1_000_000
 
-        # Same defensive read as the token counts above, for the same measured
-        # reason: responses are built with `construct_type`, so `model` can be
-        # absent or can be something that is not a string. A non-string is
-        # unknown rather than coerced with `str()` — `str()` on an object that
-        # is not a name produces a plausible-looking string that would then be
-        # compared against the requested id and reported as a mismatch, which
-        # is a finding nobody measured.
-        raw_model = getattr(response, "model", None)
-        served: str | None = raw_model if isinstance(raw_model, str) else None
+        # **What actually served this, off the response body.** Read with the
+        # same suspicion as the token counts and for the same measured reason:
+        # responses are built with `construct_type`, which is unchecked
+        # construction, so `model` can be absent or can be any type at all. A
+        # non-string is read as ABSENT rather than coerced with `str()` — a
+        # coerced `None` would be the string "None", which is a model id that
+        # matches nothing and reads as a mismatch, inventing a finding out of a
+        # transport fault.
+        served = getattr(response, "model", None)
 
         return CallUsage(
             input_tokens=in_tokens,
@@ -1332,6 +1399,6 @@ class ModelClient:
             cache_read_tokens=cache_read,
             cache_write_tokens=cache_write,
             estimated_cost_usd=cost,
-            served_model=served,
-            requested_model=self._model,
+            requested_model_id=self._model,
+            served_model_id=served if isinstance(served, str) else "",
         )

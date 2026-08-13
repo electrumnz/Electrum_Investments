@@ -1224,3 +1224,234 @@ def test_a_proposal_cannot_ask_for_an_out_of_hours_fill():
 
     fields = set(OrderProposal.model_fields)
     assert not [f for f in fields if "extended" in f or "hours" in f]
+
+
+# ------------------------------------------------------- asking about ONE order
+#
+# `get_open_orders` is a status-filtered, limit-100 list of what is RESTING, so
+# an id missing from it establishes nothing about that id. `_confirm_entries`
+# read that absence as "terminal, and therefore filled", closed a live
+# 107-share AAPL position out of the journal and wrote a realised figure nobody
+# had traded. `get_order` is the direct question, and these tests are about the
+# two ways it could fail quietly: an enum read with `str()`, and a failure that
+# comes back looking like an answer.
+
+
+class _LookupTrading:
+    """Stands in for the SDK's TradingClient for `get_order_by_id` only."""
+
+    def __init__(self, order: Any = None, raises: Exception | None = None) -> None:
+        self._order = order
+        self._raises = raises
+        self.asked: list[str] = []
+
+    def get_order_by_id(self, order_id: Any, filter: Any = None) -> Any:
+        self.asked.append(str(order_id))
+        if self._raises is not None:
+            raise self._raises
+        return self._order
+
+
+class _RawSingleOrder:
+    """One order as `get_order_by_id` hands it back."""
+
+    def __init__(self, **fields: Any) -> None:
+        self.id = "952237ac-d7ec-426e-bb5f-5c6ce7294260"
+        self.symbol = "AAPL"
+        self.status = "filled"
+        self.filled_qty = 107
+        self.filled_avg_price = "308.42"
+        for key, value in fields.items():
+            setattr(self, key, value)
+
+
+def test_a_filled_order_reports_what_it_actually_filled_at():
+    from bot.broker import OrderDisposition
+
+    trading = _LookupTrading(_RawSingleOrder())
+
+    lookup = _alpaca_with(trading).get_order("entry-1")
+
+    assert lookup is not None
+    assert lookup.disposition is OrderDisposition.FILLED
+    assert lookup.filled_qty == 107
+    assert lookup.filled_avg_price == 308.42
+    assert trading.asked == ["entry-1"]
+
+
+def test_a_cancelled_order_that_never_filled_says_the_trade_never_opened():
+    """The answer the deferral could not produce. Cancelled with nothing filled
+    is not a close — it is a proposal that went nowhere."""
+    from bot.broker import OrderDisposition
+
+    trading = _LookupTrading(
+        _RawSingleOrder(status="canceled", filled_qty=0, filled_avg_price=None)
+    )
+
+    lookup = _alpaca_with(trading).get_order("entry-1")
+
+    assert lookup is not None
+    assert lookup.disposition is OrderDisposition.NEVER_FILLED
+    assert lookup.broker_status == "canceled"
+
+
+def test_a_cancelled_order_with_part_of_it_filled_is_not_never_filled():
+    """`filled_qty` is the second half of the question. A cancel after a partial
+    fill left a real position behind, so calling it 'never opened' would be the
+    fabrication this exists to prevent, pointing the other way."""
+    from bot.broker import OrderDisposition
+
+    trading = _LookupTrading(
+        _RawSingleOrder(status="canceled", filled_qty=3, filled_avg_price="308.40")
+    )
+
+    lookup = _alpaca_with(trading).get_order("entry-1")
+
+    assert lookup is not None
+    assert lookup.disposition is OrderDisposition.PART_FILLED
+
+
+@pytest.mark.parametrize("word", ["new", "accepted", "pending_new", "held"])
+def test_an_order_that_can_still_fill_reports_as_working(word):
+    """An entry past the resting list's 100-order bound, or in a status that
+    query does not return, has not failed to fill — it has not finished
+    trying."""
+    from bot.broker import OrderDisposition
+
+    trading = _LookupTrading(
+        _RawSingleOrder(status=word, filled_qty=0, filled_avg_price=None)
+    )
+
+    lookup = _alpaca_with(trading).get_order("entry-1")
+
+    assert lookup is not None
+    assert lookup.disposition is OrderDisposition.WORKING
+
+
+@pytest.mark.parametrize("word", ["replaced", "something_alpaca_added_later", ""])
+def test_a_status_this_build_cannot_classify_says_so_rather_than_guessing(word):
+    """The half a lenient mapping always leaves out.
+
+    `replaced` is the real one: Alpaca cancelled this order in favour of a new
+    id, so it is neither dead nor working and nothing here can follow the chain.
+    Reported as unclassified, which defers, rather than being folded into
+    whichever neighbouring bucket looks closest.
+    """
+    from bot.broker import OrderDisposition
+
+    trading = _LookupTrading(
+        _RawSingleOrder(status=word, filled_qty=0, filled_avg_price=None)
+    )
+
+    lookup = _alpaca_with(trading).get_order("entry-1")
+
+    assert lookup is not None
+    assert lookup.disposition is OrderDisposition.UNCLASSIFIED
+
+
+def test_a_failed_lookup_is_could_not_ask_and_never_does_not_exist():
+    """The property the caller's correctness rests on.
+
+    `get_open_orders` returning `[]` on its own failure is why the original bug
+    existed at all. A lookup that answered CANCELLED when the call failed would
+    put that bug straight back with a network error as its new trigger.
+    """
+    trading = _LookupTrading(raises=RuntimeError("connection reset by peer"))
+
+    assert _alpaca_with(trading).get_order("entry-1") is None
+
+
+def test_a_404_is_inside_that_and_is_not_read_as_a_cancellation():
+    """An id the broker has never heard of is a plausible reading of a 404, and
+    so are an expired key, a proxy and a 500. This cannot tell them apart, so it
+    does not pick the one that happens to be actionable."""
+    trading = _LookupTrading(raises=RuntimeError("404 order not found"))
+
+    assert _alpaca_with(trading).get_order("entry-1") is None
+
+
+def test_every_real_sdk_status_is_read_by_value_and_none_survives_str():
+    """The trap, measured against the real SDK rather than against a stand-in.
+
+    alpaca-py's enums subclass `(str, Enum)`, so `str(OrderStatus.CANCELED)` is
+    "OrderStatus.CANCELED" and matches no arm of any table written against the
+    values. That failure is silent and total: it is what made every resting
+    order on the Board render as `other` for weeks.
+
+    Both halves are asserted, over all eighteen statuses the installed SDK
+    defines — the value-first read classifies every one of them, and the
+    `str()` read classifies none.
+    """
+    from alpaca.trading.enums import OrderStatus as SdkOrderStatus
+
+    from bot.broker import OrderDisposition, OrderLookup
+
+    for member in SdkOrderStatus:
+        by_value = OrderLookup.classify("entry-1", broker_status=member)
+        assert by_value.broker_status == member.value, member
+        by_str = OrderLookup.classify("entry-1", broker_status=str(member))
+        assert by_str.disposition is OrderDisposition.UNCLASSIFIED, member
+        # ...which is what makes the first assertion worth making: had the
+        # value not been taken first, EVERY status would land in the fallback.
+        assert str(member) != member.value
+
+
+def test_the_mock_answers_could_not_establish_for_an_id_it_never_issued():
+    """Faithful rather than lazy. `AlpacaBroker.get_order` catches a 404 and
+    answers `None`, so both brokers say "could not establish" to an id they have
+    no record of. A mock that synthesised a cancellation would pin a path
+    production never takes — the `orders_degraded` trap exactly."""
+    broker = MockBroker()
+
+    assert broker.get_order("never-issued") is None
+
+
+def test_the_mock_can_fail_the_way_the_real_lookup_fails():
+    """Nothing in memory can fail, so without the hook the "could not ask" path
+    — the whole reason `None` is a return value — is unreachable from a test."""
+    broker = MockBroker()
+    broker.set_order("entry-1", broker_status="canceled")
+    assert broker.get_order("entry-1") is not None
+
+    broker.set_order_lookup_fails(True)
+
+    assert broker.get_order("entry-1") is None
+
+
+def test_the_mock_answers_about_an_order_it_placed():
+    """It fills instantly, so FILLED is the one thing it knows for certain."""
+    from bot.broker import OrderDisposition
+
+    broker = MockBroker()
+    broker.connect()
+    broker.set_price("SPY", bid=579.98, ask=580.02)
+
+    result = broker.place_order(_proposal(qty=10))
+
+    assert result.order_id is not None
+    lookup = broker.get_order(result.order_id)
+    assert lookup is not None
+    assert lookup.disposition is OrderDisposition.FILLED
+    assert lookup.filled_qty == 10
+    assert lookup.filled_avg_price == 580.02
+
+
+@pytest.mark.parametrize(
+    "word", ["canceled", "expired", "rejected", "filled", "new", "held", "replaced"]
+)
+def test_the_mock_and_alpaca_classify_the_same_word_identically(word):
+    """One classifier, two brokers. A double that grouped a status differently
+    from the thing it doubles would let a test pass against a reading production
+    never performs — which is the trap `orders_degraded` was found by."""
+    mock = MockBroker()
+    mock.set_order("entry-1", broker_status=word)
+    trading = _LookupTrading(
+        _RawSingleOrder(status=word, filled_qty=0, filled_avg_price=None)
+    )
+
+    from_mock = mock.get_order("entry-1")
+    from_alpaca = _alpaca_with(trading).get_order("entry-1")
+
+    assert from_mock is not None and from_alpaca is not None
+    assert from_mock.disposition is from_alpaca.disposition
+    assert from_mock.broker_status == from_alpaca.broker_status

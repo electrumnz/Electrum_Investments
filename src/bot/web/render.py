@@ -6001,8 +6001,8 @@ def _cycle(
         # cycle nobody recorded anything about.
         substituted = (
             f' &middot; <span class="alert">served by '
-            f"{_e(d.served_model_id or '')}, not the "
-            f"{_e(d.requested_model_id or '')} this cost is priced from</span>"
+            f"{_e(d.served_model_id)}, not the "
+            f"{_e(d.requested_model_id)} this cost is priced from</span>"
             if d.served_as_requested is False
             else ""
         )

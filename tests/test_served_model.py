@@ -26,15 +26,15 @@ from bot.model_client import CallUsage
 from bot.models import Decision
 
 
-def _usage(served: str | None, requested: str | None) -> CallUsage:
+def _usage(served: str, requested: str) -> CallUsage:
     return CallUsage(
         input_tokens=10,
         output_tokens=5,
         cache_read_tokens=0,
         cache_write_tokens=0,
         estimated_cost_usd=0.001,
-        served_model=served,
-        requested_model=requested,
+        served_model_id=served,
+        requested_model_id=requested,
     )
 
 
@@ -56,9 +56,9 @@ def test_no_model_id_in_the_response_is_UNKNOWN_and_never_a_mismatch() -> None:
     as `has_cycles`, `can_grade_anything` and first-visit being kept apart from
     empty.
     """
-    assert _usage(None, "claude-sonnet-5").served_as_requested is None
-    assert _usage("claude-sonnet-5", None).served_as_requested is None
-    assert _usage(None, None).served_as_requested is None
+    assert _usage("", "claude-sonnet-5").served_as_requested is None
+    assert _usage("claude-sonnet-5", "").served_as_requested is None
+    assert _usage("", "").served_as_requested is None
 
 
 def test_a_non_string_model_field_reads_as_unknown_rather_than_being_coerced() -> None:
@@ -89,7 +89,7 @@ def test_a_non_string_model_field_reads_as_unknown_rather_than_being_coerced() -
 
     client._spec = _Spec()  # type: ignore[assignment]
     usage = ModelClient._usage_from(client, _Response())  # type: ignore[arg-type]
-    assert usage.served_model is None
+    assert usage.served_model_id == ""
     assert usage.served_as_requested is None
 
 
@@ -112,8 +112,8 @@ def test_the_response_model_is_carried_through_when_it_is_a_string() -> None:
 
     client._spec = _Spec()  # type: ignore[assignment]
     usage = ModelClient._usage_from(client, _Response())  # type: ignore[arg-type]
-    assert usage.served_model == "anthropic-claude-5-sonnet"
-    assert usage.requested_model == "claude-sonnet-5"
+    assert usage.served_model_id == "anthropic-claude-5-sonnet"
+    assert usage.requested_model_id == "claude-sonnet-5"
     assert usage.served_as_requested is False
 
 
@@ -127,7 +127,8 @@ def test_the_audit_record_carries_the_served_model_and_defaults_to_unknown() -> 
     records will be read back for as long as the log exists.
     """
     old = Decision(timestamp=datetime(2026, 5, 4, 15, 0, tzinfo=UTC))
-    assert old.served_model_id is None
+    assert old.served_model_id == ""
+    assert old.served_as_requested is None
 
     recorded = Decision(
         timestamp=datetime(2026, 5, 4, 15, 0, tzinfo=UTC),
@@ -180,8 +181,12 @@ def test_agreement_and_an_unrecorded_pair_both_render_nothing() -> None:
 
     for served, requested in (
         ("claude-sonnet-5", "claude-sonnet-5"),
-        (None, None),
-        ("claude-sonnet-5", None),
+        ("", ""),
+        ("claude-sonnet-5", ""),
+        # The dated snapshot Anthropic actually returns. A caveat that fired
+        # here would fire on every ordinary call, and a warning nobody reads
+        # leaves the real substitution as invisible as it was before.
+        ("claude-sonnet-5-20260401", "claude-sonnet-5"),
     ):
         d = Decision(
             timestamp=datetime(2026, 5, 4, 15, 0, tzinfo=UTC),

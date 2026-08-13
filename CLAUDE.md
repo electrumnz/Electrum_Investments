@@ -1162,6 +1162,92 @@ Decisions page and a query that answer it, not the heartbeat. Checked against a
 live cycle, because the claim had been repeated into three documents without
 anybody reading a log line to confirm it.
 
+### The sizing ceilings are two UNITS, and the model compares numbers
+
+The caps reach the model as percentages and the inputs in dollars, so it was
+doing five steps across two documents and skipping the one requiring a
+subtraction — 185 shares proposed where 91 was permitted. `context.sizing_ceilings`
+renders the ceilings in dollars, which fixed that.
+
+**It moved the error rather than removing it.** Measured over 320 live calls:
+the subtraction is now handled, and every material over-size is CROSS-UNIT — the
+model does the RISK division and never checks the POSITION VALUE ceiling.
+`deepseek-v4-pro` was 7.1x over on buying power five times, once 14.4x.
+
+**The block already printed both units and already said "take the smaller".**
+That sentence was in the document for every one of the sixteen over-sized
+proposals, and it is not even well posed: the units differ, so the smaller
+NUMBER is not the tighter constraint, and a model comparing them as numbers
+picks the risk ceiling every time.
+
+So the two are made COMPARABLE instead. With risk ceiling `R`, value ceiling
+`V`, entry `p` and stop distance `d`, value binds when `V/p < R/d`, i.e. when
+`d/p < R/V` — and **`R/V` carries no price and no stop**, so it is computed here
+and rendered as one dimensionless figure. The model makes one comparison against
+its own stop and one division. That is the shape that worked for the
+subtraction, rather than a second figure beside the first.
+
+**The finding that reframes it: on the shipped rules the crossover for
+`us_equity` is 2.000% of entry.** One ATR on a $500 name is well under that, so
+POSITION VALUE is the binding unit for essentially every realistic equity stop —
+the block was presenting the ceiling that binds MOST of the time as the
+afterthought.
+
+**A crossover must never be phrased as "your stop must be at least X%".** That
+is an opinion on placement arriving through the renderer — a minimum stop
+distance nobody agreed to, and one obeyed by WIDENING the stop, which buys a
+bigger loss at the same percentage. It is stated as a property of the
+arithmetic, with the disclaimer on the same line, and a test pins it.
+
+Still no worked maximum quantity, for the reason that has not changed: both
+branches divide by something only the agent knows, so neither resolves to a
+share count, and a worked example at the current price would read as a
+recommendation to trade at that size.
+
+### A stop tightened to nothing is REPORTED, never refused
+
+Size is the ceiling divided by stop distance, and `RiskGate` deliberately holds
+no opinion on placement — `_stops_on_correct_side` checks only which side.
+Measured: `qwen3-coder-flash` proposed a $0.05 stop against a $1.32 ATR, 0.04
+ATR, inside the spread, which at the same stated risk buys a position about
+twenty-six times larger than a 1-ATR stop would.
+
+`context.stop_width` measures every proposal against the ATR the loop already
+recorded and states the multiple on ALL of them, so a clean cycle is a stated
+fact rather than the absence of a warning. A symbol with no ATR is **UNMEASURED,
+never fine**.
+
+**Do not close this by making the gate reject a tight stop.** That is the
+placement opinion this repository refuses to put in the gate, and
+`tests/test_context.py` drives the real gate at a 0.008-ATR stop and asserts
+APPROVED — so the tempting repair is a red build. The real protection is the
+VALUE ceilings, which is why the crossover above had to land first.
+
+The prompt says a stop is a claim about where the thesis is wrong rather than a
+lever on size, and states **no numeric threshold** — a limit in the prompt is a
+limit nobody can read off `config/rules.yaml`.
+
+### The served model is read back, and reported rather than enforced
+
+`CallUsage` carries `requested_model_id`, `served_model_id` and a three-valued
+`served_as_requested`. Read with the same suspicion as the token counts: the SDK
+builds responses with `construct_type`, which does not validate, so a non-string
+is treated as **absent** rather than `str()`-coerced — a coerced `None` becomes
+the literal `"None"`, an id matching nothing, inventing a substitution out of a
+transport fault. Empty is *could not ask*, never agreement.
+
+A dated snapshot of the requested alias counts as the same model, and the
+exemption is deliberately narrow — hyphen plus exactly eight digits — because a
+bare prefix rule would mask `nemotron-3-ultra` → `nemotron-3-ultra-550b`, which
+is exactly the substitution this exists to catch.
+
+**It does not fail the cycle, and that is a decision rather than an omission.**
+Nothing had ever recorded which model answered, so there is no evidence of how
+often the two differ at that endpoint, and a hard failure keyed on an unmeasured
+comparison could kill 96 cycles a day. Report it, read the audit log for a week,
+and only then decide. Note `served_as_requested is None` must never be a failure
+even then: a proxy omitting the field is a transport gap, not a substitution.
+
 ### The model call is a feed too, and prose truncates while numbers reject
 
 The same rule as the feeds below, learned the hard way. `claude.propose` was

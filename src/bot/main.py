@@ -398,7 +398,7 @@ def cmd_smoketest(env: Env, rules: Rules, *, force_mock: bool = False) -> int:
             # ASKED for, so if these two disagree the figure on this line is
             # priced against the wrong weights. Reported, never enforced — see
             # `CallUsage.served_as_requested`.
-            served_model=usage.served_model,
+            served_model=usage.served_model_id,
             served_as_requested=usage.served_as_requested,
         )
         _note_unpriced_call(audit, usage, model_id=claude.model_id, where="smoketest")
@@ -410,8 +410,8 @@ def cmd_smoketest(env: Env, rules: Rules, *, force_mock: bool = False) -> int:
                 claude_output_tokens=usage.output_tokens,
                 claude_cached_tokens=usage.cache_read_tokens,
                 estimated_cost_usd=_recorded_cost(usage.estimated_cost_usd),
-                served_model_id=usage.served_model,
-                requested_model_id=usage.requested_model,
+                served_model_id=usage.served_model_id,
+                requested_model_id=usage.requested_model_id,
                 notes=f"smoketest assessment: {decision.market_assessment}",
             )
         )
@@ -947,6 +947,9 @@ def cmd_loop(
                     entries_corrected=len(recon.entries_corrected),
                     entries_resting=recon.entries_resting,
                     entries_mid_fill=recon.entries_mid_fill,
+                    entries_unchecked=recon.entries_unchecked,
+                    entries_unresolved=recon.entries_unresolved,
+                    entries_never_opened=recon.entries_never_opened,
                     closes_deferred=recon.closes_deferred,
                     plan_abandoned=len(recon.plan_abandoned),
                     next_cycle_seconds=env.decision_interval_seconds,
@@ -1367,8 +1370,8 @@ def cmd_loop(
                     # afterwards. The heartbeat says it once and scrolls; a
                     # decision three months old still has to be able to answer
                     # "which weights sized this position".
-                    served_model_id=usage.served_model,
-                    requested_model_id=usage.requested_model,
+                    served_model_id=usage.served_model_id,
+                    requested_model_id=usage.requested_model_id,
                     notes=decision.market_assessment,
                 )
             )
@@ -1417,6 +1420,8 @@ def cmd_loop(
                     "entries_resting": recon.entries_resting,
                     "entries_mid_fill": recon.entries_mid_fill,
                     "entries_unchecked": recon.entries_unchecked,
+                    "entries_unresolved": recon.entries_unresolved,
+                    "entries_never_opened": recon.entries_never_opened,
                     "entries_ambiguous": recon.entries_ambiguous,
                     "closes_deferred": recon.closes_deferred,
                     # Why each position that closed this cycle closed — the
@@ -1493,7 +1498,7 @@ def cmd_loop(
                 # substitution is invisible everywhere else: the call succeeds,
                 # the schema validates, and the cost is priced against the
                 # model that was asked for.
-                served_model=usage.served_model,
+                served_model=usage.served_model_id,
                 served_as_requested=usage.served_as_requested,
                 risk_understated=recon.risk_is_understated,
                 # On the cycle line rather than only in a warning, so a reader
@@ -1543,6 +1548,26 @@ def cmd_loop(
                 entries_corrected=len(recon.entries_corrected),
                 entries_resting=recon.entries_resting,
                 entries_mid_fill=recon.entries_mid_fill,
+                # The three states where the entry order could not be squared,
+                # and they are three different findings rather than one.
+                # `closes_deferred` below names WHICH symbol was held back and
+                # never WHY, so on its own it cannot tell a routine
+                # out-of-hours entry from an order the broker says was
+                # cancelled — and only one of those needs somebody.
+                #
+                # `unchecked` is no order id on the row or a degraded order
+                # read: nothing was asked. `unresolved` is asked and still
+                # unanswered — a failed lookup, an unclassifiable status, or an
+                # answer that contradicts what is held. `never_opened` is the
+                # settled one: the broker says cancelled, expired or rejected
+                # with nothing filled, so the trade never opened, the row is
+                # still counting planned risk it will never lose, and it takes
+                # an operator to retire it. On the line for the reason
+                # `stops_breached` is: a stated empty list each cycle is a
+                # fact, and an absent field is what an outage looks like.
+                entries_unchecked=recon.entries_unchecked,
+                entries_unresolved=recon.entries_unresolved,
+                entries_never_opened=recon.entries_never_opened,
                 # A close withheld because the entry may still be resting. An
                 # out-of-hours order rests until the next open, and without this
                 # it was closed as a trade on the very next cycle.

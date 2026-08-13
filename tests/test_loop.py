@@ -66,7 +66,7 @@ class _StubClaude:
     #: differs from the original in its resting state pins a path production
     #: never takes — the trap `Broker.orders_degraded` was found by. A test
     #: about a substitution overrides it.
-    served: str | None = "claude-haiku-4-5-20251001"
+    served: str = "claude-haiku-4-5-20251001"
 
     def propose(self, market_context: str) -> tuple[ModelDecision, CallUsage]:
         return self._decision, CallUsage(
@@ -75,8 +75,8 @@ class _StubClaude:
             cache_read_tokens=0,
             cache_write_tokens=0,
             estimated_cost_usd=self.cost,
-            served_model=self.served,
-            requested_model=self.model_id,
+            served_model_id=self.served,
+            requested_model_id=self.model_id,
         )
 
 
@@ -1391,11 +1391,20 @@ def test_the_cycle_line_carries_what_reconcile_found_about_the_entry(
         "entries_corrected",
         "entries_resting",
         "entries_mid_fill",
+        # The three that say the entry could NOT be squared, and they are three
+        # different findings. `closes_deferred` names which symbol was held
+        # back and never why, so without these a routine out-of-hours entry and
+        # an order the broker says was cancelled read identically.
+        "entries_unchecked",
+        "entries_unresolved",
+        "entries_never_opened",
         "closes_deferred",
         "plan_abandoned",
     ):
         assert field in beat, f"{field} is not on the cycle line"
     assert beat["entries_resting"] == []
+    assert beat["entries_unresolved"] == []
+    assert beat["entries_never_opened"] == []
     assert beat["plan_abandoned"] == 0
 
 
@@ -1422,10 +1431,68 @@ def test_a_shut_market_still_states_what_reconcile_found_about_the_entry(
         "entries_corrected",
         "entries_resting",
         "entries_mid_fill",
+        "entries_unchecked",
+        "entries_unresolved",
+        "entries_never_opened",
         "closes_deferred",
         "plan_abandoned",
     ):
         assert field in skip, f"{field} is absent while the market is shut"
+
+
+def test_a_cancelled_entry_reaches_the_cycle_line_as_a_settled_fact(
+    monkeypatch, tmp_path
+):
+    """The reason `closes_deferred` alone was not enough.
+
+    An out-of-hours entry resting until the next open and an entry the broker
+    cancelled hours ago both defer their close, so on `closes_deferred` they
+    are the same symbol in the same list. Only one of them is holding planned
+    risk the account will never lose, and only one needs somebody. The reason
+    is on the line now, so a reader can tell them apart without opening the
+    audit log.
+    """
+    from bot.broker import MockBroker
+    from bot.models import Direction, FillState, Trade
+
+    broker = MockBroker(starting_equity=100_000.0)
+    broker.connect()
+    broker.set_price("SPY", bid=789.98, ask=790.02)
+    broker.set_open_orders([])                       # nothing resting
+    broker.set_order("entry-1", broker_status="canceled")
+
+    journal = Journal(tmp_path / "journal.db")
+    journal.record_entry(
+        Trade(
+            symbol="SPY",
+            direction=Direction.SELL,
+            qty=21,
+            entry_time=datetime(2026, 5, 4, 15, 0, tzinfo=UTC),
+            entry_price=772.84,
+            planned_stop=820.0,
+            submitted_qty=21,
+            submitted_price=772.84,
+            fill_state=FillState.UNCONFIRMED,
+            entry_order_id="entry-1",
+            rationale="Journalled from the proposal, then cancelled at Alpaca.",
+        )
+    )
+
+    logs = _cycle_with_broker(
+        monkeypatch,
+        tmp_path,
+        ModelDecision(market_assessment="Holding.", proposals=[]),
+        broker,
+        journal=journal,
+    )
+
+    beat = _heartbeat(logs)
+    assert beat["entries_never_opened"] == ["SPY"]
+    assert beat["entries_unresolved"] == []
+    assert beat["closes_deferred"] == ["SPY"]
+    # And it is still open in the journal, still counting its planned risk.
+    assert [t.symbol for t in journal.open_trades()] == ["SPY"]
+    assert journal.closed_trades() == []
 
 
 def test_a_position_with_no_resting_stop_is_named_rather_than_counted_clean(
@@ -2735,7 +2802,7 @@ def test_a_response_carrying_no_model_id_reads_as_unknown_on_the_pulse(
     """
 
     class _Anonymous(_StubClaude):
-        served = None
+        served = ""
 
     logs = _run_one_cycle(
         monkeypatch,
@@ -2744,7 +2811,7 @@ def test_a_response_carrying_no_model_id_reads_as_unknown_on_the_pulse(
         client_cls=_Anonymous,
     )
     beat = _heartbeat(logs)
-    assert beat["served_model"] is None
+    assert beat["served_model"] == ""
     assert beat["served_as_requested"] is None
 
 

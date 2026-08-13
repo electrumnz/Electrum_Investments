@@ -328,12 +328,29 @@ def build_market_context(
             )
             for reason in verdict.reasons:
                 lines.append(f"    - {reason}")
+            # **How wide that stop was, in the instrument's own daily range.**
+            # Deterministic, outcome-free and true regardless of how the trade
+            # would have gone, which is what makes it safe to feed back — the
+            # same test the gate's verdicts pass and the P&L history fails.
+            # Nothing here refuses anything: `RiskGate` holds no opinion on
+            # placement and neither does this line. See `StopWidth`.
+            lines.append(f"    - {stop_width(proposal, indicators or {}).render()}")
         lines.append(
             "The gate is deterministic code, not a reader you can persuade. A "
             "rejection above will happen again, identically, for the same "
             "proposal. If you still want the trade, fix the specific defect "
             "named — size down to fit the cap, move the stop, wait for the "
             "session — and do not re-send it unchanged or argue with the reason."
+        )
+        # The ATR is THIS cycle's, not the one that was on screen when the
+        # proposal was made. Stated rather than implied, for the same reason the
+        # age of a carried-over watch is: a figure whose vintage is unstated is
+        # read as current, and the cycle gap can be a whole weekend.
+        lines.append(
+            "The ATR each stop is measured against is the one in THIS cycle's "
+            "Indicators section, not the reading you had when you proposed it. "
+            "No gate refuses a stop for being tight — where it goes is yours — "
+            "so the multiple is a fact about the plan and never a rejection."
         )
         lines.append("")
 
@@ -486,11 +503,19 @@ class Ceiling:
         return self.headroom_usd is not None and self.headroom_usd < NEGLIGIBLE_USD
 
     def render(self) -> list[str]:
+        # **The unit is repeated on the figure itself, not left to the heading
+        # above it.** Measured 13 Aug 2026: every material over-size in a
+        # 160-call run was a model that did the RISK division and never checked
+        # a VALUE ceiling, so a figure lifted out of its section and divided
+        # into is exactly what happens. A line that carries its own unit cannot
+        # be read as the other one, and the cost is four words.
         if self.headroom_usd is None:
             return [f"- {self.label}: {HEADROOM_UNKNOWN} — {self.unknown_note}"]
         if self.is_spent:
             return [f"- {self.label}: {BUDGET_SPENT} — {self.spent_note}"]
-        out = [f"- {self.label}: ${self.headroom_usd:,.2f} ({self.basis})"]
+        out = [
+            f"- {self.label}: ${self.headroom_usd:,.2f} of {self.unit} ({self.basis})"
+        ]
         if self.caveat:
             out.append(f"    {self.caveat}")
         return out
@@ -878,7 +903,7 @@ def _tightest_line(ceilings: list[Ceiling], class_key: str, unit: str) -> str:
     smallest, label = min(known, key=lambda pair: pair[0])
     line = (
         f"- Tightest {unit} ceiling for a {class_key} trade: ${smallest:,.2f} "
-        f"— {label.lower()}."
+        f"of {unit} — {label.lower()}."
     )
 
     overstated = [c for c in applicable if c.caveat]
@@ -896,6 +921,200 @@ def _tightest_line(ceilings: list[Ceiling], class_key: str, unit: str) -> str:
             f"smaller size or no trade, never a larger one."
         )
     return line
+
+
+# ------------------------------------------------- which of the two units binds
+#
+# **Item 21 moved the error rather than removing it, and this is where it moved
+# to.** Five arithmetic steps became one division, and the models now do that
+# division reliably and stop. Measured 13 Aug 2026 over 160 live calls through
+# the real `ModelClient`, the real `build_market_context` and the real
+# `RiskGate`: every material over-size in the run was a model that divided the
+# RISK ceiling by its stop and never looked at a POSITION VALUE ceiling.
+# `deepseek-v4-pro` — five proposals at 7.06-7.27x buying power, three at
+# 2.06-2.13x gross exposure, one at 14.39x. `nemotron-3-ultra-550b`, the model
+# live in production, missed it once at 1.51x.
+#
+# **The obvious repair is the one that has already failed.** Printing a second
+# worked figure and asking for the minimum of two is exactly the delegation that
+# broke one level up: the block ALREADY printed both units, and already said
+# "then check what that quantity is worth against the tightest POSITION VALUE
+# ceiling and take the smaller". That sentence was in the document for every one
+# of those over-sized proposals.
+#
+# (The one-share round-up is a different and much smaller defect and must not be
+# counted with these — seven of deepseek's sixteen over-sizes are 1.00-1.01x,
+# 145 where 144.3 was permitted. The gate refuses them correctly and the remedy
+# is the sentence telling the model to round DOWN.)
+#
+# Worse, "take the smaller" is not even well posed. The two figures are in
+# different units, so the smaller NUMBER is not the tighter constraint — a $500
+# risk ceiling and a $50,000 value ceiling say nothing about each other until a
+# stop distance exists to convert between them. A model asked to compare them as
+# numbers will pick the risk ceiling every time, which is what it was doing
+# anyway.
+#
+# **So the two are made comparable instead, and the conversion factor is a
+# number this module can compute.** With a risk ceiling R, a value ceiling V, an
+# entry price p and a stop distance d:
+#
+#     risk binds when   q <= R/d        value binds when   q <= V/p
+#     V/p < R/d   <=>   d/p < R/V
+#
+# `R/V` is dimensionless. It needs no price and no stop, so it can be computed
+# here, and it says the whole thing in one number: **below a stop this fraction
+# of entry, the POSITION VALUE ceiling is the binding one.** The model then does
+# ONE comparison against its own stop and ONE division — the same shape as the
+# fix that worked, rather than a second figure beside the first.
+#
+# Two things that shape the wording and are not decoration:
+#
+# - **It is not a minimum stop distance and must never read as one.** The gate
+#   holds no opinion on where a stop goes and neither does this file; a
+#   crossover phrased as "your stop must be at least X%" is that opinion
+#   arriving through the renderer. It is stated as a property of the ARITHMETIC,
+#   with the disclaimer on the same line, and `tests/test_context.py` pins it.
+# - **The value branch is the ordinary case, not the exception.** On the shipped
+#   rules the crossover for an equity is around 2% of entry, and one ATR on a
+#   $500 name is well under that. `CLAUDE.md` has said the consequence out loud
+#   for a year — "a 1%-risk trade with a 2% stop is a position worth about 48%
+#   of equity" — and the block presented the ceiling that binds most often as
+#   the afterthought check.
+
+
+def _tightest_figure(
+    ceilings: list[Ceiling], class_key: str, unit: str
+) -> float | None:
+    """The smallest applicable ceiling in one unit, as a number, or `None`.
+
+    `None` covers three states deliberately — no applicable ceiling, one that
+    cannot be established, and one that is spent — because the only caller,
+    `crossover_stop_pct`, must refuse to answer in all three. `_tightest_line`
+    is what tells them apart, in words, and it is the right place for that: this
+    is arithmetic and arithmetic has nothing to say about a budget that is gone.
+
+    A spent ceiling is excluded rather than used at its (tiny, possibly
+    negative) figure. Dividing by it would produce a crossover, and a crossover
+    computed from a budget that is spent is a plausible wrong figure standing
+    where "nothing fits at any size" belongs.
+    """
+    applicable = [c for c in ceilings if c.unit == unit and c.applies_to(class_key)]
+    if not applicable:
+        return None
+    if any(c.headroom_usd is None or c.is_spent for c in applicable):
+        return None
+    figures = [c.headroom_usd for c in applicable if c.headroom_usd is not None]
+    return min(figures) if figures else None
+
+
+def crossover_stop_pct(ceilings: list[Ceiling], class_key: str) -> float | None:
+    """Stop distance as a percentage of entry price, where the two units cross.
+
+    Below this the POSITION VALUE ceiling binds; at or above it the RISK ceiling
+    does. Derived in the block comment above; it is `tightest risk / tightest
+    value`, which is dimensionless and therefore needs neither a price nor a
+    stop.
+
+    `None` means there is no crossover to state, which is never the same as
+    "there is no constraint": it is either that one of the two units has no
+    figure at all — spent, unknown, absent — or that the value ceiling is
+    non-positive. Each of those is already a stronger statement than a
+    crossover, and the renderer says which.
+    """
+    risk = _tightest_figure(ceilings, class_key, RISK_UNIT)
+    value = _tightest_figure(ceilings, class_key, VALUE_UNIT)
+    if risk is None or value is None or value <= 0:
+        return None
+    return risk / value * 100
+
+
+def _no_crossover_note(ceilings: list[Ceiling], class_key: str) -> str:
+    """Why a class has no crossover, in the same words the two units already use.
+
+    Named rather than left blank, and named per UNIT. "No crossover" on its own
+    invites the reading that nothing constrains this class, which is the exact
+    inversion of the truth in the case that produces it most often — a budget
+    that is spent.
+    """
+    reasons: list[str] = []
+    for unit in (RISK_UNIT, VALUE_UNIT):
+        applicable = [c for c in ceilings if c.unit == unit and c.applies_to(class_key)]
+        if not applicable:
+            reasons.append(f"no {unit} ceiling is in force")
+        elif any(c.headroom_usd is None for c in applicable):
+            reasons.append(f"the tightest {unit} ceiling is {HEADROOM_UNKNOWN}")
+        elif any(c.is_spent for c in applicable):
+            reasons.append(f"the tightest {unit} ceiling is {BUDGET_SPENT}")
+    return "; ".join(reasons)
+
+
+def _crossover_lines(ceilings: list[Ceiling], class_key: str) -> list[str]:
+    """One class's answer to "which unit binds", as the two branches of a divide.
+
+    The formulae carry the class's own figures substituted in, which is NOT the
+    worked maximum quantity the operator ruled out: both sides still divide by
+    something only the agent knows — its stop distance on one branch, its limit
+    price on the other — so neither resolves to a share count here. What is
+    removed is the step that was measured being skipped, not the step that is
+    the agent's to take.
+    """
+    risk = _tightest_figure(ceilings, class_key, RISK_UNIT)
+    value = _tightest_figure(ceilings, class_key, VALUE_UNIT)
+    crossover = crossover_stop_pct(ceilings, class_key)
+    if risk is None or value is None or crossover is None:
+        note = _no_crossover_note(ceilings, class_key)
+        return [
+            f"- {class_key}: NO CROSSOVER TO STATE — {note}. That is a stronger "
+            f"answer than a crossover, not a weaker one: no stop distance makes "
+            f"a {class_key} position fit, so there is nothing to divide."
+        ]
+
+    lines = [
+        f"- {class_key}: the two ceilings cross at a stop {crossover:.3f}% of "
+        f"your entry price.",
+        f"    stop that far from entry or WIDER — RISK binds: "
+        f"qty = ${risk:,.2f} / |limit_price - stop_loss_price|",
+        f"    stop TIGHTER than that — POSITION VALUE binds: "
+        f"qty = ${value:,.2f} / limit_price",
+    ]
+    if crossover >= 100:
+        # A long's stop is above zero, so its distance is always under 100% of
+        # entry. Stating it rather than leaving the reader to notice: a
+        # crossover it is arithmetically impossible to reach reads as an
+        # unreachable requirement unless somebody says which branch that leaves.
+        lines.append(
+            "    That crossover is at or above 100% of entry, which a long's "
+            "stop cannot reach — so POSITION VALUE binds on every long here."
+        )
+    # **A caveat on either side travels into the crossover, and the two sides
+    # travel in OPPOSITE directions.** `R/V` is overstated when R is and
+    # understated when V is, so a single sentence covering both would be wrong
+    # half the time — which is why the unit is tested rather than the set. Today
+    # only the portfolio risk ceiling carries a caveat, so the value branch is
+    # unreachable; it is written because the branch that cannot be reached is
+    # the one nobody checks when a second caveat is added.
+    caveated = {
+        c.unit for c in ceilings if c.caveat and c.applies_to(class_key)
+    }
+    if RISK_UNIT in caveated:
+        # The safe direction: an overstated R makes the crossover too HIGH,
+        # which sends more stops into the POSITION VALUE branch and therefore to
+        # a smaller size. Said out loud anyway — a figure that is an upper bound
+        # must not print as a measurement whichever way the error runs.
+        lines.append(
+            "    UPPER BOUND: the RISK ceiling above it is overstated (see its "
+            "own note), so the true crossover is lower. That errs toward the "
+            "POSITION VALUE branch, which is the smaller size and the safe "
+            "direction."
+        )
+    if VALUE_UNIT in caveated:
+        lines.append(
+            "    LOWER BOUND: the POSITION VALUE ceiling above it is overstated "
+            "(see its own note), so the true crossover is HIGHER. That errs "
+            "toward the RISK branch, which is the larger size — treat this "
+            "crossover as a floor and size below what it selects."
+        )
+    return lines
 
 
 def render_sizing_ceilings(
@@ -979,10 +1198,17 @@ def render_sizing_ceilings(
     out.append("")
     out.append(
         "No maximum quantity is given here, deliberately: it depends on where "
-        "you put the stop, and the stop is yours. Divide the tightest RISK "
-        "ceiling by your stop distance to get a quantity, then check what that "
-        "quantity is worth against the tightest POSITION VALUE ceiling and take "
-        "the smaller. A figure below is a ceiling, not a target."
+        "you put the stop, and the stop is yours. What is given instead is the "
+        "stop distance at which the two units CROSS, in the last section below "
+        "— one comparison against your own stop, then one division. A figure "
+        "below is a ceiling, not a target."
+    )
+    out.append(
+        "The two figures cannot be compared as numbers. A $500 risk ceiling and "
+        "a $50,000 value ceiling say nothing about each other until your stop "
+        "exists to convert between them, so the smaller NUMBER is not the "
+        "tighter constraint and 'take the smaller of the two' is not a rule "
+        "that can be followed."
     )
     out.append(
         "Do not move the stop to make a size fit. A tighter stop buys more "
@@ -1009,6 +1235,43 @@ def render_sizing_ceilings(
             if line:
                 out.append(line)
 
+    # **The section that closes the cross-unit gap, and it goes LAST on
+    # purpose.** It is the only thing here a quantity is arrived at through, so
+    # it sits after every figure it selects between rather than above them —
+    # the same reason the sizing block as a whole sits under the account
+    # figures. A recipe printed before its inputs is a recipe read from memory.
+    if classes:
+        out.append("")
+        out.append("### Which ceiling binds — ONE comparison, then ONE division")
+        out.append(
+            "Measure your stop as a fraction of your entry — "
+            "|limit_price - stop_loss_price| / limit_price — and compare it "
+            "with the crossover for the class. That comparison picks ONE of the "
+            "two ceilings above. Divide by the matching denominator and round "
+            "DOWN."
+        )
+        for class_key in classes:
+            out.extend(_crossover_lines(ceilings, class_key))
+        out.append(
+            "Round DOWN in both branches. A quantity rounded UP is refused by "
+            "the gate, and it is refused for a single share."
+        )
+        out.append(
+            "Take the branch. Do NOT do the RISK division and stop there: a "
+            "stop tighter than the crossover is the ORDINARY case for an equity "
+            "— one ATR on a $500 name is well under 1% of it — so POSITION "
+            "VALUE is the unit that binds most of the time, and the RISK "
+            "division alone then returns a quantity several times what the gate "
+            "will take. That has been measured at 2x, at 7x, and once at 14x."
+        )
+        out.append(
+            "The crossover is NOT a minimum stop distance and NOT a view on "
+            "where your stop belongs. Nothing here has an opinion on placement. "
+            "Widening a stop to land on the other side of it buys a larger loss "
+            "at the same size: what the comparison changes is which division "
+            "you do, never which trade is worth making."
+        )
+
     out.append("")
     # The two HALTING gates lead, because they are a different kind of refusal
     # from the rest of this list: the others refuse a trade, these refuse every
@@ -1024,6 +1287,135 @@ def render_sizing_ceilings(
         "every figure above."
     )
     return out
+
+
+# ------------------------------------------- how wide a stop actually is
+#
+# **Size is the ceiling divided by the stop distance, so a stop tightened
+# towards nothing buys a position tending towards infinity.** Measured 13 Aug
+# 2026 in the same run as the cross-unit gap: `qwen3-coder-flash` proposed KO
+# with a $0.05 stop against a $1.32 ATR — 0.04 ATR, inside the spread — which at
+# the same stated risk is a position roughly twenty-six times the size a 1-ATR
+# stop would have bought. Its median was 0.83 ATR against 1.65-1.66 for
+# `nemotron-3-ultra-550b` and `deepseek-v4-pro`.
+#
+# **This REPORTS and it must never refuse.** A minimum stop distance is the
+# opinion-on-placement `RiskGate` exists without: `_stops_on_correct_side`
+# checks which SIDE of entry a level sits on and nothing else, deliberately,
+# because a wider stop already buys a smaller position and the cost is what the
+# gate measures. A floor here would be a rule nobody agreed to arriving through
+# the back door — and it would arrive in the module that renders prompts, which
+# is worse, because a limit stated in a document is a limit nobody can read off
+# `config/rules.yaml`.
+#
+# So this is arithmetic and a sentence, in the same shape as `stops_unchecked`:
+#
+# - **A symbol with no ATR is UNMEASURED, never fine.** `fetch_indicators` drops
+#   a symbol whose bars failed, so an absent ATR means "could not ask". Reading
+#   that as a stop of acceptable width is the `calendar_degraded` mistake with a
+#   position attached.
+# - **The multiple is stated on every proposal, not only on the tight ones.** A
+#   zero-breach cycle has to be a stated fact rather than the absence of a
+#   warning, which is also what an outage looks like.
+# - **The threshold flags; it does not judge.** 0.5 ATR sits below the 0.83
+#   median of the worst model measured and far below the 1.65 of the two best,
+#   so it names the pathological case without calling an ordinary tight stop
+#   wrong. Nothing downstream reads it as permission or refusal.
+TIGHT_STOP_ATR = 0.5
+
+
+@dataclass(frozen=True)
+class StopWidth:
+    """One proposal's stop distance, in the instrument's own daily range.
+
+    Three states rather than two, for the usual reason: measured and wide,
+    measured and tight, and NOT MEASURED. The third is not a mild version of the
+    first — it is the question having been asked and not answered.
+    """
+
+    symbol: str
+    stop_distance_usd: float
+    atr_14: float | None
+
+    @property
+    def atr_multiple(self) -> float | None:
+        """Stop distance in ATRs, or `None` when there is no ATR to divide by.
+
+        A non-positive ATR is `None` too rather than a division: it is what a
+        flat or unreadable series produces, and an infinite multiple would be a
+        confident answer built on nothing.
+        """
+        if self.atr_14 is None or self.atr_14 <= 0:
+            return None
+        return self.stop_distance_usd / self.atr_14
+
+    @property
+    def is_measured(self) -> bool:
+        return self.atr_multiple is not None
+
+    @property
+    def is_tight(self) -> bool:
+        """Under the reporting threshold, and MEASURED. An unknown is not tight."""
+        multiple = self.atr_multiple
+        return multiple is not None and multiple < TIGHT_STOP_ATR
+
+    def render(self) -> str:
+        """One clause, for a surface or for the model's own feedback block."""
+        if not self.is_measured:
+            return (
+                f"stop ${self.stop_distance_usd:,.4f} from entry — ATR UNMEASURED "
+                f"for {self.symbol}, so the stop cannot be put in the "
+                f"instrument's own terms. Not checked, which is not the same as "
+                f"fine."
+            )
+        multiple = self.atr_multiple
+        atr = self.atr_14
+        # Guarded by `is_measured`; restated for the type checker rather than
+        # asserted, because a renderer that raised would take a page down over a
+        # descriptive line.
+        if multiple is None or atr is None:  # pragma: no cover - unreachable
+            return ""
+        line = (
+            f"stop ${self.stop_distance_usd:,.4f} from entry = {multiple:.2f} ATR "
+            f"(ATR {atr:,.4f})"
+        )
+        if self.is_tight:
+            line += (
+                f", under {TIGHT_STOP_ATR:.2f} ATR — inside a single day's "
+                f"average range, so ordinary noise reaches it before the thesis "
+                f"is tested, at the largest size the ceilings allow. Reported, "
+                f"not refused: where the stop goes is yours."
+            )
+        return line
+
+
+def stop_width(
+    proposal: OrderProposal, indicators: Mapping[str, Indicators]
+) -> StopWidth:
+    """Measure one proposal's stop against the ATR the loop actually recorded.
+
+    The ATR is read rather than derived, exactly as everywhere else — the model
+    is handed figures and this is handed the same ones. A symbol absent from
+    `indicators` yields `atr_14=None`, which renders as unmeasured.
+    """
+    reading = indicators.get(proposal.symbol)
+    return StopWidth(
+        symbol=proposal.symbol,
+        stop_distance_usd=abs(proposal.limit_price - proposal.stop_loss_price),
+        atr_14=reading.atr_14 if reading is not None else None,
+    )
+
+
+def measure_stop_widths(
+    proposals: list[OrderProposal], indicators: Mapping[str, Indicators]
+) -> list[StopWidth]:
+    """Every proposal's stop width, in order, including the unmeasurable ones.
+
+    A list rather than a mapping, and that is load-bearing: two proposals on one
+    symbol are two different stops, and keying by symbol would silently report
+    one of them. Order matches `proposals`, so a caller can zip the two.
+    """
+    return [stop_width(p, indicators) for p in proposals]
 
 
 def render_grants(grants: GrantBriefing, *, now: datetime) -> list[str]:

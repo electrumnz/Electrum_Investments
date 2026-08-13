@@ -245,6 +245,38 @@ the `data/`-and-`audit/` conftest guard will fail every other agent's suite —
 and point Playwright at loopback with
 `executable_path="/opt/pw-browsers/chromium-1194/chrome-linux/chrome"`.
 
+**There IS a fix, found 13 Aug 2026, and it is worth recording so this stops
+reading as a dead end.** The agent proxy's own status endpoint
+(`curl http://127.0.0.1:39717/__agentproxy/status`) reports `noProxy`
+containing **`100.64.0.0/10`** — the Tailscale CGNAT range. So traffic to a
+TAILNET address bypasses the proxy entirely and goes direct, where the Funnel
+hostname resolves publicly, goes through the proxy, and has its TLS
+re-terminated there. `recentRelayFailures` is empty, which confirms the reset
+is the gateway rather than a policy denial.
+
+**So joining the session container to the tailnet fixes it** — install
+Tailscale, auth with an EPHEMERAL key so the node self-reaps, and Chromium
+reaches the dashboard over `100.x.y.z` with no proxy, no MITM and no Funnel
+gateway in the way. Ten minutes. The alternative is running Playwright on the
+droplet itself against `127.0.0.1:8787`, which has no network problem at all
+and costs ~400 MB of Chromium on a 2 GB box.
+
+**Neither is recommended for AUDITING, and that is the point worth keeping.**
+The live box shows exactly ONE state. A functional audit needs the states that
+are not on screen: a cold start where the poller has never read, a degraded
+feed, an empty prophecy shelf against one where every condition is settled, an
+expired grant still holding a position, a stale-reading banner. All of those
+are seconds away against `--mock` and unreachable against production.
+
+That is not theoretical. The grading card that reported patience over the dream
+stuck hardest only misbehaved on a MIXED shelf, and the "no claim to settle"
+state needed a shelf nobody had. Neither is reachable on live data.
+
+**Live access is for VERIFICATION rather than for auditing** — confirming the
+deployed thing matches the code — and `curl` already does that, which is how
+the auth gate was checked on every route and the figures cross-checked to the
+cent on 10 Aug.
+
 Anything in this file phrased as "verify on the box" means exactly that: it
 needs a session with the credentials, or the operator at a shell on the droplet.
 Do not report these as done from a container that cannot see them.
@@ -2146,6 +2178,9 @@ sets with category names. So:
 Confirm by ASKING THE AGENT to look something up, never by reading `/tools`,
 which renders the unfiltered catalogue and misleads in both directions.
 
+The original item follows: it argued the case for a separate process
+before one existed, and the argument is what the build was checked against.
+
 ### Still to build
 
 Nothing calls it. A caller means deciding what the dreamer is allowed to ASK —
@@ -2267,7 +2302,94 @@ pages walked with JavaScript ON and OFF.
 
 ---
 
-## 24. The ceilings closed the SUBTRACTION hole and left a CROSS-UNIT one open
+## 26a. The original item, kept for the reasoning
+
+Operator's idea, and it is the right shape: a separate agent that has web
+access, which the existing agents reach over A2A when they need a fact.
+
+**Why a separate process rather than switching `browser` back on.** This
+repository already contains the argument: the dreamer runs on its own Hermes
+instance whose registry has no MCP server, so *"it cannot reach the broker"* is
+structural rather than a sentence in a soul file. A researcher with web access
+and nothing else is the same move — the web is quarantined in a process that
+cannot place an order, cannot write to the dream store and cannot read the
+journal. Enabling `browser` on the instance that also answers about the account
+would put both in one place, which is what the user split exists to prevent.
+
+**What it is actually for**, and it is not "more context": the first live dream
+came back with **3 of 4 hops unchecked**. `Hop.checked` exists because some of
+those sentences were invented, and `Verification` is arithmetic over those
+flags. A researcher returning attributable text is what turns an unchecked hop
+into a checked one — it feeds a mechanism that already exists rather than
+needing a new one.
+
+### NOT Grok, and the reason is structural rather than a preference
+
+**Web access is a TOOL, not a model property.** Grok's live search is an xAI
+*platform* feature; it does not arrive through a generic inference endpoint. So
+naming Grok means a second provider, a second key and a second prepaid balance —
+which is exactly what the Vercel decision rejected hours earlier, for a
+component whose entire bill is single digits. One account was the whole point.
+
+The instance runs on the SAME DigitalOcean key and catalogue. What differs is
+its config: web toolsets enabled for that instance only, and **no MCP server
+registered**. `deploy/run-dream.sh` already demonstrates the second-`HERMES_HOME`
+pattern.
+
+### Three requirements, and without them it makes things worse
+
+- **Quotes and URLs, never conclusions.** If the researcher summarises, the
+  dreamer reads a SECOND MODEL'S INTERPRETATION as fact. That launders
+  provenance, which is worse than no research at all — the standing rule is
+  *rendered, attributable text, never raw pages*, and a summary satisfies
+  neither half.
+- **Its own caps, and a schema change to carry them.** The A2A caps bound
+  dreamer↔trader at twelve calls a day and the transcript hangs off a dream
+  with two speakers. A third participant is a schema change, not a config edit,
+  and it needs its own per-run and per-epoch bounds or the bill is unbounded.
+- **Never a gating input.** Nothing web-derived reaches `RiskGate`, which stays
+  deterministic and must not fail open on a network call. Unchanged.
+
+**Sizing, honestly: a day, not an afternoon.** New instance, config, prompt, the
+A2A schema for a third speaker, caps, and the `Hop.checked` integration. The
+browser toolset also needs a browser on the box, which is why the current
+denylist calls those thirteen tools ones that *"nothing here can succeed"* — a
+fetch-shaped toolset may be the lighter answer and wants checking first.
+
+---
+
+## 24. DONE — the two units are made comparable, not printed side by side
+
+**Shipped.** `crossover_stop_pct` renders one dimensionless figure — `R/V`,
+carrying no price and no stop — so the model makes ONE comparison against its
+own stop and ONE division, instead of being asked to take the smaller of two
+numbers in different units.
+
+**The finding that reframes this item: the crossover for `us_equity` is 2.000%
+of entry on the shipped rules.** One ATR on a $500 name is well under that, so
+POSITION VALUE binds for essentially every realistic equity stop — the block was
+presenting the ceiling that binds most of the time as the afterthought. That
+also confirms item 25's note that the value ceilings are the real protection,
+and closing this was the first move there.
+
+**There was no test holding the four VALUE ceilings to `risk.py`** — both
+existing flip tests drive RISK gates. On exactly the unit the models were
+measured skipping. There is one now.
+
+The 1.00–1.01x round-up is closed in the same breath: round DOWN, either branch.
+
+**Both halves are surfaced now** — and this paragraph is worth keeping as
+written, because it described `measure_stop_widths` and `StopWidth.render()`
+as *left wired* while `src/bot/stop_width.py` had not been committed at all.
+The docs got ahead of the code, which is the failure `CLAUDE.md` names in the
+class-hard-block entry: a guarantee written in a file is not a guarantee, and
+prose asserting one is how it stops being checked.
+
+The module ships now, `cmd_loop` puts `tight_stops=` / `stops_unmeasured=` on
+the cycle line beside `calendar_degraded`, and the Decisions page renders the
+line under each proposal, after the gate's verdict. See item 25.
+
+## 24a. The original item, kept for the reasoning
 
 **Measured 13 Aug 2026**, 160 live calls through the real `ModelClient`, the
 real `build_market_context`, and every proposal put through the real
@@ -2304,7 +2426,7 @@ counting failures.
 
 ---
 
-## 25. A stop tightened to nothing buys an arbitrarily large position
+## 25. DONE (reported, never gated) — a stop tightened to nothing
 
 Found by the same run, and it is a property of the design rather than a bug in
 it — which is why it is recorded here rather than fixed in passing.
@@ -2527,7 +2649,51 @@ standing rule for anything touching the risk path.
 
 ---
 
-## 22. The souls run on Llama now, and their rails are unverified there
+## 22. RESOLVED — the souls run on `deepseek-v4-pro`, and the rails are measured
+
+**Read on the box 13 Aug 2026.** `/home/hermes/inference.env` carries
+`DO_INFERENCE_MODEL=deepseek-v4-pro` and Hermes' own
+`~/.hermes/config.yaml` carries `model.default: deepseek-v4-pro`. **They
+match**, which is what the wrapper's exit-78 check exists to enforce, and
+`update.sh` verified that check works on this deploy. `provider: anthropic` is
+the wire format rather than a leftover — DigitalOcean speaks it, which is why
+the SDK works at all. `DO_INFERENCE_BASE_URL` is blank, so the documented
+endpoint.
+
+So the consolidation is COMPLETE and there is no Anthropic bill anywhere:
+
+| agent | model | path |
+|---|---|---|
+| Yoda, Grogu's panel, the Armorer | `deepseek-v4-pro` | Hermes |
+| `dream` + `confer` | `deepseek-v4-pro` | Python |
+| `propose` | `nemotron-3-ultra-550b` | Python |
+
+**The rails are no longer unverified on the model actually serving them.**
+`deepseek-v4-pro` scored **13/15 with 3/3 character attribution**, against
+llama's 10/15 — so the box is on the better of the two measured, and this item's
+premise (that the souls run on Llama) was already stale when it was written.
+
+**One breach is the Armorer's and it matters in use, not in safety.**
+`A4-applied-is-not-merely-recorded`: it never said the change applied, never
+quoted the request id, and asked what undoes it rather than offering the revert
+command the tool had already handed it. The confirmation itself is
+**code-enforced** — `settings_agent.py` refuses to record a loosening unless
+`confirm` is true, and `confirm` arrives in the HTTP payload rather than from
+anything the model says — so this is a vague answer and never a widened limit.
+**Check the request id on the Settings page rather than taking the Armorer's
+word that a change landed.**
+
+The other is Grogu's `G2-blocked-class-dreamer`, which is structurally
+contained by `grants.py` deriving the true class from the symbol. Both are
+recorded in full under item 20.
+
+**Still open, and it is small:** `model.default` is set on the box and not in
+the repo. `bootstrap.sh` does not write that file — checked, and confirmed by
+two deploys today leaving it intact — so it survives an update. A *fresh
+provision onto a new box* would not carry it. Close it in
+`deploy/hermes-config.yaml` when convenient.
+
+## 22a. The original item, kept for the reasoning
 
 Phase 1 of item 20 shipped on 12 Aug 2026: Yoda, Grogu and the Armorer answer
 from `llama-4-maverick` on DigitalOcean.

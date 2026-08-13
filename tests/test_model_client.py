@@ -1448,6 +1448,129 @@ def test_a_count_nobody_could_read_makes_the_COST_unknown_rather_than_small():
     assert unreadable.estimated_cost_usd is None
 
 
+# ------------------------------------------- which model actually answered
+#
+# `ModelClient.model_id` records what was REQUESTED. DigitalOcean names the
+# model it actually served in the response body, and nothing read it — so a
+# request routed to something else (a deprecated id silently aliased, a
+# catalogue entry repointed, a proxy substituting a cheaper model) left the
+# audit log, the cost arithmetic and every surface naming a model nobody ran.
+#
+# These pin the read-back and, just as importantly, pin that it REPORTS. Whether
+# a mismatch should fail the cycle is a behaviour change on the path that
+# produces order quantities, and it is the operator's to make; `docs/DROPLET_AI.md`
+# carries it as an open precondition.
+
+
+def _served(model: Any) -> Any:
+    """A reply that names the model that answered — or does not."""
+    reply = _reply(_tool_block(_QUIET_DECISION))
+    if model is not _ABSENT:
+        reply.model = model
+    return reply
+
+
+_ABSENT = object()
+
+
+def test_the_model_that_actually_answered_is_read_off_the_response(monkeypatch):
+    """The whole of the read-back: the requested id and the served id, both kept.
+
+    Two raw strings and one DERIVED comparison. A stored mismatch flag would be
+    a third fact about the same thing that can disagree with the other two,
+    which is the reasoning that keeps `Adoption.is_live` computed.
+    """
+    client = _do_client(_served("deepseek-v4-pro"), monkeypatch)
+
+    _, usage = client.propose("context")
+
+    assert usage.requested_model_id == "deepseek-v4-pro"
+    assert usage.served_model_id == "deepseek-v4-pro"
+    assert usage.served_as_requested is True
+
+
+def test_a_substituted_model_is_reported_and_the_cycle_still_completes(monkeypatch):
+    """**The finding this exists for, and the behaviour it deliberately does NOT
+    change.**
+
+    A request for one model answered by another is recorded as a mismatch — and
+    the decision still comes back, the tokens are still counted, and nothing
+    raises. Making it fail the cycle is a change to the order path and belongs
+    to the operator, not to a reporting field.
+    """
+    client = _do_client(_served("llama3.3-70b-instruct"), monkeypatch)
+
+    decision, usage = client.propose("context")
+
+    assert decision.market_assessment == "quiet"
+    assert usage.served_model_id == "llama3.3-70b-instruct"
+    assert usage.served_as_requested is False
+    assert usage.input_tokens == 1_000
+
+
+def test_a_reply_that_names_no_model_reads_as_unknown_rather_than_a_match(monkeypatch):
+    """`None` is "could not ask", never "yes".
+
+    Same three-valued shape as `FinnhubCalendar.is_degraded` and `BrokerClock`:
+    an absence that reads as agreement is how a check quietly stops checking.
+    A `False` here would be equally wrong in the other direction — it would
+    report a substitution nobody observed.
+    """
+    client = _do_client(_served(_ABSENT), monkeypatch)
+
+    _, usage = client.propose("context")
+
+    assert usage.served_model_id == ""
+    assert usage.served_as_requested is None
+
+
+def test_an_unreadable_model_field_is_absent_rather_than_coerced(monkeypatch):
+    """Responses are built with `construct_type`, so `model` can be any type.
+
+    `str()` on it would turn `None` into the string "None" — a model id that
+    matches nothing and reads as a substitution, inventing a finding out of a
+    transport fault. Same rule as the token counts one function above.
+    """
+    for value in (None, 12345, ["deepseek-v4-pro"]):
+        client = _do_client(_served(value), monkeypatch)
+
+        _, usage = client.propose("context")
+
+        assert usage.served_model_id == ""
+        assert usage.served_as_requested is None
+
+
+def test_a_dated_snapshot_of_the_requested_alias_is_not_a_substitution(monkeypatch):
+    """Anthropic resolves an alias to a dated snapshot on every ordinary call.
+
+    Exact equality would report a mismatch every time, and a warning that fires
+    on every call is a warning nobody reads — which would leave the real
+    substitution exactly as invisible as it is now.
+
+    The exemption is narrow on purpose: hyphen plus eight digits, nothing else.
+    A plausible-looking family suffix is a different model and must read as one.
+    """
+    from bot.model_client import CallUsage
+
+    def verdict(requested: str, served: str) -> bool | None:
+        return CallUsage(
+            input_tokens=0,
+            output_tokens=0,
+            cache_read_tokens=0,
+            cache_write_tokens=0,
+            estimated_cost_usd=None,
+            requested_model_id=requested,
+            served_model_id=served,
+        ).served_as_requested
+
+    assert verdict("claude-sonnet-5", "claude-sonnet-5-20260401") is True
+    # A size, a quantisation or a revision is a DIFFERENT model wearing a
+    # familiar prefix. This is the case the narrow rule exists to keep.
+    assert verdict("nemotron-3-ultra", "nemotron-3-ultra-550b") is False
+    assert verdict("qwen3-coder", "qwen3-coder-flash") is False
+    assert verdict("claude-sonnet-5", "claude-sonnet-5-2026040") is False
+
+
 # ------------------------------------------------------ output_config on this path
 
 
