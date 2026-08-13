@@ -304,7 +304,7 @@ def _token() -> str:
     return os.environ.get("MUDHORN_CONSOLE_TOKEN", "").strip()
 
 
-def build_app(token: str) -> Any:
+def build_app(token: str, *, port: int = 8788) -> Any:
     """The MCP app behind a constant-time bearer check.
 
     Written as middleware rather than a per-route dependency for the reason
@@ -313,11 +313,56 @@ def build_app(token: str) -> Any:
     equivalent of `OPEN_PATHS` here, because nothing this server does should
     ever be reachable without the token.
     """
+    from mcp.server.transport_security import TransportSecuritySettings
     from starlette.middleware.base import BaseHTTPMiddleware
     from starlette.requests import Request
     from starlette.responses import JSONResponse
 
-    app = server.streamable_http_app()
+    # **DNS-rebinding protection, and it MUST be told the public hostname.**
+    #
+    # The SDK validates the Host header and ships allowing loopback only, which
+    # is right for a server dialled directly and wrong for every deployment
+    # this one is built for: a Tailscale Funnel forwards to 127.0.0.1:8788 with
+    # the ORIGINAL Host intact, so the request arrives saying
+    # `mudhorn.tailc04415.ts.net` and is refused with "Invalid Host header".
+    #
+    # Found by curling the live Funnel rather than by reading. The failure is
+    # worth describing because of its ORDER: the bearer gate below runs first,
+    # so an unauthenticated probe still got a clean 401 and the endpoint looked
+    # correct. Only a request with a VALID token reached the host check and
+    # failed. A setup verified with a wrong token would have reported success.
+    #
+    # Names come from MUDHORN_CONSOLE_HOSTS, comma-separated. Loopback is always
+    # allowed, so a local `--host 127.0.0.1` deployment needs no configuration
+    # and the variable only carries what a proxy adds.
+    # The Host header carries the PORT, so the allowlist has to as well: a list
+    # holding `127.0.0.1` does not match a request saying `127.0.0.1:8803`.
+    # Hence the port is passed in rather than assumed — the first version
+    # hardcoded 8788 and refused its own loopback on any other port.
+    hosts = [
+        "127.0.0.1",
+        "localhost",
+        f"127.0.0.1:{port}",
+        f"localhost:{port}",
+    ]
+    origins: list[str] = []
+    for name in os.environ.get("MUDHORN_CONSOLE_HOSTS", "").split(","):
+        name = name.strip()
+        if not name:
+            continue
+        hosts.append(name)
+        # A browser-originated request carries Origin as a full URL. Both
+        # schemes are allowed rather than guessed at: the Funnel terminates TLS
+        # and forwards plain HTTP, so which one arrives is not this process's
+        # business to predict.
+        origins.extend([f"https://{name}", f"http://{name}"])
+
+    app = server.streamable_http_app(
+        transport_security=TransportSecuritySettings(
+            allowed_hosts=hosts,
+            allowed_origins=origins,
+        )
+    )
 
     class BearerGate(BaseHTTPMiddleware):
         async def dispatch(self, request: Request, call_next: Any) -> Any:
@@ -381,7 +426,7 @@ def main() -> int:
             "machine directly. Prefer 127.0.0.1 plus a Tailscale Funnel."
         )
 
-    uvicorn.run(build_app(token), host=args.host, port=args.port)
+    uvicorn.run(build_app(token, port=args.port), host=args.host, port=args.port)
     return 0
 
 

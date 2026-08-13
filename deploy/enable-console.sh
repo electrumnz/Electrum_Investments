@@ -157,6 +157,42 @@ if [[ $WANT_SHELL -eq 1 ]]; then
   echo "MUDHORN_CONSOLE_SHELL=1" >> "$ENV_FILE"
 fi
 
+# ---------------------------------------------- the name a Funnel arrives under
+#
+# **The MCP SDK validates the Host header and ships allowing loopback only.**
+# A Funnel forwards to 127.0.0.1 with the ORIGINAL Host intact, so a request
+# arrives saying `mudhorn.tailc04415.ts.net` and is refused with 421 "Invalid
+# Host header" — after the bearer gate has already passed it.
+#
+# That ORDER is why this is detected rather than left to the operator. An
+# unauthenticated probe gets a clean 401 from the token gate and never reaches
+# the host check, so the endpoint looks correct from outside while every real
+# request fails. Found by curling a live Funnel with a valid token; a setup
+# verified with a wrong one would have reported success.
+#
+# Detected from Tailscale rather than typed, because it is knowable here and a
+# hand-copied hostname is a hand-copied hostname.
+sed -i '/^MUDHORN_CONSOLE_HOSTS=/d' "$ENV_FILE"
+TS_NAME=""
+if command -v tailscale >/dev/null 2>&1; then
+  TS_NAME="$(tailscale status --json 2>/dev/null \
+    | python3 -c 'import json,sys
+try:
+    print(json.load(sys.stdin).get("Self",{}).get("DNSName","").rstrip("."))
+except Exception:
+    print("")' 2>/dev/null || true)"
+fi
+if [[ -n "$TS_NAME" ]]; then
+  echo "MUDHORN_CONSOLE_HOSTS=$TS_NAME" >> "$ENV_FILE"
+  say "Allowing Host: $TS_NAME"
+else
+  say "Tailscale name not detected. If you front this with a proxy or Funnel,"
+  say "requests will be refused with 421 'Invalid Host header' until you add"
+  say "the public name to $ENV_FILE:"
+  say "    MUDHORN_CONSOLE_HOSTS=your.name.ts.net"
+  say "then: sudo systemctl restart $UNIT"
+fi
+
 systemctl daemon-reload
 systemctl enable --now "$UNIT"
 
