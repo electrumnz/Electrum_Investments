@@ -81,6 +81,16 @@ from bot.config import CLAUDE_MODEL_IDS, Env, Rules  # noqa: E402
 from bot.dreaming import DREAMER, OPERATOR, Dream, DreamStore, Vault  # noqa: E402
 
 
+def _cost(usd: float | None) -> float | None:
+    """A cost for the JSON report: rounded, or `None` for unknown.
+
+    `CallUsage.estimated_cost_usd` is `float | None` because a model with no
+    entry in `config.MODEL_SPECS` costs an amount nothing here can compute. A
+    zero in this report would read as a free run.
+    """
+    return None if usd is None else round(usd, 4)
+
+
 class Tripwire:
     """What the process reached for, watched rather than read off the source.
 
@@ -141,7 +151,9 @@ class RecordingCaller:
                 "raw_text_chars": len(text),
                 "over_text_max_chars": len(text) > TEXT_MAX_CHARS,
                 "verdict": str(getattr(turn, "verdict", "") or "") or None,
-                "cost_usd": round(float(getattr(usage, "estimated_cost_usd", 0.0)), 4),
+                # `None` is UNKNOWN and never free -- the model has no prices
+                # on file. See `CallUsage.estimated_cost_usd`.
+                "cost_usd": _cost(getattr(usage, "estimated_cost_usd", None)),
             }
         )
         return turn, usage
@@ -196,7 +208,7 @@ def exchange_row(store: DreamStore, result: ExchangeResult) -> dict[str, Any]:
         "turns": result.turns,
         "detail": result.detail,
         "calls": len(result.usage),
-        "cost_usd": round(result.cost_usd, 4),
+        "cost_usd": _cost(result.cost_usd),
         "cost_a_model_call": result.conferred,
         "counters_after": counters(store, result.dream_id),
     }
@@ -209,7 +221,7 @@ def report_row(store: DreamStore, report: ConferenceReport) -> dict[str, Any]:
         "skipped": report.skipped,
         "adopted": report.adopted,
         "calls": report.calls,
-        "cost_usd": round(report.cost_usd, 4),
+        "cost_usd": _cost(report.cost_usd),
         "within_max_dreams_per_run": report.conferred <= MAX_DREAMS_PER_RUN,
         "exchanges": [exchange_row(store, e) for e in report.exchanges],
     }

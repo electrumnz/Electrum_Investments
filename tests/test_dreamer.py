@@ -683,7 +683,7 @@ def test_the_dream_call_is_bought_deep_rather_than_fast(monkeypatch):
     timer occupied by a call that had already failed, with nothing on any
     surface saying so.
     """
-    from bot.config import ClaudeTier
+    from bot.config import CLAUDE_MODEL_SPECS, ClaudeTier
     from bot.model_client import (
         DREAM_MAX_RETRIES,
         DREAM_MAX_TOKENS,
@@ -705,7 +705,9 @@ def test_the_dream_call_is_bought_deep_rather_than_fast(monkeypatch):
             captured["options"] = kw
             return self
 
-    client = ModelClient(_env(), "system", tier=ClaudeTier.SONNET, cache_system=False)
+    client = ModelClient(
+        _env(), "system", spec=CLAUDE_MODEL_SPECS[ClaudeTier.SONNET], cache_system=False
+    )
     monkeypatch.setattr(client, "_client", _Inner())
 
     with pytest.raises(RuntimeError):
@@ -847,19 +849,39 @@ def test_the_shipped_timer_is_in_new_zealand_time():
     assert "Pacific/Auckland" in schedule.calendar
 
 
-def test_the_cost_estimate_reflects_the_tier():
+def test_the_cost_estimate_reflects_the_model():
     """Haiku has no thinking pass, so it is far cheaper and far shallower."""
-    from bot.config import ClaudeTier
+    from bot.config import CLAUDE_MODEL_SPECS, ClaudeTier
     from bot.dreamer import estimated_cost_usd
 
-    haiku_run, haiku_year = estimated_cost_usd(ClaudeTier.HAIKU)
-    sonnet_run, sonnet_year = estimated_cost_usd(ClaudeTier.SONNET)
-    opus_run, _ = estimated_cost_usd(ClaudeTier.OPUS)
+    haiku = estimated_cost_usd(CLAUDE_MODEL_SPECS[ClaudeTier.HAIKU])
+    sonnet = estimated_cost_usd(CLAUDE_MODEL_SPECS[ClaudeTier.SONNET])
+    opus = estimated_cost_usd(CLAUDE_MODEL_SPECS[ClaudeTier.OPUS])
+    assert haiku is not None and sonnet is not None and opus is not None
+
+    haiku_run, haiku_year = haiku
+    sonnet_run, sonnet_year = sonnet
+    opus_run, _ = opus
 
     assert haiku_run < sonnet_run < opus_run
     assert haiku_year == pytest.approx(haiku_run * 365)
     # A year of daily dreaming stays in double digits on the shipped tier.
     assert sonnet_year < 100
+
+
+def test_a_model_with_no_prices_on_file_estimates_nothing_rather_than_zero():
+    """`~$0.000 a run` would be the cheapest figure on the Settings page.
+
+    The estimate used to key on the tier twice over — once for the price table
+    and once for `0 if HAIKU else 4_000` — so it could describe one of three
+    Claude models and had no way to express a fourth at all. A model nobody has
+    priced now returns `None`, and the page says "unknown" rather than drawing a
+    number nobody measured beside numbers that were.
+    """
+    from bot.config import ModelSpec
+    from bot.dreamer import estimated_cost_usd
+
+    assert estimated_cost_usd(ModelSpec(model_id="some-open-model")) is None
 
 
 # ------------------------------------------------ asking for the two fields

@@ -742,7 +742,13 @@ def main() -> int:
                 {
                     "input_tokens": result.usage.input_tokens,
                     "output_tokens": result.usage.output_tokens,
-                    "cost_usd": round(result.usage.estimated_cost_usd, 4),
+                    # `None` is UNKNOWN and never free -- the model has no
+                    # prices on file. See `CallUsage.estimated_cost_usd`.
+                    "cost_usd": (
+                        None
+                        if result.usage.estimated_cost_usd is None
+                        else round(result.usage.estimated_cost_usd, 4)
+                    ),
                 }
                 if result.usage
                 else None

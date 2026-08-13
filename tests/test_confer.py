@@ -37,9 +37,11 @@ from bot.confer import (
     Change,
     ChangeKind,
     Conference,
+    ConferenceReport,
     ConferenceVerdict,
     ConferOutcome,
     DreamerTurn,
+    ExchangeResult,
     NoDecision,
     TraderPowers,
     TraderTurn,
@@ -985,7 +987,67 @@ def test_the_report_totals_the_cost_of_a_run(rules, store):
     report = _conference(rules, store, trader=_declines()).run(now=LATER)
 
     assert report.calls == 2
-    assert report.cost_usd == pytest.approx(2 * USAGE.estimated_cost_usd)
+    priced = USAGE.estimated_cost_usd
+    assert priced is not None
+    assert report.cost_usd == pytest.approx(2 * priced)
+    assert report.unpriced_calls == 0
+
+
+def test_an_unpriced_call_makes_the_total_unknown_rather_than_smaller(rules, store):
+    """The bug one level up from a single call reporting 0.00.
+
+    A model with no prices on file gives `CallUsage.estimated_cost_usd is None`.
+    Summing the calls that DO have prices and printing the answer as "what the
+    run cost" understates it by an unknown amount — and understates it in the
+    direction that makes an unpriced model look cheap, which is exactly the
+    reading somebody would act on. So the unknown propagates: the total is
+    `None`, and `unpriced_calls` says how much of the run it covers.
+
+    A skip is still a real zero and is checked here too, because "nothing was
+    spent" and "nobody can say what was spent" must not collapse into one
+    another — the same rule as `has_cycles` beside an empty list.
+    """
+    unpriced = CallUsage(
+        input_tokens=100,
+        output_tokens=50,
+        cache_read_tokens=0,
+        cache_write_tokens=0,
+        estimated_cost_usd=None,
+    )
+    priced = USAGE.estimated_cost_usd
+    assert priced is not None
+
+    mixed = ExchangeResult(
+        dream_id=1,
+        outcome=ConferOutcome.DECLINED,
+        turns=2,
+        usage=(USAGE, unpriced),
+    )
+    skipped = ExchangeResult(dream_id=2, outcome=ConferOutcome.NOTHING_NEW)
+
+    assert mixed.cost_usd is None
+    assert mixed.unpriced_calls == 1
+    # A skip made no call at all, so nothing cost anything. That is a measured
+    # zero and must stay one.
+    assert skipped.cost_usd == pytest.approx(0.0)
+    assert skipped.unpriced_calls == 0
+
+    report = ConferenceReport(exchanges=(mixed, skipped), considered=2)
+    assert report.cost_usd is None, (
+        "the run total absorbed an unpriced call. A partial sum presented as "
+        "the total is a plausible wrong figure, and it is wrong in the "
+        "flattering direction."
+    )
+    assert report.unpriced_calls == 1
+
+    # And with every call priced, the total is arithmetic again rather than
+    # permanently None — the unknown has to be caused by an unknown.
+    all_priced = ExchangeResult(
+        dream_id=3, outcome=ConferOutcome.DECLINED, turns=2, usage=(USAGE, USAGE)
+    )
+    whole = ConferenceReport(exchanges=(all_priced, skipped), considered=2)
+    assert whole.cost_usd == pytest.approx(2 * priced)
+    assert whole.unpriced_calls == 0
 
 
 def test_the_entry_point_a_command_calls_runs_a_whole_conference(rules, store):

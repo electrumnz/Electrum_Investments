@@ -40,19 +40,160 @@ class ClaudeTier(StrEnum):
     OPUS = "opus"
 
 
-CLAUDE_MODEL_IDS: dict[ClaudeTier, str] = {
-    ClaudeTier.HAIKU: "claude-haiku-4-5-20251001",
-    ClaudeTier.SONNET: "claude-sonnet-5",
-    ClaudeTier.OPUS: "claude-opus-5",
+@dataclass(frozen=True)
+class ModelPricing:
+    """USD per million tokens, for the running-cost tracker. See docs/COSTS.md.
+
+    A model has one of these or it has NOTHING — there is deliberately no
+    default, no fallback tier and no "close enough" table. An invented price is
+    the same class of error as an invented indicator: it produces a figure
+    nobody measured, on a page whose whole argument is that its numbers are
+    read rather than plausible. `ModelSpec.pricing` is therefore
+    `ModelPricing | None`, and `None` travels all the way to the surface as
+    "unknown".
+    """
+
+    input_usd_per_mtok: float
+    output_usd_per_mtok: float
+    cache_read_usd_per_mtok: float
+
+    def as_tuple(self) -> tuple[float, float, float]:
+        """(base input, output, cache read), the shape the old table used."""
+        return (
+            self.input_usd_per_mtok,
+            self.output_usd_per_mtok,
+            self.cache_read_usd_per_mtok,
+        )
+
+
+@dataclass(frozen=True)
+class ModelSpec:
+    """Which model a call goes to, what a token costs there, and which optional
+    request fields that endpoint will actually accept.
+
+    **This replaces "which of three Claude tiers" as the answer to "which
+    model".** `CLAUDE_MODEL_IDS[tier]` could only ever name one of three
+    Anthropic strings, so a DigitalOcean model could not be named at all. The
+    three tiers are now three instances of this rather than the only
+    possibility, and `resolve_model_spec` will build one for any id.
+
+    The two booleans are named for the ANTHROPIC fields they control, and that
+    is deliberate rather than verbose. `thinking` and `output_config.effort`
+    are Anthropic request fields with an Anthropic shape; DigitalOcean's schema
+    lists a flat `reasoning_effort` and carries no `output_config` at all, so a
+    spec that set a generically-named `takes_effort=True` for a DO model would
+    send the wrong field in the wrong shape and get a silently unreasoned
+    answer. A vendor in the field name is what makes that mistake visible at
+    the point somebody types `True`.
+
+    So a model this repository has never seen gets both False, which sends
+    NEITHER field: correct-and-plain rather than wrong. Emitting
+    `reasoning_effort` for a provider that wants it is a separate change with
+    its own evidence, and it belongs beside the forced-tool-call substitute for
+    structured output rather than here.
+    """
+
+    model_id: str
+    pricing: ModelPricing | None = None
+    sends_anthropic_thinking: bool = False
+    sends_anthropic_effort: bool = False
+
+    @property
+    def price_is_known(self) -> bool:
+        """Whether a cost can be computed at all for this model.
+
+        False means nobody has put this model's prices on file — never that it
+        is free. Every consumer of a cost has to keep those apart, which is why
+        `CallUsage.estimated_cost_usd` is `float | None` rather than a float
+        that quietly reads 0.00.
+        """
+        return self.pricing is not None
+
+
+# The three Claude tiers, as specs. Prices are USD per million tokens.
+#
+# Haiku sends neither `thinking` nor `output_config.effort` because it has no
+# extended thinking at all; Sonnet and Opus send both. That is exactly the
+# `if self._tier in (SONNET, OPUS)` test the transport used to carry inline,
+# moved to where the model is described rather than where the request is built.
+CLAUDE_MODEL_SPECS: dict[ClaudeTier, ModelSpec] = {
+    ClaudeTier.HAIKU: ModelSpec(
+        model_id="claude-haiku-4-5-20251001",
+        pricing=ModelPricing(1.0, 5.0, 0.10),
+        sends_anthropic_thinking=False,
+        sends_anthropic_effort=False,
+    ),
+    ClaudeTier.SONNET: ModelSpec(
+        model_id="claude-sonnet-5",
+        pricing=ModelPricing(2.0, 10.0, 0.20),
+        sends_anthropic_thinking=True,
+        sends_anthropic_effort=True,
+    ),
+    ClaudeTier.OPUS: ModelSpec(
+        model_id="claude-opus-5",
+        pricing=ModelPricing(5.0, 25.0, 0.50),
+        sends_anthropic_thinking=True,
+        sends_anthropic_effort=True,
+    ),
 }
 
-# USD per million tokens, for the running-cost tracker. See docs/COSTS.md.
-CLAUDE_PRICING_USD_PER_MTOK: dict[ClaudeTier, tuple[float, float, float]] = {
-    # (base input, output, cache read)
-    ClaudeTier.HAIKU: (1.0, 5.0, 0.10),
-    ClaudeTier.SONNET: (2.0, 10.0, 0.20),
-    ClaudeTier.OPUS: (5.0, 25.0, 0.50),
+
+# Every model this repository knows the shape and the price of, keyed by the id
+# that goes on the wire.
+#
+# **A model reaches this table in a commit, with a reason, exactly as a limit
+# reaches `config/rules.yaml`.** There is deliberately no environment variable
+# carrying a price: a cost typed into `.env` is a figure with no review and no
+# history, and the surfaces that render it cannot tell it apart from a measured
+# one. Naming a model that is not in here is fully supported — it simply costs
+# an unknown amount until somebody adds its prices here.
+MODEL_SPECS: dict[str, ModelSpec] = {
+    spec.model_id: spec for spec in CLAUDE_MODEL_SPECS.values()
 }
+
+
+def resolve_model_spec(model_id: str, tier: ClaudeTier) -> ModelSpec:
+    """The spec for an explicitly named model, or for the Claude tier otherwise.
+
+    Empty `model_id` is today's behaviour exactly — the tier picks one of three
+    Claude specs — so an existing deployment on `CLAUDE_TIER=sonnet` builds a
+    byte-identical request and computes an identical cost. The same shape as
+    `DO_INFERENCE_KEY`: the empty value is the supported default and rollback is
+    unsetting the variable rather than editing code.
+
+    An id nobody has priced comes back as a spec with `pricing=None` and both
+    Anthropic-only flags False. That is the whole point and it is not a
+    degraded state: the model is nameable, the request is plain, and the cost
+    is reported as unknown rather than as zero.
+    """
+    named = model_id.strip()
+    if not named:
+        return CLAUDE_MODEL_SPECS[tier]
+    known = MODEL_SPECS.get(named)
+    if known is not None:
+        return known
+    return ModelSpec(model_id=named)
+
+
+def _claude_model_ids() -> dict[ClaudeTier, str]:
+    return {tier: spec.model_id for tier, spec in CLAUDE_MODEL_SPECS.items()}
+
+
+def _claude_prices() -> dict[ClaudeTier, tuple[float, float, float]]:
+    prices: dict[ClaudeTier, tuple[float, float, float]] = {}
+    for tier, spec in CLAUDE_MODEL_SPECS.items():
+        if spec.pricing is not None:
+            prices[tier] = spec.pricing.as_tuple()
+    return prices
+
+
+# DERIVED from `CLAUDE_MODEL_SPECS`, and kept because `scripts/` reads them to
+# label a live run. Two dicts naming the same three models is two places to
+# disagree, so neither is written out by hand any more. New code should take a
+# `ModelSpec`; these exist so the spec change did not have to reach into files
+# it has no business editing.
+CLAUDE_MODEL_IDS: dict[ClaudeTier, str] = _claude_model_ids()
+CLAUDE_PRICING_USD_PER_MTOK: dict[ClaudeTier, tuple[float, float, float]] = _claude_prices()
 
 
 # ----------------------------------------------------------------- inference
@@ -221,6 +362,44 @@ class Env(BaseSettings):
     @property
     def dream_tier(self) -> ClaudeTier:
         return self.dream_claude_tier
+
+    # Naming a model OUTRIGHT, which the two tier settings above cannot do.
+    #
+    # Both are empty by default and **empty means the tier**, so a deployment
+    # that has not set them behaves exactly as it always did — the same shape as
+    # `DO_INFERENCE_KEY` and `DASHBOARD_CHAT_TOKEN`, and for the same reason:
+    # rollback is unsetting a variable rather than editing code.
+    #
+    # Set one to any string and that string goes on the wire. If it is a model
+    # `MODEL_SPECS` has prices for, the prices come with it; if it is not, the
+    # call is made and its cost is reported as UNKNOWN rather than as zero. That
+    # is the honest half of making an arbitrary model nameable, and it is why
+    # `CallUsage.estimated_cost_usd` can be None.
+    #
+    # They are separate for the reason the two tiers are separate: the decision
+    # loop wakes 96 times a day and the dreamer once, so the model that is right
+    # for one is not automatically right for the other.
+    #
+    # Named `decision_`/`dream_` rather than `model_id`: `model_` is a RESERVED
+    # namespace in Pydantic v2, so a field starting with it is unavailable here.
+    decision_model_id: str = Field(default="", alias="DECISION_MODEL_ID")
+    dream_model_id: str = Field(default="", alias="DREAM_MODEL_ID")
+
+    @property
+    def decision_spec(self) -> ModelSpec:
+        """The model `claude.propose` runs on: the loop and the smoketest."""
+        return resolve_model_spec(self.decision_model_id, self.claude_tier)
+
+    @property
+    def dream_spec(self) -> ModelSpec:
+        """The model `claude.dream` and `claude.confer` run on.
+
+        Follows `dream_tier` rather than `claude_tier` when no id is named, for
+        the reason `dream_tier` exists at all: the loop's default is a tier with
+        no extended thinking, and thinking is how a dream gets past its first
+        hop.
+        """
+        return resolve_model_spec(self.dream_model_id, self.dream_claude_tier)
 
     # Who the operator is, for the interface and the two agents to address.
     #

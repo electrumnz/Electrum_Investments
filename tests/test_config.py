@@ -9,13 +9,17 @@ import pytest
 
 from bot.config import (
     CLAUDE_MODEL_IDS,
+    CLAUDE_MODEL_SPECS,
     CLAUDE_PRICING_USD_PER_MTOK,
+    MODEL_SPECS,
     AccountRules,
     ClaudeTier,
     Env,
     InstrumentRules,
     LiveTradingRefused,
+    ModelSpec,
     Rules,
+    resolve_model_spec,
 )
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -39,6 +43,140 @@ def test_claude_model_ids_and_pricing_complete():
         assert 0 < base_in < out
         # Cache reads bill at 10% of base input.
         assert cache_read == pytest.approx(base_in * 0.1)
+
+
+# ------------------------------------------------------- naming a model at all
+#
+# "Which model" used to be welded to a three-value Claude enum: `CLAUDE_MODEL_IDS`
+# for the id, `CLAUDE_PRICING_USD_PER_MTOK` for the price, and an
+# `if tier in (SONNET, OPUS)` in the transport for the optional request fields.
+# `ModelSpec` carries all three, and the tiers are instances of it rather than
+# the only possibility.
+
+
+def test_the_old_tables_are_derived_from_the_specs_rather_than_written_twice():
+    """Two dicts naming the same three models is two places to disagree.
+
+    They are kept because `scripts/` reads them to label a live run, so they
+    could not simply go — but nothing writes them out by hand any more, and this
+    is what says so. A spec whose price changed while a table did not would be a
+    figure nobody could read off one file.
+    """
+    for tier, spec in CLAUDE_MODEL_SPECS.items():
+        assert CLAUDE_MODEL_IDS[tier] == spec.model_id
+        assert spec.pricing is not None
+        assert CLAUDE_PRICING_USD_PER_MTOK[tier] == spec.pricing.as_tuple()
+        # And the registry keyed by wire id agrees with the one keyed by tier.
+        assert MODEL_SPECS[spec.model_id] is spec
+
+
+def test_the_claude_tiers_keep_exactly_the_request_fields_they_always_had():
+    """The decoupling must not change a single byte of an existing request.
+
+    `thinking` and `output_config.effort` went out for Sonnet and Opus and not
+    for Haiku, because Haiku has no extended thinking at all. That test lived
+    inline in the transport as `if self._tier in (SONNET, OPUS)`; it lives on
+    the spec now, and this is the pin that the move was a move and not a change.
+    """
+    haiku = CLAUDE_MODEL_SPECS[ClaudeTier.HAIKU]
+    assert haiku.sends_anthropic_thinking is False
+    assert haiku.sends_anthropic_effort is False
+
+    for tier in (ClaudeTier.SONNET, ClaudeTier.OPUS):
+        spec = CLAUDE_MODEL_SPECS[tier]
+        assert spec.sends_anthropic_thinking is True
+        assert spec.sends_anthropic_effort is True
+
+
+def test_an_unnamed_model_still_resolves_to_the_tier():
+    """Empty means the tier, which is today's behaviour exactly.
+
+    The same shape as `DO_INFERENCE_KEY`: the empty value is the supported
+    default, so rollback is unsetting a variable rather than editing code. An
+    existing deployment on `CLAUDE_TIER=sonnet` must be untouched by all of
+    this.
+    """
+    for tier in ClaudeTier:
+        assert resolve_model_spec("", tier) is CLAUDE_MODEL_SPECS[tier]
+        # Whitespace is not a name either.
+        assert resolve_model_spec("   ", tier) is CLAUDE_MODEL_SPECS[tier]
+
+
+def test_a_model_nobody_has_priced_is_nameable_and_reports_no_price():
+    """The whole point, and the trap inside it.
+
+    A model this repository has never seen is a fully supported thing to name —
+    that is what the work was for. What it must NOT come with is a price, and
+    `ModelPricing` has no default anywhere for exactly that reason: an invented
+    cost is the same class of error as an invented indicator, and it would reach
+    the Settings page looking like a measurement.
+
+    It must also be sent NEITHER Anthropic-only request field. `thinking` and
+    `output_config` have an Anthropic shape; DigitalOcean's schema lists a flat
+    `reasoning_effort` and no `output_config` at all, so sending them would be
+    wrong in two ways at once. Both False is a plain request rather than a wrong
+    one.
+    """
+    spec = resolve_model_spec("glm-5.2", ClaudeTier.SONNET)
+
+    assert spec.model_id == "glm-5.2"
+    assert spec.pricing is None
+    assert spec.price_is_known is False
+    assert spec.sends_anthropic_thinking is False
+    assert spec.sends_anthropic_effort is False
+
+
+def test_naming_a_known_model_brings_its_prices_with_it():
+    """A model id that IS in the registry is not a stranger.
+
+    Naming `claude-sonnet-5` outright has to be the same thing as reaching it
+    through the tier — otherwise the honest-pricing rule would punish the
+    operator for spelling out what they already had.
+    """
+    spec = resolve_model_spec("claude-sonnet-5", ClaudeTier.HAIKU)
+
+    assert spec is CLAUDE_MODEL_SPECS[ClaudeTier.SONNET]
+    assert spec.price_is_known is True
+
+
+def test_the_environment_carries_no_price_for_a_model():
+    """Prices reach `MODEL_SPECS` in a commit, never through `.env`.
+
+    Same rule as a limit reaching `config/rules.yaml` rather than being typed
+    somewhere at runtime: a cost with no review and no history behind it is
+    indistinguishable, on the page that renders it, from one somebody measured.
+    An unpriced model is fully usable and simply reports an unknown cost.
+    """
+    priced = [
+        name
+        for name in Env.model_fields
+        if any(word in name for word in ("price", "usd_per", "cost"))
+    ]
+    assert priced == [], (
+        f"{priced} would let a cost be typed into the environment. An invented "
+        "price renders exactly like a measured one."
+    )
+
+
+def test_the_two_model_ids_are_separately_settable_and_default_to_the_tiers():
+    """The loop wakes 96 times a day and the dreamer once.
+
+    The model that is right for one is not automatically right for the other,
+    which is why `DREAM_CLAUDE_TIER` already existed. The id overrides follow
+    the same split, and neither one set is the shipped default.
+    """
+    env = Env(_env_file=None)  # type: ignore[call-arg]
+
+    assert env.decision_spec is CLAUDE_MODEL_SPECS[ClaudeTier.HAIKU]
+    assert env.dream_spec is CLAUDE_MODEL_SPECS[ClaudeTier.SONNET]
+
+    env.decision_model_id = "some-open-model"
+    assert env.decision_spec == ModelSpec(model_id="some-open-model")
+    # And the dreamer is untouched by it, exactly as its tier is.
+    assert env.dream_spec is CLAUDE_MODEL_SPECS[ClaudeTier.SONNET]
+
+    env.dream_model_id = "another-open-model"
+    assert env.dream_spec == ModelSpec(model_id="another-open-model")
 
 
 def _account_rules(**overrides: Any) -> AccountRules:

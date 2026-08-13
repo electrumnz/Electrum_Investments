@@ -60,7 +60,7 @@ from .indicators import snapshot as snapshot_indicators
 from .indicators import summarise as summarise_indicators
 from .intraday import summarise as summarise_intraday
 from .journal import Journal
-from .model_client import ModelClient, build_system_prompt
+from .model_client import CallUsage, ModelClient, build_system_prompt
 from .models import (
     AccountSnapshot,
     Decision,
@@ -79,6 +79,82 @@ from .session_calendar import SessionCalendar
 from .triggers import CycleReadings
 
 log = structlog.get_logger()
+
+
+# ------------------------------------------------------------- what a call cost
+#
+# `CallUsage.estimated_cost_usd` is `float | None` because a model with no entry
+# in `config.MODEL_SPECS` costs an amount this process cannot compute. The two
+# helpers below are the whole of what that means at this boundary, and they
+# answer to two different sinks with two different capabilities.
+
+
+def _logged_cost(cost: float | None, places: int) -> float | None:
+    """The cost for a structured log line: rounded, or `None` for unknown.
+
+    A `cost_usd=None` field on a log line reads as unknown, which is what it is.
+    A `0.0` there would read as free, and a run on an unpriced model would look
+    like the cheapest one this bot has ever had.
+    """
+    return None if cost is None else round(cost, places)
+
+
+def _recorded_cost(cost: float | None) -> float:
+    """The cost for the audit log's `Decision`, which cannot hold "unknown".
+
+    **This is a known lossy step and it is deliberate rather than overlooked.**
+    `Decision.estimated_cost_usd` is a plain `float` with a default of 0.0, and
+    the audit log is append-only and NEVER migrated — so widening that field is
+    a change to `models.py` that has to be made with the reader in mind, not a
+    coercion invented at one call site.
+
+    Until it is, the durable record of an unpriced call is:
+
+    - **the zero itself is legible**, because the token counts are recorded
+      beside it and a call that spent tokens cannot have cost exactly nothing.
+      `web/render.py` reads that pair and prints "cost unknown"; it is an
+      inference, and it is the only one available while the field is a float.
+    - **`_note_unpriced_call` writes an event naming the model**, so the reason
+      is on file rather than left to be deduced from an arithmetic
+      impossibility.
+    """
+    return 0.0 if cost is None else cost
+
+
+def _note_unpriced_call(audit: AuditLog, usage: CallUsage, *, model_id: str, where: str) -> None:
+    """Record that a call happened at a price nobody can state.
+
+    Written as its own event because the `Decision` it belongs to cannot carry
+    the fact. Same principle as `calendar_degraded`: say the number is unknown
+    rather than let a zero imply it is small.
+
+    Silent when the cost IS known, so a normally-priced deployment writes
+    nothing extra ever. That is the one thing this must not get wrong — an event
+    per cycle on a healthy loop would be noise in the record a person reads.
+    """
+    if usage.estimated_cost_usd is not None:
+        return
+    log.warning(
+        "model_cost_unknown",
+        model=model_id,
+        where=where,
+        input_tokens=usage.input_tokens,
+        output_tokens=usage.output_tokens,
+        detail=(
+            "No prices are on file for this model, so the call's cost is "
+            "unknown rather than zero. Add it to config.MODEL_SPECS."
+        ),
+    )
+    audit.record_event(
+        "model_cost_unknown",
+        {
+            "model": model_id,
+            "where": where,
+            "input_tokens": usage.input_tokens,
+            "output_tokens": usage.output_tokens,
+            "cached_tokens": usage.cache_read_tokens,
+        },
+    )
 
 
 def build_broker(env: Env, *, force_mock: bool = False) -> Broker:
@@ -182,8 +258,9 @@ def cmd_smoketest(env: Env, rules: Rules, *, force_mock: bool = False) -> int:
             proposal_count=len(decision.proposals),
             input_tokens=usage.input_tokens,
             output_tokens=usage.output_tokens,
-            cost_usd=round(usage.estimated_cost_usd, 6),
+            cost_usd=_logged_cost(usage.estimated_cost_usd, 6),
         )
+        _note_unpriced_call(audit, usage, model_id=claude.model_id, where="smoketest")
         audit.record(
             Decision(
                 timestamp=datetime.now(UTC),
@@ -191,7 +268,7 @@ def cmd_smoketest(env: Env, rules: Rules, *, force_mock: bool = False) -> int:
                 claude_input_tokens=usage.input_tokens,
                 claude_output_tokens=usage.output_tokens,
                 claude_cached_tokens=usage.cache_read_tokens,
-                estimated_cost_usd=usage.estimated_cost_usd,
+                estimated_cost_usd=_recorded_cost(usage.estimated_cost_usd),
                 notes=f"smoketest assessment: {decision.market_assessment}",
             )
         )
@@ -290,7 +367,15 @@ def cmd_loop(
     audit.record_event(
         "loop_start",
         {
+            # `tier` is kept and NOT renamed: the audit log is append-only, so a
+            # renamed key makes every historical `loop_start` read back as
+            # missing. It is also no longer the whole answer — a named model is
+            # not one of three tiers — so the served model id goes beside it,
+            # and `cost_visible` says whether anything in this run's records can
+            # carry a price at all.
             "tier": env.claude_tier.value,
+            "model": claude.model_id,
+            "cost_visible": claude.price_is_known,
             "execute": execute,
             "paper": env.alpaca_paper_trade,
             "position_actions_enabled": actions_enabled,
@@ -891,10 +976,11 @@ def cmd_loop(
                     claude_input_tokens=usage.input_tokens,
                     claude_output_tokens=usage.output_tokens,
                     claude_cached_tokens=usage.cache_read_tokens,
-                    estimated_cost_usd=usage.estimated_cost_usd,
+                    estimated_cost_usd=_recorded_cost(usage.estimated_cost_usd),
                     notes=decision.market_assessment,
                 )
             )
+            _note_unpriced_call(audit, usage, model_id=claude.model_id, where="propose")
             # Carried forward only on a cycle that produced a decision. A cycle
             # skipped because the market was shut, or one whose model call
             # failed, leaves the last real assessment in place rather than
@@ -1063,7 +1149,10 @@ def cmd_loop(
                 # intraday bars is one where a break and a wick cannot be told
                 # apart, which is the condition trend_break must not run under.
                 symbols_without_intraday=no_intraday,
-                cost_usd=round(usage.estimated_cost_usd, 6),
+                # `None` here is UNKNOWN and never free — the model serving this
+                # cycle has no prices on file. A zero would make the most
+                # expensive unknown look like the cheapest cycle of the day.
+                cost_usd=_logged_cost(usage.estimated_cost_usd, 6),
                 next_cycle_seconds=env.decision_interval_seconds,
             )
             # The same pulse, made durable. The line above goes to the systemd
@@ -1240,7 +1329,11 @@ def cmd_dream(env: Env, rules: Rules) -> int:
         # nothing surfaced — which is exactly the silence `scope` was given a
         # log line to avoid.
         fusion=_describe_fusion(result.fusion),
-        cost_usd=round(result.usage.estimated_cost_usd, 4) if result.usage else None,
+        # Two different `None`s share this field and the log line cannot tell
+        # them apart, which is worth knowing before reading one: no usage at all
+        # (no call was made), and a call whose model has no prices on file. Both
+        # mean "no figure", neither means zero.
+        cost_usd=_logged_cost(result.usage.estimated_cost_usd, 4) if result.usage else None,
         # On the same line as the dream itself, so one log entry answers both
         # "did it think" and "did anything move". A zero here beside a healthy
         # dream is the signature of the bug this closed, and it should be
@@ -1496,7 +1589,10 @@ def cmd_confer(env: Env, rules: Rules) -> int:
         adopted=report.adopted,
         calls=report.calls,
         failed=len(failed),
-        cost_usd=round(report.cost_usd, 4),
+        # `None` means the run's cost could not be totalled because at least one
+        # of its calls has no prices on file. `unpriced_calls` says how many.
+        cost_usd=_logged_cost(report.cost_usd, 4),
+        unpriced_calls=report.unpriced_calls,
     )
 
     if report.conferred and len(failed) == report.conferred:

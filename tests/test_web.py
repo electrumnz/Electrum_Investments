@@ -592,6 +592,55 @@ def test_decisions_page_is_empty_but_explains_itself(client):
     assert "electrum-bot loop" in body
 
 
+def test_a_cycle_with_tokens_and_no_price_says_cost_unknown(audited):
+    """**A zero cost beside a real token count is a missing price, not a free
+    call**, and this page is where that has to be said out loud.
+
+    `Decision.estimated_cost_usd` is a plain float on an append-only record that
+    is never migrated, so it cannot carry "unknown" the way
+    `CallUsage.estimated_cost_usd` now can. What makes the pair readable anyway
+    is arithmetic: tokens were spent, and a call that spent tokens cannot have
+    cost exactly nothing. `$0.0000` would be a plausible wrong figure on a page
+    whose whole argument is that its numbers were measured.
+
+    The cause is a model with no entry in `config.MODEL_SPECS`; the loop writes
+    a `model_cost_unknown` event naming it, because an inference drawn here is
+    not a record.
+    """
+    log, client = audited
+    log.record(
+        _decision(
+            proposals=[],
+            claude_input_tokens=2072,
+            claude_output_tokens=129,
+            estimated_cost_usd=0.0,
+        )
+    )
+
+    body = client.get("/decisions").text
+    assert "2,072 in / 129 out" in body
+    assert "cost unknown" in body
+    assert "$0.0000" not in body
+
+
+def test_a_priced_cycle_still_shows_the_figure(audited):
+    """The other half. A real cost must keep rendering as one, or the fix for a
+    missing price would have hidden every price."""
+    log, client = audited
+    log.record(
+        _decision(
+            proposals=[],
+            claude_input_tokens=2072,
+            claude_output_tokens=129,
+            estimated_cost_usd=0.002717,
+        )
+    )
+
+    body = client.get("/decisions").text
+    assert "$0.0027" in body
+    assert "cost unknown" not in body
+
+
 def test_a_rejection_shows_every_reason_the_gate_gave(audited):
     """The gate collects all reasons rather than short-circuiting. If the page
     renders only the first, that property is invisible to the operator."""
@@ -2153,6 +2202,49 @@ def _settings_with(
         calendar_degraded=degraded,
         poller_has_read=poller_has_read,
     )
+
+
+def test_the_settings_page_names_the_model_rather_than_the_tier():
+    """A tier could only ever mean one of three Claude strings.
+
+    So a page reporting one was answering a narrower question than the one being
+    asked, and would keep saying "haiku" while `DECISION_MODEL_ID` sent
+    something else entirely. Both cards name what actually goes on the wire.
+    """
+    env = _env()
+    env.decision_model_id = "some-open-model"
+    env.dream_model_id = "another-open-model"
+
+    html = render.settings_page(load_rules(), env, chat_enabled=False)
+
+    assert "some-open-model" in html
+    assert "another-open-model" in html
+
+
+def test_an_unpriced_dreamer_estimates_nothing_rather_than_zero_dollars():
+    """`~$0.000 a run, ~$0 a year` would be the cheapest figure on this page.
+
+    It would also be a figure nobody measured, sitting beside figures that were.
+    `estimated_cost_usd` answers `None` for a model with no prices on file, and
+    the card says unknown and names the model — "unknown" with no subject sends
+    an operator looking in the wrong place.
+    """
+    env = _env()
+    env.dream_model_id = "some-open-model"
+
+    html = render.settings_page(load_rules(), env, chat_enabled=False)
+
+    assert "No prices are on file for some-open-model" in html
+    assert "a run, ~$" not in html
+
+
+def test_a_priced_dreamer_still_shows_the_estimate():
+    """The shipped configuration. A model with prices renders a number, or the
+    fix for a missing price would have removed every estimate."""
+    html = render.settings_page(load_rules(), _env(), chat_enabled=False)
+
+    assert "a run, ~$" in html
+    assert "No prices are on file" not in html
 
 
 def test_an_unloaded_calendar_renders_as_unknown_not_as_an_empty_run():

@@ -5930,10 +5930,23 @@ def _cycle(
 
     cost = ""
     if d.claude_input_tokens or d.claude_output_tokens:
+        # **A zero here is a missing price, not a free call**, and this is where
+        # it has to be said out loud. `Decision.estimated_cost_usd` is a plain
+        # float on an append-only record that is never migrated, so it cannot
+        # hold "unknown" — but the branch above has already established that
+        # tokens were spent, and a call that spent tokens cannot have cost
+        # exactly nothing. The pair is therefore readable even though the field
+        # is not, and `$0.0000` would be a plausible wrong figure on a page
+        # whose whole argument is that its numbers were measured.
+        #
+        # The cause is a model with no entry in `config.MODEL_SPECS`. The loop
+        # writes a `model_cost_unknown` event naming it, because an inference
+        # drawn here is not a record.
+        priced = f"${d.estimated_cost_usd:.4f}" if d.estimated_cost_usd else "cost unknown"
         cost = (
             f"{d.claude_input_tokens:,} in / {d.claude_output_tokens:,} out"
             + (f" / {d.claude_cached_tokens:,} cached" if d.claude_cached_tokens else "")
-            + f" &middot; ${d.estimated_cost_usd:.4f}"
+            + f" &middot; {priced}"
         )
 
     # `<details>`, and the head line is its `<summary>`.
@@ -7400,7 +7413,19 @@ def settings_page(
             "The code refuses to start twice over if this is ever false.",
         )
         + _row("Decision interval", f"{env.decision_interval_seconds}s")
-        + _row("Model tier", env.claude_tier.value)
+        # The model, not the tier. A tier could only ever name one of three
+        # Claude strings, so a page reporting one was answering a narrower
+        # question than the one being asked the moment any other model became
+        # nameable — and would keep saying "haiku" while DECISION_MODEL_ID sent
+        # something else entirely.
+        + _row(
+            "Decision model",
+            env.decision_spec.model_id,
+            "What goes on the wire. CLAUDE_TIER picks one of three Claude "
+            "models; DECISION_MODEL_ID names any model outright and overrides "
+            "it. A model with no prices on file still runs — its calls report "
+            "an unknown cost rather than a zero.",
+        )
         + '</dl><p class="source">Whether orders are actually placed is decided by '
         "the <code>--execute</code> flag on the service unit, not from here.</p></div>"
         '<div class="card"><h3>Credentials and feeds</h3><dl class="kv">'
@@ -7438,7 +7463,32 @@ def settings_page(
     # holding its own copy of a cadence keeps announcing the old one forever
     # after somebody edits the timer on the box.
     schedule = read_schedule()
-    per_run, per_year = estimated_cost_usd(env.dream_tier)
+
+    # **Absent rather than zero.** `estimated_cost_usd` answers `None` for a
+    # model nobody has prices on file for, and `~$0.000 a run, ~$0 a year` would
+    # be the cheapest thing on this page while being a figure nobody measured.
+    # The row states which model it could not price, because "unknown" with no
+    # subject sends an operator looking in the wrong place.
+    dream_spec = env.dream_spec
+    dream_estimate = estimated_cost_usd(dream_spec)
+    if dream_estimate is None:
+        dream_cost_row = _row(
+            "Estimated cost",
+            "unknown",
+            f"No prices are on file for {dream_spec.model_id}, so a run's "
+            "cost cannot be computed. It is added to config.MODEL_SPECS in a "
+            "commit, exactly as a limit is added to config/rules.yaml — an "
+            "estimate typed into the environment would be a figure with no "
+            "review behind it.",
+        )
+    else:
+        per_run, per_year = dream_estimate
+        dream_cost_row = _row(
+            "Estimated cost",
+            f"~${per_run:.3f} a run, ~${per_year:.0f} a year",
+            "An estimate from the model's prices and a typical prompt. The real "
+            "figure for a run that happened is logged with it.",
+        )
     body += (
         '<section class="block"><h2>Dreaming</h2><div class="grid g2">'
         '<div class="card"><h3>Schedule</h3><dl class="kv">'
@@ -7466,17 +7516,24 @@ def settings_page(
         "<code>deploy/systemd/mudhorn-dream.timer</code>.</p></div>"
         '<div class="card"><h3>The call</h3><dl class="kv">'
         + _row(
-            "Model tier",
-            env.dream_tier.value,
-            "Set by DREAM_CLAUDE_TIER. It deliberately does not follow "
-            "CLAUDE_TIER, because that defaults to a tier with no extended "
-            "thinking and thinking is how a dream gets past its first hop.",
+            "Model",
+            dream_spec.model_id,
+            "Set by DREAM_MODEL_ID, or by DREAM_CLAUDE_TIER when no id is "
+            "named. It deliberately does not follow CLAUDE_TIER, because that "
+            "defaults to a tier with no extended thinking and thinking is how "
+            "a dream gets past its first hop.",
         )
         + _row(
             "Bought",
-            "deep, not fast",
-            "High effort, a large thinking budget and a 900s timeout. Nothing "
-            "waits on this call and depth is the whole product.",
+            "deep, not fast" if dream_spec.sends_anthropic_thinking else "plain",
+            (
+                "High effort, a large thinking budget and a 240s timeout. "
+                "Nothing waits on this call and depth is the whole product."
+                if dream_spec.sends_anthropic_thinking
+                else "This model is not sent a thinking budget or an effort "
+                "setting, so the depth a dream needs has to come from the "
+                "model itself. The budget and the 240s timeout still apply."
+            ),
         )
         + _row(
             "Prompt cache",
@@ -7485,12 +7542,7 @@ def settings_page(
             "runs daily, so it would miss every time and pay double. The "
             "decision loop caches because it wakes every fifteen minutes.",
         )
-        + _row(
-            "Estimated cost",
-            f"~${per_run:.3f} a run, ~${per_year:.0f} a year",
-            "An estimate from the tier and a typical prompt. The real figure "
-            "for a run that happened is logged with it.",
-        )
+        + dream_cost_row
         + _row(
             "Anthropic key",
             "configured" if env.anthropic_api_key else "not configured",

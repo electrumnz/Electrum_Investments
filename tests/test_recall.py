@@ -169,6 +169,17 @@ class _StubClaude:
     def __init__(self, decision: ModelDecision) -> None:
         self._decision = decision
 
+    # Both read by the loop: one for the `loop_start` record, one to decide
+    # whether a cost can be stated at all. A double missing an attribute the
+    # real client has pins a path production never takes.
+    @property
+    def model_id(self) -> str:
+        return "claude-haiku-4-5-20251001"
+
+    @property
+    def price_is_known(self) -> bool:
+        return True
+
     def propose(self, market_context: str) -> tuple[ModelDecision, CallUsage]:
         self.seen = market_context
         return self._decision, CallUsage(

@@ -442,8 +442,35 @@ class ExchangeResult:
         return self.outcome not in SKIPPED_OUTCOMES
 
     @property
-    def cost_usd(self) -> float:
-        return sum(u.estimated_cost_usd for u in self.usage)
+    def unpriced_calls(self) -> int:
+        """Calls this exchange made whose cost nobody can compute.
+
+        Stated separately from the total rather than inferred from it, so a
+        reader can tell "no model has prices on file" from "one turn out of six
+        did". Same shape as `symbols_without_history` travelling beside the
+        indicator block rather than being deduced from a gap in it.
+        """
+        return sum(1 for u in self.usage if u.estimated_cost_usd is None)
+
+    @property
+    def cost_usd(self) -> float | None:
+        """What this exchange cost, or `None` when any call in it is unpriced.
+
+        **A partial sum presented as the total is the failure this returns None
+        to avoid.** Adding up the calls that happen to have prices and printing
+        the answer as "what the run cost" understates it by an unknown amount,
+        which is worse than saying nothing — it is a plausible wrong figure, and
+        it is wrong in the direction that makes an unpriced model look cheap.
+
+        Zero is still a real answer, and a common one: a skipped dream makes no
+        call at all, so `usage` is empty and nothing cost anything. Empty and
+        unpriced are kept apart exactly as `has_cycles` is kept apart from an
+        empty list.
+        """
+        costs = [u.estimated_cost_usd for u in self.usage]
+        if any(c is None for c in costs):
+            return None
+        return sum(c for c in costs if c is not None)
 
 
 @dataclass(frozen=True)
@@ -505,8 +532,23 @@ class ConferenceReport:
         return sum(len(e.usage) for e in self.exchanges)
 
     @property
-    def cost_usd(self) -> float:
-        return sum(e.cost_usd for e in self.exchanges)
+    def unpriced_calls(self) -> int:
+        """How many of `calls` this run could not put a price on."""
+        return sum(e.unpriced_calls for e in self.exchanges)
+
+    @property
+    def cost_usd(self) -> float | None:
+        """What the run cost, or `None` when any exchange in it is unpriced.
+
+        The unknown propagates rather than being absorbed here. A total that
+        silently drops the calls it could not price is the same bug as a single
+        call reporting 0.00, one level up and harder to notice, because the
+        figure it produces is large enough to look like the answer.
+        """
+        totals = [e.cost_usd for e in self.exchanges]
+        if any(t is None for t in totals):
+            return None
+        return sum(t for t in totals if t is not None)
 
 
 # ------------------------------------------------- reading the transcript back
@@ -1200,7 +1242,7 @@ class Conference:
         """
         soul = load_soul(soul_name)
         prompt = f"{soul.prompt_prefix()}\n{system}" if soul.found else system
-        return ModelClient(env, prompt, tier=env.dream_tier, cache_system=False)
+        return ModelClient(env, prompt, spec=env.dream_spec, cache_system=False)
 
     # ------------------------------------------------------------- the run
 
@@ -1252,7 +1294,13 @@ class Conference:
             decided=report.decided,
             undecided=report.undecided,
             calls=report.calls,
-            cost_usd=round(report.cost_usd, 4),
+            # `None` on this line means the run's cost could not be computed,
+            # never that it was free. `unpriced_calls` says how much of the run
+            # that covers, and a zero stated every run is a fact rather than the
+            # absence of a warning — the same reason the cycle line carries its
+            # breach count.
+            cost_usd=None if report.cost_usd is None else round(report.cost_usd, 4),
+            unpriced_calls=report.unpriced_calls,
         )
         return report
 

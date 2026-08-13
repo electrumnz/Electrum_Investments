@@ -38,10 +38,28 @@ from bot.models import Decision, IndicatorSnapshot, MarketInputs
 
 
 class _StubClaude:
-    """Stands in for ModelClient. Returns whatever decision the test asked for."""
+    """Stands in for ModelClient. Returns whatever decision the test asked for.
+
+    `model_id` and `price_is_known` are here because the real client has them
+    and the loop reads both — one for the `loop_start` record, one to decide
+    whether a cost can be stated at all. A double that is missing an attribute
+    the original has pins a path production never takes, which is the trap
+    `Broker.orders_degraded` was found by.
+    """
+
+    #: What a call costs, or `None` for a model with no prices on file.
+    cost: float | None = 0.002717
 
     def __init__(self, decision: ModelDecision) -> None:
         self._decision = decision
+
+    @property
+    def model_id(self) -> str:
+        return "claude-haiku-4-5-20251001"
+
+    @property
+    def price_is_known(self) -> bool:
+        return self.cost is not None
 
     def propose(self, market_context: str) -> tuple[ModelDecision, CallUsage]:
         return self._decision, CallUsage(
@@ -49,8 +67,14 @@ class _StubClaude:
             output_tokens=129,
             cache_read_tokens=0,
             cache_write_tokens=0,
-            estimated_cost_usd=0.002717,
+            estimated_cost_usd=self.cost,
         )
+
+
+class _UnpricedClaude(_StubClaude):
+    """A model nobody has prices on file for. Everything else is identical."""
+
+    cost = None
 
 
 def _run_one_cycle(
@@ -105,6 +129,14 @@ class _ExplodingClaude:
 
     def __init__(self, error: Exception) -> None:
         self._error = error
+
+    @property
+    def model_id(self) -> str:
+        return "claude-haiku-4-5-20251001"
+
+    @property
+    def price_is_known(self) -> bool:
+        return True
 
     def propose(self, market_context: str) -> tuple[ModelDecision, CallUsage]:
         raise self._error
@@ -1694,6 +1726,84 @@ def test_a_failed_pass_is_recorded_as_failed_and_never_as_one_that_held(
     # other readers already know about it.
     view = AuditLog(tmp_path / "audit").read()
     assert any(e.kind == "model_call_failed" for e in view.events)
+
+
+def test_an_unpriced_cycle_reports_the_cost_as_unknown_rather_than_as_free(
+    monkeypatch, tmp_path
+):
+    """**The missing-versus-zero rule, with money attached.**
+
+    `CallUsage.estimated_cost_usd` is `float | None`, and a model with no entry
+    in `config.MODEL_SPECS` gives `None`. Rounding that to 0.0 for the log line
+    would make the one cycle nobody can price look like the cheapest cycle of
+    the day, and an operator watching the running cost would read an unpriced
+    model as a free one.
+
+    The audit `Decision` is the awkward half and it is checked here too. Its
+    `estimated_cost_usd` is a plain float on an append-only record that is never
+    migrated, so it cannot hold "unknown" — the zero it stores is legible only
+    because the token counts sit beside it and a call that spent tokens cannot
+    have cost exactly nothing. `model_cost_unknown` is what turns that inference
+    into a record, and it names the model so nobody has to deduce the cause.
+    """
+    logs = _run_one_cycle_with_client(
+        monkeypatch,
+        tmp_path,
+        _UnpricedClaude(ModelDecision(market_assessment="Holding.", proposals=[])),
+        in_session=True,
+    )
+
+    beat = _heartbeat(logs)
+    assert beat["cost_usd"] is None, (
+        "an unpriced cycle put a number on the heartbeat. A 0.0 there reads as "
+        "free, which is the one thing it is not."
+    )
+
+    view = AuditLog(tmp_path / "audit").read()
+    unpriced = [e for e in view.events if e.kind == "model_cost_unknown"]
+    assert len(unpriced) == 1, "the unknown price left no durable record"
+    assert unpriced[0].payload["model"] == "claude-haiku-4-5-20251001"
+    assert unpriced[0].payload["input_tokens"] == 2072
+
+    # And the record the Decisions page reads: tokens spent, cost stored as the
+    # only value the field can hold. The renderer turns that pair into "cost
+    # unknown"; see tests/test_web.py.
+    assert view.decisions
+    recorded = view.decisions[0].decision
+    assert recorded.claude_input_tokens == 2072
+    assert recorded.estimated_cost_usd == 0.0
+
+    # The run's own model is on the record rather than only its tier, because a
+    # named model is not one of three tiers.
+    start = [e for e in view.events if e.kind == "loop_start"]
+    assert start and start[0].payload["model"] == "claude-haiku-4-5-20251001"
+    assert start[0].payload["cost_visible"] is False
+
+
+def test_a_priced_cycle_still_reports_the_figure_and_writes_no_extra_event(
+    monkeypatch, tmp_path
+):
+    """The other half, and the one that must not regress.
+
+    Every shipped deployment runs a Claude tier with prices on file, so the
+    normal path has to be untouched: a real figure on the heartbeat, and NO
+    `model_cost_unknown` event. An event written every cycle on a healthy loop
+    would be noise in the one record a person reads.
+    """
+    logs = _run_one_cycle_with_client(
+        monkeypatch,
+        tmp_path,
+        _StubClaude(ModelDecision(market_assessment="Holding.", proposals=[])),
+        in_session=True,
+    )
+
+    assert _heartbeat(logs)["cost_usd"] == pytest.approx(0.002717)
+
+    view = AuditLog(tmp_path / "audit").read()
+    assert not [e for e in view.events if e.kind == "model_cost_unknown"]
+    assert view.decisions[0].decision.estimated_cost_usd == pytest.approx(0.002717)
+    start = [e for e in view.events if e.kind == "loop_start"]
+    assert start and start[0].payload["cost_visible"] is True
 
 
 def test_the_bars_are_not_fetched_on_a_pass_that_will_not_ask_the_model(

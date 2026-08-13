@@ -463,6 +463,177 @@ def test_the_prompt_does_not_promise_the_broker_is_holding_the_trail():
     assert "Do not widen the stop" in section
 
 
+# --------------------------------------- which model, what it costs, what it sends
+#
+# `ModelSpec` replaced "one of three Claude tiers" as the answer to "which
+# model". Three things were welded to that enum and each is checked here: the
+# id, the prices, and the two ANTHROPIC-only request fields.
+#
+# The rule the whole change is held to: an existing deployment must build a
+# byte-identical request and compute an identical cost. This is a decoupling,
+# not a migration.
+
+
+class _Recorder:
+    """Stands in for the SDK client. Captures the kwargs and refuses to answer."""
+
+    def __init__(self) -> None:
+        self.captured: dict[str, Any] = {}
+
+        outer = self
+
+        class _Messages:
+            def parse(self, **kw: Any) -> Any:
+                outer.captured.update(kw)
+                raise RuntimeError("stop")
+
+        self.messages = _Messages()
+
+    def with_options(self, **kw: Any) -> _Recorder:
+        self.captured["options"] = kw
+        return self
+
+
+def _client(spec: Any, monkeypatch: Any) -> Any:
+    from bot.config import Env
+    from bot.model_client import ModelClient
+
+    env = Env(_env_file=None)  # type: ignore[call-arg]
+    env.anthropic_api_key = "test"
+    client = ModelClient(env, "system text", spec=spec, cache_system=False)
+    monkeypatch.setattr(client, "_client", _Recorder())
+    return client
+
+
+@pytest.mark.parametrize(
+    ("tier", "thinks"),
+    [("haiku", False), ("sonnet", True), ("opus", True)],
+)
+def test_a_claude_tier_sends_exactly_what_it_always_sent(tier, thinks, monkeypatch):
+    """The `if self._tier in (SONNET, OPUS)` test, moved rather than changed.
+
+    Haiku has no extended thinking, so it was sent neither field; Sonnet and
+    Opus were sent both. That decision now lives on the spec, and the request
+    has to come out identical either way — a decoupling that quietly stopped
+    sending `thinking` would make every proposal shallower with nothing on any
+    surface saying so.
+    """
+    from bot.config import CLAUDE_MODEL_SPECS, ClaudeTier
+
+    spec = CLAUDE_MODEL_SPECS[ClaudeTier(tier)]
+    client = _client(spec, monkeypatch)
+
+    with pytest.raises(RuntimeError):
+        client.propose("context")
+
+    captured = client._client.captured
+    assert captured["model"] == spec.model_id
+    if thinks:
+        assert captured["thinking"] == {"type": "adaptive"}
+        assert captured["output_config"] == {"effort": "medium"}
+    else:
+        assert "thinking" not in captured
+        assert "output_config" not in captured
+
+
+def test_a_model_that_takes_neither_field_is_sent_a_plain_request(monkeypatch):
+    """`thinking` and `output_config` are ANTHROPIC fields with an Anthropic
+    shape.
+
+    DigitalOcean's schema lists a flat `reasoning_effort` and carries no
+    `output_config` at all, so sending Anthropic's pair at a non-Anthropic
+    endpoint is wrong in two ways at once. A spec that takes neither gets
+    neither: correct-and-plain rather than wrong. Emitting `reasoning_effort`
+    where it is wanted is a separate change with its own evidence.
+    """
+    from bot.config import ModelSpec
+
+    client = _client(ModelSpec(model_id="some-open-model"), monkeypatch)
+
+    with pytest.raises(RuntimeError):
+        client.propose("context")
+
+    captured = client._client.captured
+    assert captured["model"] == "some-open-model"
+    assert "thinking" not in captured
+    assert "output_config" not in captured
+    # And the parts that are not vendor-specific still go out unchanged.
+    assert captured["output_format"] is ModelDecision
+    assert captured["max_tokens"] == 4096
+
+
+class _Usage:
+    input_tokens = 2_000
+    output_tokens = 500
+    cache_read_input_tokens = 10_000
+    cache_creation_input_tokens = 1_000
+
+
+class _Response:
+    usage = _Usage()
+
+
+def test_a_priced_model_computes_the_same_cost_it_always_did(monkeypatch):
+    """The arithmetic, spelled out here rather than trusted to the table.
+
+    Base input, output, cache read at a tenth of input, and a 1-hour cache
+    WRITE at twice base input. If any of that had shifted while the prices moved
+    onto the spec, every cost figure in the repository would be quietly wrong in
+    a way no other test would notice.
+    """
+    from bot.config import CLAUDE_MODEL_SPECS, ClaudeTier
+
+    client = _client(CLAUDE_MODEL_SPECS[ClaudeTier.SONNET], monkeypatch)
+    usage = client._usage_from(_Response())
+
+    expected = (2_000 * 2.0 + 500 * 10.0 + 10_000 * 0.20 + 1_000 * 2.0 * 2.0) / 1_000_000
+    assert usage.estimated_cost_usd == pytest.approx(expected)
+    assert usage.input_tokens == 2_000
+    assert usage.cache_write_tokens == 1_000
+
+
+def test_an_unpriced_model_reports_an_unknown_cost_and_never_a_zero(monkeypatch):
+    """**The trap this whole change exists around.**
+
+    `CallUsage.estimated_cost_usd` was a plain float, so a model whose price is
+    not on file would report 0.00 — which reads as *free* on the Settings page
+    and in every log line. That is the missing-versus-zero rule with money
+    attached, and it is the same class of error as an invented indicator.
+
+    The field carries the absence instead. Note what is NOT lost: the token
+    counts are still exact, because they come off the response and are known
+    whoever served it. "How much did it think" and "what did that cost" are
+    different questions and only the second one is unanswerable.
+    """
+    from bot.config import ModelSpec
+
+    client = _client(ModelSpec(model_id="some-open-model"), monkeypatch)
+    usage = client._usage_from(_Response())
+
+    assert usage.estimated_cost_usd is None, (
+        "an unpriced model reported a number. A zero here is indistinguishable "
+        "from a free call on every surface that renders it."
+    )
+    assert usage.input_tokens == 2_000
+    assert usage.output_tokens == 500
+    assert usage.cache_read_tokens == 10_000
+    assert client.price_is_known is False
+
+
+def test_the_client_can_name_the_model_it_is_actually_using(monkeypatch):
+    """`loop_start` recorded the TIER and never the served model.
+
+    That was survivable while a tier could only mean one of three Claude
+    strings. It stops being survivable the moment `DECISION_MODEL_ID` can name
+    anything, because the record would then describe a setting rather than a
+    run.
+    """
+    from bot.config import ModelSpec
+
+    client = _client(ModelSpec(model_id="some-open-model"), monkeypatch)
+    assert client.model_id == "some-open-model"
+
+
 LIVE_FLAG = "MUDHORN_LIVE_SCHEMA_PROBE"
 LIVE_KEY = "ANTHROPIC_API_KEY_ELECTRUM"
 

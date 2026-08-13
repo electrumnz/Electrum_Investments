@@ -4,7 +4,9 @@ Design:
 - Frozen system prompt (no datetimes, IDs, or volatile content) so prompt caching works
 - Volatile market state goes in the user message, after the cache breakpoint
 - Structured outputs via `messages.parse()` against a Pydantic schema
-- Tier-aware: Haiku has no thinking/effort; Sonnet/Opus default to adaptive thinking
+- Spec-aware: the model, its prices and which optional request fields it takes
+  all travel together on a `ModelSpec`, so naming a model is not the same thing
+  as choosing one of three Claude tiers
 
 Caching note: the system prompt is marked with a 1-hour TTL. At the default
 15-minute decision cadence a 5-minute cache would expire between every call and
@@ -20,7 +22,7 @@ from typing import Any
 import anthropic
 from pydantic import BaseModel, Field
 
-from .config import CLAUDE_MODEL_IDS, CLAUDE_PRICING_USD_PER_MTOK, DAY_NAMES, ClaudeTier, Env, Rules
+from .config import DAY_NAMES, Env, ModelSpec, Rules
 from .models import (
     # `x as x` is mypy's explicit re-export form under --strict, and the
     # re-export is the point: the models this applies to live in `models.py`,
@@ -179,11 +181,31 @@ DREAM_MAX_RETRIES = 1
 
 @dataclass(frozen=True)
 class CallUsage:
+    """What one model call spent, and what that cost — when that is knowable.
+
+    **`estimated_cost_usd` is `float | None`, and `None` means UNKNOWN rather
+    than free.** It was a plain float while the only reachable models were the
+    three Claude tiers, every one of which has prices on file. The moment an
+    arbitrary model can be named, a model nobody has priced computes a cost of
+    0.00 — which reads as *this call was free* on the Settings page and in every
+    log line, and is the missing-versus-zero rule with money attached.
+
+    The fix is not a default price. An invented cost is the same class of error
+    as an invented indicator: it is a figure nobody measured, presented beside
+    figures that were. So the field carries the absence, and every consumer has
+    to say "unknown" rather than print a zero or sum it silently into a total.
+    A total that quietly drops an unknown component is the same bug one level
+    up, which is why `ConferenceReport.cost_usd` is `float | None` too.
+
+    The token counts are never None. They come off the response, so they are
+    known whoever served it; it is only the price that can be missing.
+    """
+
     input_tokens: int
     output_tokens: int
     cache_read_tokens: int
     cache_write_tokens: int
-    estimated_cost_usd: float
+    estimated_cost_usd: float | None
 
 
 SYSTEM_PROMPT_TEMPLATE = """\
@@ -533,13 +555,21 @@ class ModelClient:
         env: Env,
         system_prompt: str,
         *,
-        tier: ClaudeTier | None = None,
+        spec: ModelSpec | None = None,
         cache_system: bool = True,
     ) -> None:
         """
-        `tier` overrides `CLAUDE_TIER` for this client. The decision loop and
-        the dreamer run at wildly different cadences, so the tier that is right
-        for one is not automatically right for the other: see `Env.dream_tier`.
+        `spec` overrides `Env.decision_spec` for this client. The decision loop
+        and the dreamer run at wildly different cadences, so the model that is
+        right for one is not automatically right for the other: see
+        `Env.dream_spec`.
+
+        It used to be a `ClaudeTier`, and the type is the change. A tier could
+        only ever name one of three Anthropic strings, so "which model" and
+        "which of three Claude tiers" were the same question. A `ModelSpec`
+        carries the id, the prices and which optional request fields the
+        endpoint accepts, which is everything this class needs to know about
+        the far end.
 
         `cache_system` must be FALSE for anything that runs less often than the
         cache TTL, and getting this wrong costs money rather than saving it.
@@ -551,10 +581,43 @@ class ModelClient:
         minutes and gets roughly four reads per write, so it keeps caching on.
         """
         self._client = anthropic.Anthropic(api_key=env.anthropic_api_key)
-        self._tier = tier or env.claude_tier
-        self._model = CLAUDE_MODEL_IDS[self._tier]
+        self._spec = spec or env.decision_spec
+        self._model = self._spec.model_id
         self._system_prompt = system_prompt
         self._cache_system = cache_system
+
+    @property
+    def model_id(self) -> str:
+        """What actually goes on the wire, for a caller that wants to say so.
+
+        `loop_start` records the TIER and never recorded the served model, so a
+        run on a named model was invisible in the record afterwards. A tier
+        cannot describe a model this repository did not pick from a list of
+        three; the id can.
+        """
+        return self._model
+
+    @property
+    def price_is_known(self) -> bool:
+        """Whether this client can put a figure on what a call cost."""
+        return self._spec.price_is_known
+
+    def _reasoning_kwargs(self, effort: str) -> dict[str, Any]:
+        """The optional request fields, for endpoints that take them.
+
+        Both are ANTHROPIC fields with an Anthropic shape, which is why the
+        spec's flags are named after the vendor. A model that does not take them
+        gets neither — a plain request rather than a wrong one. DigitalOcean's
+        schema lists a flat `reasoning_effort` and no `output_config` at all;
+        emitting that is a separate change with its own evidence and it is
+        deliberately not guessed at here.
+        """
+        kwargs: dict[str, Any] = {}
+        if self._spec.sends_anthropic_thinking:
+            kwargs["thinking"] = {"type": "adaptive"}
+        if self._spec.sends_anthropic_effort:
+            kwargs["output_config"] = {"effort": effort}
+        return kwargs
 
     def _system_block(self) -> list[dict[str, Any]]:
         block: dict[str, Any] = {"type": "text", "text": self._system_prompt}
@@ -571,10 +634,7 @@ class ModelClient:
             "messages": [{"role": "user", "content": market_context}],
             "output_format": ModelDecision,
         }
-
-        if self._tier in (ClaudeTier.SONNET, ClaudeTier.OPUS):
-            kwargs["thinking"] = {"type": "adaptive"}
-            kwargs["output_config"] = {"effort": "medium"}
+        kwargs.update(self._reasoning_kwargs("medium"))
 
         response = self._client.messages.parse(**kwargs)
         decision = response.parsed_output
@@ -618,9 +678,7 @@ class ModelClient:
             "messages": [{"role": "user", "content": prompt}],
             "output_format": DreamStep,
         }
-        if self._tier in (ClaudeTier.SONNET, ClaudeTier.OPUS):
-            kwargs["thinking"] = {"type": "adaptive"}
-            kwargs["output_config"] = {"effort": "high"}
+        kwargs.update(self._reasoning_kwargs("high"))
 
         # Long enough for a full thinking pass, short enough that a call which
         # is never going to answer says so while somebody could still act on it.
@@ -678,9 +736,7 @@ class ModelClient:
             "messages": [{"role": "user", "content": prompt}],
             "output_format": output_format,
         }
-        if self._tier in (ClaudeTier.SONNET, ClaudeTier.OPUS):
-            kwargs["thinking"] = {"type": "adaptive"}
-            kwargs["output_config"] = {"effort": "medium"}
+        kwargs.update(self._reasoning_kwargs("medium"))
 
         client = self._client.with_options(
             timeout=DREAM_TIMEOUT_SECONDS, max_retries=DREAM_MAX_RETRIES
@@ -701,14 +757,26 @@ class ModelClient:
         cache_read = getattr(u, "cache_read_input_tokens", 0) or 0
         cache_write = getattr(u, "cache_creation_input_tokens", 0) or 0
 
-        in_price, out_price, cache_read_price = CLAUDE_PRICING_USD_PER_MTOK[self._tier]
-        # 1-hour cache writes bill at 2x base input.
-        cost = (
-            in_tokens * in_price
-            + out_tokens * out_price
-            + cache_read * cache_read_price
-            + cache_write * in_price * 2.0
-        ) / 1_000_000
+        # **`None` rather than a fallback price.** A model with no entry in
+        # `MODEL_SPECS` costs an amount this process cannot compute, and the
+        # only two honest things to do with that are to report it as unknown or
+        # to refuse the call. Refusing would make an unpriced model unusable,
+        # which is the opposite of what naming one is for, so the cost carries
+        # the absence and the surfaces say so.
+        #
+        # Note the tokens are still counted and still reported. "How much did it
+        # think" and "what did that cost" are different questions and only the
+        # second one is unanswerable here.
+        pricing = self._spec.pricing
+        cost: float | None = None
+        if pricing is not None:
+            # 1-hour cache writes bill at 2x base input.
+            cost = (
+                in_tokens * pricing.input_usd_per_mtok
+                + out_tokens * pricing.output_usd_per_mtok
+                + cache_read * pricing.cache_read_usd_per_mtok
+                + cache_write * pricing.input_usd_per_mtok * 2.0
+            ) / 1_000_000
 
         return CallUsage(
             input_tokens=in_tokens,

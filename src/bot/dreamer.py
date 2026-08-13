@@ -86,7 +86,7 @@ import structlog
 from pydantic import BaseModel, Field
 
 from .audit import AuditLog
-from .config import CLAUDE_PRICING_USD_PER_MTOK, ClaudeTier, Env, Rules
+from .config import Env, ModelSpec, Rules
 from .dreaming import (
     DREAMER,
     MAX_FUSION_PARENTS,
@@ -1375,19 +1375,34 @@ def read_schedule(
     return Schedule(calendar="", installed=False, found=False)
 
 
-def estimated_cost_usd(tier: ClaudeTier) -> tuple[float, float]:
-    """Rough cost of one run, and of a year of daily runs.
+def estimated_cost_usd(spec: ModelSpec) -> tuple[float, float] | None:
+    """Rough cost of one run, and of a year of daily runs. `None` if unknowable.
 
     Measured against the real prompt rather than guessed: about 3,600 input
     tokens with a few chains open, and a few hundred output on top of the
-    thinking pass. Thinking bills as output, and Haiku has none.
+    thinking pass. Thinking bills as output.
 
     Presented as an estimate and labelled as one on the page. The exact figure
     for a run that actually happened is logged with it as `cost_usd`.
+
+    **A model with no prices on file returns `None`, and the page must say
+    unknown rather than draw `~$0.000 a run`.** This used to key on the tier
+    twice over — the price table, and `0 if HAIKU else 4_000` for the thinking
+    budget — so it could only describe one of three Claude models and had no way
+    to express a fourth. Both halves now come off the spec: the prices are the
+    spec's or absent, and the thinking allowance follows whether the model is
+    actually SENT a thinking field, which is the property that made Haiku's
+    estimate zero in the first place. The three Claude tiers produce exactly the
+    figures they always did.
     """
-    input_price, output_price, _ = CLAUDE_PRICING_USD_PER_MTOK[tier]
-    thinking = 0 if tier is ClaudeTier.HAIKU else 4_000
-    per_run = (3_600 * input_price + (thinking + 700) * output_price) / 1_000_000
+    pricing = spec.pricing
+    if pricing is None:
+        return None
+    thinking = 4_000 if spec.sends_anthropic_thinking else 0
+    per_run = (
+        3_600 * pricing.input_usd_per_mtok
+        + (thinking + 700) * pricing.output_usd_per_mtok
+    ) / 1_000_000
     return per_run, per_run * 365
 
 
@@ -1431,9 +1446,9 @@ class Dreamer:
         self._client = client or ModelClient(
             env,
             system,
-            # Its own tier, because Haiku cannot think and thinking is how a
+            # Its own model, because Haiku cannot think and thinking is how a
             # dream gets past its first hop.
-            tier=env.dream_tier,
+            spec=env.dream_spec,
             # NOT cached. A 1h cache write bills at 2x input and a read at 0.1x,
             # so a caller running once a day misses every time and pays double
             # the system block on every call. The loop caches because it wakes
