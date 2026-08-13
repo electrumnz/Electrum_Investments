@@ -17,6 +17,7 @@ import pytest
 from bot.broker import MockBroker
 from bot.config import Rules, load_rules
 from bot.context import (
+    ACCOUNT_HALTED,
     BUDGET_SPENT,
     HEADROOM_UNKNOWN,
     RISK_UNIT,
@@ -1074,6 +1075,78 @@ def test_the_block_states_that_it_bounds_size_and_nothing_else(account):
 
     assert "These bound SIZE only" in blob
     assert "stand-down" in blob
+    # The two HALTING gates were missing from that list, and they are the two
+    # most worth naming: the others refuse a trade, these refuse every trade.
+    assert "equity floor" in blob
+    assert "daily-loss kill switch" in blob
+
+
+def test_an_account_below_the_equity_floor_says_so_above_every_figure():
+    """**A budget quoted to an account that may open nothing.**
+
+    `RiskGate._equity_floor` refuses EVERY proposal once equity drops below
+    `min_equity_floor_usd`, and audit drove it: at $89,999 against the shipped
+    $90,000 floor the block rendered a $899.99 risk budget and a $44,999.50
+    value budget — every figure correct as a size limit — and the gate refused a
+    proposal sized at exactly those. The floor is in neither the cached system
+    prompt nor this block, so the agent had no way at all to know the account
+    was halted.
+
+    Both halves are pinned. The words lead, because every line under them is a
+    statement about what may be opened and all of them are moot; and the
+    ceilings still render, because they are still true and going silent would
+    make a halted account indistinguishable from a broken renderer.
+    """
+    rules = load_rules()
+    floor = rules.account.min_equity_floor_usd
+    account = AccountSnapshot(
+        equity_usd=floor - 1.0,
+        cash_usd=floor - 1.0,
+        buying_power_usd=floor * 2,
+    )
+
+    lines = render_sizing_ceilings(account=account, rules=rules)
+    blob = "\n".join(lines)
+
+    assert ACCOUNT_HALTED in blob
+    assert "REFUSES every new position" in blob
+    # Ahead of the first ceiling, not buried under it.
+    assert lines.index(next(x for x in lines if ACCOUNT_HALTED in x)) < lines.index(
+        next(x for x in lines if "Most ONE us_equity trade may risk" in x)
+    )
+    # And the figures are still there rather than withheld.
+    assert "Most ONE us_equity trade may risk" in blob
+
+    # The gate agrees this account is halted — which is the point of the words.
+    proposal = _proposal(qty=1)
+    verdict = RiskGate(
+        rules, equity_at_session_start=account.equity_usd, now=IN_SESSION
+    ).evaluate(proposal, account=account, tick=_qqq_tick())
+    assert not verdict.approved
+    assert any("below floor" in r for r in verdict.reasons)
+
+
+def test_an_account_at_the_floor_is_not_described_as_halted():
+    """`_equity_floor` compares with `<`, so equity exactly at the floor trades.
+
+    The mirror of the test above, and the one that stops the warning being
+    printed at an account that is fine — a halt notice on a working account is
+    the same class of wrong figure in the other direction.
+    """
+    rules = load_rules()
+    account = AccountSnapshot(
+        equity_usd=rules.account.min_equity_floor_usd,
+        cash_usd=rules.account.min_equity_floor_usd,
+        buying_power_usd=rules.account.min_equity_floor_usd * 2,
+    )
+
+    assert ACCOUNT_HALTED not in "\n".join(
+        render_sizing_ceilings(account=account, rules=rules)
+    )
+    verdict = RiskGate(
+        rules, equity_at_session_start=account.equity_usd, now=IN_SESSION
+    ).evaluate(_proposal(qty=1), account=account, tick=_qqq_tick())
+    assert verdict.approved, verdict.reasons
 
 
 def test_a_looser_class_limit_is_named_as_the_class_own_rather_than_a_mistake():

@@ -425,6 +425,11 @@ VALUE_UNIT = "position value"
 # spelling is what keeps a test and a renderer talking about the same state.
 BUDGET_SPENT = "BUDGET SPENT"
 HEADROOM_UNKNOWN = "HEADROOM UNKNOWN"
+# Deliberately NOT one of the other two. "Spent" and "unknown" are both answers
+# about a budget; this is the account being shut, which is a different sentence
+# and must not be read as a very small budget or as a figure nobody could
+# establish.
+ACCOUNT_HALTED = "ACCOUNT HALTED"
 
 # **The words start above the rounding boundary, not at zero.** Every figure in
 # this document prints at two decimal places, so a headroom of $0.004 is a
@@ -910,6 +915,23 @@ def render_sizing_ceilings(
     The block states its own limits at the end rather than implying
     completeness. These are ceilings on SIZE, and half the gates in `risk.py`
     are not about size at all.
+
+    **One of those non-size gates is stated here rather than only in that list,
+    because it is HALTING and it is visible from this snapshot.**
+    `RiskGate._equity_floor` refuses every proposal once equity drops below
+    `min_equity_floor_usd`, and audit drove it: at $89,999 against the shipped
+    $90,000 floor this block rendered a $899.99 risk budget and a $44,999.50
+    value budget, every figure correct as a size limit, while the gate refused a
+    proposal sized at exactly those. The floor appears nowhere in the cached
+    system prompt either, so an agent in that state had no way whatever to know
+    the account was halted — a budget quoted to an account that may open
+    nothing is the confident partial answer this repository exists to refuse,
+    arriving through the furniture.
+
+    The other halting gate, the daily-loss kill switch, is deliberately NOT
+    stated as a fact: it is state held inside `RiskGate` and is not on the
+    snapshot, so this could only guess at it. It is named in the closing list
+    instead, which is the honest half.
     """
     out = ["## Sizing ceilings, in dollars (computed — do not re-derive them)"]
 
@@ -923,6 +945,20 @@ def render_sizing_ceilings(
             "Propose nothing until the account reads back."
         )
         return out
+
+    # Ahead of every figure it qualifies, for the same reason a stale reading is
+    # announced above the banners that describe it: each line below is a
+    # statement about what may be opened, and all of them are moot.
+    floor = rules.account.min_equity_floor_usd
+    if account.equity_usd < floor:
+        out.append(
+            f"- {ACCOUNT_HALTED} — equity ${account.equity_usd:,.2f} is below the "
+            f"${floor:,.2f} floor in config/rules.yaml, so the gate REFUSES every "
+            f"new position whatever it is sized at. The figures below are still "
+            f"the size limits and they are not permission: nothing opens until "
+            f"equity is back above the floor. Closing a position and moving a "
+            f"stop are never gated and are unaffected."
+        )
 
     ceilings = sizing_ceilings(
         account=account, rules=rules, granted_symbols=granted_symbols
@@ -974,11 +1010,18 @@ def render_sizing_ceilings(
                 out.append(line)
 
     out.append("")
+    # The two HALTING gates lead, because they are a different kind of refusal
+    # from the rest of this list: the others refuse a trade, these refuse every
+    # trade. Both were missing, and both are the ones an agent most needs to
+    # know are there — a rejection it cannot see coming is one it will keep
+    # walking into every fifteen minutes.
     out.append(
-        "These bound SIZE only. The session window, the news blackout, the "
-        "per-symbol cooldown, the daily and weekly trade counts, the "
-        "concurrent-position limit and a consecutive-loss stand-down can each "
-        "still refuse a trade that fits every figure above."
+        "These bound SIZE only. The equity floor and the daily-loss kill switch "
+        "each stop the account opening ANYTHING, whatever it is sized at. The "
+        "session window, the news blackout, the per-symbol cooldown, the daily "
+        "and weekly trade counts, the concurrent-position limit and a "
+        "consecutive-loss stand-down can each still refuse a trade that fits "
+        "every figure above."
     )
     return out
 

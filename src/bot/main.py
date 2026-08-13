@@ -20,7 +20,13 @@ from . import jobs, stop_watch
 from .announce import announce_inference
 from .audit import AuditLog, AuditView
 from .broker import AlpacaBroker, Broker, MockBroker
-from .config import Env, LiveTradingRefused, Rules
+from .config import (
+    Env,
+    LiveTradingRefused,
+    ModelSpec,
+    Rules,
+    is_claude_tier_default,
+)
 from .context import (
     build_market_context,
     fetch_indicators,
@@ -165,8 +171,8 @@ def _note_unpriced_call(audit: AuditLog, usage: CallUsage, *, model_id: str, whe
     )
 
 
-def provider_is_unusable(env: Env) -> str | None:
-    """Why the configured endpoint cannot be talked to at all, or None.
+def provider_is_unusable(env: Env, *, spec: ModelSpec | None = None) -> str | None:
+    """Why `ModelClient` will REFUSE TO CONSTRUCT here, or None if it will build.
 
     The narrower of the two questions, and the one the decision loop asks. A
     provider that is CONFIGURED AND WRONG is a different fault from one with no
@@ -181,12 +187,58 @@ def provider_is_unusable(env: Env) -> str | None:
     positions when the model call fails. That safety work is worth more than the
     proposal, so the loop degrades rather than refusing, exactly as it does when
     a feed is down.
+
+    **The question is "will the constructor refuse", never "is this
+    configuration tidy", and asking the second one was wrong in both
+    directions.** It read `provider.usable` alone, and audit found one hole of
+    each kind:
+
+    - **A guaranteed failure it let through.** `DO_INFERENCE_KEY` set with no
+      `DECISION_MODEL_ID` leaves `usable=True` and a Claude tier default as the
+      model id, which `ModelClient.__init__` refuses outright. Measured: the
+      loop cleared this guard and then raised out of `cmd_loop` — the exact
+      traceback-under-systemd shape the guard exists to prevent, and the most
+      likely half-configuration there is, since the key is the switch an
+      operator is told to set.
+    - **A working configuration it refused.** `DO_INFERENCE_BASE_URL` set
+      without the key reports `usable=False` while the detail sentence says in
+      as many words that model calls go to Anthropic and nothing has moved.
+      `ModelClient` builds, the calls succeed — and the loop exited 1, taking
+      `reconcile`, `stop_watch` and the expiry alerts down with it over a stray
+      variable `.env.example` describes as moving nothing.
+
+    So both refusals are read off the constructor's own two conditions.
+    `tests/test_loop.py::test_the_loop_refuses_exactly_what_the_client_refuses`
+    drives the real `ModelClient` across the configurations and fails if the two
+    ever disagree, which is what stops this drifting into a second, softer copy
+    of the constructor.
+
+    `spec` names which model would be used, because that is half the question:
+    the loop and the smoketest run `decision_spec` and the dreamer and the
+    conference run `dream_spec`, and a tier default in one is not a tier default
+    in the other.
     """
     provider = env.inference_provider
-    return None if provider.usable else provider.detail
+    if not provider.is_digitalocean:
+        # `ModelClient` raises on nothing here. An Anthropic configuration that
+        # is merely INCOMPLETE is `model_calls_are_impossible`'s to report, and
+        # a loop that refuses on it loses the safety work for no gain.
+        return None
+    if not provider.usable:
+        return provider.detail
+    model_id = (spec or env.decision_spec).model_id
+    if is_claude_tier_default(model_id):
+        return (
+            f"Model {model_id!r} is a Claude tier default and this process is "
+            f"configured for DigitalOcean at {provider.base_url}, which names "
+            f"Anthropic models differently and 403s the ones it lists on this "
+            f"account's tier. Name the model outright with DECISION_MODEL_ID or "
+            f"DREAM_MODEL_ID, or unset DO_INFERENCE_KEY to go back to Anthropic."
+        )
+    return None
 
 
-def model_calls_are_impossible(env: Env) -> str | None:
+def model_calls_are_impossible(env: Env, *, spec: ModelSpec | None = None) -> str | None:
     """Why this process cannot make a model call, or None if it can try.
 
     **One question asked in one place, because it used to be asked three times
@@ -210,7 +262,18 @@ def model_calls_are_impossible(env: Env) -> str | None:
     command that exits non-zero with a line saying which variable to set is a
     better answer than a traceback — particularly under systemd, where a
     traceback becomes a restart into the identical failure.
+
+    **That last sentence was aspirational and is now true.** Every one of the
+    three callers cleared this guard on a DigitalOcean box with no model named
+    and then hit `ModelClient.__init__`'s own refusal as an uncaught
+    `ModelCallFailed` — `smoketest`, `dream` and `confer` all produced the
+    traceback the docstring above promised they would not. It asks
+    `provider_is_unusable` first now, which is the constructor's question rather
+    than a paraphrase of it.
     """
+    blocked = provider_is_unusable(env, spec=spec)
+    if blocked:
+        return blocked
     provider = env.inference_provider
     if not provider.usable:
         return provider.detail
@@ -437,17 +500,72 @@ def refuse_a_decision_that_considered_nothing(
     Never a downgrade. No retry, no second model, no "record it but flag it": a
     recorded decision that considered nothing is the thing being prevented, so
     recording it with a warning attached is the bug wearing a warning label.
+
+    **What is counted is assessments that name a symbol from `shown`, not
+    assessments.** It counted the list's LENGTH, which is a different question
+    from the one every sentence above asks, and audit reproduced the gap: shown
+    `SPY` and `QQQ`, answered with two assessments naming neither, the cycle was
+    recorded — and `cycle_complete` read `symbols_shown=2, assessments=2`, so
+    the ratio put there to make a partial answer visible reported a complete
+    one.
+
+    That is not a hypothetical hallucination. `SymbolAssessment.symbol` is free
+    text with no allowlist behind it, and the context block *asks* for symbols
+    outside the current indicator set: "What you said last cycle" lists the
+    previous cycle's assessments and the prompt tells the model to report on
+    each. A symbol whose bars failed this cycle, or whose grant lapsed, is in
+    that list and not in `shown` — so a model that answers only the recall
+    section, which is the cheapest way to look diligent, lands exactly here.
+
+    Case is normalised on both sides. Refusing a correct answer because it came
+    back `spy` would be a false refusal on a cycle that was fine, which is the
+    one outcome worse than the gap being closed.
     """
-    if not shown or decision.assessments:
+    if not shown:
+        return
+    answered, off_list = split_assessments_by_what_was_shown(decision, shown=shown)
+    if answered:
+        # At least one assessment is about something the model was given
+        # figures for. A shortfall is reported on the cycle line, never refused.
         return
 
     named = ", ".join(sorted(shown))
+    instead = (
+        f" It returned {len(off_list)} assessment(s), and every one names a "
+        f"symbol it was shown no indicators for ({', '.join(off_list)}), which "
+        f"answers a question nobody asked."
+        if off_list
+        else ""
+    )
     raise ConsideredNothing(
         f"The model was shown indicators for {len(shown)} symbol(s) ({named}) "
-        f"and assessed none of them. An empty assessment list against a "
-        f"non-empty indicator set cannot be told apart afterwards from a loop "
-        f"that never looked, so this cycle is refused rather than recorded."
+        f"and assessed none of them.{instead} An assessment list that names none "
+        f"of the indicator set cannot be told apart afterwards from a loop that "
+        f"never looked, so this cycle is refused rather than recorded."
     )
+
+
+def split_assessments_by_what_was_shown(
+    decision: ModelDecision, *, shown: Collection[str]
+) -> tuple[list[str], list[str]]:
+    """`(assessed among the symbols shown, assessed outside them)`.
+
+    One reading of "was this assessment about anything we asked about", returned
+    as a pair, because both halves are wanted and by two different callers: the
+    refusal above needs "none of them were", the `cycle_complete` line needs
+    "which ones were strays". Two functions would be two places for the
+    case-folding rule to live and one place for it to drift.
+
+    Sorted and de-duplicated: both halves reach a log line or a message, and a
+    model that repeated itself should not make the field longer than the fault.
+    """
+    wanted = {s.strip().upper() for s in shown}
+    answered: set[str] = set()
+    strays: set[str] = set()
+    for assessment in decision.assessments:
+        target = answered if assessment.symbol.strip().upper() in wanted else strays
+        target.add(assessment.symbol)
+    return sorted(answered), sorted(strays)
 
 
 def cmd_loop(
@@ -1296,6 +1414,18 @@ def cmd_loop(
                 # this line.
                 symbols_shown=len(indicators),
                 assessments=len(decision.assessments),
+                # And the strays, because `assessments` alone cannot carry the
+                # ratio it was put here for. An assessment naming a symbol this
+                # cycle showed no figures for still lengthens that count, so
+                # `shown=2, assessments=2` read as a complete answer while one
+                # of the two symbols had never been mentioned. Not a refusal —
+                # the "What you said last cycle" block deliberately invites a
+                # report on a symbol that has since dropped out of the indicator
+                # set, so a stray is frequently the model doing as it was told.
+                # It is a fact about the record either way and belongs stated.
+                assessments_off_list=split_assessments_by_what_was_shown(
+                    decision, shown=indicators
+                )[1],
                 # The other half of that answer, and the one that is reported
                 # rather than refused. See the block above the warning for why
                 # a missing plan is not treated like a missing assessment.
@@ -1469,7 +1599,12 @@ def cmd_dream(env: Env, rules: Rules) -> int:
 
     announce_inference(env)
 
-    blocked = model_calls_are_impossible(env)
+    # `dream_spec`, not the default. The dreamer runs its OWN model — that is
+    # the whole reason `DREAM_MODEL_ID` exists beside `DECISION_MODEL_ID` — so a
+    # guard asked about the loop's model would clear a dreamer whose own model
+    # the endpoint will refuse, and `Dreamer.__init__` builds the client outside
+    # any `except`.
+    blocked = model_calls_are_impossible(env, spec=env.dream_spec)
     if blocked:
         log.error("dream_no_api_key", detail=blocked)
         return 1
@@ -1822,7 +1957,10 @@ def cmd_confer(env: Env, rules: Rules) -> int:
 
     announce_inference(env)
 
-    blocked = model_calls_are_impossible(env)
+    # `dream_spec` here too: `Conference._build` constructs both speakers'
+    # clients with it, so the loop's model has nothing to do with whether this
+    # command can run.
+    blocked = model_calls_are_impossible(env, spec=env.dream_spec)
     if blocked:
         log.error("confer_no_api_key", detail=blocked)
         return 1
