@@ -8,7 +8,87 @@ Ordered by what is actually blocking, not by size.
 
 ---
 
-## CURRENT STATE — there is a live position
+## DEPLOYED 13 Aug 2026, and the deploy answered two open questions
+
+The droplet is on `main` at `774ebbd`, clean tree, no stashes. `update.sh` ran
+the wrapper's deliberate-break test itself and it passed — *"refuses a
+mismatch, exit 78, both values named"* — so item 22's action on the box is
+done, and the wrapper that used to announce a model it had not checked is gone.
+
+`DO_INFERENCE_KEY` is NOT set on the box, so the Python model path still goes to
+Anthropic. The startup banner says so in as many words. The move is shipped and
+dormant; throwing the switch is Josh's on transfer.
+
+**`stash@{0}` is dropped**, recoverable at `eb35020fa9707ea8c48ceb188f3d1a42ccfece6a`
+until git collects it. It held 233 insertions and no deletions across
+`run-chat.sh` and `run-dream.sh` — the DigitalOcean block, hand-applied to the
+box before the repo carried it. Superseded, and worth removing rather than
+leaving: popping it would have re-applied the WRONG config path
+(`$HERMES_HOME/config.yaml`) and the `[[ -r ]]` guard that SKIPS instead of
+refusing, silently undoing the fix that had just been verified one step earlier.
+
+### `--execute` IS installed, and that is no longer unverified
+
+`mudhorn-bot.service` carries the `execute.conf` drop-in and runs
+`electrum-bot loop --execute`. This file listed that as unknown because every
+observed cycle had `proposals: 0`. **The loop can place orders.**
+
+---
+
+## CURRENT STATE — a 107-share AAPL position the system believes does not exist
+
+**Found in the first cycle after the deploy, by the reporting this branch
+added.** `unexplained_moves: 1` — *"AAPL: quantity is 185.0000 at the broker and
+78.0000 in the journal, with no recorded action explaining the change."*
+
+The journal, read on the box:
+
+    id  qty    entry_price  planned_stop  entry_time                  exit_time
+    2   107.0  308.5        300.0         2026-08-11T09:00:03+00:00   2026-08-11T09:15:04+00:00
+    3    78.0  306.3        299.8         2026-08-11T17:11:06+00:00   (open)
+
+**107 + 78 = 185, exactly what the broker holds.** Row 2 is marked closed and
+the broker never closed it.
+
+**It is the documented reconcile failure, reproducing.** Entry at 09:00:03 UTC
+is 05:00 New York — pre-market — and an entry carrying a stop cannot fill out of
+hours, so it RESTED. One cycle later `reconcile` saw the broker holding no AAPL
+and wrote the row off as closed; the order then filled at the 09:30 open into a
+position with no open journal row. `CLAUDE.md` describes this exact bug and says
+it was fixed by deferring the close while the entry order is still live, so
+either that deferral does not cover this shape or it regressed. Being fixed
+properly, with the cause established by reproduction rather than by reading.
+
+**What it costs, and the framing matters.** Not concentration — this repository
+measures RISK, not notional, and `max_position_pct` is a deliberately generous
+backstop. The breach is of the two rules that count:
+
+- **Rule 2.** `open_risk_usd` sums `|entry − stop| × qty` over trades the
+  JOURNAL calls open, so row 2 contributes nothing. Reported **1,487.19** =
+  SPY 980.19 + row 3's 507.00, which checks exactly. True open risk including
+  row 2's 909.50 is **2,396.69 on 99,200.28 equity — 2.42%** against a 2% cap.
+  That is a fifth over and invisible on every surface.
+- **Rule 3.** `positions_without_a_resting_stop: ["AAPL"]` — nothing rests
+  behind any of the 185 shares. `stop_watch` cannot cover it either: AAPL's
+  book came back one-sided (bid 289.65, ask 0.00) so it is `stops_unchecked`,
+  which is the correct answer and not a reassuring one.
+
+**`risk_understated` reported `false` throughout.** It is honest about its own
+question — it tracks positions with no journal row at all — and it reads as
+comfort about a figure that is materially wrong for a different reason. Worth
+fixing or renaming: a flag that says "the risk figure is sound" while the risk
+figure is 60% of the truth is the plausible-wrong-figure failure on the cap's
+own input.
+
+**The recovery is deliberately NOT automated.** Row 2 needs a person to decide
+whether to re-open it or record what actually happened, and a migration that
+silently re-opened closed trades would be far more dangerous than the bug. A
+read-only query that finds every row with this shape comes first, so the blast
+radius is known before anything changes.
+
+---
+
+## The original CURRENT STATE — the manual SPY short
 
 Not a task. Recorded because it outlives the session that opened it and nothing
 else names it.

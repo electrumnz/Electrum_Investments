@@ -712,6 +712,161 @@ def test_a_row_with_no_order_id_is_named_rather_than_deferred(
     assert journal.open_trades()[0].entry_price == SHORT_ENTRY
 
 
+# -------- the entry that is neither resting nor held: AAPL row 2, 11 Aug 2026
+
+# Read off `data/journal.db` on the droplet. 107 AAPL submitted at 09:00:03 UTC
+# — 05:00 New York, so the bracket could not fill and rested — was marked CLOSED
+# at 09:15:04, one cycle later, by a broker that had never held it. The order
+# then filled at the regular open, leaving 107 shares with no open journal row:
+# `open_risk_usd` read 1,487.19 against a true 2,396.69, or 2.42% of equity
+# against a 2% cap, with `--execute` on and `stop_watch` no longer looking.
+AAPL_ENTRY = datetime(2026, 8, 11, 9, 0, 3, tzinfo=UTC)
+AAPL_LIMIT = 308.5
+AAPL_STOP = 300.0
+AAPL_QTY = 107.0
+AAPL_RISK = (AAPL_LIMIT - AAPL_STOP) * AAPL_QTY      # 909.50
+
+
+def _premarket_bracket(journal, *, order_id: str | None = "entry-aapl"):
+    """An AAPL entry exactly as `record_fill` leaves a pre-market bracket:
+    the proposal's figures, an order id, and nothing confirmed."""
+    return journal.record_entry(
+        Trade(
+            symbol="AAPL",
+            direction=Direction.BUY,
+            qty=AAPL_QTY,
+            entry_time=AAPL_ENTRY,
+            entry_price=AAPL_LIMIT,
+            planned_stop=AAPL_STOP,
+            submitted_qty=AAPL_QTY,
+            submitted_price=AAPL_LIMIT,
+            fill_state=FillState.UNCONFIRMED,
+            entry_order_id=order_id,
+            rationale="Pre-market bracket, journalled from the proposal.",
+        )
+    )
+
+
+def test_an_entry_neither_resting_nor_held_is_not_written_off_as_a_closed_trade(
+    journal, broker, rules
+):
+    """The live bug. An order id missing from the resting list is not a fill.
+
+    `get_open_orders` asks Alpaca for what it classifies as OPEN, bounded at
+    100, so an id that is not in the answer may be filled, cancelled, expired,
+    rejected, past the bound, or in a status that query does not return. Only
+    the first of those is a position, and the code read all of them as
+    "terminal" and then, with nothing held, as a close.
+
+    The degraded flag guards the whole list failing. It does not guard ONE order
+    going missing from a list that came back fine, which is the same
+    missing-versus-absent distinction one level down.
+    """
+    _premarket_bracket(journal)
+    broker.set_price("AAPL", bid=307.9, ask=308.1)
+    broker.set_open_orders([])                    # the entry is not in the list
+    assert broker.orders_degraded is False        # ...and the read was fine
+
+    result = reconcile(journal, broker, rules, now=AAPL_ENTRY + timedelta(minutes=15))
+
+    assert result.closed == []
+    assert result.closes_deferred == ["AAPL"]
+    assert result.entries_unresolved == ["AAPL"]
+    assert [t.symbol for t in journal.open_trades()] == ["AAPL"]
+    # The figures are still the proposal's, and the row says so.
+    assert "AAPL" in result.entry_figures_are_the_proposal
+
+
+def test_the_withheld_close_keeps_the_risk_the_2pct_cap_has_to_count(
+    journal, broker, rules
+):
+    """Failing closed here means OVERSTATING risk, which is the direction this
+    repository picks. Closing the row zeroed a real 909.50 of exposure: the
+    live total read 1,487.19 when it was 2,396.69, and the gate went on sizing
+    new trades against the smaller number with `--execute` on."""
+    _premarket_bracket(journal)
+    broker.set_price("AAPL", bid=307.9, ask=308.1)
+    broker.set_open_orders([])
+
+    reconcile(journal, broker, rules, now=AAPL_ENTRY + timedelta(minutes=15))
+
+    snapshot = apply_journal_state(broker.get_account(), journal)
+    assert snapshot.open_risk_usd == pytest.approx(AAPL_RISK)
+
+
+def test_an_entry_that_was_never_a_position_is_given_no_realised_pnl(
+    journal, broker, rules
+):
+    """The second finding, and it outlives the row. Closing an unconfirmed entry
+    wrote an exit price off a live quote — `exit_price_estimated` FALSE, so it
+    reads as a fill — and a realised figure nobody traded. Both reach
+    `metrics.py`, the Analytics page and `evaluate_stand_down`, which counts
+    consecutive losses. A fabricated loss can move a real breaker."""
+    _premarket_bracket(journal)
+    broker.set_price("AAPL", bid=307.9, ask=308.1)     # a mark it would have used
+    broker.set_open_orders([])
+
+    reconcile(journal, broker, rules, now=AAPL_ENTRY + timedelta(minutes=15))
+
+    assert journal.closed_trades() == []
+    assert journal.open_trades()[0].realised_pnl_usd is None
+
+
+def test_the_withheld_close_settles_itself_once_the_resting_entry_fills(
+    journal, broker, rules
+):
+    """The deferral is not a stall in the case that matters. The entry becomes
+    eligible at the regular open, the position appears, and the ordinary
+    squaring below takes over — which is what should have happened on 11 Aug."""
+    _premarket_bracket(journal)
+    broker.set_price("AAPL", bid=307.9, ask=308.1)
+    broker.set_open_orders([])
+    reconcile(journal, broker, rules, now=AAPL_ENTRY + timedelta(minutes=15))
+
+    broker._positions["AAPL"] = Position(                # filled at the open
+        symbol="AAPL",
+        direction=Direction.BUY,
+        qty=AAPL_QTY,
+        entry_price=308.42,
+        opened_at=AAPL_ENTRY,
+    )
+    result = reconcile(journal, broker, rules, now=AAPL_ENTRY + timedelta(minutes=45))
+
+    assert result.entries_unresolved == []
+    assert [c.symbol for c in result.entries_corrected] == ["AAPL"]
+    stored = journal.open_trades()[0]
+    assert stored.fill_state is FillState.COMPLETE
+    assert stored.entry_price == 308.42
+    assert stored.submitted_price == AAPL_LIMIT
+
+
+def test_a_confirmed_trade_the_broker_no_longer_holds_still_closes(
+    journal, broker, rules
+):
+    """The deferral must not swallow a real close. Once a fill has been read
+    back, the position's absence IS the evidence — and withholding that would
+    strand every completed trade in the journal for ever."""
+    _premarket_bracket(journal)
+    broker.set_price("AAPL", bid=307.9, ask=308.1)
+    broker._positions["AAPL"] = Position(
+        symbol="AAPL",
+        direction=Direction.BUY,
+        qty=AAPL_QTY,
+        entry_price=308.42,
+        opened_at=AAPL_ENTRY,
+    )
+    broker.set_open_orders([])
+    reconcile(journal, broker, rules, now=AAPL_ENTRY + timedelta(minutes=15))
+    assert journal.open_trades()[0].fill_state is FillState.COMPLETE
+
+    broker._positions.pop("AAPL")                        # the stop filled
+    result = reconcile(journal, broker, rules, now=AAPL_ENTRY + timedelta(minutes=30))
+
+    assert result.closed == ["AAPL"]
+    assert result.entries_unresolved == []
+    assert journal.open_trades() == []
+
+
 def test_two_open_trades_in_one_symbol_leave_the_entry_alone(
     journal, broker, rules
 ):
