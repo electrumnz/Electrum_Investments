@@ -553,6 +553,35 @@ Three things the bracket structurally cannot cover, which is why
 - a position adopted from the broker, or one whose bracket was cancelled by
   hand: a journalled stop with no order behind it
 
+### The exit is the agent's, and a trail is ONE number
+
+`OrderProposal.take_profit_price` is optional — `None` sends an OTO (entry plus
+stop) rather than a bracket, so nobody invents a level to satisfy a validator,
+and the journal migration `_drop_planned_target_not_null` exists because of that
+change. `trail_percent` is the other half: `None` is a fixed stop, a figure IS
+the trail.
+
+**One field, not a field plus an `exit_style` enum.** A second fact about one
+decision is a second fact that can disagree with the first, the same reason
+`Adoption.is_live` is computed rather than stored. Percent rather than an
+absolute distance because it means the same thing on SPY at 773 and BTC/USD at
+65,000, and Alpaca's own trailing order takes it unchanged.
+
+**`trailing_stop_level()` can only ever TIGHTEN.** It is floored on a long and
+capped on a short by the stop already in force, so a trail is never a route to
+widening what the position was sized against. A non-positive high-water mark is
+refused rather than absorbed, because two sides of one function must not fail
+differently.
+
+**"A broker-side stop OR an out-of-hours fill" has a second instance here, and
+this one was verified against the installed SDK.** `StopLossRequest` — the only
+stop a bracket or an OTO can carry — has `stop_price` and `limit_price` and
+nothing else, while `TrailingStopOrderRequest` is a standalone order type. **So
+an entry cannot carry a trail.** `place_order` therefore rests the FIXED initial
+stop exactly as before, which keeps rule 3 intact from the first instant at the
+level the position was sized against, and `OrderResult.stop_at_broker` reports
+which kind is actually resting rather than leaving a caller to assume.
+
 **`stop_watch` reports and never closes.** Closing out of hours needs a
 marketable limit order, which is a new execution path, and one that fires
 unattended at 3am is a different proposition from one an operator watches.
@@ -590,10 +619,49 @@ that samples an in-flight order has to treat the answer as a snapshot.
 `entry_price`, no concept of 3 filled now and 18 later, or of 3 filled and the
 rest cancelled. That is a gap in the model, not a bug in a caller.
 
-Recording at submission is not simply wrong: the alternative, waiting for a
-terminal order state, leaves a live position unjournalled in the meantime,
-which is the `14b88c8` hole. `reconcile` already squares journal against broker
-every cycle and is the likely right home for the correction. See `TODO.md`.
+Recording at submission is not simply wrong, and it stayed: the alternative,
+waiting for a terminal order state, leaves a live position unjournalled in the
+meantime, which is the `14b88c8` hole. Recording early overstates risk for at
+most one cycle; recording late understates it to ZERO for as long as the order
+takes. **`reconcile` corrects it instead**, and `submitted_qty` /
+`submitted_price` keep what was actually ordered, so the correction does not
+erase the intention.
+
+**It REFUSES to correct in four states, each named on `ReconcileResult` rather
+than silently skipped:** two open trades in one symbol or a direction mismatch
+(Alpaca aggregates per symbol, so its average entry is neither row's fill); a
+position larger than `submitted_qty`; no `entry_order_id`; and a degraded order
+read, because `get_open_orders` returns `[]` on its own failure and that means
+"could not ask", never "nothing resting".
+
+**The bug that fell out of building it:** step 1 closed any journal-open trade
+the broker did not hold — so an out-of-hours entry, which rests until the next
+regular open, was written off as closed on the very next cycle and then filled
+into a position with no journal row. The close is deferred while the entry
+order is still live.
+
+### An exit says why it ended, and the P&L half stays out
+
+`record_exit` used to take a price, a time and a realised figure, so stop-hit,
+target-hit, closed-by-hand and expiry were indistinguishable afterwards.
+`ExitReason` classifies it, which answers the one question worth asking on a
+close: **did this end the way it was designed to?**
+
+The interesting bucket is **closed by hand before either level** — the plan
+being abandoned, which is discipline rather than luck.
+
+**`None` is not `ExitReason.UNKNOWN`.** Nothing was recorded, versus the question
+was asked and could not be answered. Same rule as `has_cycles`,
+`can_grade_anything` and first-visit.
+
+This belongs beside `triggers.py` and `DreamLedger`, never beside `metrics.py`:
+those grade plan-following and reasoning quality, which are true regardless of
+how a trade went and have no outcome sample to overfit to. **"Review the trade
+so it can learn" is the reasonable-sounding request this repository exists to
+refuse** — forty trades is noise, a model shown three losses will confidently
+change approach, and that is the Alpha Arena failure arriving as a feature
+request. The operator learns from the track record; the model learns from
+nothing.
 
 ### The journal must be wired in or the caps count nothing
 
@@ -741,11 +809,40 @@ the leftover digits. Nothing warns, `ruff` does not care, and it is invisible
 unless somebody looks at the rendered page. Use the literal character.
 `tests/test_web.py` fails the build if a control character appears in there.
 
-**Settings shows the limits and offers no way to change them.** A settings
-screen that could widen a cap would be used to widen one during a losing run,
-which is exactly when the cap is doing its job. Each limit names the file that
-owns it. Credentials are reported as configured or not configured, never
-rendered: loopback-bound is not the same as private, and a screenshot travels.
+**Settings CAN change a limit now, and only through the Armorer.** It used to
+offer no edit control at all, on the argument that a screen which could widen a
+cap would be used to widen one during a losing run. The operator overruled that
+and was right: *"Settings agent can't edit settings?? That's broken. That's what
+setting agent is for, to give Josh an educated experience into why settings are
+important."* A wall teaches nothing, and recording a chore for somebody to apply
+at a shell is the same wall with an extra step.
+
+So the route is `src/bot/settings_agent.py`, and **the asymmetry is the part
+that must not be simplified away.** Tightening is recorded as asked. Loosening
+states the arithmetic, raises the Armorer's objection, and waits for a second
+explicit agreement after it has been read. `config/` stays root-owned — the
+service account still cannot edit its own limits — and the change is applied
+through a root-owned wrapper with the request id on stdin, the same shape as
+`run-chat.sh`.
+
+`LimitFact` answers **four** separate questions per limit — what it is, why it
+sits there, the goal it serves, and what loosening costs. Four rather than one
+paragraph, because collapsing them is how "it is for safety" ends up being the
+whole justification for a number.
+
+`tests/test_web.py` used to assert Settings had no `<input>` at all. **That
+assertion was widened three times by editing it, never by deleting it**, so what
+the page may contain is still enumerated rather than unconstrained.
+
+Each limit still names the file that owns it. Credentials are still reported as
+configured or not configured, never rendered: loopback-bound is not the same as
+private, and a screenshot travels.
+
+**The forge window (`web/forge_window.py`) shows both values at once**, because
+"raise it to 2.0" is a number with nothing to compare it against and `1.0 → 2.0`
+is a change. The old side is **the exact text on the line**, never a
+re-rendering of the parsed number — `90000` and `90000.0` are one limit and two
+different diffs.
 
 ### The model call is a feed too, and prose truncates while numbers reject
 
@@ -2720,45 +2817,11 @@ The list below is the older deferred set and is duplicated there.
 
 ## Deferred, and noted so the shape is not lost
 
-- **A settings agent.** "Open settings agent": a deliberately conservative,
-  strict, stubborn character, the only route to changing `config/rules.yaml`
-  from the interface. Asymmetric on purpose — it makes the operator argue for a
-  limit getting looser and encourages one getting tighter.
-  **It pushes back; it does not deny.** The job is to slow the operator down and
-  make the consequence explicit, then do what they decide. That distinction is
-  why the per-class limit validator was removed — a hard refusal at config load
-  is the same intent implemented as a wall, at the moment it helps least.
-  It does NOT have to run on Hermes. It needs read access to the settings and a written file
-  covering each limit: what it is, why it sits there, and the goal it serves.
-  Settings has no edit control today and `tests/test_web.py` enforces that, so
-  this is a deliberate change to that rule rather than an addition beside it.
-- **Let the agent choose its exit type.** `OrderProposal.take_profit_price` is
-  **optional now** — `None` sends an OTO (entry plus stop) rather than a
-  bracket, so nobody has to invent a level to satisfy a validator, and the
-  journal migration `_drop_planned_target_not_null` exists because of that
-  change. What is still missing is a **trailing** stop: the field is one fixed
-  price, so the agent cannot express a trail even where that is the right exit.
-  Alpaca supports trailing stops natively, so this is a model and adapter
-  change rather than a strategy one. The exit is the agent's decision; the
-  model should be able to carry the decision it actually made.
-  Worth knowing while doing it: the system prompt in `model_client.py` still
-  lists `take_profit_price` among the fields each proposal "needs", which has
-  not caught up with the field becoming optional.
-- **An exit review, grading the PLAN and never the profit.** Nothing currently
-  records *why* a position closed: `record_exit` takes a price, a time and a
-  realised figure, and stop-hit, target-hit, closed-by-hand and expiry are
-  indistinguishable afterwards. Classifying it would answer the one question
-  worth asking on a close — "did this end the way it was designed to?" — and
-  the interesting bucket is **closed by hand before either level**, because
-  that is the plan being abandoned, which is discipline rather than luck.
-  It belongs beside `triggers.py` and `DreamLedger` rather than beside
-  `metrics.py`: those grade plan-following and reasoning quality, which are
-  true regardless of how a trade went and have no outcome sample to overfit to.
-  **The P&L half stays out.** "Review the trade so it can learn" is the
-  reasonable-sounding request that this repository exists to refuse — forty
-  trades is noise, a model shown three losses will confidently change approach,
-  and that is the Alpha Arena failure arriving as a feature request. The
-  operator learns from the track record; the model learns from nothing.
+Three entries that used to live here — the settings agent, the trailing stop
+and the exit review — are BUILT. Their reasoning has moved into the body above
+rather than being deleted with the deferral, because in every case the reason
+outlasted the wait.
+
 - **Multi-agent dreaming.** Several dreamers working a topic independently and
   then debating it out before a verdict. `Thought.by` already carries the
   attribution that needs.
