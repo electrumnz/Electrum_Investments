@@ -21,6 +21,36 @@ the point. `docs/DROPLET_AI.md` closes by saying "everything above was read, not
 run"; most of what follows has now been run, and three of the things it inferred
 turn out to be wrong in the direction that matters.
 
+> ## SUPERSEDED 13 Aug 2026 — read this before the short version below
+>
+> **Vercel is gone entirely, so every recommendation in this document pointing
+> at it is a dead end.** The operator: *"we killed vercel. we are just on DO
+> now."* The Vercel project is deleted, `brand/` and the demo site it served
+> were deleted before it — *"we didnt need the demo and landing page anymore"* —
+> and there is one provider and one account, which was the whole point of the
+> consolidation.
+>
+> That matters because the box below closes by recommending Vercel AI Gateway
+> as **the better target for the structured Python calls**, on the strength of a
+> real measurement: its validator models `output_config.format` in depth and
+> accepts both of this repository's schemas, where DigitalOcean's endpoint
+> accepts the field and silently ignores it. **The measurement stands and the
+> recommendation does not.** It was made against a premise the operator has
+> since removed — a second provider, a second account and a second balance,
+> for a component whose entire bill is single-digit dollars.
+>
+> What actually shipped is the other branch: `propose`, `dream` and `confer`
+> all reach DigitalOcean through a **forced tool call** validated by Pydantic on
+> this side, with a reply carrying no tool call treated as a hard failure. See
+> `CLAUDE.md`, "Two transports, and which one runs is a property of the
+> ENDPOINT", and TODO item 20.
+>
+> Everything below is kept because the per-call-site measurements are still the
+> best record of what each call actually sends, and because the Vercel findings
+> are what proved the blocker was DigitalOcean's rather than every proxy's —
+> which is a fact about the endpoint worth keeping even though nobody will act
+> on it.
+
 > ## The short version
 >
 > **The blocker that made every structured call unmovable is a DigitalOcean

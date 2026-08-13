@@ -1630,13 +1630,14 @@ Two that are worth stating as rules rather than as tests:
     pushes — only `checks`, which is the GitHub Actions job. A failing build
     would be visible there and is not.
 
-  **This does not prove the project was deleted**, and the difference matters:
-  the connector sees one team, so a project on another account would be
-  invisible from here exactly as it was when this item was written and the
-  token 404'd on it. What is established is narrower and is the part anybody
-  cared about — nothing Vercel is failing on this repository's pull requests.
-  Left here rather than deleted, because "I could not see it" is not "it is
-  gone", and somebody with the console can close it in a moment.
+  Those two observations established only that nothing Vercel was failing on
+  this repository's PRs — not that the project was gone, because the connector
+  sees one team and a project on another account is invisible from here.
+
+  **CLOSED by the operator, 13 Aug 2026:** *"we killed vercel. we are just on DO
+  now."* That is the authoritative answer the observations could not give.
+  There is one provider and one account, which was the whole point of the
+  consolidation.
 - **Multi-agent dreaming.** Several dreamers working a topic independently and
   debating it out before a verdict. `Thought.by` already carries the
   attribution, and the A2A message store from item 2 is most of the transcript
