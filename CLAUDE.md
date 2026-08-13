@@ -2796,8 +2796,9 @@ for a while and agree with them.
 
 `TODO.md` holds it, ordered by what is actually blocking.
 
-**Every code item on it is now closed.** What is left needs something a session
-in a container does not have:
+**Every code item that BLOCKS is closed.** One optional one is not — multi-agent
+dreaming, below — and everything else left needs something a session in a
+container does not have:
 
 - **A deploy.** The droplet still runs code from partway through the session,
   and `deploy/bootstrap.sh` also closes the `souls/` ownership gap — the safety
@@ -2812,6 +2813,12 @@ in a container does not have:
   DigitalOcean tier question).
 - **One open design question** — whether a dream is gradeable after adoption,
   and how to do that without grading P&L by accident.
+- **The souls' rails on their new model.** They run on DigitalOcean now, and
+  every prose rail — *"never state a figure you did not read"*, *"push back
+  without refusing"* — is exactly the kind of instruction that varies between
+  models and fails quietly. Measured: llama held 10/15, deepseek 13/15.
+  **A breach is a finding, not an argument against the move.** The answers are
+  a sharper soul clause or a different model, never a weaker rail.
 
 The list below is the older deferred set and is duplicated there.
 
