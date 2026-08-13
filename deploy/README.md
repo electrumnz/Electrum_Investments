@@ -805,6 +805,23 @@ sudo /opt/mudhorn/deploy/bootstrap.sh          # picks up dependency changes
 sudo systemctl restart mudhorn-bot mudhorn-web
 ```
 
+**`bootstrap.sh` replaces the wrappers, so re-run the deliberate-break test
+afterwards** — section 5 above, "Confirm it moved". A pull that lands a fix to
+`run-chat.sh` is exactly the moment its check is worth watching fire once.
+
+Two things a pull does **not** carry, both by design:
+
+- **`model.default` lives in `~hermes/.hermes/config.yaml`, not in this repo.**
+  It survives a re-merge, because nothing here sets a `model:` block, but it
+  would not survive a fresh provision — that lands back on `claude-sonnet-5`,
+  and the wrappers would then refuse every turn on the mismatch. Loud, and the
+  right direction, but know what you are looking at.
+- **`exchange_calendars` is an optional extra** and `bootstrap.sh` installs
+  `-e .`, so the droplet keeps the weekday-shaped badges for Tokyo, Sydney and
+  Auckland until that becomes `-e ".[calendars]"`. `ClockFace.tracks_holidays`
+  reports False and the badge tooltip says so, which is the whole reason the
+  dependency is optional — nothing claims to know a holiday it cannot see.
+
 ## Moving off the VPS
 
 `data/journal.db` is the only irreplaceable file. It holds every trade, the
