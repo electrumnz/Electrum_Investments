@@ -1,0 +1,57 @@
+[Unit]
+# One agent-to-agent conference over the dreams sitting in the vault: the
+# dreamer makes its case, the trading agent asks the question that would kill
+# it, and the exchange ends in accept, decline or park. An accept grants a
+# SYMBOL PERMISSION with an expiry on it. It does not place an order, cannot
+# size one, and reaches no broker — `RiskGate.evaluate` still runs on anything
+# traded under a grant, exactly as it does on everything else.
+#
+# Deliberately NOT part of mudhorn-bot.service, and the separation is a unit
+# boundary rather than a comment. The decision loop wakes every fifteen minutes
+# because a price moves that fast; whether a second-order hypothesis is worth a
+# permission does not, and ninety-six unattended negotiations a day on the same
+# process that places orders is the Alpha Arena failure shape with two models
+# instead of one. Separate units means separate processes, so no later refactor
+# quietly attaches a negotiation to the trading cycle.
+Description=Mudhorn Capital: one dream-vault conference
+Documentation=file:/opt/mudhorn/CLAUDE.md
+After=network-online.target
+Wants=network-online.target
+# Ordering only, and only when both are started in the same transaction — which
+# is the catch-up case, a box that was off when both timers were due. It is NOT
+# a dependency: a conference with nothing new to talk about is a skip that costs
+# no model call, so it is never wrong to run this without a dream first. All
+# this buys is that the catch-up pair happen in the sensible order.
+After=mudhorn-dream.service
+
+[Service]
+Type=oneshot
+User=mudhorn
+Group=mudhorn
+WorkingDirectory=/opt/mudhorn
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=/opt/mudhorn/.env
+ExecStart=/opt/mudhorn/.venv/bin/electrum-bot confer
+
+# A run is capped at two dreams and six turns each, so twelve model calls at
+# worst, each sharing the dreamer's 900-second client timeout. This has to
+# outlast the worst case or systemd kills an exchange half-written: the
+# transcript is append-only, so a killed run leaves a conversation with a
+# dangling turn that nothing will ever finish.
+TimeoutStartSec=3600
+
+# Sandboxed like the dream unit, and it can be: this places nothing and reaches
+# no broker. It needs the network for the model calls and write access to data/
+# for the dream store, and nothing else.
+NoNewPrivileges=true
+RestrictSUIDSGID=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/mudhorn/data
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target

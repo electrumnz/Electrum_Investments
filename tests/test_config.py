@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -8,13 +9,17 @@ import pytest
 
 from bot.config import (
     CLAUDE_MODEL_IDS,
+    CLAUDE_MODEL_SPECS,
     CLAUDE_PRICING_USD_PER_MTOK,
+    MODEL_SPECS,
     AccountRules,
     ClaudeTier,
     Env,
     InstrumentRules,
     LiveTradingRefused,
+    ModelSpec,
     Rules,
+    resolve_model_spec,
 )
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -38,6 +43,140 @@ def test_claude_model_ids_and_pricing_complete():
         assert 0 < base_in < out
         # Cache reads bill at 10% of base input.
         assert cache_read == pytest.approx(base_in * 0.1)
+
+
+# ------------------------------------------------------- naming a model at all
+#
+# "Which model" used to be welded to a three-value Claude enum: `CLAUDE_MODEL_IDS`
+# for the id, `CLAUDE_PRICING_USD_PER_MTOK` for the price, and an
+# `if tier in (SONNET, OPUS)` in the transport for the optional request fields.
+# `ModelSpec` carries all three, and the tiers are instances of it rather than
+# the only possibility.
+
+
+def test_the_old_tables_are_derived_from_the_specs_rather_than_written_twice():
+    """Two dicts naming the same three models is two places to disagree.
+
+    They are kept because `scripts/` reads them to label a live run, so they
+    could not simply go — but nothing writes them out by hand any more, and this
+    is what says so. A spec whose price changed while a table did not would be a
+    figure nobody could read off one file.
+    """
+    for tier, spec in CLAUDE_MODEL_SPECS.items():
+        assert CLAUDE_MODEL_IDS[tier] == spec.model_id
+        assert spec.pricing is not None
+        assert CLAUDE_PRICING_USD_PER_MTOK[tier] == spec.pricing.as_tuple()
+        # And the registry keyed by wire id agrees with the one keyed by tier.
+        assert MODEL_SPECS[spec.model_id] is spec
+
+
+def test_the_claude_tiers_keep_exactly_the_request_fields_they_always_had():
+    """The decoupling must not change a single byte of an existing request.
+
+    `thinking` and `output_config.effort` went out for Sonnet and Opus and not
+    for Haiku, because Haiku has no extended thinking at all. That test lived
+    inline in the transport as `if self._tier in (SONNET, OPUS)`; it lives on
+    the spec now, and this is the pin that the move was a move and not a change.
+    """
+    haiku = CLAUDE_MODEL_SPECS[ClaudeTier.HAIKU]
+    assert haiku.sends_anthropic_thinking is False
+    assert haiku.sends_anthropic_effort is False
+
+    for tier in (ClaudeTier.SONNET, ClaudeTier.OPUS):
+        spec = CLAUDE_MODEL_SPECS[tier]
+        assert spec.sends_anthropic_thinking is True
+        assert spec.sends_anthropic_effort is True
+
+
+def test_an_unnamed_model_still_resolves_to_the_tier():
+    """Empty means the tier, which is today's behaviour exactly.
+
+    The same shape as `DO_INFERENCE_KEY`: the empty value is the supported
+    default, so rollback is unsetting a variable rather than editing code. An
+    existing deployment on `CLAUDE_TIER=sonnet` must be untouched by all of
+    this.
+    """
+    for tier in ClaudeTier:
+        assert resolve_model_spec("", tier) is CLAUDE_MODEL_SPECS[tier]
+        # Whitespace is not a name either.
+        assert resolve_model_spec("   ", tier) is CLAUDE_MODEL_SPECS[tier]
+
+
+def test_a_model_nobody_has_priced_is_nameable_and_reports_no_price():
+    """The whole point, and the trap inside it.
+
+    A model this repository has never seen is a fully supported thing to name —
+    that is what the work was for. What it must NOT come with is a price, and
+    `ModelPricing` has no default anywhere for exactly that reason: an invented
+    cost is the same class of error as an invented indicator, and it would reach
+    the Settings page looking like a measurement.
+
+    It must also be sent NEITHER Anthropic-only request field. `thinking` and
+    `output_config` have an Anthropic shape; DigitalOcean's schema lists a flat
+    `reasoning_effort` and no `output_config` at all, so sending them would be
+    wrong in two ways at once. Both False is a plain request rather than a wrong
+    one.
+    """
+    spec = resolve_model_spec("glm-5.2", ClaudeTier.SONNET)
+
+    assert spec.model_id == "glm-5.2"
+    assert spec.pricing is None
+    assert spec.price_is_known is False
+    assert spec.sends_anthropic_thinking is False
+    assert spec.sends_anthropic_effort is False
+
+
+def test_naming_a_known_model_brings_its_prices_with_it():
+    """A model id that IS in the registry is not a stranger.
+
+    Naming `claude-sonnet-5` outright has to be the same thing as reaching it
+    through the tier — otherwise the honest-pricing rule would punish the
+    operator for spelling out what they already had.
+    """
+    spec = resolve_model_spec("claude-sonnet-5", ClaudeTier.HAIKU)
+
+    assert spec is CLAUDE_MODEL_SPECS[ClaudeTier.SONNET]
+    assert spec.price_is_known is True
+
+
+def test_the_environment_carries_no_price_for_a_model():
+    """Prices reach `MODEL_SPECS` in a commit, never through `.env`.
+
+    Same rule as a limit reaching `config/rules.yaml` rather than being typed
+    somewhere at runtime: a cost with no review and no history behind it is
+    indistinguishable, on the page that renders it, from one somebody measured.
+    An unpriced model is fully usable and simply reports an unknown cost.
+    """
+    priced = [
+        name
+        for name in Env.model_fields
+        if any(word in name for word in ("price", "usd_per", "cost"))
+    ]
+    assert priced == [], (
+        f"{priced} would let a cost be typed into the environment. An invented "
+        "price renders exactly like a measured one."
+    )
+
+
+def test_the_two_model_ids_are_separately_settable_and_default_to_the_tiers():
+    """The loop wakes 96 times a day and the dreamer once.
+
+    The model that is right for one is not automatically right for the other,
+    which is why `DREAM_CLAUDE_TIER` already existed. The id overrides follow
+    the same split, and neither one set is the shipped default.
+    """
+    env = Env(_env_file=None)  # type: ignore[call-arg]
+
+    assert env.decision_spec is CLAUDE_MODEL_SPECS[ClaudeTier.HAIKU]
+    assert env.dream_spec is CLAUDE_MODEL_SPECS[ClaudeTier.SONNET]
+
+    env.decision_model_id = "some-open-model"
+    assert env.decision_spec == ModelSpec(model_id="some-open-model")
+    # And the dreamer is untouched by it, exactly as its tier is.
+    assert env.dream_spec is CLAUDE_MODEL_SPECS[ClaudeTier.SONNET]
+
+    env.dream_model_id = "another-open-model"
+    assert env.dream_spec == ModelSpec(model_id="another-open-model")
 
 
 def _account_rules(**overrides: Any) -> AccountRules:
@@ -86,6 +225,438 @@ def _env(**overrides: Any) -> Env:
     return Env(_env_file=None, **overrides)  # type: ignore[call-arg]
 
 
+# ------------------------------------------------------ which endpoint answers
+
+
+@pytest.fixture
+def no_do_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`_env_file=None` silences the file, not the process environment.
+
+    A developer with DO_INFERENCE_KEY exported would otherwise get a different
+    answer from these tests than CI does, which is the one thing a test about
+    "what is configured" must not do.
+    """
+    monkeypatch.delenv("DO_INFERENCE_KEY", raising=False)
+    monkeypatch.delenv("DO_INFERENCE_BASE_URL", raising=False)
+
+
+def test_the_inference_fields_default_to_empty_and_empty_means_anthropic(no_do_key):
+    """The switch is one variable and its empty value is today's behaviour.
+
+    Same shape as DASHBOARD_CHAT_TOKEN and X_BEARER_TOKEN: a deployment that
+    never heard of this feature is a supported configuration, and rollback is
+    unsetting a variable rather than editing code.
+    """
+    from bot.config import ANTHROPIC
+
+    env = _env()
+
+    assert env.do_inference_key == ""
+    assert env.do_inference_base_url == ""
+
+    provider = env.inference_provider
+    assert provider.name == ANTHROPIC
+    assert provider.usable is True
+    assert not provider.is_digitalocean
+    assert "Anthropic" in provider.detail
+
+
+def test_a_key_alone_selects_digitalocean_at_the_documented_endpoint(no_do_key):
+    """One variable, not two. The base URL exists in exactly one place."""
+    from bot.config import DO_INFERENCE_DEFAULT_BASE_URL
+
+    provider = _env(DO_INFERENCE_KEY="do-model-access-key").inference_provider
+
+    assert provider.is_digitalocean
+    assert provider.usable is True
+    assert provider.base_url == DO_INFERENCE_DEFAULT_BASE_URL
+
+
+def test_a_base_url_with_no_key_is_reported_as_moving_nothing(no_do_key):
+    """Half a configuration must not read as a working one.
+
+    The key is the switch. An operator who set the endpoint and forgot the key
+    would otherwise believe the swap had happened, with nothing afterwards to
+    say it had not — which is the failure this whole arrangement exists to
+    refuse, arriving through a typo instead of through a model.
+    """
+    from bot.config import ANTHROPIC
+
+    provider = _env(DO_INFERENCE_BASE_URL="https://inference.do-ai.run").inference_provider
+
+    assert provider.name == ANTHROPIC
+    assert provider.usable is False
+    assert "nothing has moved" in provider.detail
+
+
+def test_an_unusable_endpoint_is_not_a_quiet_fall_back_to_anthropic(no_do_key):
+    """A key that cannot be used must not report as "Anthropic, all fine".
+
+    Three states rather than two. The third one is what lets a caller refuse
+    loudly instead of proceeding on a provider the operator did not choose, and
+    the sentence says so in as many words so nobody has to infer it.
+    """
+    provider = _env(
+        DO_INFERENCE_KEY="do-model-access-key",
+        DO_INFERENCE_BASE_URL="http://inference.do-ai.run",
+    ).inference_provider
+
+    assert provider.is_digitalocean
+    assert provider.usable is False
+    assert "NOT a fall back to Anthropic" in provider.detail
+
+
+def test_the_banner_never_claims_a_switch_that_has_not_been_thrown(no_do_key):
+    """Phase 1 moves the souls on Hermes and NO Python model call.
+
+    So a key in `.env` today is a declaration, not a route, and the line a
+    startup banner prints has to say that. This test is the thing that makes
+    `PYTHON_MODEL_PATH_USES_DO` a checkable fact rather than a remembered one:
+    flipping it without moving a call site — or moving a call site without
+    flipping it — fails here.
+    """
+    from bot.config import PYTHON_MODEL_PATH_USES_DO
+
+    detail = _env(DO_INFERENCE_KEY="do-model-access-key").inference_provider.detail
+
+    if PYTHON_MODEL_PATH_USES_DO:
+        assert "NOT IN FORCE" not in detail
+    else:
+        assert "NOT IN FORCE" in detail
+        assert "Hermes" in detail
+
+
+def test_the_provider_sentence_never_contains_the_key(no_do_key):
+    """Credentials are reported as configured or not configured, never rendered.
+
+    `detail` is printed at startup, into a journal somebody may paste, so it
+    inherits the Settings page's rule: no value, no prefix, no length.
+    """
+    secret = "do-v1-super-secret-model-access-key"
+
+    for env in (
+        _env(DO_INFERENCE_KEY=secret),
+        _env(DO_INFERENCE_KEY=secret, DO_INFERENCE_BASE_URL="http://nope"),
+    ):
+        assert secret not in env.inference_provider.detail
+
+
+def test_a_misconfigured_endpoint_does_not_stop_the_process_starting(no_do_key):
+    """It reports; it does not raise.
+
+    Refusing to boot over a variable no Python path reads yet would be a denial
+    at the least useful moment, and the thing denied would be the trading loop.
+    The friction belongs where the setting is USED — the Hermes wrappers, which
+    refuse the turn and cost a chat message instead of a session.
+    """
+    env = _env(DO_INFERENCE_KEY="k", DO_INFERENCE_BASE_URL="not-a-url")
+
+    assert env.inference_provider.usable is False  # no exception on the way here
+
+
+# ------------------------------------------ the wrappers that actually switch
+#
+# The souls' endpoint is chosen in `deploy/run-chat.sh` and `deploy/run-dream.sh`
+# rather than in Python, so these RUN the scripts against a stub Hermes. Reading
+# them for a substring would pin the words and not the behaviour, which is the
+# `str()`-on-an-enum trap in a different costume: the shape can look right while
+# every branch misses.
+
+
+def _stub_hermes(tmp_path: Path) -> Path:
+    """A Hermes that reports the environment it was handed and nothing else."""
+    binary = tmp_path / "hermes"
+    binary.write_text(
+        "#!/usr/bin/env bash\n"
+        'echo "base=${ANTHROPIC_BASE_URL:-none} '
+        'model=${ANTHROPIC_MODEL:-none} key=${ANTHROPIC_API_KEY:-none}"\n',
+        encoding="utf-8",
+    )
+    binary.chmod(0o755)
+    return binary
+
+
+def _run_wrapper(script: str, home: Path, tmp_path: Path) -> Any:
+    import subprocess
+
+    home.mkdir(parents=True, exist_ok=True)
+    env = {
+        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+        "HERMES_BIN": str(_stub_hermes(tmp_path)),
+        # Each wrapper names its own home differently, so both are supplied and
+        # each script reads the one it cares about.
+        "HERMES_HOME": str(home),
+        "HERMES_DREAM_HOME": str(home),
+    }
+    return subprocess.run(
+        ["bash", str(REPO_ROOT / "deploy" / script)],
+        input="hello",
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=30,
+        check=False,
+    )
+
+
+WRAPPERS = ["run-chat.sh", "run-dream.sh"]
+
+
+def _hermes_config(home: Path) -> Path:
+    """Where Hermes ACTUALLY keeps its config: `$HERMES_HOME/.hermes/config.yaml`.
+
+    **These tests wrote `$HERMES_HOME/config.yaml` and passed, while the wrapper
+    read the same wrong path and silently skipped its check on the real box.**
+    The test was written from the code rather than from the deployment, so both
+    agreed with each other and neither agreed with Hermes. Observed live:
+    `inference.env` was deliberately set to a different model from the config,
+    and the turn ran anyway under a banner claiming the model had been checked.
+
+    A helper rather than a literal in four places, so the path is stated once
+    and a future move is one edit rather than four that can disagree.
+    """
+    directory = home / ".hermes"
+    directory.mkdir(parents=True, exist_ok=True)
+    return directory / "config.yaml"
+
+
+
+@pytest.mark.parametrize("script", WRAPPERS)
+def test_no_inference_file_means_anthropic_and_a_working_turn(script, tmp_path):
+    """The default path, and the one every existing deployment is on."""
+    done = _run_wrapper(script, tmp_path / "home", tmp_path)
+
+    assert done.returncode == 0, done.stderr
+    assert "base=none" in done.stdout, "an endpoint leaked into a turn nobody configured"
+    assert "Anthropic direct" in done.stderr
+
+
+@pytest.mark.parametrize("script", WRAPPERS)
+def test_a_key_with_no_model_refuses_the_turn_rather_than_using_anthropic(script, tmp_path):
+    """The failure this arrangement exists to prevent, in its likeliest form.
+
+    The serving slug is not the Anthropic model id and is deliberately not
+    guessed, so a key on its own is half a switch. Falling through to Anthropic
+    here would answer the operator normally while they believed the souls had
+    moved — a confident partial answer arriving through the plumbing.
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / "inference.env").write_text("DO_INFERENCE_KEY=fake\n", encoding="utf-8")
+
+    done = _run_wrapper(script, home, tmp_path)
+
+    assert done.returncode != 0
+    assert "DO_INFERENCE_MODEL" in done.stderr
+    assert done.stdout.strip() == "", "the turn ran anyway"
+
+
+@pytest.mark.parametrize("script", WRAPPERS)
+def test_a_router_is_refused_because_nothing_here_could_see_the_downgrade(script, tmp_path):
+    """A router falls back to another model on rate limit, and `hermes -z`
+    returns the response text and nothing else — so which model answered is not
+    observable from this box at all. Removing the mechanism is the only honest
+    answer when the observation is impossible."""
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / "inference.env").write_text(
+        "DO_INFERENCE_KEY=fake\nDO_INFERENCE_MODEL=my-router-fast\n", encoding="utf-8"
+    )
+
+    done = _run_wrapper(script, home, tmp_path)
+
+    assert done.returncode != 0
+    assert "router" in done.stderr
+    assert done.stdout.strip() == ""
+
+
+@pytest.mark.parametrize("script", WRAPPERS)
+def test_a_configured_switch_replaces_the_anthropic_credential(script, tmp_path):
+    """Not merely adds an endpoint beside it.
+
+    Whether Hermes honours ANTHROPIC_BASE_URL is unverified. If it does not, the
+    DigitalOcean key reaches Anthropic and is refused with a 401 — loud, and the
+    right direction. A working Anthropic key left beside a DigitalOcean base URL
+    is the arrangement that could serve the turn from the old provider while the
+    operator believed it had moved.
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / "inference.env").write_text(
+        "DO_INFERENCE_KEY=fake-do-key\nDO_INFERENCE_MODEL=some-slug\n", encoding="utf-8"
+    )
+    # The config has to agree, or the mismatch check below refuses first and
+    # this test would pass for the wrong reason.
+    _hermes_config(home).write_text("model:\n  default: some-slug\n", encoding="utf-8")
+
+    done = _run_wrapper(script, home, tmp_path)
+
+    assert done.returncode == 0, done.stderr
+    assert "base=https://inference.do-ai.run" in done.stdout
+    assert "model=some-slug" in done.stdout
+    assert "key=fake-do-key" in done.stdout
+    # It never claims the swap HAPPENED. The wrapper cannot see which model
+    # answered, and a line saying otherwise would be the overclaim this
+    # repository keeps catching. The endpoint and the configured model ARE both
+    # checked now, so the banner says that much and stops exactly there.
+    assert "which model ANSWERED is still not visible" in done.stderr
+
+
+@pytest.mark.parametrize("script", WRAPPERS)
+def test_a_model_the_wrapper_cannot_set_is_refused_rather_than_announced(script, tmp_path):
+    """**The rule that rejects, and it is here because it happened.**
+
+    `ANTHROPIC_MODEL` does not select the model. Hermes reads `model.default`
+    from its own `config.yaml`. Observed live on 12 Aug 2026: `inference.env`
+    named `llama-4-maverick`, the wrapper printed `model llama-4-maverick`, and
+    Hermes asked DigitalOcean for `claude-sonnet-5`.
+
+    That returned 403 only because the other model happened to be tier-gated.
+    A slug the account COULD serve would have answered normally, from a model
+    nobody chose, under a banner naming a different one — which is the
+    confident wrong figure this repository exists to refuse, arriving through
+    the deployment rather than through a model.
+    """
+    home = tmp_path / "home"
+    home.mkdir(parents=True, exist_ok=True)
+    (home / "inference.env").write_text(
+        "DO_INFERENCE_KEY=fake-do-key\nDO_INFERENCE_MODEL=llama-4-maverick\n",
+        encoding="utf-8",
+    )
+    # The shape the real file has: a `model:` block, and a DIFFERENT nested
+    # `model:` further down that the reader must not pick up instead.
+    _hermes_config(home).write_text(
+        "model:\n  default: claude-sonnet-5\n  provider: anthropic\n"
+        "speech:\n  model: whisper-1\n",
+        encoding="utf-8",
+    )
+
+    done = _run_wrapper(script, home, tmp_path)
+
+    assert done.returncode == 78, done.stdout
+    assert "Model mismatch" in done.stderr
+    assert "claude-sonnet-5" in done.stderr
+    assert "llama-4-maverick" in done.stderr
+    # Refused, so no turn was taken at all — not taken against the wrong model.
+    assert "base=" not in done.stdout
+
+
+@pytest.mark.parametrize("script", WRAPPERS)
+def test_a_matching_model_is_allowed_through(script, tmp_path):
+    """The other half, or the check above would pass by refusing everything."""
+    home = tmp_path / "home"
+    home.mkdir(parents=True, exist_ok=True)
+    (home / "inference.env").write_text(
+        "DO_INFERENCE_KEY=fake-do-key\nDO_INFERENCE_MODEL=llama-4-maverick\n",
+        encoding="utf-8",
+    )
+    _hermes_config(home).write_text(
+        "model:\n  default: llama-4-maverick\n  provider: anthropic\n"
+        "speech:\n  model: whisper-1\n",
+        encoding="utf-8",
+    )
+
+    done = _run_wrapper(script, home, tmp_path)
+
+    assert done.returncode == 0, done.stderr
+    assert "model=llama-4-maverick" in done.stdout
+
+
+@pytest.mark.parametrize("script", WRAPPERS)
+def test_a_config_with_no_model_default_refuses(script, tmp_path):
+    """Unknown is not the same as matching, so it must not read as agreement.
+
+    A config carrying no `model.default` means the model in force cannot be
+    established from here. Proceeding would print a slug out of `inference.env`
+    with nothing behind it — the same overclaim, one step quieter.
+    """
+    home = tmp_path / "home"
+    home.mkdir(parents=True, exist_ok=True)
+    (home / "inference.env").write_text(
+        "DO_INFERENCE_KEY=fake-do-key\nDO_INFERENCE_MODEL=llama-4-maverick\n",
+        encoding="utf-8",
+    )
+    _hermes_config(home).write_text("speech:\n  model: whisper-1\n", encoding="utf-8")
+
+    done = _run_wrapper(script, home, tmp_path)
+
+    assert done.returncode == 78, done.stdout
+    assert "No model.default" in done.stderr
+
+
+@pytest.mark.parametrize("script", WRAPPERS)
+def test_a_config_that_cannot_be_read_refuses_rather_than_skipping(script, tmp_path):
+    """**The bug the check itself had, and the reason it is pinned.**
+
+    The first version guarded the whole comparison with `[[ -r $config ]]`, so a
+    config it could not find was SKIPPED — and the banner two lines below still
+    said the model had been checked. It was looking one level too high
+    (`$HERMES_HOME/config.yaml` rather than `$HERMES_HOME/.hermes/config.yaml`),
+    so on the real box it skipped every time. Observed live: `inference.env` was
+    deliberately pointed at a different model from the config and the turn ran
+    anyway, announcing a slug that was not in force.
+
+    That is the disease this whole block exists to cure, caught inside the cure.
+    A check that quietly does not run is worse than no check at all, because the
+    claim it licenses keeps being printed.
+    """
+    home = tmp_path / "home"
+    home.mkdir(parents=True, exist_ok=True)
+    (home / "inference.env").write_text(
+        "DO_INFERENCE_KEY=fake-do-key\nDO_INFERENCE_MODEL=llama-4-maverick\n",
+        encoding="utf-8",
+    )
+    # No config written at all — the state the real box was in.
+
+    done = _run_wrapper(script, home, tmp_path)
+
+    assert done.returncode == 78, done.stdout
+    assert ".hermes/config.yaml" in done.stderr, "the path it could not read is not named"
+    assert "base=" not in done.stdout, "the turn ran with the model unestablished"
+    assert "both checked" not in done.stderr, "it claimed a check it had skipped"
+
+
+@pytest.mark.parametrize("script", WRAPPERS)
+def test_blanking_the_key_leaves_no_endpoint_behind(script, tmp_path):
+    """Rollback is one blank line, so it has to be a COMPLETE rollback.
+
+    A base URL surviving the key would send the turn to DigitalOcean with an
+    Anthropic credential while the wrapper reported "Anthropic direct".
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / "inference.env").write_text(
+        "DO_INFERENCE_KEY=\nDO_INFERENCE_BASE_URL=https://inference.do-ai.run\n",
+        encoding="utf-8",
+    )
+
+    done = _run_wrapper(script, home, tmp_path)
+
+    assert done.returncode == 0, done.stderr
+    assert "base=none" in done.stdout
+    assert "Anthropic direct" in done.stderr
+
+
+@pytest.mark.parametrize("script", WRAPPERS)
+def test_the_souls_key_never_comes_from_the_bots_env_file(script, tmp_path):
+    """`hermes` cannot read /opt/mudhorn/.env, and that is the user split
+    working rather than a problem to route around. Two credentials in two
+    accounts is the answer here, not a duplication to tidy away — it is what
+    keeps the agent's environment free of anything that reaches the broker.
+
+    Comments are stripped first: both files TALK about that file at length,
+    because the reasoning is the thing worth writing down. What must not appear
+    is a line that READS it.
+    """
+    text = (REPO_ROOT / "deploy" / script).read_text(encoding="utf-8")
+    code = "\n".join(
+        line for line in text.splitlines() if line.strip() and not line.lstrip().startswith("#")
+    )
+
+    assert "/opt/mudhorn/.env" not in code
+    assert "inference.env" in code, "the wrapper reads no inference settings at all"
+
+
 def test_paper_mode_is_the_default():
     env = _env()
     assert env.alpaca_paper_trade is True
@@ -124,6 +695,64 @@ def test_allowed_symbols_is_derived_from_enabled_classes():
     assert enabled.is_symbol_allowed("BTC/USD")
     assert enabled.class_name_for("BTC/USD") == "crypto"
     assert enabled.strategy_for("BTC/USD") == "momentum"
+
+
+def test_a_per_class_total_risk_cap_is_optional_and_bounded():
+    """`None` is "no opinion", not zero — absent means the portfolio total alone.
+
+    The bounds are the same shape as the other per-class limits: a percentage
+    that has to be a real one. Zero would be a class that could never trade,
+    written as though it were a setting.
+    """
+    assert InstrumentRules().max_class_total_risk_pct is None
+
+    with pytest.raises(ValueError):
+        InstrumentRules(max_class_total_risk_pct=0)
+    with pytest.raises(ValueError):
+        InstrumentRules(max_class_total_risk_pct=-1.0)
+    with pytest.raises(ValueError):
+        InstrumentRules(max_class_total_risk_pct=11.0)
+
+    assert InstrumentRules(max_class_total_risk_pct=0.5).max_class_total_risk_pct == 0.5
+
+
+def test_a_looser_class_total_is_accepted_rather_than_refused_at_load():
+    """Same doctrine as `max_risk_per_trade_pct`: it overrides in EITHER direction.
+
+    A validator that refused a class total above the portfolio's 2% would be a
+    denial at the least useful moment — boot, with no explanation and no way for
+    the operator to say "yes, I mean it". That friction belongs in the settings
+    agent. What matters here is that the file and the gate agree, so the value
+    is kept exactly as written and is never floored back with a `min`.
+
+    It buys nothing on its own, because `max_total_risk_pct` stays
+    portfolio-wide and refuses the trade that would breach it first — but that
+    is an interaction to know about, not a reason to reject the config.
+    """
+    loose = InstrumentRules(max_class_total_risk_pct=5.0)
+
+    assert loose.max_class_total_risk_pct == 5.0
+
+
+def test_the_shipped_crypto_class_caps_its_total_risk():
+    """Guards the operator's rule in the file, not only in the gate."""
+    from .conftest import RULES_PATH
+
+    crypto = Rules.load(RULES_PATH).instruments["crypto"]
+
+    assert crypto.max_class_total_risk_pct == 0.5
+    # The same figure as the per-trade cap, which is what makes crypto one
+    # full-size position at a time. Deliberate rather than a coincidence: it
+    # agrees with max_concurrent_positions: 1 instead of overriding it.
+    assert crypto.max_risk_per_trade_pct == 0.5
+    assert crypto.max_concurrent_positions == 1
+
+
+def test_the_equity_class_declares_no_total_risk_cap():
+    """Absence is the setting. Equities are bounded by the portfolio total."""
+    from .conftest import RULES_PATH
+
+    assert Rules.load(RULES_PATH).instruments["us_equity"].max_class_total_risk_pct is None
 
 
 def test_enabled_instrument_must_have_symbols_and_sessions():
@@ -335,3 +964,421 @@ def test_the_shipped_rules_close_the_weekend_for_equities():
     assert equities.session_days_utc == [0, 1, 2, 3, 4]
     assert 5 not in equities.session_days_utc  # Saturday
     assert 6 not in equities.session_days_utc  # Sunday
+
+
+# ------------------------------------------------------------- the dreaming block
+
+
+def test_symbol_grants_default_to_off_in_the_model():
+    """The half of the asymmetry that protects a caller who never heard of this.
+
+    A `Rules` built with no `dreaming:` block — an older deployment, a test
+    fixture, a config nobody has updated — grants nothing at all. Fails closed,
+    the same rule as `FinnhubCalendar.is_degraded` and `stops_unchecked`: an
+    unknown is never treated as a permission.
+    """
+    from bot.config import DreamingRules
+
+    assert DreamingRules().allow_symbol_grants is False
+
+
+def test_the_shipped_config_turns_symbol_grants_on():
+    """The other half. A decision somebody made belongs in a file that can be
+    read and reverted in one line, not in a default nobody sees."""
+    rules = Rules.load(REPO_ROOT / "config" / "rules.yaml")
+
+    assert rules.dreaming.allow_symbol_grants is True
+    assert rules.dreaming.max_granted_symbols > 0
+
+
+def test_the_configured_vault_numbers_match_the_value_objects():
+    """The numbers live in the file and the dataclasses keep their own defaults
+    for callers that pass nothing. This is what stops the two drifting into two
+    different answers to the same question.
+
+    **It loads the FILE**, which is the point and was the bug. It used to
+    compare `DreamingRules()` with `VaultCaps()` — two sets of code defaults,
+    which agree with each other by construction and say nothing whatever about
+    `config/rules.yaml`. A file setting `caps.adopted: 5` kept this green while
+    the enforced number stayed 3, so the anti-drift test could not see the
+    drift it exists for.
+    """
+    from bot.config import DreamingRules
+    from bot.dreaming import VaultCaps, VaultTTLs
+
+    shipped = Rules.load(REPO_ROOT / "config" / "rules.yaml").dreaming
+
+    assert shipped.vault_caps() == VaultCaps()
+    assert shipped.vault_ttls() == VaultTTLs()
+    # And the code defaults still agree, so a caller that passes nothing gets
+    # the same answer as one that read the file.
+    assert DreamingRules().vault_caps() == VaultCaps()
+    assert DreamingRules().vault_ttls() == VaultTTLs()
+
+
+def test_the_shipped_vault_caps_match_the_position_cap():
+    """An adopted dream the account has no slot to trade is a promise it cannot
+    keep. The two numbers are related by intent rather than by code, so the
+    relationship is asserted rather than left to a comment."""
+    rules = Rules.load(REPO_ROOT / "config" / "rules.yaml")
+
+    assert rules.dreaming.caps.adopted == rules.account.max_concurrent_positions
+    # The archive is uncapped on purpose: the only alternative to archiving a
+    # dream when the archive is full is deleting it.
+    assert rules.dreaming.caps.archive is None
+    assert rules.dreaming.ttl_days.archive is None
+
+
+# ------------------------------------------------- which class a symbol is in
+
+
+def test_true_class_key_reads_a_disabled_blocks_symbol_list_too():
+    """`for_symbol` scans ENABLED classes only, which made "is this symbol from
+    a class the operator switched off?" unanswerable — at exactly the moment an
+    adopted dream claimed one under a different class's key."""
+    rules = Rules.load(REPO_ROOT / "config" / "rules.yaml")
+    rules.instruments["crypto"].allowed_symbols = ["ETH/USD"]
+    assert rules.instruments["crypto"].enabled is False
+
+    assert rules.for_symbol("ETH/USD") is None
+    assert rules.true_class_key("ETH/USD") == "crypto"
+
+
+def test_true_class_key_agrees_with_the_rule_the_broker_routes_on():
+    """`AlpacaBroker.place_order` branches on `"/" in symbol`, so a slashed
+    symbol is a crypto order — unbracketed, no broker-side stop — whatever any
+    config says about it."""
+    rules = Rules.load(REPO_ROOT / "config" / "rules.yaml")
+
+    assert rules.true_class_key("BTC/USD") == "crypto"
+    assert rules.true_class_key("MP") == "us_equity"
+    assert rules.true_class_key("SPY") == "us_equity"
+
+
+def test_true_class_key_is_empty_when_two_blocks_claim_one_symbol():
+    """Where the file disagrees with itself there is no single answer, and the
+    callers read `""` as "drop this" rather than as a default."""
+    rules = Rules.load(REPO_ROOT / "config" / "rules.yaml")
+    rules.instruments["crypto"].allowed_symbols = ["WIDGET"]
+    rules.instruments["shelved"] = rules.instruments["crypto"].model_copy(
+        update={"allowed_symbols": ["WIDGET"], "enabled": False}
+    )
+
+    assert rules.true_class_key("WIDGET") == ""
+
+
+def test_true_class_key_is_empty_when_the_listing_contradicts_the_routing():
+    """A config that filed `BTC/USD` under the equity book would be a class the
+    gate applied and a class the broker used, and they would not be the same
+    one. Neither answer is safe, so there is no answer."""
+    rules = Rules.load(REPO_ROOT / "config" / "rules.yaml")
+    rules.instruments["us_equity"].allowed_symbols = [
+        *rules.instruments["us_equity"].allowed_symbols,
+        "BTC/USD",
+    ]
+
+    assert rules.true_class_key("BTC/USD") == ""
+
+
+def test_true_class_key_is_empty_for_a_symbol_that_is_not_one():
+    rules = Rules.load(REPO_ROOT / "config" / "rules.yaml")
+
+    assert rules.true_class_key("   ") == ""
+
+
+def test_a_bare_ticker_filed_under_crypto_has_no_establishable_class():
+    """The disagreement runs both ways, and the consequence is the same.
+
+    A symbol with no slash placed in the crypto block would be gated as crypto
+    and ROUTED as an equity — bracketed, with a broker-side stop, under crypto's
+    caps. Neither reading is the truth, so there is no answer and the grant is
+    dropped. Worth knowing for the day a second broker arrives: a `futures:`
+    block listing `ES` lands here too, and the routing rule is what has to learn
+    about it rather than this method.
+    """
+    rules = Rules.load(REPO_ROOT / "config" / "rules.yaml")
+    rules.instruments["crypto"].allowed_symbols = ["ES"]
+
+    assert rules.true_class_key("ES") == ""
+
+
+# ------------------------------------------------- the position-actions block
+
+
+def test_the_loop_may_not_act_on_position_plans_by_default():
+    """A `Rules` built with no `position_actions:` block executes nothing.
+
+    Fails closed, like every other switch here. An older deployment or a test
+    fixture that never heard of this feature does not suddenly gain an
+    unattended execution path because a new field landed.
+    """
+    from bot.config import PositionActionRules
+
+    assert PositionActionRules().enabled is False
+
+
+def test_the_shipped_config_leaves_unattended_execution_off():
+    """Unlike `dreaming.allow_symbol_grants`, the model default and the file
+    AGREE here, because nobody has asked for this one to be on.
+
+    The operator asked for the trading agent to be able to action its own
+    position, and that is satisfied by the MCP tools with a person in the
+    conversation. This flag is the other thing: the fifteen-minute loop moving
+    a stop at 3am with nobody watching. Building the record is not the same
+    decision as arming the trigger.
+    """
+    rules = Rules.load(REPO_ROOT / "config" / "rules.yaml")
+
+    assert rules.position_actions.enabled is False
+
+
+# ------------------------------------------ the out-of-hours fill switch
+
+
+def test_no_instrument_surrenders_its_stop_by_default():
+    """An `InstrumentRules` that never heard of this field gives up nothing.
+
+    The same fail-closed asymmetry as `PositionActionRules.enabled` and
+    `DreamingRules.allow_symbol_grants`, and it matters more here than for
+    either of them: this is the only setting in the file that trades away one
+    of the operator's four rules. A deployment predating the feature, and every
+    test fixture that builds `Rules` by hand, keeps its broker-side stop.
+    """
+    from bot.config import InstrumentRules
+
+    assert InstrumentRules().allow_extended_hours_fills is False
+
+
+def test_the_shipped_config_surrenders_nothing():
+    """Off in the model AND off in the file, which is the pattern every switch
+    that spends or acts follows here — `--execute`, `position_actions.enabled`,
+    the dream timer, `enable-forge.sh`.
+
+    `extended_hours_fill_classes` is the readable form of the question, and it
+    exists so that "is anything trading without a stop at the broker" is a fact
+    something can answer rather than a flag buried in one block of one file.
+    """
+    rules = Rules.load(REPO_ROOT / "config" / "rules.yaml")
+
+    assert rules.instruments["us_equity"].allow_extended_hours_fills is False
+    assert rules.extended_hours_fill_classes == []
+
+
+def test_a_class_that_has_surrendered_its_stop_is_named():
+    """The switch must not be invisible once thrown. A surrender nobody can see
+    is how a feature ships inert in one direction and unnoticed in the other."""
+    rules = Rules.load(REPO_ROOT / "config" / "rules.yaml")
+    rules.instruments["us_equity"].allow_extended_hours_fills = True
+
+    assert rules.extended_hours_fill_classes == ["us_equity"]
+
+
+def test_a_disabled_class_is_never_named_as_having_surrendered_anything():
+    """It cannot trade at all, so reporting it would name a cost nobody is
+    paying — the same reason `allowed_symbols` unions enabled classes only."""
+    rules = Rules.load(REPO_ROOT / "config" / "rules.yaml")
+    rules.instruments["crypto"].allow_extended_hours_fills = True
+
+    assert rules.instruments["crypto"].enabled is False
+    assert rules.extended_hours_fill_classes == []
+
+
+# ---------------------------------------------------------------------------
+# The widened allowlist
+#
+# `instruments.us_equity.allowed_symbols` went from six names to twenty on the
+# operator's decision. It is a PERMISSION, so every test here proves what the
+# gate still REFUSES rather than what it now admits — a widened allowlist that
+# only ever gets tested for the names it added is a widened allowlist nobody has
+# checked the edges of.
+
+
+def _shipped() -> Rules:
+    return Rules.load(REPO_ROOT / "config" / "rules.yaml")
+
+
+def _gate_for(rules: Rules):
+    from bot.risk import RiskGate
+
+    return RiskGate(
+        rules,
+        equity_at_session_start=100_000.0,
+        now=datetime(2026, 5, 4, 15, 0, tzinfo=UTC),  # a Monday, inside session
+    )
+
+
+def _snapshot(**overrides: Any):
+    from bot.models import AccountSnapshot
+
+    return AccountSnapshot(
+        equity_usd=100_000.0,
+        cash_usd=100_000.0,
+        buying_power_usd=100_000.0,
+        open_positions=[],
+        **overrides,
+    )
+
+
+def _proposal(symbol: str, **overrides: Any):
+    from bot.models import Direction, OrderProposal
+
+    fields: dict[str, Any] = {
+        "symbol": symbol,
+        "direction": Direction.BUY,
+        "qty": 3,
+        "limit_price": 580.00,
+        "stop_loss_price": 575.00,
+        "take_profit_price": 590.00,
+        "rationale": "Shape only; every figure here exists to exercise a gate.",
+    }
+    fields.update(overrides)
+    return OrderProposal(**fields)
+
+
+def _tick(symbol: str):
+    from bot.models import Tick
+
+    return Tick(
+        symbol=symbol, bid=579.98, ask=580.02,
+        timestamp=datetime(2026, 5, 4, 15, 0, tzinfo=UTC),
+    )
+
+
+def _reasons(verdict) -> str:
+    return " | ".join(verdict.reasons).lower()
+
+
+def test_every_listed_symbol_agrees_with_the_block_that_lists_it():
+    """The audited `grants.py` bypass, arriving through the config file instead.
+
+    A symbol filed under a class it cannot belong to is a live permission under
+    the WRONG class's limits: `BTC/USD` under `us_equity` would be routed by
+    `AlpacaBroker` as crypto — unbracketed, so with no broker-side stop at all —
+    while facing the equity book's caps. `true_class_key` derives the class from
+    the same rule the broker routes on, and this fails the build if the file
+    disagrees with it.
+
+    A test rather than a load-time validator, deliberately: refusing to start is
+    a denial at the least useful moment, and the commented-out `futures:`
+    template resolves to `""` on purpose while no second broker exists.
+    """
+    rules = _shipped()
+    for key, instrument in rules.instruments.items():
+        for symbol in instrument.allowed_symbols:
+            assert rules.true_class_key(symbol) == key, (
+                f"{symbol} is listed under {key} but its true class is "
+                f"{rules.true_class_key(symbol)!r}"
+            )
+
+
+def test_the_widened_list_still_refuses_everything_outside_it():
+    """Twenty names is not "most large caps". The gate refuses by list, not by
+    resemblance, and it says so in the rejection."""
+    rules = _shipped()
+    verdict = _gate_for(rules).evaluate(
+        _proposal("GME"), account=_snapshot(), tick=_tick("GME")
+    )
+    assert not verdict.approved
+    assert "not in the allowed list" in _reasons(verdict)
+
+
+def test_a_disabled_class_is_still_never_crossed():
+    """Crypto is configured-but-off on purpose, and widening the equity book
+    does not reach it. Enabling it is still a one-word edit and nothing else."""
+    rules = _shipped()
+    assert rules.instruments["crypto"].enabled is False
+    assert "BTC/USD" not in rules.allowed_symbols
+
+    verdict = _gate_for(rules).evaluate(
+        _proposal("BTC/USD", limit_price=60_000.0, stop_loss_price=59_000.0,
+                  take_profit_price=61_000.0, qty=0.01),
+        account=_snapshot(),
+        tick=_tick("BTC/USD"),
+    )
+    assert not verdict.approved
+    assert "not in the allowed list" in _reasons(verdict)
+
+
+def test_a_dream_grant_cannot_reach_a_class_the_operator_shut():
+    """The other door into the same room, checked against the SHIPPED config.
+
+    An adopted dream widens `allowed_symbols` at runtime, so widening the static
+    list must not have made that path inconsistent. The enabled-class hard block
+    still refuses crypto whatever key the adoption row claims — and the same
+    resolution still grants an equity outside the twenty, which is what keeps
+    adoption the interesting route rather than a dead one.
+    """
+    from bot.grants import resolve_granted_symbols
+
+    class _Store:
+        def __init__(self, granted: dict[str, str]) -> None:
+            self._granted = granted
+
+        def granted_symbols(self, now: datetime) -> dict[str, str]:
+            return dict(self._granted)
+
+    rules = _shipped()
+    moment = datetime(2026, 5, 4, 15, 0, tzinfo=UTC)
+
+    # Honestly filed, and still refused: the class is switched off.
+    assert resolve_granted_symbols(_Store({"BTC/USD": "crypto"}), rules, now=moment) == {}
+    # Mislabelled to dodge that, and refused by the class the SYMBOL is, which
+    # is the rule `AlpacaBroker.place_order` routes on.
+    assert resolve_granted_symbols(_Store({"BTC/USD": "us_equity"}), rules, now=moment) == {}
+    # An equity outside the twenty is still granted, so the block above is doing
+    # work rather than refusing everything.
+    assert resolve_granted_symbols(_Store({"TSLA": "us_equity"}), rules, now=moment) == {
+        "TSLA": "us_equity"
+    }
+    assert "TSLA" not in rules.allowed_symbols
+
+
+def test_the_tape_and_the_allowlist_are_different_lists_in_BOTH_directions():
+    """`watchlist:` is DISPLAY ONLY and must never be merged into this.
+
+    Pinned as a shape rather than as two fixed lists: the tape carries names the
+    bot may not trade AND the allowlist carries names the tape does not show, so
+    a later "tidy-up" that made one derive from the other fails here. The
+    selection criteria genuinely differ — VIXY and USO are informative to watch
+    and structurally decaying to mean-revert.
+    """
+    rules = _shipped()
+    tape = set(rules.watchlist.symbols)
+    allowed = set(rules.allowed_symbols)
+
+    assert tape - allowed, "the tape must carry at least one watch-only symbol"
+    assert allowed - tape, "the allowlist must not be a subset of the tape"
+    for watch_only in ("VIXY", "USO", "BTC/USD", "ETH/USD"):
+        assert watch_only in tape
+        assert not rules.is_symbol_allowed(watch_only)
+
+
+def test_widening_the_list_widened_no_limit():
+    """A permission is not a limit. A newly admitted symbol is sized by exactly
+    the same arithmetic as SPY was, and a proposal over the per-trade cap is
+    refused with the cap named."""
+    rules = _shipped()
+    assert rules.account.max_risk_per_trade_pct == 1.0
+    assert rules.instruments["us_equity"].max_concurrent_positions == 3
+    assert rules.frequency.max_trades_per_day == 5
+
+    # 250 shares risking $5 each is $1,250 — 1.25% of a $100k account.
+    verdict = _gate_for(rules).evaluate(
+        _proposal("AMZN", qty=250), account=_snapshot(), tick=_tick("AMZN")
+    )
+    assert not verdict.approved
+    assert "risk" in _reasons(verdict)
+
+
+def test_the_widened_list_is_still_DERIVED_and_not_a_second_copy():
+    """Disabling the class removes all twenty at once, which is only true while
+    `Rules.allowed_symbols` is derived from the enabled blocks. A hand-maintained
+    list somewhere else would survive this."""
+    rules = _shipped()
+    assert len(rules.allowed_symbols) == 20
+
+    off = rules.model_copy(deep=True)
+    off.instruments["us_equity"].enabled = False
+    assert off.allowed_symbols == []
+    for symbol in rules.allowed_symbols:
+        assert not off.is_symbol_allowed(symbol)

@@ -13,7 +13,9 @@ and let `place_order` here be the only write path.
 
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime, timedelta
+from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
@@ -22,8 +24,21 @@ from mcp.server.mcpserver import MCPServer
 from .audit import AuditLog
 from .broker import Broker
 from .config import Env, Rules, load_rules
+from .data.calendar import CalendarFeed, build_calendar_feed
+from .dreaming import (
+    DEFAULT_DREAMS_PATH,
+    Adoption,
+    Dream,
+    DreamStore,
+    MoveResult,
+    Vault,
+    VaultTTLs,
+)
+from .grants import resolve_granted_symbols
 from .insight import DEFAULT_DB_PATH as INSIGHT_DB_PATH
 from .insight import InsightIndex, run_query
+from .jobs import read as read_jobs
+from .jobs import render as render_jobs
 from .journal import Journal
 from .metrics import build_report, render_excursions, render_summary
 from .models import AccountSnapshot, AssetClass, Direction, OrderProposal
@@ -31,8 +46,16 @@ from .news_history import NewsItem
 from .news_history import recall as recall_news
 from .news_history import render as render_news
 from .options import alerts_for_positions, parse_occ_symbol, render_alerts
-from .reconcile import record_fill
+from .position_actions import (
+    ActionOutcome,
+    close_with_reason,
+    detect_unexplained_moves,
+    loop_execution_state,
+)
+from .position_actions import tighten_stop as tighten_stop_action
+from .reconcile import apply_journal_state, record_fill
 from .risk import RiskGate
+from .souls import GROGU, YODA
 from .stand_down import describe
 from .triggers import render as render_watches
 
@@ -43,6 +66,18 @@ server = MCPServer(
         "Always call check_order before proposing a trade to the user, and use "
         "place_order rather than any other order tool — it is the only path that "
         "enforces config/rules.yaml.\n\n"
+        "**Open positions are yours to manage, not yours to comment on.** "
+        "tighten_stop pulls a stop closer to entry and "
+        "close_position_with_reason closes one, both immediately and both "
+        "requiring a reason that is stored with the move. Neither goes through "
+        "the risk gate, because the gate vets orders that OPEN exposure and "
+        "these reduce it — which is also why a stand-down never blocks them. "
+        "Widening a stop is refused by code on either side of the market: it is "
+        "the one position move that increases the loss at unchanged size, and "
+        "nothing else in the system would catch it. If the risk on a position "
+        "is the problem, close part of it. get_position_actions reads the "
+        "record back, and reports stops or quantities that changed with no "
+        "reason on file.\n\n"
         "This server also carries the market information the bot reads. "
         "get_recent_news returns the headlines, watched-account posts and "
         "earnings windows the loop was actually shown, recorded with the time "
@@ -50,11 +85,35 @@ server = MCPServer(
         "quote the ages and never present a six-hour-old headline as current — "
         "but do not answer 'I have no access to news' either, because this is "
         "the news this bot trades on.\n\n"
+        "get_loop_activity answers whether the decision loop was actually "
+        "running, and what it was doing at a given moment. Four states and "
+        "none is a version of another: a pass that RAN and proposed nothing "
+        "stood pat, a SKIPPED pass never looked because the market was shut, a "
+        "FAILED pass got no decision at all, and a moment nothing covers means "
+        "the loop was stopped, restarting, or its record was lost. Never "
+        "report has_jobs=false as 'it ran and found nothing to do'.\n\n"
         "For anything outside a recent window, the full history is searchable: "
         "query_history runs read-only SQL over every decision, assessment, "
         "rejection reason and news item ever recorded, and describe_history "
         "returns the schema and the days covered. Prefer those over saying the "
-        "history is unavailable — it is on disk and indexed."
+        "history is unavailable — it is on disk and indexed.\n\n"
+        "The dream vaults are here too. list_dreams, get_dream and "
+        "dream_vault_status read them; adopt_dream and return_dream are the "
+        "only two verbs the trading agent has, and post_dream_message records a "
+        "turn of the conversation. None of them reaches the broker: adopting a "
+        "dream grants a SYMBOL PERMISSION with an expiry on it, and every gate "
+        "in config/rules.yaml still runs on anything traded under one. Quote "
+        "the ages these tools report — a dream offered three months ago and one "
+        "offered this morning are different facts — and never read an empty "
+        "list as 'nothing is happening' without checking store_readable first.\n\n"
+        "**Neither chat agent can create a dream, and raise_consideration is "
+        "not a way to.** It records a NOTE to the dreamer — a spark, why now, "
+        "and the operator's own words verbatim — which the dreamer reads on its "
+        "own run and may ignore. Nothing it writes is on a shelf, offered, or "
+        "permitted, so never tell the operator a dream now exists; "
+        "list_considerations reads them back. Put one up when you have a link "
+        "the operator does not, and remember that 'I have nothing worth passing "
+        "on here' is a good answer."
     ),
 )
 
@@ -71,6 +130,9 @@ class _Session:
         self._audit = AuditLog()
         self._insight: InsightIndex | None = None
         self._insight_path = INSIGHT_DB_PATH
+        self._dreams: DreamStore | None = None
+        self._dreams_path = DEFAULT_DREAMS_PATH
+        self._calendar: CalendarFeed | None = None
 
     @property
     def env(self) -> Env:
@@ -100,6 +162,32 @@ class _Session:
         if self._journal is None:
             self._journal = Journal()
         return self._journal
+
+    @property
+    def calendar(self) -> CalendarFeed:
+        """The earnings calendar the news blackout gate reads.
+
+        **This path ran without one, so `_news_blackout` had never fired on an
+        order placed here.** The rule is in `config/rules.yaml`, the gate
+        implements it, and `evaluate` was simply never handed any windows —
+        which meant the loop held back around an announcement and an order
+        placed by the operator or through chat did not. A gate rule enforced on
+        one path and not another is worse than one nobody wrote, because the
+        limits page says it applies.
+
+        Built once per process and cached, exactly as the loop builds it once at
+        start: `FinnhubCalendar` keeps a TTL cache because the free tier allows
+        100 requests a day, and a fresh adapter per tool call would throw that
+        cache away and spend the loop's quota.
+
+        Failure is the feed's own to report. `FinnhubCalendar` catches its
+        errors and answers with no windows plus `is_degraded`, so a bad fetch
+        costs the blackout rather than the order path — the same direction as
+        everything else here.
+        """
+        if self._calendar is None:
+            self._calendar = build_calendar_feed(self.env, self.rules)
+        return self._calendar
 
     @property
     def gate(self) -> RiskGate:
@@ -135,17 +223,42 @@ class _Session:
             )
         return self._insight
 
+    @property
+    def dreams(self) -> DreamStore:
+        """The dream store, built on first use. May raise; callers use `_store`.
+
+        Lazy for the reason the index is: most sessions never ask about dreams,
+        and opening a SQLite file to answer a question about the account would
+        be work nobody asked for. It is also the reason it can fail — a missing
+        directory, a file somebody moved — and a store that will not open must
+        reach the agent as a stated fact rather than as a traceback, which is
+        what `_store` is for.
+
+        `DreamStore` is resolved off the module rather than captured at import,
+        so a test can patch it. `_dreams_path` follows the same pattern as
+        `_insight_path`: every store here takes its path from the session so the
+        suite never writes to the real `data/`.
+        """
+        if self._dreams is None:
+            self._dreams = DreamStore(self._dreams_path)
+        return self._dreams
+
     def account(self) -> AccountSnapshot:
         """Broker state with open risk filled in from the journal.
 
         The broker cannot supply open risk — Alpaca keeps stop-losses as
         separate orders — so every read goes through here rather than calling
-        `broker.get_account()` directly, or the total-risk cap would have
-        nothing to count.
+        `broker.get_account()` directly, or the risk caps would have nothing to
+        count.
+
+        Delegates to `apply_journal_state` rather than keeping its own copy of
+        the enrichment. This used to mirror it by hand, which was one line while
+        there was one figure to fill in; it is three now — the total, the
+        per-symbol breakdown the class caps read, and the positions whose risk
+        is unknowable — and a hand-kept mirror is how one path quietly stops
+        populating something the gate depends on.
         """
-        snapshot = self.broker.get_account()
-        snapshot.open_risk_usd = self.journal.open_risk_usd()
-        return snapshot
+        return apply_journal_state(self.broker.get_account(), self.journal)
 
     def reset(self) -> None:
         """Start a new trading session: re-baseline equity and clear the kill switch."""
@@ -233,6 +346,11 @@ def check_order(
         account=account,
         tick=tick,
         activity=activity,
+        # The same hour of lookahead the decision loop uses. Without this the
+        # earnings blackout in config/rules.yaml could not fire on an order
+        # placed by the operator or through chat, while firing on every order
+        # the loop proposed — one rule, enforced on one path.
+        news_windows=_session.calendar.upcoming_windows(lookahead_minutes=60),
         stand_down=_session.journal.get_stand_down(),
     )
     return {
@@ -343,7 +461,25 @@ def place_order(
 
 @server.tool()
 def close_position(symbol: str) -> dict[str, Any]:
-    """Close the entire open position in a symbol on the paper account."""
+    """Close a position WITHOUT recording why. Prefer close_position_with_reason.
+
+    This still works, and it is left in place because closing a position must
+    never be harder than opening one — a stand-down that could not be exited
+    would be worse than the losing streak that caused it, and the same is true
+    of a tool that made getting out conditional on writing a sentence first.
+
+    But it leaves no reason on file, and that is now a gap rather than a
+    neutral difference. `record_exit` stores a price, a time and a realised
+    figure, so afterwards a stop-hit, a target-hit and a deliberate close by
+    hand are indistinguishable — and the interesting one is the third, because
+    that is the plan being abandoned. `close_position_with_reason` captures it
+    at the only moment anybody knows it.
+
+    A close through this tool shows on the Board as an unexplained move.
+
+    Args:
+        symbol: Ticker of the position to close.
+    """
     result = _session.broker.close_position(symbol.upper())
     _session.audit.record_event(
         "mcp_close_position",
@@ -353,6 +489,264 @@ def close_position(symbol: str) -> dict[str, Any]:
         "closed": result.accepted,
         "order_id": result.order_id,
         "error": result.error,
+        "reason_recorded": False,
+        "note": (
+            "No reason was recorded for this close. Use "
+            "close_position_with_reason instead — the reason is the one thing "
+            "nothing else can reconstruct afterwards."
+        ),
+    }
+
+
+def _action_payload(outcome: ActionOutcome) -> dict[str, Any]:
+    """One shape for both moves, so a caller reads them the same way.
+
+    A refusal is an ANSWER rather than an error, exactly as `_move_payload`
+    treats a refused dream move and as `check_order` treats a refused proposal.
+    Every reason is carried, because the refusal paths here collect all of them
+    rather than short-circuiting.
+    """
+    record = outcome.record
+    return {
+        "ok": outcome.ok,
+        "symbol": outcome.symbol,
+        "action": str(outcome.action),
+        "reasons": outcome.reasons,
+        "warnings": outcome.warnings,
+        "detail": outcome.detail,
+        "reached_broker": outcome.reached_broker,
+        "broker_order_id": outcome.broker_order_id,
+        "risk_before_usd": (
+            round(outcome.risk_before_usd, 2)
+            if outcome.risk_before_usd is not None
+            else None
+        ),
+        "risk_after_usd": (
+            round(outcome.risk_after_usd, 2)
+            if outcome.risk_after_usd is not None
+            else None
+        ),
+        "risk_reduced_usd": (
+            round(outcome.risk_reduced_usd, 2)
+            if outcome.risk_reduced_usd is not None
+            else None
+        ),
+        "recorded_action_id": record.id if record else None,
+        "record": record.model_dump(mode="json") if record else None,
+        "note": (
+            ""
+            if outcome.ok
+            else (
+                "This was refused by deterministic code, not by a judgement "
+                "call. Fix what it names or leave the position alone; asking "
+                "again will not change the answer."
+            )
+        ),
+    }
+
+
+@server.tool()
+def close_position_with_reason(symbol: str, reason: str) -> dict[str, Any]:
+    """Close the whole position in a symbol, recording WHY it was closed.
+
+    **This is the close to use.** It does exactly what close_position does at
+    the broker and additionally writes the one thing nothing else can
+    reconstruct: the reason. Afterwards the journal can tell a deliberate exit
+    from a stop-hit, and the interesting case — closed by hand before either
+    level, which is the plan being abandoned — stops being invisible.
+
+    Closing is never gated. `RiskGate` vets proposals that OPEN exposure and
+    never sees this, deliberately: a stand-down that froze position management
+    would strand open trades with no way out. Nothing here is refused except a
+    blank reason and a broker refusal.
+
+    A position the journal has never seen is still closed. The record is written
+    with no trade behind it and the response says so, because refusing to reduce
+    exposure over incomplete paperwork would be the wrong way round.
+
+    The exit price, the time and the realised figure are written by the next
+    reconcile cycle, not here — a fill is not atomic, and one poll during it is
+    a reading rather than an outcome.
+
+    Args:
+        symbol: Ticker of the position to close.
+        reason: Why it is being closed. One sentence. It does not have to be a
+            good reason — nothing here judges it — but it cannot be blank, and
+            a blank one is refused rather than stored empty.
+    """
+    outcome = close_with_reason(
+        _session.journal,
+        _session.broker,
+        symbol=symbol,
+        reason=reason,
+        actor="trader",
+    )
+    _session.audit.record_event(
+        "mcp_close_position_with_reason",
+        {
+            "symbol": outcome.symbol,
+            "ok": outcome.ok,
+            "reason": reason,
+            "reasons": outcome.reasons,
+            "order_id": outcome.broker_order_id,
+        },
+    )
+    return _action_payload(outcome)
+
+
+@server.tool()
+def tighten_stop(symbol: str, new_stop_price: float, reason: str) -> dict[str, Any]:
+    """Pull an open position's stop CLOSER to entry, and record why.
+
+    **Tighter only, and this is enforced in code rather than asked for.** On a
+    long the stop tightens UPWARD, on a short DOWNWARD. A level further from
+    entry than the one in force is refused outright, on either side of the
+    market, and no wording in `reason` changes that.
+
+    The reason it is absolute: `RiskGate.evaluate` gates proposals that OPEN
+    exposure and never sees a position move, because a stand-down that froze
+    position management would strand open trades with no way out. That
+    exemption is safe only for moves that reduce exposure. Widening a stop is
+    the one position move that increases the loss at unchanged size, on a live
+    position, with no gate anywhere in the system behind it — so it is
+    impossible through this path rather than discouraged.
+
+    If the risk on a position is the problem, close part of it. Do not buy room
+    by moving the stop.
+
+    What happens: the resting stop leg at the broker is REPLACED, in one
+    server-side operation — never cancelled and re-placed, which would leave the
+    position with no stop at all in between. The new leg has a new order id. The
+    journal's stop in force is updated in the same transaction as the record, so
+    the two cannot come apart, and open risk falls by the amount the response
+    reports.
+
+    Refused when the reason is blank, when the symbol has no open journal row
+    (the stop in force would be unknowable), when the move widens or changes
+    nothing, when more than one stop leg is resting, when the resting orders
+    could not be read, or when the broker refuses the replace — in which case
+    the original stop is still there and nothing was written.
+
+    A symbol with no resting stop leg is NOT refused, and the response says so
+    loudly: the move lands in the journal only, where `stop_watch` reports a
+    breach against it on the loop's pulse. That is the normal arrangement for
+    crypto, which Alpaca accepts no bracket on. On an equity it means nothing at
+    the broker is protecting the position.
+
+    Args:
+        symbol: Ticker of the open position.
+        new_stop_price: The new trigger, as a number. Closer to entry than the
+            stop currently in force. Call get_positions or get_risk_status first
+            if you are not certain where that is.
+        reason: Why it is being tightened. One sentence, and it cannot be blank.
+    """
+    outcome = tighten_stop_action(
+        _session.journal,
+        _session.broker,
+        symbol=symbol,
+        new_stop=new_stop_price,
+        reason=reason,
+        actor="trader",
+    )
+    _session.audit.record_event(
+        "mcp_tighten_stop",
+        {
+            "symbol": outcome.symbol,
+            "ok": outcome.ok,
+            "new_stop_price": new_stop_price,
+            "reason": reason,
+            "reasons": outcome.reasons,
+            "reached_broker": outcome.reached_broker,
+            "broker_order_id": outcome.broker_order_id,
+        },
+    )
+    return _action_payload(outcome)
+
+
+@server.tool()
+def get_position_actions(symbol: str = "", limit: int = 25) -> dict[str, Any]:
+    """Every recorded move on an open position, newest first, with its reason.
+
+    This is the record `tighten_stop` and `close_position_with_reason` write. A
+    record nothing can read back is not a record, and this is also the only
+    place a stop's history exists: the journal stores the level in force and the
+    broker stores the leg resting now, and neither says where either came from.
+
+    It reports the inverse too, and that half is the point. `unexplained_moves`
+    lists stops and quantities that differ from what the journal records with
+    **no action explaining them** — a stop pulled in through Alpaca's web UI, a
+    partial fill nobody journalled, a bracket leg cancelled by hand. A feature
+    that only showed the moves it managed to capture would hide its own
+    failures.
+
+    Read the two caveat lists before concluding anything from an empty
+    `unexplained_moves`:
+
+    - `stop_trigger_unreadable` — a stop leg is resting and the broker reported
+      no trigger price. Whether it moved is UNKNOWN, not fine.
+    - `positions_without_a_resting_stop` — the position is there and no stop
+      order is. Expected on crypto, which Alpaca accepts no bracket on, so
+      crypto is excluded from the list. On an equity it means nothing at the
+      broker would close the position.
+
+    If `broker_orders_readable` is false the resting orders could not be
+    fetched at all, and an empty `unexplained_moves` then means nothing
+    whatsoever.
+
+    Args:
+        symbol: Only this ticker. Empty means every symbol.
+        limit: Maximum recorded moves returned (default 25).
+    """
+    actions = _session.journal.position_actions(
+        symbol=symbol.strip().upper() or None, limit=max(1, limit)
+    )
+    account = _session.account()
+    orders = _session.broker.get_open_orders()
+    report = detect_unexplained_moves(
+        positions=account.open_positions,
+        orders=orders,
+        open_trades=_session.journal.open_trades(),
+        actions=_session.journal.position_actions(limit=200),
+        orders_degraded=_session.broker.orders_degraded,
+    )
+    enabled, sentence = loop_execution_state(_session.rules)
+
+    return {
+        "symbol_filter": symbol.strip().upper() or "all symbols",
+        "recorded_moves": len(actions),
+        "actions": [
+            {
+                **a.model_dump(mode="json"),
+                "summary": a.describe(),
+            }
+            for a in actions
+        ],
+        "broker_orders_readable": report.can_check,
+        "unexplained_moves": [m.describe() for m in report.moves],
+        "stop_trigger_unreadable": report.unreadable_stops,
+        "positions_without_a_resting_stop": report.positions_without_a_resting_stop,
+        # A leg that moves its own trigger by design. Its level differs from
+        # the journal's on every cycle it trails, so it is deliberately not
+        # compared — and named here, because otherwise "nothing differed" and
+        # "this one is not checked" are the same silence.
+        "stop_is_trailing": report.trailing_stops,
+        # Trailing, with no trail size reported. The current trigger can be
+        # read and where it goes next cannot.
+        "trail_size_unreadable": report.unreadable_trails,
+        # Named so an agent describing its own powers describes them correctly.
+        # It has the two tools regardless; what this flag decides is whether the
+        # unattended LOOP may act on the plans it writes.
+        "loop_may_act_unattended": enabled,
+        "loop_execution_note": sentence,
+        "note": (
+            "An empty actions list means no move has been recorded, which is "
+            "the ordinary state. An empty unexplained_moves list means nothing "
+            "was found to differ — but only if broker_orders_readable is true, "
+            "and only outside whatever the caveat lists name. A symbol in "
+            "stop_is_trailing was not compared at all: its trigger moves by "
+            "design, so quote it as a reading taken now rather than as a level "
+            "anybody chose."
+        ),
     }
 
 
@@ -763,6 +1157,129 @@ def get_recent_decisions(limit: int = 20, days: int = 7) -> dict[str, Any]:
 
 
 @server.tool()
+def get_loop_activity(hours: float = 24.0, at: str = "") -> dict[str, Any]:
+    """Was the decision loop actually running, and what was it doing?
+
+    Answers the question that used to need `journalctl | grep cycle_complete`
+    on the box — which no agent can reach, and which holds only the passes that
+    FINISHED. A cycle skipped with the market shut and a cycle whose model call
+    failed never appeared there at all.
+
+    **Four states, and collapsing any two of them is the failure this tool
+    exists to prevent:**
+
+    - `ran` — the loop completed a pass and got a decision. `proposals: 0` on
+      one of these is a QUIET cycle: it looked and stood pat, which is
+      frequently the right answer.
+    - `skipped` — no enabled instrument class was in session, so the model was
+      deliberately not asked. It did not look. The counts are `null` rather
+      than `0` for exactly that reason.
+    - `failed` — the pass could not get a decision. Never report this as a
+      cycle that decided to do nothing.
+    - **nothing covers that moment** — not an outcome at all. The loop was
+      stopped, restarting, or the record was lost.
+
+    And within that last one, `coverage` separates two more that look alike:
+    `not_recorded` means nothing accounts for the moment, `out_of_range` means
+    the read did not reach far enough to have an opinion about it. Never report
+    the second as the first.
+
+    If `has_jobs` is false, the loop recorded no pass at all in the window. That
+    is NOT "it ran and found nothing to do" — say so plainly. If `is_degraded`
+    is true the counts are known to be incomplete and every absence in them is
+    unexamined rather than established.
+
+    Args:
+        hours: How far back to look (default 24).
+        at: Optional ISO-8601 moment — "what was it doing at 14:15?". Empty
+            asks about now.
+    """
+    history = read_jobs(_session.audit, hours=max(0.1, hours))
+
+    moment: datetime | None = None
+    moment_error = ""
+    if at.strip():
+        moment = _parse_ts(at.strip())
+        if moment is None:
+            # Refused rather than silently answered about now. A question about
+            # 14:15 answered about this instant is a confident wrong answer,
+            # which is the one failure mode this whole module is arranged
+            # against.
+            moment_error = (
+                f"{at!r} is not an ISO-8601 timestamp, so no moment was looked "
+                "up and the answer below is about now. The window counts are "
+                "still the real ones."
+            )
+
+    # `window_to` rather than a fresh clock read when nobody named a moment.
+    # `JobHistory.at` refuses anything past the end of the span it read, and a
+    # second `datetime.now()` is always a hair past it — so "what is it doing
+    # now" answered `out_of_range` every single time. The instant the log was
+    # read IS now, as far as the record can speak.
+    answer = history.at(moment or history.window_to or datetime.now(UTC))
+
+    def _job(job: Any) -> dict[str, Any] | None:
+        if job is None:
+            return None
+        return {
+            "outcome": job.outcome.value,
+            "started_at": job.started_at.isoformat(timespec="seconds"),
+            "duration_seconds": round(job.duration_seconds, 3),
+            "interval_seconds": job.interval_seconds,
+            "detail": job.detail,
+            # `null` on a skip and on a failure, never 0 — those passes did not
+            # look, so a zero would be a claim they never made.
+            "proposals": job.proposals,
+            "approved": job.approved,
+            "executed": job.executed,
+            "quiet": job.quiet,
+            "equity_usd": job.standing.equity_usd,
+            "open_positions": job.standing.open_positions,
+            "open_risk_usd": job.standing.open_risk_usd,
+            "stand_down_stage": job.standing.stand_down_stage,
+        }
+
+    return {
+        "window_hours": history.window_hours,
+        # Separate from "are the counts zero", the same way `has_cycles` is in
+        # get_recent_news. No passes recorded and passes that all stood pat are
+        # opposite findings.
+        "has_jobs": history.has_jobs,
+        "passes": len(history.jobs),
+        "ran": history.ran,
+        "skipped": history.skipped,
+        "failed": history.failed,
+        "quiet": history.quiet,
+        "asked_about": answer.moment.isoformat(timespec="seconds"),
+        "coverage": answer.coverage.value,
+        "at_that_moment": answer.describe(),
+        "job_covering_that_moment": _job(answer.job),
+        "nearest_pass_before": _job(answer.nearest_before),
+        "nearest_pass_after": _job(answer.nearest_after),
+        "latest_pass": _job(history.latest),
+        "gaps": [
+            {
+                "after": gap.after.isoformat(timespec="minutes"),
+                "before": gap.before.isoformat(timespec="minutes"),
+                "minutes": round(gap.seconds / 60.0, 1),
+                # `null` when the pass before the gap never stated its cadence.
+                # A count derived from an assumed interval is a made-up number.
+                "passes_missed": gap.missed,
+                "explained_by_shutdown": gap.explained_by_shutdown,
+            }
+            for gap in history.gaps
+        ],
+        "is_degraded": history.is_degraded,
+        "read_hit_its_limit": history.truncated,
+        "unreadable_records": history.unreadable_records,
+        "malformed_lines": history.malformed_lines,
+        "unreadable_files": history.unreadable_files,
+        "moment_error": moment_error,
+        "readout": render_jobs(history),
+    }
+
+
+@server.tool()
 def describe_history() -> dict[str, Any]:
     """Schema and coverage of the searchable decision history.
 
@@ -993,6 +1510,1090 @@ def _parse_ts(value: Any) -> datetime | None:
     except ValueError:
         return None
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+
+
+# ------------------------------------------------------------------ the dreams
+#
+# **These tools reach `DreamStore` and nothing else.** No broker, no
+# `OrderProposal`, no call into `place_order`, and no import that could become
+# one. That is the argument `dreaming.py` and `confer.py` are built on, arriving
+# on the tool surface: a `Dream` carries no quantity, no entry, no stop and no
+# side, so nothing turns one into an order without somebody writing new fields
+# and new validation by hand.
+#
+# What adoption buys is a SYMBOL PERMISSION with an expiry on it. Everything
+# that decides whether a considered trade actually happens is untouched —
+# `RiskGate.evaluate` still runs on every order path, the stop is still required
+# and still validated, and the size still follows from it.
+#
+# Two verbs, because the trading agent is the one with a route to the broker and
+# therefore gets the smaller set: `adopt_dream` (vault to adopted) and
+# `return_dream` (adopted back to the vault, with a stated reason). There is
+# deliberately no `move_dream` and no `delete_dream` here. `DreamStore` refuses
+# the trader both anyway; the absence of the tool is the readable half of that
+# guarantee, in the same way `TraderPowers` is.
+
+# How close to lapsing counts as "expiring soon".
+#
+# Ten days, the same notice period as the Tailscale banner and for the same
+# reason: the failure is notice followed by a loss of capability, and the notice
+# period is the only time anything can be done about it. A grant that lapses
+# unannounced leaves a position held under a permission that no longer exists.
+GRANT_WARNING_DAYS = 10.0
+
+# What a caller has to read before concluding anything from an empty list.
+# Written once and attached to every readout here, because the failure it
+# prevents is the one `news_history.has_cycles` and
+# `WatchReport.can_grade_anything` exist for: a shelf that is empty and a store
+# that could not be read produce the same empty list, and only one of them says
+# anything about the dreamer.
+EMPTY_VS_UNREADABLE = (
+    "An empty list means that shelf is empty, which is an ordinary state. It "
+    "means nothing at all unless store_readable is true — if the store could "
+    "not be read, say so rather than reporting a quiet vault."
+)
+
+
+def _store() -> tuple[DreamStore | None, str]:
+    """The dream store, or the reason it could not be opened. Never raises.
+
+    Broad on purpose, exactly like `fetch_market_ticks` and
+    `grants.resolve_granted_symbols`. This is a SQLite open behind an agent
+    turn: the failures are `sqlite3.Error`, a permissions problem, a directory
+    that is not there. Any of them propagating would reach the agent as a tool
+    crash, and an agent handed a crash says "I cannot see the dreams" — which is
+    indistinguishable, in the transcript, from "there are no dreams".
+    """
+    try:
+        return _session.dreams, ""
+    except Exception as exc:
+        return None, f"{type(exc).__name__}: {exc}"
+
+
+def _unreadable(detail: str) -> dict[str, Any]:
+    """The one shape every tool here returns when the store will not open."""
+    return {
+        "store_readable": False,
+        "error": detail,
+        "note": (
+            "The dream store could not be read, so nothing below is known. "
+            "This is NOT an empty vault and must not be reported as one."
+        ),
+    }
+
+
+def _days(then: datetime, now: datetime) -> float:
+    """Days between two moments, to one decimal so an hour stays visible."""
+    return round((now - then).total_seconds() / 86400.0, 1)
+
+
+def _ttls() -> VaultTTLs:
+    """The TTLs from `config/rules.yaml`, never the dataclass defaults.
+
+    The file an operator edits is the file that decides. Reading the defaults
+    here would let this tool and the Settings page disagree about when a dream
+    expires, and the one nobody is reading would be the wrong one.
+    """
+    return _session.rules.dreaming.vault_ttls()
+
+
+def _expiry(dream: Dream, now: datetime, ttls: VaultTTLs) -> dict[str, Any]:
+    """When this dream ages out of the shelf it is on.
+
+    Measured from `vault_entered_at` and never from `created_at`: a dream pulled
+    back out for another pass gets a fresh clock, because the alternative
+    punishes exactly the reworking the arrangement wants to encourage.
+
+    A shelf with no TTL — the archive — reports `None` rather than a number, and
+    `expires_in_days: null` means never, not today.
+    """
+    days = ttls.days_for(dream.vault)
+    if days is None:
+        return {"expires_in_days": None, "expired": False, "ttl_days": None}
+    remaining = days - (now - dream.vault_entered_at).total_seconds() / 86400.0
+    return {
+        "expires_in_days": round(remaining, 1),
+        "expired": remaining <= 0,
+        "ttl_days": days,
+    }
+
+
+# ------------------------------------------- a consideration put to the dreamer
+#
+# **The operator's correction, and it changes the shape rather than the wording:
+# "Chat agents can't raise Dream, the agent can merely put it to consideration,
+# hence the chat log."**
+#
+# A first pass at this gave chat a tool that wrote a `Dream`. That was wrong,
+# and not as a matter of taste. A dream is the FIRST LINK of a chain that ends
+# in a live trading permission — dream, prophecy, vault, adopted,
+# `grants.resolve_granted_symbols`, and then a symbol `RiskGate` will admit that
+# `config/rules.yaml` never listed. Handing a conversational surface a tool that
+# inserts at the top of that chain means a signed-in user can talk a model into
+# the first link of a permission path. Every step after it still gates, so no
+# rule would have been broken today — but "it cannot create one" and "it can
+# create one and the later steps will catch it" are different claims, and only
+# the first is worth making. Same reasoning that put the dreamer on its own
+# Hermes instance rather than trusting a sentence in `souls/grogu.md`.
+#
+# So what chat writes is a CONSIDERATION: a note addressed to the dreamer,
+# saying here is a spark, here is why now, and here is what the operator
+# actually said. The dreamer picks it up on its own run and decides for itself
+# whether any of it becomes a seed. **It may ignore it**, and that is the
+# feature: the operator can point at something and the thing that dreams still
+# chooses.
+#
+# Three fields a `Dream` has are deliberately ABSENT here, and they are the
+# three that make a dream capable of becoming a permission:
+#
+# - `symbols` — the only field on a dream that can become a grant.
+# - `asset_class_key` — which risk limits such a grant would run under.
+# - `chain` — the hops. Requiring them was what made the first attempt a
+#   dream-authoring tool; producing them is the dreamer's job, not chat's.
+#
+# A consideration carrying any of those would be a dream wearing a different
+# noun, so `tests/test_mcp_server.py` asserts the field sets do not overlap —
+# the same blunt net `tests/test_dreaming.py` throws over `Dream` and
+# `OrderProposal`.
+#
+# **It is written to the AUDIT LOG, not to `data/dreams.db`.** That is the
+# containment, and it is structural rather than careful: nothing in
+# `dreaming.py` reads the audit log, so there is no code path that turns one of
+# these into a row on a shelf. It is also the right shape on its own terms —
+# append-only, never migrated, tolerant of a torn final line, already backed up
+# by `deploy/backup-journal.sh`, and already indexed into `insight.py`'s
+# `events` table, so `query_history` can answer "what has chat put up lately"
+# across the whole history rather than a window.
+#
+# What survives from the first attempt, because all of it applies to a note as
+# much as to a dream: `why_now` in the agent's own words, `prompted_by` as the
+# operator's verbatim phrasing, `origin` recording `chat:grogu` or `chat:yoda`,
+# and a small daily cap. `prompt_echo` survives too — arithmetic over words,
+# REPORTED and never enforced, the same posture as `Verification` counting
+# `checked` flags rather than asking a model how well sourced it feels. A guard
+# on that number could be walked around by rewording, and the walk-around would
+# leave the record looking clean; a record that tells on itself cannot be.
+
+# Which chat agents may put something up. Both, because the operator's reason
+# for wanting this was "two brains are better than one" — and deliberately not
+# `armorer`, whose whole job is arguing about `config/rules.yaml`.
+#
+# An unrecognised speaker is REFUSED rather than defaulted, which inverts the
+# rule `bot.web.app.chat` applies to `load_soul`, and the inversion is about
+# what the field is for in each place. There, getting it wrong costs the wrong
+# voice on one answer. Here it is the whole attribution on a note the dreamer
+# will read later, and a misattributed record is worse than a refused one.
+CHAT_RAISERS: frozenset[str] = frozenset({GROGU, YODA})
+
+# The surface half of `origin`. A dreamt dream carries whatever the model said
+# the spark was; a consideration carries `chat:<soul>`, so a reader can always
+# tell a thing said in conversation from a thing the dreamer worked out.
+CHAT_ORIGIN_PREFIX = "chat:"
+
+# The audit `kind` these are stored under. One string, named once, because it is
+# what every reader — this module, `query_history`, and anything that later
+# renders these on the Dreaming page — has to agree on.
+CONSIDERATION_EVENT = "chat_consideration"
+
+# How many may be put up in one UTC day. Small on purpose.
+#
+# Counted across BOTH agents rather than per speaker, because the scarce thing
+# is the dreamer's attention rather than either agent's quota — a per-speaker
+# cap would simply be six.
+MAX_CONSIDERATIONS_PER_DAY = 3
+
+# How many audit events to scan when counting today's, and how many days of
+# dated files to open. Counted from the log rather than held as a counter, so
+# the figure cannot drift out of step with what is actually on file.
+_CONSIDERATION_SCAN = 400
+
+# Words too common to say anything about whether a spark is the operator's
+# sentence given back. Deliberately short: a longer list starts encoding a view
+# about which words are meaningful, and the ratio is only ever an observation.
+_ECHO_STOPWORDS = frozenset(
+    {
+        "the", "and", "but", "for", "are", "was", "were", "have", "has", "had",
+        "what", "about", "with", "that", "this", "from", "into", "your", "you",
+        "its", "can", "could", "would", "should", "any", "some", "them", "they",
+        "there", "then", "how", "why", "who", "when", "where", "which", "does",
+        "did", "not", "out", "get", "got", "one", "two", "all", "more", "most",
+        "much", "very", "just", "like", "look", "see", "think", "thoughts",
+    }
+)
+
+
+class RaiseRefusal(StrEnum):
+    """Why a consideration was not recorded. Machine-readable, like `MoveRefusal`.
+
+    Every one is an ordinary answer rather than an error, and they are collected
+    rather than short-circuited — the property `RiskGate` and `DreamStore` both
+    have, for the same reason: an agent told one thing wrong at a time asks
+    repeatedly, and an unattended surface must not encourage that.
+    """
+
+    UNKNOWN_SPEAKER = "unknown_speaker"
+    NEEDS_SPARK = "needs_spark"
+    NEEDS_WHY_NOW = "needs_why_now"
+    DAILY_CAP_REACHED = "daily_cap_reached"
+
+
+# Every field a consideration has. Named as a constant rather than left implicit
+# in a dict literal so the containment test has something to assert against:
+# none of these may be a field of `Dream` that can become a permission. See the
+# block comment above, and `test_a_consideration_shares_no_field_with_a_grant`.
+CONSIDERATION_FIELDS: frozenset[str] = frozenset(
+    {"origin", "speaker", "spark", "why_now", "prompted_by", "prompt_echo", "at"}
+)
+
+
+def _content_words(text: str) -> set[str]:
+    """Words worth comparing. Lowercased, punctuation dropped, stopwords removed."""
+    return {
+        word
+        for word in re.findall(r"[a-z0-9]+", text.lower())
+        if len(word) >= 3 and word not in _ECHO_STOPWORDS
+    }
+
+
+def _prompt_echo(prompted_by: str, spark: str) -> float | None:
+    """What share of the operator's own words came straight back in the spark.
+
+    Arithmetic, reported and never enforced. A consideration whose spark is
+    nearly the operator's own sentence is one nobody actually had, and the
+    operator was explicit that this should be VISIBLE rather than prevented: a
+    guard on a number can be walked around by rewording, and the walk-around
+    would leave the record looking clean.
+
+    `None` when nothing was quoted, never `0.0`. An unprompted note has no ratio
+    rather than a perfect one, which is the `has_cycles` rule again: the
+    flattering reading must not be what an absence of evidence looks like.
+    """
+    prompt = _content_words(prompted_by)
+    if not prompt:
+        return None
+    return round(len(prompt & _content_words(spark)) / len(prompt), 2)
+
+
+def _utc_day(moment: datetime) -> str:
+    """The UTC calendar day of a moment, as `YYYY-MM-DD`.
+
+    A naive timestamp is read as UTC rather than raising. Everything here
+    reasons in UTC, and a `TypeError` out of a date comparison would take the
+    tool down over a line somebody hand-edited.
+    """
+    aware = moment if moment.tzinfo else moment.replace(tzinfo=UTC)
+    return aware.astimezone(UTC).date().isoformat()
+
+
+def _considerations(days: int) -> tuple[list[dict[str, Any]], bool]:
+    """Every consideration on file across `days`, newest first, and whether the
+    read was degraded.
+
+    Returned as plain rows plus the degraded flag rather than as a bare list,
+    because a log that could not be fully read produces the same empty list as a
+    quiet week — the `FinnhubCalendar.is_degraded` lesson, and the reason
+    `list_considerations` reports `record_is_incomplete` beside the count.
+    """
+    view = _session.audit.read(limit=_CONSIDERATION_SCAN, days=max(1, days))
+    rows = [
+        dict(event.payload, at=event.timestamp.isoformat(timespec="minutes"))
+        for event in view.events
+        if event.kind == CONSIDERATION_EVENT
+    ]
+    return rows, view.is_degraded
+
+
+def _considerations_today(now: datetime) -> list[dict[str, Any]]:
+    """Today's, for the cap. Counted off the log, never off a counter."""
+    today = _utc_day(now)
+    rows, _ = _considerations(days=2)
+    return [r for r in rows if str(r.get("at", ""))[:10] == today]
+
+
+def _dream_brief(dream: Dream, now: datetime, ttls: VaultTTLs) -> dict[str, Any]:
+    """One row in a list. Every age it can state, it states.
+
+    `has_conditions` travels beside `all_conditions_met` deliberately: a dream
+    with no conditions is False for the second, and a reader given only that
+    reads "not yet" where the truth is "nothing was ever claimed".
+    """
+    return {
+        "id": dream.id,
+        "title": dream.title,
+        "vault": str(dream.vault),
+        "stage": str(dream.stage),
+        "verdict": str(dream.verdict) if dream.verdict else None,
+        # Arithmetic over the `checked` flags on the chain, never the model's
+        # own opinion of its sourcing.
+        "verification": str(dream.verification),
+        "weakest_hop": dream.weakest_hop,
+        # Three separate questions about the same link, and collapsing any two
+        # of them produces a plausible wrong answer.
+        #
+        # `awaits_settlement` is False when every hop is checked — there is no
+        # link waiting on anything, which is a good state and not a gap.
+        # `weakest_hop_resolved` False WHILE awaiting settlement is the
+        # different case: the model named a hop number out of range, or prose
+        # matching no claim, so which link is weakest was never established.
+        # That is deliberately not clamped upstream, so it must not be reported
+        # as "no weak link" here either — same missing-versus-absent rule as
+        # `calendar_degraded` and `stops_unchecked`.
+        #
+        # `weakest_hop_pinned` is what actually decides whether a kept dream
+        # can leave the workbench: a condition has to claim to settle that hop.
+        # A reader given only `all_conditions_met` cannot tell a dream that is
+        # one grading away from the vault from one that will never promote.
+        "weakest_hop_index": dream.weakest_hop_index,
+        "weakest_hop_resolved": dream.resolved_weakest_hop is not None,
+        "awaits_settlement": dream.awaits_settlement,
+        "weakest_hop_pinned": any(
+            condition.settles(dream.resolved_weakest_hop)
+            for condition in dream.conditions
+        ),
+        "hops": len(dream.chain),
+        "unchecked_hops": len(dream.unverified_hops),
+        "symbols": list(dream.symbols),
+        "asset_class_key": dream.asset_class_key,
+        "instruments": list(dream.instruments),
+        "has_conditions": dream.has_conditions,
+        "conditions": len(dream.conditions),
+        "conditions_met": dream.conditions_met,
+        "all_conditions_met": dream.all_conditions_met,
+        "wisp": dream.wisp,
+        "created_at": dream.created_at.isoformat(timespec="minutes"),
+        "updated_at": dream.updated_at.isoformat(timespec="minutes"),
+        "age_days": _days(dream.created_at, now),
+        "vault_entered_at": dream.vault_entered_at.isoformat(timespec="minutes"),
+        "days_on_this_shelf": _days(dream.vault_entered_at, now),
+        **_expiry(dream, now, ttls),
+    }
+
+
+def _adoption_row(adoption: Adoption, now: datetime) -> dict[str, Any]:
+    """One grant, with its clock. `live` is arithmetic, never a stored flag."""
+    expires = adoption.expires_at
+    return {
+        "dream_id": adoption.dream_id,
+        "symbols_granted": list(adoption.symbols_granted),
+        "asset_class": adoption.asset_class,
+        "adopted_at": adoption.adopted_at.isoformat(timespec="minutes"),
+        "held_for_days": _days(adoption.adopted_at, now),
+        "expires_at": expires.isoformat(timespec="minutes") if expires else None,
+        "expires_in_days": (
+            round((expires - now).total_seconds() / 86400.0, 1) if expires else None
+        ),
+        "returned_at": (
+            adoption.returned_at.isoformat(timespec="minutes")
+            if adoption.returned_at
+            else None
+        ),
+        "return_reason": adoption.return_reason,
+        "live": adoption.is_live(now),
+    }
+
+
+def _move_payload(result: MoveResult) -> dict[str, Any]:
+    """A `MoveResult` as the agent reads it. A refusal is an answer, not an error.
+
+    Every refusal reason is carried, because `DreamStore` collects them rather
+    than short-circuiting — the same property `RiskGate` has, for the same
+    reason. An agent told one thing wrong with a move fixes it, asks again and
+    is told the second; an agent that has to ask repeatedly is what an
+    unattended surface must not encourage.
+    """
+    return {
+        "ok": result.ok,
+        "dream_id": result.dream_id,
+        "moved_from": str(result.moved_from) if result.moved_from else None,
+        "moved_to": str(result.moved_to) if result.moved_to else None,
+        "refusals": [str(r) for r in result.refusals],
+        "detail": result.detail,
+        "note": (
+            ""
+            if result.ok
+            else (
+                "This was refused by the dream store, which is deterministic "
+                "code. Fix what it names or leave the dream where it is; the "
+                "answer will not change if it is asked again."
+            )
+        ),
+    }
+
+
+@server.tool()
+def list_dreams(vault: str | None = None, limit: int = 20) -> dict[str, Any]:
+    """What is on each dream shelf, newest first, with an age on every row.
+
+    Five shelves. `workbench` is being dreamt about now, `prophecy` is a
+    long-horizon claim with conditions attached, `vault` is the only shelf the
+    trading agent can see and where the two agents talk, `adopted` is what the
+    trading agent has taken, and `archive` is retired.
+
+    **Quote the ages.** A dream offered three months ago and one offered this
+    morning are different facts, and only the second could be described as news.
+    `days_on_this_shelf` is the figure that matters for an offer nobody has
+    answered; `expires_in_days` is how long it has before it ages out.
+
+    A dream is speculative by construction. `verification` is arithmetic over
+    which links in the chain name a source — `unverified` means at least one hop
+    is an assumption — and `weakest_hop` is the sentence that could kill it.
+    Never present a chain as established fact.
+
+    An empty shelf is an ordinary state and says nothing on its own. Check
+    `store_readable` first: an unreadable store produces the same empty lists,
+    and reporting that as a quiet vault is the failure this tool must avoid.
+
+    Args:
+        vault: One of workbench, prophecy, vault, adopted, archive. Omit for
+            every shelf at once.
+        limit: Maximum dreams returned per shelf (default 20).
+    """
+    store, error = _store()
+    if store is None:
+        return _unreadable(error)
+
+    if vault:
+        try:
+            wanted = [Vault(vault.strip().lower())]
+        except ValueError:
+            # A refusal, not an exception. A mistyped shelf name is an ordinary
+            # thing for an agent to do, and the useful answer names the shelves.
+            return {
+                "store_readable": True,
+                "error": f"'{vault}' is not a shelf.",
+                "valid_vaults": [str(v) for v in Vault],
+            }
+    else:
+        wanted = list(Vault)
+
+    now = datetime.now(UTC)
+    ttls = _ttls()
+    counts = store.counts_by_vault()
+    caps = _session.rules.dreaming.vault_caps()
+
+    shelves: dict[str, Any] = {}
+    for shelf in wanted:
+        dreams = store.in_vault(shelf, limit=max(1, limit))
+        cap = caps.limit_for(shelf)
+        shelves[str(shelf)] = {
+            "held": counts.get(shelf, 0),
+            "cap": cap,
+            "full": cap is not None and counts.get(shelf, 0) >= cap,
+            "returned": len(dreams),
+            "dreams": [_dream_brief(d, now, ttls) for d in dreams],
+        }
+
+    return {
+        "store_readable": True,
+        "error": "",
+        "asked_at": now.isoformat(timespec="minutes"),
+        "vault_filter": str(wanted[0]) if vault else "all shelves",
+        # Every shelf is a key even when it is empty, so a zero is a stated fact
+        # rather than a missing one. Same reason `stop_watch` puts a breach
+        # count of zero on every cycle line.
+        "counts_by_vault": {str(v): counts.get(v, 0) for v in Vault},
+        "shelves": shelves,
+        "note": EMPTY_VS_UNREADABLE,
+    }
+
+
+@server.tool()
+def get_dream(dream_id: int) -> dict[str, Any]:
+    """One dream in full: the chain, the conditions, the verdict, the transcript.
+
+    The causal chain is the point of a dream and it comes back hop by hop, each
+    with whether anybody actually checked it and what against. A chain is a
+    hypothesis precisely because every link is a separate claim that can be
+    attacked on its own, so read `unchecked_hops` and `weakest_hop` before
+    repeating any of it and never present an unchecked hop as a fact.
+
+    `messages` is the agent-to-agent transcript, oldest first, because a
+    negotiation read newest-first is a negotiation read backwards. Every turn
+    carries its age: a message from March is not part of a conversation
+    happening now. `adoptions` is every grant this dream has carried, live or
+    handed back.
+
+    A missing dream comes back as `found: false` rather than as an error.
+
+    Args:
+        dream_id: The id from list_dreams.
+    """
+    store, error = _store()
+    if store is None:
+        return _unreadable(error)
+
+    dream = store.get(dream_id)
+    if dream is None:
+        return {
+            "store_readable": True,
+            "found": False,
+            "dream_id": dream_id,
+            "note": (
+                "No dream with that id. It may have been retired by the "
+                "dreamer; call list_dreams for what is actually there."
+            ),
+        }
+
+    now = datetime.now(UTC)
+    return {
+        "store_readable": True,
+        "found": True,
+        **_dream_brief(dream, now, _ttls()),
+        "seed": dream.seed,
+        "origin": dream.origin,
+        "trigger": dream.trigger,
+        "chain": [
+            {"claim": hop.claim, "checked": hop.checked, "source": hop.source}
+            for hop in dream.chain
+        ],
+        "condition_detail": [
+            {
+                "text": c.text,
+                # The checkable half. `null` means no THRESHOLD, which is
+                # "code cannot grade this" and never "did not hold" — and no
+                # longer implies nothing can settle it at all, since an
+                # observation is settled by a person instead.
+                "trigger": (t.render() if (t := c.as_trigger()) is not None else None),
+                "is_checkable": c.is_checkable,
+                # The other shape of pre-registration, and the fields a caller
+                # needs to say WHAT somebody has to go and look at. Reporting
+                # only `is_checkable` left an agent describing an
+                # operator-settled claim as unsettleable prose.
+                "is_observable": c.is_observable,
+                "subject": c.subject or None,
+                "observable": c.observable or None,
+                "observe_by": (
+                    c.observe_by.isoformat(timespec="minutes") if c.observe_by else None
+                ),
+                # Five states, because `fulfilled` alone cannot tell RULED_OUT
+                # from nobody having looked, or an elapsed review date from a
+                # claim with no way to settle it at all.
+                "state": c.state(now).value,
+                "fulfilled": c.fulfilled,
+                # An answer, not a failure to answer. A caller shown only
+                # `fulfilled: false` reads a refuted claim as an open one.
+                "ruled_out": c.ruled_out,
+                "answered_by": c.observed_by or None,
+                "fulfilled_at": (
+                    c.fulfilled_at.isoformat(timespec="minutes")
+                    if c.fulfilled_at
+                    else None
+                ),
+                "note": c.note,
+            }
+            for c in dream.conditions
+        ],
+        "thoughts": [
+            {
+                "stage": str(t.stage),
+                "text": t.text,
+                "at": t.at.isoformat(timespec="minutes"),
+                "age_days": _days(t.at, now),
+                "by": t.by,
+            }
+            for t in dream.thoughts
+        ],
+        "messages": [
+            {
+                "speaker": m.speaker,
+                "kind": m.kind,
+                "text": m.text,
+                "at": m.at.isoformat(timespec="minutes"),
+                "age_days": _days(m.at, now),
+            }
+            for m in store.messages(dream_id)
+        ],
+        "adoptions": [_adoption_row(a, now) for a in store.adoptions(dream_id)],
+        "note": (
+            "The chain is speculative by construction. Quote the verification "
+            "badge and the weakest hop alongside it, and quote the ages."
+        ),
+    }
+
+
+@server.tool()
+def dream_vault_status() -> dict[str, Any]:
+    """The shelves against their caps, the live grants, and what lapses soon.
+
+    Three questions, answered apart because they fail apart:
+
+    - **What is held**, per shelf, against the cap in config/rules.yaml. A full
+      shelf refuses a move and says so. The cap is a working constraint about
+      what a person can hold in their head, not a risk rule — except `adopted`,
+      which matches max_concurrent_positions so that an adoption the account has
+      no slot to trade cannot be promised.
+    - **What is permitted right now.** `symbols_in_force` is what the risk gate
+      will actually honour and it is a SUBSET of what the adoptions claim: a
+      grant naming an instrument class that is disabled in config/rules.yaml
+      grants nothing, and a symbol already on the allowed list is not a grant
+      at all because it was permitted anyway. `symbols_claimed_by_adoptions` is
+      the raw store answer, and the gap between the two is the rules doing their
+      job rather than an error.
+    - **What is about to lapse**, with the days remaining. Expiry withdraws the
+      right to OPEN a position in a granted symbol and never closes anything: a
+      position held under a lapsed grant stands and is still the operator's to
+      manage.
+
+    An empty `symbols_in_force` is the normal state and means the account is
+    trading exactly what config/rules.yaml already allows. An unreadable store
+    is reported as `store_readable: false` and must not be summarised as a
+    quiet vault.
+    """
+    store, error = _store()
+    if store is None:
+        return _unreadable(error)
+
+    now = datetime.now(UTC)
+    rules = _session.rules
+    ttls = _ttls()
+    caps = rules.dreaming.vault_caps()
+    counts = store.counts_by_vault()
+
+    live = [a for a in store.adoptions() if a.is_live(now)]
+    claimed = store.granted_symbols(now)
+    in_force = resolve_granted_symbols(store, rules, now=now)
+
+    expiring = [
+        _adoption_row(a, now)
+        for a in live
+        if a.expires_at is not None
+        and (a.expires_at - now).total_seconds() / 86400.0 <= GRANT_WARNING_DAYS
+    ]
+
+    # Already past their shelf's TTL. `DreamStore.expired` is a pure read — it
+    # marks nothing and deletes nothing — so this is a report, and
+    # `electrum-bot vault-expire` is what acts on it.
+    expired = store.expired(now, ttls)
+
+    return {
+        "store_readable": True,
+        "asked_at": now.isoformat(timespec="minutes"),
+        "shelves": {
+            str(v): {
+                "held": counts.get(v, 0),
+                "cap": caps.limit_for(v),
+                "ttl_days": ttls.days_for(v),
+                "full": (
+                    caps.limit_for(v) is not None
+                    and counts.get(v, 0) >= (caps.limit_for(v) or 0)
+                ),
+            }
+            for v in Vault
+        },
+        "grants_enabled": rules.dreaming.allow_symbol_grants,
+        "max_granted_symbols": rules.dreaming.max_granted_symbols,
+        "live_adoptions": [_adoption_row(a, now) for a in live],
+        "symbols_in_force": dict(sorted(in_force.items())),
+        "symbols_claimed_by_adoptions": dict(sorted(claimed.items())),
+        "expiring_within_days": GRANT_WARNING_DAYS,
+        "grants_expiring_soon": expiring,
+        "dreams_past_their_ttl": [
+            {
+                "id": d.id,
+                "title": d.title,
+                "vault": str(d.vault),
+                "days_on_this_shelf": _days(d.vault_entered_at, now),
+            }
+            for d in expired
+        ],
+        "note": (
+            "A permission is not an order. An adopted dream widens which "
+            "symbols may be CONSIDERED; risk, concentration, session, "
+            "concurrency and cooldown all still apply under that symbol's own "
+            "class limits, and every order still goes through place_order. "
+            + EMPTY_VS_UNREADABLE
+        ),
+    }
+
+
+@server.tool()
+def adopt_dream(
+    dream_id: int, symbols: list[str] | None = None, asset_class: str = ""
+) -> dict[str, Any]:
+    """Take a dream out of the vault, granting its symbols until the grant lapses.
+
+    **This is a permission, not a trade.** It adds the named symbols to what may
+    be considered, for as long as the adoption is live, under the existing
+    limits of an already-enabled instrument class. It cannot enable a class,
+    cannot raise a cap and cannot skip a gate. Nothing is bought, nothing is
+    sized and no position is opened — that is check_order and place_order,
+    exactly as for any other symbol.
+
+    Refused, with every reason at once, when the dream is not in the vault (the
+    only shelf visible from here), when it names no symbols, when its instrument
+    class is unresolved, when the adopted shelf is full, or when you ask for
+    symbols or a class the dream does not itself claim. A full shelf is an
+    ordinary answer: the cap matches max_concurrent_positions, so a fourth
+    adoption would be a promise the account has no slot to keep. A refusal comes
+    back as `ok: false` with its reasons — it is not an error, and asking again
+    will not change it.
+
+    **You cannot grant yourself a symbol here.** The store checks every adoption
+    against what the dream offers, so `symbols` may only ever narrow that list
+    and `asset_class` may only restate it. A dream is the argument the dreamer
+    won; adoption accepts it or takes less of it.
+
+    The grant is time-boxed. Report `expires_at` and `expires_in_days` when
+    describing what was taken, because a permission with no stated end is one
+    nobody revisits.
+
+    Args:
+        dream_id: The id from list_dreams.
+        symbols: Take only some of what the dream offers. Must be a subset of
+            its own symbols; anything else is refused. Omit to take the whole
+            offer as the dreamer made it.
+        asset_class: The instruments key from config/rules.yaml — "us_equity",
+            "crypto". It must match the dream's own; omit it and the dream's is
+            used. An unresolved class grants nothing, because a symbol whose
+            class is unknown is a symbol whose risk limits are unknown.
+    """
+    store, error = _store()
+    if store is None:
+        return _unreadable(error)
+
+    now = datetime.now(UTC)
+    result = store.adopt(
+        dream_id,
+        symbols=list(symbols) if symbols else None,
+        asset_class=asset_class,
+        at=now,
+        # From the rules file rather than the dataclass defaults, so the cap and
+        # the clock an operator can read are the ones actually applied.
+        caps=_session.rules.dreaming.vault_caps(),
+        ttl_days=_session.rules.dreaming.ttl_days.adopted,
+    )
+
+    payload = _move_payload(result)
+    payload["store_readable"] = True
+    if result.ok:
+        grants = [a for a in store.adoptions(dream_id) if a.is_live(now)]
+        payload["grant"] = _adoption_row(grants[0], now) if grants else None
+        payload["symbols_in_force"] = dict(
+            sorted(resolve_granted_symbols(store, _session.rules, now=now).items())
+        )
+        payload["note"] = (
+            "The grant expires on the date above. A symbol whose grant has "
+            "lapsed is refused like any other unlisted symbol, and expiry never "
+            "closes a position that is already open. If symbols_in_force does "
+            "not contain what was just granted, the rules did not honour it — "
+            "most often because its instrument class is disabled."
+        )
+    # Recorded for the same reason `mcp_place_order` is: a permission that
+    # leaves no trace is a permission nobody can audit afterwards, and a
+    # refusal is as worth having on the record as a grant.
+    _session.audit.record_event(
+        "mcp_adopt_dream",
+        {
+            "dream_id": dream_id,
+            "ok": result.ok,
+            "refusals": [str(r) for r in result.refusals],
+            "symbols": list(symbols) if symbols else None,
+            "asset_class": asset_class,
+        },
+    )
+    return payload
+
+
+@server.tool()
+def return_dream(dream_id: int, reason: str) -> dict[str, Any]:
+    """Hand an adopted dream back to the vault, saying why. Withdraws the grant.
+
+    The reason is required and a blank one is refused by the store. It does not
+    have to be a good reason — nothing here judges it — but a return with no
+    record is an argument reversed silently, and the record is most of what the
+    dream vault is for. It is written into the transcript as a `return` turn,
+    where the dreamer can read it.
+
+    The symbol permission ends immediately. Any position already open in a
+    returned symbol stands: closing is deliberately outside this path and
+    nothing here will close one.
+
+    Args:
+        dream_id: The id from list_dreams.
+        reason: Why it is going back. One sentence is enough.
+    """
+    store, error = _store()
+    if store is None:
+        return _unreadable(error)
+
+    result = store.return_to_vault(dream_id, reason=reason)
+    payload = _move_payload(result)
+    payload["store_readable"] = True
+    if result.ok:
+        payload["note"] = (
+            "The grant is withdrawn as of now. A position still open in one of "
+            "its symbols is untouched and remains yours to manage; there are "
+            "simply no new entries permitted in it."
+        )
+    _session.audit.record_event(
+        "mcp_return_dream",
+        {"dream_id": dream_id, "ok": result.ok, "reason": reason},
+    )
+    return payload
+
+
+@server.tool()
+def post_dream_message(
+    dream_id: int, speaker: str, text: str, kind: str = "note"
+) -> dict[str, Any]:
+    """Record one turn of the conversation about a dream. Append-only.
+
+    The transcript is most of why the dream vault is worth having: the
+    interesting part of a negotiation is the point where somebody changed their
+    mind, and a store keeping only the current position would throw exactly that
+    away. Use this when a chat turn settles something — a question put to the
+    dreamer, the answer, the reasoning behind taking a dream or leaving it.
+
+    Nothing is overwritten and nothing can be edited afterwards, so write the
+    turn as it was said.
+
+    Args:
+        dream_id: The id from list_dreams. A message on a dream that does not
+            exist is refused, because it could never be read back.
+        speaker: Who is speaking — conventionally "trader", "dreamer" or
+            "operator". Recorded verbatim: it is a claim about who spoke rather
+            than a verified identity, so do not sign a turn as somebody else.
+        text: The turn itself. Long prose is trimmed rather than rejected; an
+            empty turn is refused, because a blank line in a transcript is
+            indistinguishable from a bug.
+        kind: question, answer, offer, accept, return or note (default note).
+            offer, accept and return are written by the store itself when an
+            adoption starts or ends, so prefer question, answer or note here.
+    """
+    store, error = _store()
+    if store is None:
+        return _unreadable(error)
+
+    if not text.strip():
+        return {
+            "store_readable": True,
+            "posted": False,
+            "dream_id": dream_id,
+            "error": "An empty message is not a turn. Say something, or say nothing.",
+        }
+
+    # Checked here rather than left to the store, which has no foreign key and
+    # would happily write a message hanging off an id that does not exist — a
+    # turn nobody can read back, on a conversation that never happened.
+    if store.get(dream_id) is None:
+        return {
+            "store_readable": True,
+            "posted": False,
+            "dream_id": dream_id,
+            "error": (
+                f"No dream with id {dream_id}, so there is nothing to say it "
+                "about. Call list_dreams for what is there."
+            ),
+        }
+
+    message = store.add_message(
+        dream_id,
+        speaker=speaker.strip() or "unknown",
+        text=text,
+        kind=kind.strip() or "note",
+    )
+    return {
+        "store_readable": True,
+        "posted": True,
+        "dream_id": dream_id,
+        "message_id": message.id,
+        "speaker": message.speaker,
+        "kind": message.kind,
+        "text": message.text,
+        "at": message.at.isoformat(timespec="minutes"),
+        # Prose trims rather than being rejected, so a caller is told when the
+        # stored turn is not the turn it sent.
+        "truncated": message.text != text.strip(),
+    }
+
+
+@server.tool()
+def raise_consideration(
+    speaker: str,
+    spark: str,
+    why_now: str,
+    prompted_by: str = "",
+) -> dict[str, Any]:
+    """Put something to the dreamer for consideration. It is a note, not a dream.
+
+    **This does not create a dream and cannot.** It writes one line to the audit
+    log saying: here is a spark, here is why now, and here is what the operator
+    actually said. The dreamer reads it on its own run, on its own timer, and
+    decides for itself whether any of it becomes a seed — **it may ignore it
+    entirely**, and that is the point. You can point at something; the thing
+    that dreams still chooses.
+
+    The reason this is a note rather than a dream is worth knowing, because it
+    tells you what to write. A dream is the first link of a chain that ends in a
+    live trading permission — dream, prophecy, vault, adopted, and then a symbol
+    the risk gate will admit that `config/rules.yaml` never listed. A
+    conversation must not be able to insert at the top of that chain, so this
+    carries no symbols, no instrument class and no causal hops. Do not try to
+    smuggle a ticker into the prose; it grants nothing and it makes the note
+    read as a recommendation, which is exactly what it is not.
+
+    **Put one up when you have a LINK the operator does not.** A topic they just
+    named is a subject, not a consideration. If what you would write is their
+    sentence with a noun swapped, you have nothing to put up.
+
+    **"I have nothing worth passing on here" is a good answer**, and it is the
+    right one most of the time. Nothing counts these as productivity. One raised
+    to be agreeable is worse than none, because the dreamer reads them and its
+    attention is the scarce thing.
+
+    `why_now` and `prompted_by` are stored side by side on purpose. Do not
+    paraphrase, tidy or summarise the quote — a reader puts the operator's own
+    words beside your spark and decides for themselves whether anything was
+    added, and a smoothed quote takes that judgement away from them. Leave it
+    empty only when nobody prompted you.
+
+    Refused, with every reason at once, when the speaker is not a chat agent,
+    when the spark or why_now is blank, or when three have already gone up
+    today. A refusal is an ordinary answer and asking again will not change it.
+
+    Read them back with list_considerations, or across the whole history with
+    query_history: `SELECT ts, payload FROM events WHERE kind =
+    'chat_consideration' ORDER BY ts DESC`.
+
+    Args:
+        speaker: Which agent is putting it up — "grogu" or "yoda". Recorded as
+            `chat:<speaker>`; do not sign it as the other one.
+        spark: The thought itself, in a sentence or two. Not a recommendation
+            and not a trade — a place you think it is worth the dreamer looking.
+        why_now: What prompted this, in your own words: what you noticed, and
+            why it is worth the dreamer's attention today rather than at some
+            point.
+        prompted_by: The operator's own words, verbatim, when something they
+            said led to this. Empty only when nothing did.
+    """
+    now = datetime.now(UTC)
+    who = speaker.strip().lower()
+    clean_spark = spark.strip()
+    clean_why = why_now.strip()
+    quote = prompted_by.strip()
+
+    refusals: list[RaiseRefusal] = []
+    if who not in CHAT_RAISERS:
+        refusals.append(RaiseRefusal.UNKNOWN_SPEAKER)
+    if not clean_spark:
+        refusals.append(RaiseRefusal.NEEDS_SPARK)
+    if not clean_why:
+        refusals.append(RaiseRefusal.NEEDS_WHY_NOW)
+
+    already = _considerations_today(now)
+    if len(already) >= MAX_CONSIDERATIONS_PER_DAY:
+        refusals.append(RaiseRefusal.DAILY_CAP_REACHED)
+
+    origin = f"{CHAT_ORIGIN_PREFIX}{who}"
+    echo = _prompt_echo(quote, clean_spark)
+    payload: dict[str, Any] = {
+        "recorded": not refusals,
+        "refusals": [str(r) for r in refusals],
+        "raised_today": len(already),
+        "daily_cap": MAX_CONSIDERATIONS_PER_DAY,
+    }
+
+    if refusals:
+        payload["note"] = (
+            "Refused by deterministic code, not by a judgement call. Fix what it "
+            "names or let the thought go; asking again will not change the "
+            "answer. Nothing was written."
+        )
+        # Recorded even when nothing was put up, for the reason
+        # `mcp_adopt_dream` records its refusals: how often this surface tries
+        # and how often it is prompted is a fact about the surface, and a log
+        # that only kept the successes could not answer it.
+        _session.audit.record_event(
+            "chat_consideration_refused",
+            {"speaker": who, "origin": origin, "refusals": payload["refusals"]},
+        )
+        return payload
+
+    # The record itself. Deliberately these fields and no others — see
+    # `CONSIDERATION_FIELDS` and the block comment above: no symbols, no
+    # instrument class, no chain. Written to the audit log rather than to
+    # `data/dreams.db`, so nothing in `dreaming.py` can read it as a shelf row.
+    _session.audit.record_event(
+        CONSIDERATION_EVENT,
+        {
+            "origin": origin,
+            "speaker": who,
+            "spark": clean_spark,
+            "why_now": clean_why,
+            "prompted_by": quote,
+            "prompt_echo": echo,
+        },
+    )
+
+    payload.update(
+        {
+            "origin": origin,
+            "speaker": who,
+            "spark": clean_spark,
+            "why_now": clean_why,
+            "prompted_by": quote,
+            "prompt_echo": echo,
+            "raised_today": len(already) + 1,
+            "at": now.isoformat(timespec="minutes"),
+            "note": (
+                "Recorded as a consideration, not as a dream. Nothing is on a "
+                "shelf, nothing is offered and no symbol is permitted by this. "
+                "The dreamer reads it on its own run and may ignore it. Say that "
+                "plainly rather than telling the operator a dream now exists — "
+                "list_dreams is what would show one, and it will not show this. "
+                "prompt_echo is arithmetic on how much of the operator's own "
+                "wording came back in the spark; it is reported for a reader to "
+                "judge, never enforced."
+            ),
+        }
+    )
+    return payload
+
+
+@server.tool()
+def list_considerations(days: int = 14, limit: int = 20) -> dict[str, Any]:
+    """What the chat surface has put to the dreamer lately, newest first.
+
+    These are notes awaiting the dreamer, **not dreams**. None of them is on a
+    shelf, none is offered to the trading agent and none permits a symbol. A
+    consideration that has been picked up looks identical here to one that has
+    not — the dreamer's own run is what turns any of this into a seed, and it is
+    free to ignore every one.
+
+    Each row carries `prompted_by`, the operator's own words verbatim when there
+    were any, beside the agent's `spark`. Read the two together: one whose spark
+    is the operator's sentence given back is one nobody actually had.
+    `prompt_echo` is the arithmetic on that — reported, never enforced, and
+    `null` rather than zero when nobody prompted it.
+
+    An empty list is an ordinary state and says nothing on its own. Check
+    `record_is_incomplete` first: a log that could not be fully read produces
+    exactly the same empty list, and reporting that as a quiet week is the
+    failure this tool has to avoid.
+
+    Args:
+        days: How many dated log files back to read (default 14).
+        limit: Maximum rows returned (default 20).
+    """
+    rows, degraded = _considerations(days=days)
+    now = datetime.now(UTC)
+    shown = rows[: max(1, limit)]
+    return {
+        "days_read": max(1, days),
+        "found": len(rows),
+        "returned": len(shown),
+        "raised_today": len(_considerations_today(now)),
+        "daily_cap": MAX_CONSIDERATIONS_PER_DAY,
+        "considerations": shown,
+        # Say the record is incomplete rather than imply nothing happened.
+        "record_is_incomplete": degraded,
+        "note": (
+            "Notes put to the dreamer, never dreams. Nothing here is on a shelf, "
+            "offered, or permitted, and the dreamer may ignore any of it. An "
+            "empty list means nothing was put up, which is the ordinary state — "
+            "but it means nothing at all if record_is_incomplete is true."
+        ),
+    }
 
 
 @server.tool()

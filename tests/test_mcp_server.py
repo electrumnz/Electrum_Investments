@@ -14,10 +14,27 @@ from bot import mcp_server
 from bot.audit import AuditLog
 from bot.broker import MockBroker
 from bot.config import load_rules
+from bot.dreaming import DREAMER, Dream, Vault
 from bot.journal import Journal
-from bot.risk import RiskGate
+from bot.risk import NewsWindow, RiskGate
 
 from .conftest import INSIDE_SESSION, PAPER_EQUITY
+
+
+class _FixedCalendar:
+    """An earnings calendar that answers with exactly these windows.
+
+    `StaticCalendar` filters against the wall clock, and the gate's clock here
+    is pinned to a fixed session moment — so a real feed stub would answer
+    "nothing upcoming" and the blackout tests would pass for the wrong reason.
+    """
+
+    def __init__(self, windows: list[NewsWindow] | None = None) -> None:
+        self._windows = list(windows or [])
+
+    def upcoming_windows(self, *, lookahead_minutes: int) -> list[NewsWindow]:
+        del lookahead_minutes
+        return list(self._windows)
 
 
 @pytest.fixture(autouse=True)
@@ -49,6 +66,14 @@ def wired_session(monkeypatch, tmp_path):
     # The query index is derived from that audit directory, so it follows it
     # into tmp_path rather than building data/insight.db in the repo.
     session._insight_path = tmp_path / "insight.db"
+    # The dream store follows the same rule as the journal and the index: its
+    # path comes from the session, so the suite never opens `data/dreams.db`.
+    session._dreams_path = tmp_path / "dreams.db"
+    # The earnings calendar the news blackout reads. Injected rather than built,
+    # for the reason every other store here is: `build_calendar_feed` would read
+    # the environment and, on a box with a Finnhub key, reach the network — and
+    # no test may do that. Empty by default; a blackout test replaces it.
+    session._calendar = _FixedCalendar()
     session._gate = RiskGate(
         rules, equity_at_session_start=PAPER_EQUITY, now=INSIDE_SESSION
     )
@@ -450,6 +475,131 @@ def test_get_recent_decisions_counts_what_it_could_not_parse(wired_session):
     assert len(result["decisions"]) == 1
 
 
+# ------------------------------------------------------- was the loop running
+#
+# `jobs.py` was read only by `electrum-bot jobs`, so no agent could answer "was
+# the loop running at 14:15" at all. These pin the distinctions that make the
+# answer worth anything.
+
+
+def _record_pass(session, outcome: str, *, minutes_ago: float, **payload):
+    """One `cycle_job` line, with a realistic gap between start and record.
+
+    Written raw rather than through `jobs.record_*` because those stamp the
+    line NOW: a back-dated `started_at` would produce a pass whose "duration"
+    was hours, and `overdue_after` would land in the future.
+    """
+    import json
+    from datetime import UTC, datetime, timedelta
+
+    started = datetime.now(UTC) - timedelta(minutes=minutes_ago)
+    body = {
+        "outcome": outcome,
+        "started_at": started.isoformat(),
+        "interval_seconds": 900.0,
+        "detail": "",
+        "equity_usd": 100_000.0,
+        "open_positions": 0,
+        "open_risk_usd": 0.0,
+        "stand_down_stage": 0,
+        "proposals": None,
+        "approved": None,
+        "executed": None,
+    }
+    body.update(payload)
+    path = session.audit._base / f"{started.date().isoformat()}.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as f:
+        f.write(
+            json.dumps(
+                {
+                    "kind": "cycle_job",
+                    "timestamp": (started + timedelta(seconds=3)).isoformat(),
+                    "payload": body,
+                }
+            )
+            + "\n"
+        )
+
+
+def test_get_loop_activity_keeps_the_three_outcomes_apart(wired_session):
+    """A quiet pass looked and stood pat; a skipped one never looked; a failed
+    one got no decision. None is a version of another."""
+    _record_pass(wired_session, "ran", minutes_ago=40, proposals=0, approved=0,
+                 executed=0)
+    _record_pass(wired_session, "skipped", minutes_ago=25,
+                 detail="no class in session")
+    _record_pass(wired_session, "failed", minutes_ago=10, detail="read timed out")
+
+    result = mcp_server.get_loop_activity()
+
+    assert result["has_jobs"] is True
+    assert (result["ran"], result["skipped"], result["failed"]) == (1, 1, 1)
+    assert result["quiet"] == 1
+    # A skip records no counts at all — a zero would be a claim it never made.
+    assert result["latest_pass"]["proposals"] is None
+    assert result["latest_pass"]["outcome"] == "failed"
+
+
+def test_get_loop_activity_answers_about_now_rather_than_out_of_range(
+    wired_session,
+):
+    """`JobHistory.at` refuses anything past the end of the span it read, and a
+    second clock read is always a hair past it — so "what is it doing now"
+    answered `out_of_range` every single time. The moment the log was read IS
+    now, as far as the record can speak."""
+    _record_pass(wired_session, "ran", minutes_ago=1, proposals=0, approved=0,
+                 executed=0)
+
+    result = mcp_server.get_loop_activity()
+
+    assert result["coverage"] == "found"
+    assert result["job_covering_that_moment"]["outcome"] == "ran"
+
+
+def test_get_loop_activity_never_reports_an_empty_window_as_a_quiet_loop(
+    wired_session,
+):
+    """No pass on file means the loop was stopped, restarting, or its record
+    was lost. Reporting that as "it ran and found nothing" is the one thing
+    this tool exists to prevent."""
+    result = mcp_server.get_loop_activity()
+
+    assert result["has_jobs"] is False
+    assert result["passes"] == 0
+    assert any("NOT" in line for line in result["readout"])
+
+
+def test_get_loop_activity_refuses_a_moment_it_cannot_parse(wired_session):
+    """A question about 14:15 answered about this instant would be a confident
+    wrong answer."""
+    _record_pass(wired_session, "ran", minutes_ago=5, proposals=0)
+
+    result = mcp_server.get_loop_activity(at="quarter past two")
+
+    assert "not an ISO-8601 timestamp" in result["moment_error"]
+    # And the window figures are still real, rather than the whole call failing.
+    assert result["passes"] == 1
+
+
+def test_get_loop_activity_keeps_unrecorded_apart_from_out_of_range(wired_session):
+    """The read could not speak for that moment, against nothing covers it.
+    Opposite claims about one silence."""
+    from datetime import UTC, datetime, timedelta
+
+    _record_pass(wired_session, "ran", minutes_ago=180, proposals=0)
+
+    uncovered = mcp_server.get_loop_activity()
+    outside = mcp_server.get_loop_activity(
+        at=(datetime.now(UTC) - timedelta(days=3)).isoformat()
+    )
+
+    assert uncovered["coverage"] == "not_recorded"
+    assert "NOT a report that it ran and did nothing" in uncovered["at_that_moment"]
+    assert outside["coverage"] == "out_of_range"
+    assert "cannot be established" in outside["at_that_moment"]
+
+
 # ------------------------------------------------------------ query history
 
 
@@ -577,3 +727,1062 @@ def test_search_news_empty_result_does_not_claim_nothing_happened(wired_session)
     result = mcp_server.search_news(text="NOTHINGMATCHESTHIS")
     assert result["item_count"] == 0
     assert "not that nothing was published" in result["source"]
+
+
+# --------------------------------------------------------------- the dreams
+#
+# The point of these is the same as the point of the order tests above: this
+# surface must not become a way around the risk gate. Adoption grants a symbol
+# permission and nothing else — no broker call, no position, no order — and a
+# refusal has to come back as an explanation rather than as an exception or as
+# silent success.
+
+
+def _vaulted_dream(session: mcp_server._Session, **overrides: Any) -> int:
+    """A dream sitting in the vault, ready to be adopted. Returns the id."""
+    from bot.dreaming import DREAMER, Dream, Hop, Vault
+
+    # Annotated, or mypy infers the narrowest common value type from the
+    # literal and then rejects every splatted field against Dream's real
+    # signature. The dict is heterogeneous by construction.
+    fields: dict[str, Any] = {
+        "title": "Cicada broods and the marginal sesame supplier",
+        "seed": "Two of the three largest producers fall inside overlapping broods",
+        "chain": [
+            Hop(claim="Broods emerge on fixed multi-year cycles", checked=True, source="USDA"),
+            Hop(claim="Indonesia has no periodical cicadas"),
+        ],
+        "weakest_hop": "That the harvest overlap is large enough to move a price",
+        "symbols": ["SESM"],
+        "asset_class_key": "us_equity",
+    }
+    fields.update(overrides)
+    dream = Dream(**fields)
+    dream_id: int = session.dreams.save(dream)
+    assert session.dreams.move(dream_id, Vault.VAULT, by=DREAMER).ok
+    return dream_id
+
+
+def test_list_dreams_states_an_age_on_every_row(wired_session):
+    """A dream offered three months ago and one offered this morning are
+    different facts, and a readout that cannot tell them apart is the
+    confident-partial-answer failure arriving through the dream surface."""
+    _vaulted_dream(wired_session)
+
+    result = mcp_server.list_dreams(vault="vault")
+
+    assert result["store_readable"] is True
+    row = result["shelves"]["vault"]["dreams"][0]
+    assert row["age_days"] >= 0.0
+    assert row["days_on_this_shelf"] >= 0.0
+    assert row["expires_in_days"] is not None
+    assert row["verification"] == "partial"
+    assert row["unchecked_hops"] == 1
+
+
+def test_list_dreams_reports_every_shelf_including_the_empty_ones(wired_session):
+    """A missing key reads as 'no data' and a zero reads as a stated fact.
+
+    Same reason `stop_watch` puts a breach count of zero on every cycle line:
+    an empty shelf is an ordinary state, and it has to be visibly stated rather
+    than inferred from an absence.
+    """
+    result = mcp_server.list_dreams()
+
+    assert set(result["counts_by_vault"]) == {
+        "workbench",
+        "prophecy",
+        "vault",
+        "adopted",
+        "archive",
+    }
+    assert result["counts_by_vault"]["adopted"] == 0
+    assert "store_readable" in result["note"]
+
+
+def test_an_unreadable_store_is_never_an_empty_vault(wired_session, monkeypatch):
+    """The `FinnhubCalendar.is_degraded` lesson on the dream surface.
+
+    A store that will not open produces exactly the same empty lists as a store
+    with nothing in it, and only one of those says anything about the dreamer.
+    It must also never reach the agent as a traceback: an agent handed a crash
+    reports "I cannot see the dreams", which reads in a transcript as "there
+    are no dreams".
+    """
+
+    def _boom(_path):
+        raise RuntimeError("disk is on fire")
+
+    wired_session._dreams = None
+    monkeypatch.setattr(mcp_server, "DreamStore", _boom)
+
+    for result in (
+        mcp_server.list_dreams(),
+        mcp_server.get_dream(1),
+        mcp_server.dream_vault_status(),
+        mcp_server.adopt_dream(1),
+        mcp_server.return_dream(1, reason="no"),
+        mcp_server.post_dream_message(1, speaker="trader", text="hello"),
+    ):
+        assert result["store_readable"] is False
+        assert "disk is on fire" in result["error"]
+        assert "NOT an empty vault" in result["note"]
+
+
+def test_list_dreams_refuses_an_unknown_shelf_without_raising(wired_session):
+    result = mcp_server.list_dreams(vault="cupboard")
+    assert "not a shelf" in result["error"]
+    assert "vault" in result["valid_vaults"]
+
+
+def test_get_dream_returns_the_chain_the_conditions_and_the_transcript(wired_session):
+    from bot.dreaming import TRADER
+
+    dream_id = _vaulted_dream(wired_session)
+    wired_session.dreams.add_message(
+        dream_id, speaker=TRADER, kind="question", text="What would kill it?"
+    )
+
+    result = mcp_server.get_dream(dream_id)
+
+    assert result["found"] is True
+    assert [h["checked"] for h in result["chain"]] == [True, False]
+    assert result["weakest_hop"]
+    assert result["messages"][0]["speaker"] == TRADER
+    # The age travels with the turn: a message from March is not part of a
+    # conversation happening now.
+    assert result["messages"][0]["age_days"] >= 0.0
+
+
+def test_get_dream_describes_an_observation_as_something_a_person_settles(
+    wired_session,
+):
+    """It reported `is_checkable` alone, so an agent called this prose.
+
+    An observation — a subject, a claim and a review date — is pre-registered
+    and settleable, just not by code. A payload carrying only "no trigger,
+    not checkable" left the reader with no way to tell it apart from a sentence
+    nobody committed to anything about, which is the missing-versus-absent rule
+    arriving through the dream surface.
+    """
+    from datetime import UTC, datetime, timedelta
+
+    from bot.dreaming import DreamCondition
+
+    due = datetime.now(UTC) + timedelta(days=30)
+    dream_id = _vaulted_dream(
+        wired_session,
+        conditions=[
+            DreamCondition(
+                text="Indonesian sesame acreage is a double-digit share of supply",
+                subject="the USDA oilseeds circular",
+                observable="Indonesia's share of world sesame production",
+                observe_by=due,
+            )
+        ],
+    )
+
+    detail = mcp_server.get_dream(dream_id)["condition_detail"][0]
+
+    assert detail["trigger"] is None and detail["is_checkable"] is False
+    assert detail["is_observable"] is True
+    assert detail["subject"] == "the USDA oilseeds circular"
+    assert detail["observable"] == "Indonesia's share of world sesame production"
+    assert detail["observe_by"] is not None
+    # Awaiting, not unsettleable — those are opposite readings.
+    assert detail["state"] == "awaiting"
+    # And a refuted claim is its own answer rather than an unanswered one.
+    assert detail["ruled_out"] is False
+
+
+def test_get_dream_missing_is_a_stated_fact(wired_session):
+    result = mcp_server.get_dream(4242)
+    assert result["found"] is False
+    assert result["store_readable"] is True
+
+
+def test_adopt_dream_grants_the_symbols_and_places_nothing(wired_session):
+    """The whole safety argument, asserted rather than assumed.
+
+    Adoption widens what may be CONSIDERED. It must not open a position, must
+    not reach the broker, and must not leave anything resting there.
+    """
+    dream_id = _vaulted_dream(wired_session)
+
+    result = mcp_server.adopt_dream(dream_id)
+
+    assert result["ok"] is True
+    assert result["grant"]["symbols_granted"] == ["SESM"]
+    # A permission with no stated end is one nobody revisits.
+    assert result["grant"]["expires_at"]
+    assert result["grant"]["expires_in_days"] > 0
+    assert wired_session.broker.get_account().open_positions == []
+    assert wired_session.broker.get_open_orders() == []
+    assert wired_session.journal.open_trades() == []
+
+
+def test_adopt_refusal_explains_itself_rather_than_raising(wired_session):
+    """A dream that is not in the vault cannot be adopted, and the answer is an
+    explanation. `MoveResult` collects every reason at once, exactly as
+    `RiskGate` does, so an agent is not told one thing at a time."""
+    from bot.dreaming import Dream
+
+    # On the workbench, with no symbols and no class: three refusals at once.
+    dream_id = wired_session.dreams.save(Dream(title="half an idea", seed="..."))
+
+    result = mcp_server.adopt_dream(dream_id)
+
+    assert result["ok"] is False
+    assert set(result["refusals"]) == {
+        "wrong_vault",
+        "needs_symbols",
+        "needs_asset_class",
+    }
+    assert "will not change if it is asked again" in result["note"]
+
+
+def test_return_dream_refuses_a_blank_reason(wired_session):
+    """A return with no record is an argument reversed silently."""
+    dream_id = _vaulted_dream(wired_session)
+    assert mcp_server.adopt_dream(dream_id)["ok"]
+
+    result = mcp_server.return_dream(dream_id, reason="   ")
+
+    assert result["ok"] is False
+    assert "needs_reason" in result["refusals"]
+    # Still adopted, still granted.
+    assert mcp_server.dream_vault_status()["symbols_in_force"] == {"SESM": "us_equity"}
+
+
+def test_return_dream_withdraws_the_grant(wired_session):
+    dream_id = _vaulted_dream(wired_session)
+    mcp_server.adopt_dream(dream_id)
+
+    result = mcp_server.return_dream(dream_id, reason="No edge I can size.")
+
+    assert result["ok"] is True
+    assert result["moved_to"] == "vault"
+    assert mcp_server.dream_vault_status()["symbols_in_force"] == {}
+    # The reason is in the transcript, where the dreamer can read it.
+    assert "No edge I can size." in [m["text"] for m in mcp_server.get_dream(dream_id)["messages"]]
+
+
+def test_vault_status_separates_what_is_claimed_from_what_is_in_force(wired_session):
+    """A grant naming a disabled class grants nothing, and the gap between the
+    two figures is the rules doing their job rather than an error."""
+    dream_id = _vaulted_dream(wired_session, symbols=["DOGE/USD"], asset_class_key="crypto")
+    assert mcp_server.adopt_dream(dream_id)["ok"]
+
+    status = mcp_server.dream_vault_status()
+
+    assert status["symbols_claimed_by_adoptions"] == {"DOGE/USD": "crypto"}
+    # Crypto is configured while disabled in config/rules.yaml, so the class
+    # hard block drops it. "Off" means off, whatever a dream says.
+    assert status["symbols_in_force"] == {}
+    assert status["shelves"]["adopted"]["held"] == 1
+    assert status["shelves"]["adopted"]["cap"] == 3
+
+
+def test_vault_status_names_a_grant_that_is_about_to_lapse(wired_session):
+    dream_id = _vaulted_dream(wired_session)
+    # Adopted with two days left rather than ninety.
+    wired_session.dreams.adopt(dream_id, ttl_days=2)
+
+    status = mcp_server.dream_vault_status()
+
+    assert len(status["grants_expiring_soon"]) == 1
+    assert status["grants_expiring_soon"][0]["expires_in_days"] <= 2
+    assert status["expiring_within_days"] == mcp_server.GRANT_WARNING_DAYS
+
+
+def test_post_dream_message_appends_a_turn(wired_session):
+    dream_id = _vaulted_dream(wired_session)
+
+    result = mcp_server.post_dream_message(
+        dream_id, speaker="trader", text="What is the invalidation?", kind="question"
+    )
+
+    assert result["posted"] is True
+    assert result["truncated"] is False
+    assert [m["text"] for m in mcp_server.get_dream(dream_id)["messages"]] == [
+        "What is the invalidation?"
+    ]
+
+
+def test_post_dream_message_refuses_an_id_that_does_not_exist(wired_session):
+    """`dream_messages` has no foreign key, so the store would happily write a
+    turn hanging off an id nobody can read back — a conversation that never
+    happened, on a dream that does not exist."""
+    result = mcp_server.post_dream_message(999, speaker="trader", text="hello?")
+
+    assert result["posted"] is False
+    assert "No dream with id 999" in result["error"]
+    assert wired_session.dreams.messages(999) == []
+
+
+def test_post_dream_message_refuses_an_empty_turn(wired_session):
+    dream_id = _vaulted_dream(wired_session)
+    result = mcp_server.post_dream_message(dream_id, speaker="trader", text="  \n ")
+    assert result["posted"] is False
+    assert wired_session.dreams.messages(dream_id) == []
+
+
+def test_the_dream_tools_are_not_an_order_path():
+    """The structural claim, checked structurally.
+
+    Two verbs, and no more: there is no `move_dream` and no `delete_dream` on
+    this surface, because the trading agent is the one with a route to the
+    broker and therefore gets the smaller set. `DreamStore` refuses it both
+    anyway; the absence of the tool is the readable half of that guarantee.
+
+    Checked over the parsed syntax rather than the raw text, because the raw
+    text includes the docstrings — which say the words "place_order" and
+    "broker" on purpose, to tell the agent where those live. A grep-shaped test
+    would either fail on its own explanation or force the explanation out.
+    """
+    import ast
+    import inspect
+    import textwrap
+
+    names = {
+        name
+        for name, obj in vars(mcp_server).items()
+        if inspect.isfunction(obj) and "dream" in name
+    }
+    assert "move_dream" not in names
+    assert "delete_dream" not in names
+
+    forbidden = {"broker", "place_order", "close_position", "OrderProposal", "_build_proposal"}
+    for tool in (
+        "list_dreams",
+        "get_dream",
+        "dream_vault_status",
+        "adopt_dream",
+        "return_dream",
+        "post_dream_message",
+    ):
+        tree = ast.parse(textwrap.dedent(inspect.getsource(getattr(mcp_server, tool))))
+        used = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
+        used |= {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)}
+        assert not (used & forbidden), f"{tool} reaches {sorted(used & forbidden)}"
+
+
+# ------------------------------------ putting something to the dreamer from chat
+#
+# The operator asked for this in two sentences and then corrected the shape of
+# it: "Dreaming agent can raise a dream from chat if it feels inspired, two
+# brains are better than one... I'm not talking convince, or being agreeable
+# though" — and then: "Chat agents can't raise Dream, the agent can merely put
+# it to consideration, hence the chat log."
+#
+# So there are two properties to hold here and they are different jobs.
+#
+# **Containment.** A dream is the first link of a chain that ends in a live
+# trading permission. A conversational surface must not be able to insert at the
+# top of it, so `raise_consideration` writes a note to the audit log and cannot
+# reach `data/dreams.db` at all. These tests assert that structurally — by field
+# sets, by the parsed syntax of the tool, and by the dream store file never even
+# being created — rather than by trusting the docstring.
+#
+# **Sincerity, which cannot be tested.** What can be is that the insincere
+# version is easy to SPOT afterwards: the operator's own words are stored
+# verbatim beside the spark they supposedly produced, and `prompt_echo` is
+# arithmetic on the resemblance.
+
+
+def _put_args(**overrides: Any) -> dict[str, Any]:
+    args: dict[str, Any] = {
+        "speaker": "grogu",
+        "spark": (
+            "Evaporation ponds run on sunshine, so a cloudy Atacama season "
+            "defers brine tonnage by a quarter"
+        ),
+        "why_now": (
+            "The operator asked about lithium demand; the part nobody was "
+            "pricing is the evaporation side of supply, not the demand side."
+        ),
+        "prompted_by": "what do you make of lithium demand right now",
+    }
+    args.update(overrides)
+    return args
+
+
+def test_a_consideration_is_recorded_and_no_dream_exists(wired_session):
+    """The demonstration, and the whole shape of the correction.
+
+    Chat puts something up; nothing lands on a shelf. `list_dreams` is what
+    would show a dream, and it shows none — the dream store file is not even
+    created, because this path never opens it.
+    """
+    result = mcp_server.raise_consideration(**_put_args())
+
+    assert result["recorded"] is True
+    assert result["refusals"] == []
+    assert result["origin"] == "chat:grogu"
+    assert result["speaker"] == "grogu"
+    assert result["why_now"].startswith("The operator asked about lithium")
+    assert result["prompted_by"] == "what do you make of lithium demand right now"
+    assert "never enforced" in result["note"]
+    assert "not as a dream" in result["note"]
+
+    # Stronger than an empty shelf, and asserted BEFORE anything reads the
+    # dreams: this path never opened the store at all, so there is no code path
+    # here that could have written to it. (`list_dreams` below creates the file
+    # by opening it, which is why the order matters.)
+    assert not wired_session._dreams_path.exists()
+
+    assert mcp_server.list_dreams()["counts_by_vault"] == {
+        "workbench": 0,
+        "prophecy": 0,
+        "vault": 0,
+        "adopted": 0,
+        "archive": 0,
+    }
+
+
+def test_a_consideration_cannot_become_a_permission_on_its_own(wired_session):
+    """The containment claim, asserted rather than described.
+
+    A dream reaches a symbol permission through dream -> prophecy -> vault ->
+    adopted -> `grants.resolve_granted_symbols`. A consideration enters none of
+    those, so there is nothing for the later steps to catch — which is the
+    difference between "it cannot create one" and "it can, and something else
+    will stop it".
+    """
+    for i in range(mcp_server.MAX_CONSIDERATIONS_PER_DAY):
+        assert mcp_server.raise_consideration(**_put_args(spark=f"A spark {i}"))["recorded"]
+
+    status = mcp_server.dream_vault_status()
+    assert status["symbols_in_force"] == {}
+    assert status["symbols_claimed_by_adoptions"] == {}
+    assert status["live_adoptions"] == []
+    assert all(shelf["held"] == 0 for shelf in status["shelves"].values())
+    assert wired_session.dreams.recent() == []
+    assert wired_session.dreams.adoptions() == []
+
+
+def test_a_consideration_shares_no_field_with_a_grant(wired_session):
+    """The same blunt net `tests/test_dreaming.py` throws over `Dream` and
+    `OrderProposal`, one layer out.
+
+    Three fields are what make a dream capable of becoming a permission:
+    `symbols` is the only field that can become a grant, `asset_class_key` is
+    which risk limits it would run under, and `chain` is the causal argument
+    whose absence is what keeps this a note. A consideration carrying any of
+    them would be a dream wearing a different noun, so the overlap is asserted
+    empty rather than left to review.
+    """
+    grant_bearing = {"symbols", "asset_class_key", "chain", "conditions", "verdict", "vault"}
+
+    assert mcp_server.CONSIDERATION_FIELDS & grant_bearing == set()
+
+    recorded = mcp_server.raise_consideration(**_put_args())
+    stored = mcp_server.list_considerations()["considerations"][0]
+    assert set(stored) <= mcp_server.CONSIDERATION_FIELDS
+    assert set(stored) & grant_bearing == set()
+    # And nothing sneaks in through the tool's own response either.
+    assert set(recorded) & grant_bearing == set()
+
+
+def test_the_consideration_tool_cannot_reach_the_dream_store(wired_session):
+    """Checked over the parsed syntax, like `test_the_dream_tools_are_not_an_order_path`.
+
+    The docstring names `Dream` and `dreams.db` on purpose — it has to explain
+    what this is not — so a grep-shaped test would fail on its own explanation.
+    What must be absent is any USE of the store, the model, or a shelf.
+    """
+    import ast
+    import inspect
+    import textwrap
+
+    forbidden = {
+        "Dream",
+        "DreamStore",
+        "DreamStage",
+        "Hop",
+        "Vault",
+        "_store",
+        "dreams",
+        "save",
+        "adopt",
+        "promote",
+        "broker",
+        "place_order",
+        "OrderProposal",
+    }
+    for tool in ("raise_consideration", "list_considerations"):
+        tree = ast.parse(textwrap.dedent(inspect.getsource(getattr(mcp_server, tool))))
+        used = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
+        used |= {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)}
+        assert not (used & forbidden), f"{tool} reaches {sorted(used & forbidden)}"
+
+
+def test_a_consideration_is_readable_back_as_the_record(wired_session):
+    """"Hence the chat log": the note is only worth anything if somebody can
+    read it later, so the reader is part of the feature rather than a follow-up."""
+    mcp_server.raise_consideration(**_put_args(spark="First thought"))
+    mcp_server.raise_consideration(**_put_args(speaker="yoda", spark="Second thought"))
+
+    listing = mcp_server.list_considerations()
+
+    assert listing["found"] == 2
+    assert listing["record_is_incomplete"] is False
+    assert [c["spark"] for c in listing["considerations"]] == [
+        "Second thought",
+        "First thought",
+    ]
+    assert [c["origin"] for c in listing["considerations"]] == ["chat:yoda", "chat:grogu"]
+    # Every row carries when it was said and what the operator said, because a
+    # note with no time on it reads as current forever.
+    assert all(c["at"] for c in listing["considerations"])
+    assert all(c["prompted_by"] for c in listing["considerations"])
+    assert "never dreams" in listing["note"]
+
+
+def test_an_empty_list_is_not_read_as_a_quiet_week(wired_session):
+    """The `FinnhubCalendar.is_degraded` lesson again: a log that could not be
+    read produces the same empty list as one nobody wrote to."""
+    listing = mcp_server.list_considerations()
+
+    assert listing["found"] == 0
+    assert "record_is_incomplete" in listing
+    assert "means nothing at all if record_is_incomplete" in listing["note"]
+
+
+def test_raise_consideration_refuses_the_fourth_in_a_day(wired_session):
+    """An enthusiastic session must not spray the dreamer's inbox.
+
+    The count is read off the audit log by date rather than kept as a counter,
+    so it cannot drift out of step with what is actually on file.
+    """
+    for i in range(mcp_server.MAX_CONSIDERATIONS_PER_DAY):
+        result = mcp_server.raise_consideration(**_put_args(spark=f"Spark {i}"))
+        assert result["recorded"] is True, result["refusals"]
+        assert result["raised_today"] == i + 1
+
+    fourth = mcp_server.raise_consideration(**_put_args(spark="One more"))
+
+    assert fourth["recorded"] is False
+    assert fourth["refusals"] == ["daily_cap_reached"]
+    assert fourth["raised_today"] == mcp_server.MAX_CONSIDERATIONS_PER_DAY
+    assert mcp_server.list_considerations()["found"] == 3
+
+
+def test_the_daily_cap_counts_the_surface_not_each_agent(wired_session):
+    """Both chat agents share one allowance. The scarce thing is the dreamer's
+    attention, not either agent's quota — counted per speaker it would be six."""
+    for i in range(mcp_server.MAX_CONSIDERATIONS_PER_DAY):
+        assert mcp_server.raise_consideration(**_put_args(speaker="grogu", spark=f"s{i}"))[
+            "recorded"
+        ]
+
+    assert mcp_server.raise_consideration(**_put_args(speaker="yoda"))["refusals"] == [
+        "daily_cap_reached"
+    ]
+
+
+def test_raise_consideration_collects_every_refusal_at_once(wired_session):
+    """The `RiskGate` property on a new surface: an agent told one thing wrong
+    at a time asks repeatedly, and an unattended surface must not encourage
+    that."""
+    result = mcp_server.raise_consideration(speaker="the-mandalorian", spark="  ", why_now="")
+
+    assert set(result["refusals"]) == {"unknown_speaker", "needs_spark", "needs_why_now"}
+    assert "Nothing was written." in result["note"]
+    assert mcp_server.list_considerations()["found"] == 0
+
+
+def test_an_unknown_speaker_is_refused_rather_than_defaulted(wired_session):
+    """This inverts what `bot.web.app.chat` does with an unknown soul, on
+    purpose. There a wrong guess costs the wrong voice on one answer; here it is
+    the whole attribution on a note the dreamer will read later, and a
+    misattributed record is worse than a refused one."""
+    result = mcp_server.raise_consideration(**_put_args(speaker="armorer"))
+
+    assert result["recorded"] is False
+    assert result["refusals"] == ["unknown_speaker"]
+    assert mcp_server.list_considerations()["found"] == 0
+
+
+def test_the_record_tells_on_a_spark_that_is_the_operators_own_sentence(wired_session):
+    """The half the operator asked to be VISIBLE rather than prevented.
+
+    A guard on this number could be walked around by rewording, and the
+    walk-around would leave the record looking clean. Arithmetic a reader can
+    see cannot be argued with in the same way.
+    """
+    quote = "what do you make of lithium demand right now"
+    echoed = mcp_server.raise_consideration(
+        **_put_args(spark="Lithium demand is worth a look right now", prompted_by=quote)
+    )
+    added = mcp_server.raise_consideration(
+        **_put_args(
+            spark="Evaporation ponds run on sunshine and the season has been overcast",
+            prompted_by=quote,
+        )
+    )
+
+    assert echoed["prompt_echo"] >= 0.8
+    assert added["prompt_echo"] == 0.0
+    # And it survives the round trip, so an operator reading the log next week
+    # sees the same figure the agent was shown when it put the note up.
+    stored = {c["spark"]: c["prompt_echo"] for c in mcp_server.list_considerations()["considerations"]}
+    assert stored["Lithium demand is worth a look right now"] == echoed["prompt_echo"]
+
+
+def test_an_unprompted_consideration_has_no_echo_rather_than_a_perfect_one(wired_session):
+    """`None`, never `0.0`. The flattering reading must not be what an absence of
+    evidence looks like — the same rule as `has_cycles` and
+    `can_grade_anything`."""
+    result = mcp_server.raise_consideration(**_put_args(prompted_by=""))
+
+    assert result["recorded"] is True
+    assert result["prompted_by"] == ""
+    assert result["prompt_echo"] is None
+    assert mcp_server.list_considerations()["considerations"][0]["prompt_echo"] is None
+
+
+def test_the_quote_is_stored_verbatim(wired_session):
+    """A paraphrased quote takes the reader's judgement away from them, so what
+    goes on file is what was said, whitespace aside."""
+    quote = "hmm, what about LITHIUM — is that anything?"
+    mcp_server.raise_consideration(**_put_args(prompted_by=f"  {quote}  "))
+
+    assert mcp_server.list_considerations()["considerations"][0]["prompted_by"] == quote
+
+
+def test_a_refusal_is_recorded_as_well_as_a_note(wired_session):
+    """How often this surface tries and how often it is prompted is a fact about
+    the surface, and a log that only kept the successes could not answer it. The
+    refusals go under their own kind, so they never read back as considerations."""
+    mcp_server.raise_consideration(**_put_args())
+    mcp_server.raise_consideration(**_put_args(speaker="armorer"))
+
+    kinds = [e["kind"] for e in mcp_server.get_recent_decisions()["events"]]
+    assert kinds == ["chat_consideration_refused", "chat_consideration"]
+    assert mcp_server.list_considerations()["found"] == 1
+
+
+# ---------------------------------- the blackout gate applies on THIS path too
+
+
+def test_the_earnings_blackout_refuses_an_order_placed_here(wired_session):
+    """It never had, and nothing said so.
+
+    `check_order` ran the gate with no `news_windows` at all, so
+    `RiskGate._news_blackout` could not fire on an order placed by the operator
+    or through chat — while firing on every order the loop proposed. One rule in
+    `config/rules.yaml`, enforced on one path, with the Settings page saying it
+    applied to the account.
+    """
+    wired_session._calendar = _FixedCalendar(
+        [NewsWindow(timestamp=INSIDE_SESSION, affected_symbols=frozenset({"SPY"}))]
+    )
+
+    result = mcp_server.check_order(**_good_args())
+
+    assert not result["approved"]
+    assert any("news blackout" in r for r in result["reasons"])
+
+
+def test_an_order_inside_a_blackout_is_not_placed(wired_session):
+    """The refusal has to survive the whole `place_order` path, not only the
+    check that reports on it."""
+    wired_session._calendar = _FixedCalendar(
+        [NewsWindow(timestamp=INSIDE_SESSION, affected_symbols=frozenset({"SPY"}))]
+    )
+
+    result = mcp_server.place_order(**_good_args())
+
+    assert result["placed"] is False
+    assert wired_session.broker.get_account().open_positions == []
+    assert wired_session.journal.open_trades() == []
+
+
+def test_a_window_on_another_symbol_does_not_hold_this_order(wired_session):
+    """The other half, so the test is about the blackout rather than about the
+    calendar refusing everything."""
+    wired_session._calendar = _FixedCalendar(
+        [NewsWindow(timestamp=INSIDE_SESSION, affected_symbols=frozenset({"AAPL"}))]
+    )
+
+    assert mcp_server.check_order(**_good_args())["approved"]
+
+
+# ------------------------------------- adopting cannot grant an unclaimed symbol
+
+
+def test_adopt_dream_cannot_invent_the_symbols_it_grants(wired_session):
+    """The tool hands `symbols` and `asset_class` to a model, and the store took
+    both as given — so any dream in the vault was a token for granting yourself
+    anything, one tool call away.
+
+    The lock is in `DreamStore.adopt` rather than here, which is what makes it
+    hold for the conference, the CLI and whatever calls it next.
+    """
+    store = wired_session.dreams
+    dream_id = store.save(
+        Dream(title="a perfectly ordinary equity dream", seed="s")
+    )
+    store.move(dream_id, Vault.VAULT, by=DREAMER)
+
+    result = mcp_server.adopt_dream(
+        dream_id=dream_id, symbols=["BTC/USD"], asset_class="us_equity"
+    )
+
+    assert result["ok"] is False
+    assert "symbols_not_offered" in result["refusals"]
+    assert mcp_server.dream_vault_status()["symbols_in_force"] == {}
+
+
+def test_adopt_dream_still_takes_the_dreams_own_claim(wired_session):
+    """The narrowing rule must not break the ordinary case."""
+    store = wired_session.dreams
+    dream_id = store.save(
+        Dream(
+            title="rare earth refiners",
+            seed="s",
+            symbols=["MP"],
+            asset_class_key="us_equity",
+        )
+    )
+    store.move(dream_id, Vault.VAULT, by=DREAMER)
+
+    result = mcp_server.adopt_dream(dream_id=dream_id)
+
+    assert result["ok"] is True, result
+    assert result["symbols_in_force"] == {"MP": "us_equity"}
+
+
+# ------------------------------------- the agent's control of its own position
+
+
+def _seed_the_live_position(session: Any) -> None:
+    """Journal row 1 plus its resting stop leg, on the live position's numbers.
+
+    SHORT 21 SPY at 773.324285 with a stop at 820, and the pending BUY 21 that
+    IS that stop leg. See TODO.md CURRENT STATE — and item 5, which is the
+    record of what happens when a safety mechanism renders badly enough to look
+    like debris.
+    """
+    from bot.models import Direction, Position, Trade, WorkingOrder
+
+    session.journal.record_entry(
+        Trade(
+            symbol="SPY",
+            direction=Direction.SELL,
+            strategy="manual",
+            qty=21,
+            entry_time=INSIDE_SESSION,
+            entry_price=773.324285,
+            planned_stop=820.0,
+            planned_target=None,
+            rationale="Placed by hand as an operator test of the order path.",
+        )
+    )
+    session.broker.set_price("SPY", bid=774.08, ask=774.10)
+    session.broker._positions["SPY"] = Position(
+        symbol="SPY",
+        direction=Direction.SELL,
+        qty=21,
+        entry_price=773.324285,
+        opened_at=INSIDE_SESSION,
+        current_price=774.09,
+    )
+    session.broker.set_open_orders(
+        [
+            WorkingOrder(
+                order_id="952237ac-d7ec-426e-bb5f-5c6ce7294260",
+                symbol="SPY",
+                direction=Direction.BUY,
+                qty=21,
+                stop_price=820.0,
+                order_type="stop",
+                broker_status="held",
+            )
+        ]
+    )
+
+
+def test_tighten_stop_moves_the_leg_and_stores_the_reason(wired_session):
+    """The attended path the operator asked for: the agent's own position, its
+    own decision, and the reason on file afterwards."""
+    _seed_the_live_position(wired_session)
+
+    result = mcp_server.tighten_stop(
+        symbol="spy",
+        new_stop_price=800.0,
+        reason="Two sessions without a lower high; taking the room back.",
+    )
+
+    assert result["ok"] is True, result
+    assert result["reached_broker"] is True
+    assert result["risk_before_usd"] == 980.19
+    assert result["risk_after_usd"] == 560.19
+    assert result["risk_reduced_usd"] == 420.0
+
+    # The leg at the broker actually moved, under a NEW id — Alpaca replaces a
+    # leg rather than editing one.
+    legs = [o for o in wired_session.broker.get_open_orders() if o.is_stop]
+    assert [o.stop_price for o in legs] == [800.0]
+    assert legs[0].order_id == result["broker_order_id"]
+
+    # And the record reads back through the tool that exists to read it.
+    readback = mcp_server.get_position_actions(symbol="SPY")
+    assert readback["recorded_moves"] == 1
+    assert "lower high" in readback["actions"][0]["reason"]
+    assert readback["unexplained_moves"] == []
+
+
+def test_tighten_stop_refuses_a_widen_and_leaves_the_position_alone(wired_session):
+    """**The refusal this whole surface exists for.**
+
+    `RiskGate.evaluate` never sees a position move, so nothing else in the
+    system would catch this. Checked on three surfaces: the refusal, the leg
+    still at its original trigger under its original id, and the journal
+    untouched.
+    """
+    _seed_the_live_position(wired_session)
+
+    result = mcp_server.tighten_stop(
+        symbol="SPY",
+        new_stop_price=850.0,
+        reason="Give it room through the CPI print.",
+    )
+
+    assert result["ok"] is False
+    assert any("REFUSED" in r for r in result["reasons"])
+    assert "will not change the answer" in result["note"]
+
+    legs = wired_session.broker.get_open_orders()
+    assert [(o.order_id, o.stop_price) for o in legs] == [
+        ("952237ac-d7ec-426e-bb5f-5c6ce7294260", 820.0)
+    ]
+    assert wired_session.journal.position_actions() == []
+    assert wired_session.journal.open_trade_for("SPY").effective_stop == 820.0
+
+
+@pytest.mark.parametrize("blank", ["", "   "])
+def test_both_reasoned_tools_refuse_a_blank_reason(wired_session, blank):
+    """The reason is the point. A blank one would be an explained move that
+    explains nothing — and it would silence the unexplained-move report."""
+    _seed_the_live_position(wired_session)
+
+    tightened = mcp_server.tighten_stop(
+        symbol="SPY", new_stop_price=800.0, reason=blank
+    )
+    assert tightened["ok"] is False
+    assert any("reason is required" in r for r in tightened["reasons"])
+
+    closed = mcp_server.close_position_with_reason(symbol="SPY", reason=blank)
+    assert closed["ok"] is False
+
+    assert wired_session.journal.position_actions() == []
+    assert wired_session.broker.get_open_orders()[0].stop_price == 820.0
+    assert wired_session.broker.get_account().open_positions != []
+
+
+def test_close_position_with_reason_records_why(wired_session):
+    """`record_exit` stores a price, a time and a realised figure, so afterwards
+    a stop-hit and a deliberate close look identical. This is the part nothing
+    else can reconstruct."""
+    _seed_the_live_position(wired_session)
+
+    result = mcp_server.close_position_with_reason(
+        symbol="SPY", reason="Thesis is done; the gap filled this morning."
+    )
+
+    assert result["ok"] is True, result
+    assert wired_session.broker.get_account().open_positions == []
+
+    actions = wired_session.journal.position_actions()
+    assert len(actions) == 1
+    assert actions[0].action.value == "close"
+    assert "gap filled" in actions[0].reason
+
+
+def test_the_unreasoned_close_still_works_and_says_it_recorded_nothing(wired_session):
+    """Closing must never be harder than opening — a tool that made getting out
+    conditional on writing a sentence would be the stand-down mistake again. So
+    it stays, and it is honest about the gap it leaves."""
+    _seed_the_live_position(wired_session)
+
+    result = mcp_server.close_position("SPY")
+
+    assert result["closed"] is True
+    assert result["reason_recorded"] is False
+    assert "close_position_with_reason" in result["note"]
+    assert wired_session.journal.position_actions() == []
+
+
+def test_get_position_actions_reports_a_move_nobody_recorded(wired_session):
+    """A stop pulled in through Alpaca's web UI shows nowhere else at all. A
+    record that only listed the moves it captured would hide its own
+    failures."""
+    from bot.models import Direction as _Direction
+    from bot.models import WorkingOrder
+
+    _seed_the_live_position(wired_session)
+    wired_session.broker.set_open_orders(
+        [
+            WorkingOrder(
+                order_id="moved-by-hand",
+                symbol="SPY",
+                direction=_Direction.BUY,
+                qty=21,
+                stop_price=805.0,
+                order_type="stop",
+            )
+        ]
+    )
+
+    readback = mcp_server.get_position_actions()
+
+    assert readback["recorded_moves"] == 0
+    assert len(readback["unexplained_moves"]) == 1
+    assert "no recorded action" in readback["unexplained_moves"][0]
+    assert readback["broker_orders_readable"] is True
+
+
+def test_get_position_actions_names_a_trailing_leg_rather_than_flagging_it(
+    wired_session,
+):
+    """A trailing leg's level differs from the journal's on every cycle it
+    trails, and that is the exit working. Reported as its own fact so that
+    "nothing differed" and "this one is not compared" cannot look alike."""
+    from bot.models import Direction as _Direction
+    from bot.models import WorkingOrder
+
+    _seed_the_live_position(wired_session)
+    wired_session.broker.set_open_orders(
+        [
+            WorkingOrder(
+                order_id="trail-1",
+                symbol="SPY",
+                direction=_Direction.BUY,
+                qty=21,
+                stop_price=809.0,
+                trail_percent=1.5,
+                high_water_mark=797.0,
+                order_type="trailing_stop",
+            )
+        ]
+    )
+
+    readback = mcp_server.get_position_actions()
+
+    assert readback["unexplained_moves"] == []
+    assert readback["stop_is_trailing"] == ["SPY"]
+    assert readback["trail_size_unreadable"] == []
+    assert readback["positions_without_a_resting_stop"] == []
+
+
+def test_get_position_actions_says_the_loop_is_not_armed(wired_session):
+    """So an agent describing its own powers describes them correctly: it has
+    the two tools, and the unattended loop does not."""
+    readback = mcp_server.get_position_actions()
+
+    assert readback["loop_may_act_unattended"] is False
+    assert "acts on none of them" in readback["loop_execution_note"]
+
+
+def _brief(dream: Dream) -> dict[str, Any]:
+    from bot.dreaming import VaultTTLs
+
+    return mcp_server._dream_brief(dream, INSIDE_SESSION, VaultTTLs())
+
+
+def test_a_chain_with_every_hop_checked_is_not_awaiting_anything() -> None:
+    """No weak link is a good state, not a missing one.
+
+    `awaits_settlement` False here means there is nothing left unverified. A
+    reader must not see that and conclude the weakest hop went unrecorded.
+    """
+    from bot.dreaming import Hop
+
+    dream = Dream(
+        title="Every link sourced",
+        seed="s",
+        chain=[Hop(claim="a", checked=True), Hop(claim="b", checked=True)],
+    )
+
+    brief = _brief(dream)
+
+    assert brief["awaits_settlement"] is False
+    assert brief["weakest_hop_pinned"] is False
+
+
+def test_an_unresolvable_weakest_hop_is_not_reported_as_no_weak_link() -> None:
+    """The missing-versus-absent rule, at the dream layer.
+
+    A model that answers 9 on a two-hop chain has named no hop, and that is
+    deliberately not clamped upstream. Here it must read as *which link is
+    weakest was never established* — a chain still carrying an assumption —
+    rather than as a chain with nothing left to settle. Those are opposite
+    findings and the difference is the whole reason both fields are reported.
+    """
+    from bot.dreaming import Hop
+
+    dream = Dream(
+        title="Named a hop that is not there",
+        seed="s",
+        chain=[Hop(claim="a", checked=True), Hop(claim="b", checked=False)],
+        weakest_hop_index=9,
+    )
+
+    brief = _brief(dream)
+
+    assert brief["awaits_settlement"] is True
+    assert brief["weakest_hop_resolved"] is False
+    assert brief["weakest_hop_index"] == 9
+
+
+def test_a_condition_on_the_wrong_hop_does_not_read_as_pinned() -> None:
+    """What actually decides whether a kept dream can leave the workbench.
+
+    A condition settling a link nobody doubted grades perfectly well and
+    settles nothing. Without this field a reader sees a checkable condition and
+    a kept verdict and cannot tell a dream one grading from the vault from one
+    that will never promote.
+    """
+    from bot.dreaming import DreamCondition, Hop
+    from bot.models import TriggerField, TriggerOp
+
+    chain = [Hop(claim="a", checked=True), Hop(claim="b", checked=False)]
+    on_the_settled_link = Dream(
+        title="Pinned to the wrong hop",
+        seed="s",
+        chain=chain,
+        weakest_hop_index=2,
+        conditions=[
+            DreamCondition(
+                text="SPY closes above 600",
+                symbol="SPY",
+                field=TriggerField.CLOSE,
+                op=TriggerOp.ABOVE,
+                value=600.0,
+                settles_hops=(1,),
+            ),
+        ],
+    )
+
+    assert _brief(on_the_settled_link)["weakest_hop_pinned"] is False
+
+    on_the_weak_link = Dream(
+        title="Pinned to the weak hop",
+        seed="s",
+        chain=chain,
+        weakest_hop_index=2,
+        conditions=[
+            DreamCondition(
+                text="SPY closes above 600",
+                symbol="SPY",
+                field=TriggerField.CLOSE,
+                op=TriggerOp.ABOVE,
+                value=600.0,
+                settles_hops=(2,),
+            ),
+        ],
+    )
+
+    assert _brief(on_the_weak_link)["weakest_hop_pinned"] is True

@@ -140,6 +140,7 @@ class HermesBridge:
         history: list[tuple[str, str]] | None = None,
         soul: Soul | None = None,
         operator: str = "",
+        briefing: str = "",
     ) -> ChatReply:
         """One Hermes turn, optionally in character.
 
@@ -151,6 +152,16 @@ class HermesBridge:
         A missing soul is not an error. `load_soul` returns an absent one, whose
         prefix is empty, and the agent answers plainly. See `souls.py` for why
         that is the right failure direction.
+
+        `briefing` is FIGURES the agent must not derive, rendered by the caller
+        and placed between the character and the conversation. The settings
+        agent is what needs it: an agent asked to work out what doubling a
+        per-trade cap costs will produce a number, state it confidently, and be
+        believed. So `settings_agent.render_briefing` computes the limits and
+        their consequences in Python and this hands them over — the same rule as
+        `indicators.py`, arriving at the chat surface. It is a per-call argument
+        rather than something this module assembles, because the bridge holds no
+        agent logic and must not become the second place any of it lives.
         """
         if not message.strip():
             return ChatReply.failed("empty message")
@@ -161,6 +172,10 @@ class HermesBridge:
             )
 
         prompt = _with_history(message, history or [])
+        # After the character and before the conversation: the agent should read
+        # the figures as context it was handed, not as something it said.
+        if briefing.strip():
+            prompt = f"{briefing.strip()}\n\n{prompt}"
         if soul is not None and soul.found:
             prompt = f"{soul.prompt_prefix(operator)}\n{prompt}"
 

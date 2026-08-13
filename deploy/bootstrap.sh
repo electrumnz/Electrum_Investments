@@ -84,7 +84,24 @@ chmod 600 "$APP_DIR/.env"
 
 # The checkout itself stays root-owned so the service account cannot rewrite its
 # own code. Only the two paths that must be written at runtime are handed over.
-chown -R root:root "$APP_DIR/src" "$APP_DIR/config" "$APP_DIR/deploy"
+#
+# `config/` stays here EVEN THOUGH the settings agent can now change a limit.
+# It changes one by asking root to, through deploy/apply-settings.sh, which
+# validates the whole file before replacing it — the file is still only ever
+# written by root, and handing it to the service account to save a wrapper would
+# trade that for nothing. A bot that can rewrite its own limits with its own
+# hands is what this line exists to prevent.
+#
+# `souls/` is here for the same reason and was MISSING, which is worth stating
+# rather than quietly adding. Each soul's `## What to avoid` section is a
+# safety rail — never propose a trade, never state a figure you did not read,
+# never learn from the track record — and `souls.py` reads these files from
+# disk at call time, so whatever is on the box at that moment is what reaches
+# the model. Left writable by the service account, the rails are editable by
+# the thing they restrain. Nothing is known to have exploited that; it was
+# simply never on the list.
+chown -R root:root "$APP_DIR/src" "$APP_DIR/config" "$APP_DIR/deploy" \
+  "$APP_DIR/souls"
 chown -R "$APP_USER:$APP_USER" "$APP_DIR/data" "$APP_DIR/audit" "$APP_DIR/backups"
 
 echo "==> systemd units"
@@ -96,17 +113,28 @@ install -m 644 "$APP_DIR/deploy/systemd/mudhorn-tailnet.service" /etc/systemd/sy
 install -m 644 "$APP_DIR/deploy/systemd/mudhorn-tailnet.timer" /etc/systemd/system/
 install -m 644 "$APP_DIR/deploy/systemd/mudhorn-dream.service" /etc/systemd/system/
 install -m 644 "$APP_DIR/deploy/systemd/mudhorn-dream.timer" /etc/systemd/system/
-# run-mcp.sh, run-chat.sh and run-dream.sh are named in sudoers rules, so they
-# must be executable and — from the chown above — root-owned and not writable by
-# the account the rule grants FROM. A wrapper writable by that account turns its
-# sudoers rule into arbitrary code execution as the target user.
+install -m 644 "$APP_DIR/deploy/systemd/mudhorn-confer.service" /etc/systemd/system/
+install -m 644 "$APP_DIR/deploy/systemd/mudhorn-confer.timer" /etc/systemd/system/
+# run-mcp.sh, run-chat.sh, run-dream.sh and apply-settings.sh are named in
+# sudoers rules, so they must be executable and — from the chown above —
+# root-owned and not writable by the account the rule grants FROM. A wrapper
+# writable by that account turns its sudoers rule into arbitrary code execution
+# as the target user.
 #
 # run-dream.sh is made executable here whether or not the second Hermes instance
 # exists. It is inert without one: nothing invokes it unless a sudoers rule names
 # it, and the dashboard falls back to the account agent and says so on the page.
+#
+# apply-settings.sh is the same, and its inertness is load-bearing rather than
+# convenient. It is the ONE wrapper here whose sudo runs upward — `mudhorn` to
+# root — so it is installed and not granted: without a rule in
+# /etc/sudoers.d/mudhorn-forge nothing can invoke it, the settings agent reports
+# that it cannot write the file, and the change stays a recorded request a
+# person applies. `deploy/enable-forge.sh` is the deliberate act that grants it.
 chmod 755 "$APP_DIR/deploy/backup-journal.sh" "$APP_DIR/deploy/check-tailscale.sh" \
           "$APP_DIR/deploy/run-mcp.sh" "$APP_DIR/deploy/run-chat.sh" \
-          "$APP_DIR/deploy/run-dream.sh"
+          "$APP_DIR/deploy/run-dream.sh" "$APP_DIR/deploy/apply-settings.sh" \
+          "$APP_DIR/deploy/enable-forge.sh"
 systemctl daemon-reload
 systemctl enable --quiet mudhorn-bot.service mudhorn-web.service
 echo "    enabled at boot, not started"
@@ -128,6 +156,22 @@ echo "    mudhorn-backup.timer started (hourly)"
 echo "    mudhorn-dream.timer installed, NOT started"
 echo "      enable with: systemctl enable --now mudhorn-dream.timer"
 echo "      needs ANTHROPIC_API_KEY in .env. Costs roughly a few pounds a year."
+# Said here because this is the line somebody reads while wondering whether the
+# DigitalOcean key they just created covers it. It does not: this timer runs
+# `electrum-bot dream`, which is the Anthropic SDK in Python, and the
+# DigitalOcean switch moves the Hermes souls and nothing else.
+echo "      DO_INFERENCE_KEY does not change this timer -- it is an Anthropic SDK call."
+
+# The conference timer, on the same footing and for the same reasons: it spends
+# money on model calls and needs the same key. It fires an hour after the dream
+# so that a conference always has that morning's dream to talk about, and it is
+# worth nothing without the dream timer — an empty vault means every run is a
+# no-op — so enabling it alone is the odd configuration rather than the useful
+# one. An accept grants a SYMBOL PERMISSION with an expiry; it places nothing,
+# and RiskGate still runs on anything traded under one.
+echo "    mudhorn-confer.timer installed, NOT started"
+echo "      enable with: systemctl enable --now mudhorn-confer.timer"
+echo "      enable the dream timer too, or it has nothing to confer about."
 
 # Started for the same reason. Before Tailscale is installed this reports "not
 # logged in", which is correct rather than noisy: on a box whose dashboard is
@@ -158,6 +202,20 @@ Next, in order:
   4. Reach the dashboard from a phone with Tailscale. It binds to 127.0.0.1 and
      has no login, so do not put it on a public address:
          curl -fsSL https://tailscale.com/install.sh | sh && sudo tailscale up
+
+  5. Optional, and only once Hermes is installed: point the three souls at
+     DigitalOcean Gradient inference instead of Anthropic.
+     The key does NOT go in $APP_DIR/.env. \`hermes\` cannot read that file,
+     which is the user split doing its job, so the souls carry their own
+     credential in their own home — one file per Hermes instance, so the
+     dreamer can run a different model from the account agent:
+         sudo -u hermes touch /home/hermes/inference.env
+         sudo -u hermes chmod 600 /home/hermes/inference.env
+         # then DO_INFERENCE_KEY / DO_INFERENCE_MODEL, one per line
+     Prove the model slug BEFORE the first message. deploy/README.md,
+     "Pointing the souls at DigitalOcean", has the check that reads the served
+     model back. Nothing else moves: the loop and the dreamer's own model call
+     still go to Anthropic.
 
 The loop runs WITHOUT --execute. It proposes and vets orders and places none.
 Read deploy/README.md before changing that.

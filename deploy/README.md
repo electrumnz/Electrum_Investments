@@ -16,7 +16,18 @@ local machine is deleting two systemd units. Nothing below is a one-way door.
 | `mudhorn-bot` | The decision loop. Proposes, vets, reconciles the journal | nothing |
 | `mudhorn-web` | The read-only dashboard | `127.0.0.1:8787` |
 | `mudhorn-backup.timer` | Hourly snapshot of the journal | nothing |
+| `mudhorn-dream.timer` | One dream step, 07:00 New Zealand. Installed, NOT started | nothing |
+| `mudhorn-confer.timer` | One dream-vault conference, 08:00 New Zealand. Installed, NOT started | nothing |
 | Hermes gateway | Chat, if you want it. Installed separately, see below | nothing |
+
+The last two spend money on model calls every time they fire, so `bootstrap.sh`
+installs them and leaves them off — the same reasoning as `--execute` and the
+chat token. The conference runs an hour after the dream so it always has that
+morning's dream to talk about, and it grants at most a **symbol permission with
+an expiry**: it reaches no broker, and `RiskGate` still runs on anything traded
+under a grant. Both are scheduled by NAMED timezone rather than a converted UTC
+hour, because New Zealand observes daylight saving and the drift would be
+silent.
 
 CPU is idle almost all the time at a 15-minute cadence. **Buy RAM, not cores** —
 the box runs five processes once Hermes and its MCP children are up. 2 GB is
@@ -297,8 +308,11 @@ part: an HTTPS URL reachable only by your own devices. If the goal is "view it
 on my phone" rather than "show it to someone else", prefer that — it needs no
 password at all and there is no secret to leak.
 
-The identity page under `brand/` is public and that is fine, because it reads no
-journal, no broker and no credential. It is not a precedent for this.
+There used to be a public marketing site under `brand/` serving invented
+figures, and it was fine there because it read no journal, no broker and no
+credential. It has been deleted — one operator, no audience — so this dashboard
+is the only surface, and nothing about the old site was ever a precedent for
+exposing this one.
 
 ---
 
@@ -342,6 +356,92 @@ a day and Alpha Arena's lesson was that frequency is itself a risk parameter,
 so `journalctl -u mudhorn-bot -f` and the Decisions page are worth watching for
 the first few sessions rather than checked at the end of the week.
 
+## The settings agent can change settings, and that is a grant you install
+
+The Armorer on `/settings` argues about a limit, states what moving it costs in
+figures, and then **applies the change herself**. That reverses an earlier
+arrangement where she recorded a request and a person applied it later, and the
+operator's reason for the reversal was short: *"Settings agent can't edit
+settings?? That's broken. That's what the settings agent is for."*
+
+**What did not change is who owns the file.** `config/` is still root-owned and
+the web process still runs as `mudhorn`, which still cannot write
+`rules.yaml` with its own hands. What was added is the pattern already used for
+the chat panel:
+
+```sh
+sudo /opt/mudhorn/deploy/enable-forge.sh          # on
+sudo /opt/mudhorn/deploy/enable-forge.sh --status # what is set now
+sudo /opt/mudhorn/deploy/enable-forge.sh --off    # back to recording only
+```
+
+That installs exactly one line, in `/etc/sudoers.d/mudhorn-forge`:
+
+```
+mudhorn ALL=(root) NOPASSWD: /opt/mudhorn/deploy/apply-settings.sh
+```
+
+**It names the wrapper, never the Python binary.** A rule on
+`/opt/mudhorn/.venv/bin/electrum-bot` would permit every subcommand this CLI has
+today and every one a future release adds, run as root, with arguments chosen by
+whoever is signed in to a dashboard that may answer on the public internet.
+`apply-settings.sh` takes **no arguments at all**: it reads `apply <id>` or
+`revert <id>` on **stdin**, validates it against a regex before running
+anything, and invokes one fixed command against one fixed file.
+
+**This is the only sudo grant here that runs upward.** `run-chat.sh` and
+`run-dream.sh` go from `mudhorn` down to `hermes`, an account with no
+credentials. This one goes to root, so it is its own script and its own sudoers
+file — turning the chat panel on must not quietly hand the service account a way
+to edit its own risk limits.
+
+Be exact about what it grants:
+
+| It can | It cannot |
+|---|---|
+| Move a key listed in `settings_agent.limits_for` | Touch any other line, or any other file |
+| Set it to a number | Write arbitrary bytes as root |
+| …only if the whole file still loads through `Rules.load` on a staged copy | Leave a config the loop cannot start on |
+| Undo it later with `settings-revert <id>` | Escape the record — every change is a row with the reason, the objection and the diff |
+
+**The asymmetry is enforced in code, not in the character file.** A tightening
+applies on the first ask. A loosening states the arithmetic consequence and
+applies **nothing** until the operator confirms they have read it. `souls/armorer.md`
+shapes how that is said; `settings_agent.decide` is what decides it, because a
+soul is read off disk at call time and could have been edited.
+
+**Without the sudoers rule everything still works and says less.** The wrapper
+sits on disk inert, the agent argues exactly as before, the change is recorded
+as a pending request, and both the page and the agent's own briefing say the
+file has not moved. That is the fallback, reported plainly — not a silent
+failure — and it is also what a laptop deployment gets.
+
+**It also needs the unit to permit `sudo` at all**, which is the same
+prerequisite the chat panel has: `NoNewPrivileges` and `RestrictSUIDSGID` both
+block it, and `mudhorn-web.service` ships without them for that reason. Watch
+for the trap `enable-chat.sh` records — systemd sandboxing is a mount namespace
+every child inherits and `sudo` does not escape one, so a `sudo` run from a
+console shell can pass while the service is refused. `enable-forge.sh` checks
+the unit setting rather than trusting its own shell.
+
+From a root shell, with or without the grant:
+
+```sh
+sudo -u mudhorn /opt/mudhorn/.venv/bin/electrum-bot settings-apply      # list pending
+sudo /opt/mudhorn/.venv/bin/electrum-bot settings-apply 7 --dry-run     # prove it loads
+sudo /opt/mudhorn/.venv/bin/electrum-bot settings-apply 7
+sudo /opt/mudhorn/.venv/bin/electrum-bot settings-revert 7              # put it back
+```
+
+`settings-revert` restores **the exact text that was on the line**, which is why
+the request records it at apply time rather than reconstructing it later. A limit
+widened under pressure at 2am is the thing somebody wants undone at 9am, and "it
+is in git" is not a route the operator has from the dashboard.
+
+Neither command needs a broker credential, on purpose: they are meant to be run
+on a box that may be halfway through a problem, and tightening or undoing a limit
+is exactly what somebody wants at that moment.
+
 ## Do not install the Alpaca CLI here
 
 [`alpacahq/cli`](https://github.com/alpacahq/cli) submits orders from a shell,
@@ -383,6 +483,257 @@ only the last of each.
 
 If you skip Hermes, nothing here needs to stay running between sessions and the
 VPS becomes optional.
+
+## Pointing the souls at DigitalOcean
+
+Optional. DigitalOcean's **Gradient serverless inference** speaks the Anthropic
+Messages API on `https://inference.do-ai.run/v1/messages`, so the three souls
+can be pointed at it by exporting two variables — no Python change, no rebuild.
+The research and the arithmetic are in `docs/DROPLET_AI.md`.
+
+**Be exact about what moves.** This is that document's phase 1 and nothing else:
+
+| Path | Moves? | Why |
+|---|---|---|
+| Yoda, Grogu, the Armorer (Hermes) | **Yes** | None of them proposes an order, and three different jobs genuinely want different models |
+| `electrum-bot dream` / `confer` | Not yet | Both use server-enforced structured output, which DigitalOcean does not document. A later decision, on its own evidence |
+| The trading loop (`claude.propose`) | **Never** | DigitalOcean charges Anthropic's *exact list price*, so it saves nothing — and it would trade a server-enforced schema on the one call that produces order quantities and stop prices |
+
+So `DO_INFERENCE_KEY` in `/opt/mudhorn/.env` is a declaration for later. It
+changes no behaviour today and every startup line built from it says
+`NOT IN FORCE`, which is the truth rather than a warning.
+
+### 1. The account, by hand
+
+Serverless inference is **prepaid**. A zero balance takes every agent surface
+dark at once and nothing on this box can see it, so top it up and set a billing
+alert in the same sitting.
+
+Then create a **model access key** in the control panel — AI Platform →
+Serverless Inference → *Create model access key* — and scope it to the models
+you actually intend to use. Two things about that, both measured rather than
+read:
+
+- **Creating one through the API is retired.** `POST /v2/gen-ai/models/api_keys`
+  answers `{"id": "gone", "message": "resource retired: ... Go to manage page in
+  the control panel"}`. Nothing here may assume a key can be minted
+  programmatically; a person makes it in a browser.
+- **Not a personal access token.** A PAT controls droplets, DNS and billing, and
+  this box also runs an agent with a shell.
+
+### 2. Where the key goes, and why not in `.env`
+
+**Not in `/opt/mudhorn/.env`.** That file is owned by `mudhorn` at mode 600 and
+Hermes runs as `hermes`, which cannot read it. That is the user split working,
+not a problem to route around: the souls' key is a *second* credential
+belonging to the account that spends it, so the agent's environment still holds
+nothing that reaches the broker.
+
+One file per Hermes instance — which is what makes per-agent routing real,
+because Grogu can run a different model from Yoda and the Armorer:
+
+```sh
+sudo -u hermes touch /home/hermes/inference.env          # yoda + the armorer
+sudo -u hermes chmod 600 /home/hermes/inference.env
+sudo -u hermes touch /home/hermes/dreamer/inference.env  # grogu, if installed
+sudo -u hermes chmod 600 /home/hermes/dreamer/inference.env
+```
+
+Plain `KEY=value` lines, no `export`:
+
+```
+DO_INFERENCE_KEY=<the model access key>
+DO_INFERENCE_MODEL=<the serving slug — see step 3>
+DO_INFERENCE_BASE_URL=
+```
+
+`run-chat.sh` and `run-dream.sh` read their own instance's file and export
+`ANTHROPIC_BASE_URL`, `ANTHROPIC_API_KEY` and `ANTHROPIC_MODEL` for that turn.
+No key ever reaches this repository.
+
+### 3. Prove the slug before the first message
+
+**The serving slug is not the Anthropic model id, and it is not what the
+catalogue shows you.** The catalogue lists display names and UUIDs; the
+inference endpoint wants a slug, and a wrong one fails at the endpoint
+mid-conversation. So nothing here guesses it — the wrappers **refuse to run**
+with a key and no `DO_INFERENCE_MODEL`, rather than picking a plausible value.
+
+Ask the endpoint, from a laptop rather than the droplet, and read the served
+model back out of the answer:
+
+```sh
+curl -sS https://inference.do-ai.run/v1/messages \
+  -H "x-api-key: $DO_KEY" \
+  -H "anthropic-version: 2023-06-01" \
+  -H "content-type: application/json" \
+  -d '{"model":"<slug>","max_tokens":4,
+       "messages":[{"role":"user","content":"Reply with the single word OK."}]}' \
+  | python3 -c 'import json,sys; r=json.load(sys.stdin); print(r.get("model") or r)'
+```
+
+- A **wrong slug** comes back as an error object, printed whole. That is where a
+  bad slug dies: before any soul has used it.
+- A **bad key** is `401 {"id": "Unauthorized"}`. Note that a 401 short-circuits
+  *before* model lookup, so a 401 proves nothing about the slug — fix the key
+  and ask again.
+- A **good slug** prints the model that actually served the request. If that is
+  not the model you asked for, you are on a router; see below.
+
+Verified live: the endpoint is reachable, `x-api-key` plus
+`anthropic-version: 2023-06-01` are the right headers, and the account's
+catalogue carries **Claude Opus 5, Sonnet 5, Haiku 4.5 and Fable 5** alongside
+the 4.x generation. The model table in `docs/DROPLET_AI.md` predates that and is
+out of date; trust the control panel and this check, not the table.
+
+**The catalogue LISTS models the tier cannot call.** Measured 12 Aug 2026: all
+ten Anthropic rows appear in `GET /v1/models`, and asking for one returns
+**403 `"this model is not available for your subscription tier"`**. Listing is
+not entitlement, and the only way to find out is the check above. The open
+models — `llama-4-maverick`, `deepseek-v4-pro`, `llama3.3-70b-instruct`,
+`deepseek-3.2`, `nemotron-3-ultra-550b` — all answered 200.
+
+### 3b. Set the model in Hermes' own config, because the wrapper cannot
+
+**This step is easy to miss and the whole thing fails without it.** The first
+deployment did miss it, and the failure was instructive rather than obvious.
+
+`DO_INFERENCE_MODEL` in `inference.env` does **not** select the model. Neither
+does `ANTHROPIC_MODEL`, which the wrapper exports. Hermes reads `model.default`
+from its own `$HERMES_HOME/.hermes/config.yaml` — **note the `.hermes/`**, which
+is one level lower than it looks and is where the first version of the wrapper's
+own check went wrong — and out of the box that is `claude-sonnet-5`:
+
+```sh
+sudo -u hermes sed -n '4,6p' /home/hermes/.hermes/config.yaml
+# model:
+#   default: claude-sonnet-5
+#   provider: anthropic
+```
+
+Change `default` to the serving slug, and **leave `provider: anthropic`
+alone** — that is the wire protocol, and DigitalOcean's `/v1/messages` is
+Anthropic-shaped. The base URL is what redirects it.
+
+```sh
+sudo -u hermes cp /home/hermes/.hermes/config.yaml \
+                  /home/hermes/.hermes/config.yaml.bak-$(date +%s)
+sudo -u hermes sed -i '5s|^  default: .*|  default: llama-4-maverick|' \
+                  /home/hermes/.hermes/config.yaml
+```
+
+**The wrappers now refuse a mismatch** rather than printing a model they cannot
+set, so getting this wrong costs a turn and an explanation rather than a quiet
+answer from the wrong model. Before that check existed the banner read `model
+llama-4-maverick` while Hermes asked for `claude-sonnet-5`; it failed only
+because that model happened to be tier-gated, and a slug the account *could*
+serve would have answered normally from a model nobody chose.
+
+Note what this means for per-agent routing: Grogu running a different model from
+Yoda works through **`HERMES_HOME` pointing at a different config directory**,
+which is what `run-dream.sh` already does — not through the environment.
+
+### 3c. Remove every Anthropic credential from Hermes' reach
+
+`$HERMES_HOME/.env` may carry `ANTHROPIC_API_KEY` and `ANTHROPIC_TOKEN` from the
+original install, and **they take precedence over what the wrapper exports.**
+Symptom is a `401` from DigitalOcean, which is the good direction — the bad one
+is an Anthropic credential quietly serving turns the operator believes moved.
+
+```sh
+sudo -u hermes cp /home/hermes/.hermes/.env /home/hermes/.hermes/.env.bak-$(date +%s)
+sudo -u hermes sed -i 's/^ANTHROPIC_API_KEY=/#ANTHROPIC_API_KEY=/' /home/hermes/.hermes/.env
+sudo -u hermes sed -i 's/^ANTHROPIC_TOKEN=/#ANTHROPIC_TOKEN=/'     /home/hermes/.hermes/.env
+```
+
+Commented rather than deleted, so the rollback is one character.
+
+**Do NOT touch `/opt/mudhorn/.env`.** That is the trading loop's Anthropic key,
+a different user and a different process, and the loop has not moved.
+
+### 4. Do not point a soul at an inference router
+
+The wrappers refuse a `DO_INFERENCE_MODEL` containing `router`, and the reason
+is this repository's oldest rule wearing new clothes. A router **falls back to
+another model on rate limit**, and `hermes -z` returns the response text and
+nothing else — so which model answered a turn is *not observable from this
+box at all*. A downgrade nobody can see is worse than a failed call, because a
+failure is loud and a downgrade reads exactly like a normal answer.
+
+Pinning a foundation-model slug removes the mechanism rather than watching for
+it, which is the only honest option when the observation is impossible. Say
+what that does and does not buy: a router's fallback is *documented* absent for
+a pinned slug, not *measured* absent.
+
+The same reasoning is why the trading loop is never moving. There, the served
+model would have to be read off the response and recorded in the audit event,
+and a mismatch treated as a failed cycle — and none of that is worth building
+for a provider that charges the same price.
+
+### 5. Confirm it moved, then watch it
+
+**Ask the agent. Do not read a config file.** Same rule as the dropped-toolset
+finding in `CLAUDE.md`: the display path and the effective path are different
+code. Open the Chat page and ask it something; then check the wrapper's own line
+by running one turn by hand, which prints the endpoint it requested on stderr:
+
+```sh
+sudo -u hermes /opt/mudhorn/deploy/run-chat.sh <<< 'Reply with the single word OK.'
+```
+
+Three things that line is careful about, and they are worth understanding
+rather than skipping:
+
+- It claims the endpoint and the configured model were **checked**, and stops
+  exactly there — *which model answered* is not visible from this box, because
+  `hermes -z` returns the response text and nothing else. A wrapper claiming a
+  swap it cannot confirm would be the confident partial answer this project
+  exists to prevent.
+- If Hermes *ignores* the base URL, the DigitalOcean key reaches Anthropic and
+  is refused with a 401 — loud. That is deliberate: the wrapper replaces the
+  Anthropic credential rather than leaving one beside a DigitalOcean endpoint,
+  because the leftover key is what would let a turn quietly answer from the old
+  provider while you believed it had moved.
+- If Hermes turns out not to honour these at all, the model is set through
+  `hermes model` and `~/.hermes/config.yaml`'s `agent:` block — and that block
+  is changed with `deploy/merge-hermes-config.py`, **never** by appending, for
+  the duplicate-key reason at the top of `deploy/hermes-config.yaml`.
+
+Move one wrapper at a time — chat first, the dreamer a day later — so a problem
+is attributable to one of them.
+
+**Then break it on purpose, because a safety check nobody has watched fire is a
+hope.** Point `inference.env` at a model the config does not name and run one
+turn; it must refuse with exit 78 and print both values.
+
+```sh
+sudo -u hermes sed -i 's/deepseek-v4-pro/llama-4-maverick/' ~hermes/inference.env
+echo hi | sudo -u hermes /opt/mudhorn/deploy/run-chat.sh   # expect: refuses, 78
+sudo -u hermes sed -i 's/llama-4-maverick/deepseek-v4-pro/' ~hermes/inference.env
+```
+
+That is not a hypothetical. **The first version of the check failed this exact
+test**, on 13 Aug 2026: it looked in `$HERMES_HOME/config.yaml` rather than
+`$HERMES_HOME/.hermes/config.yaml`, found nothing, and `[[ -r ]]` made it skip
+in silence — while the banner two lines below went on saying the model had been
+checked. The turn ran and answered normally. A config that cannot be read now
+refuses, and `tests/test_config.py` pins it by writing no config at all. Run
+this after any `bootstrap.sh` that replaces the wrappers.
+
+### Rollback
+
+Blank `DO_INFERENCE_KEY` (or delete the file). The next message picks it up:
+`run-chat.sh` execs a fresh Hermes per turn, so **there is no daemon to
+restart** and telling anyone to restart one sends them chasing a unit that does
+not exist. The wrappers also unset `ANTHROPIC_BASE_URL` on that path, so a
+leftover endpoint cannot outlive the key.
+
+A half-configured switch never falls back quietly. A key with no model, a model
+naming a router, or a base URL that is not `https://` each **refuse the turn**
+with exit 78 and a sentence saying what to fix — which surfaces on the Chat page
+as the error, because `HermesBridge` returns the wrapper's stderr on a non-zero
+exit. Losing one chat message is the right price for never being told a swap
+happened when it did not.
 
 ## Backups
 
@@ -453,6 +804,23 @@ sudo git pull
 sudo /opt/mudhorn/deploy/bootstrap.sh          # picks up dependency changes
 sudo systemctl restart mudhorn-bot mudhorn-web
 ```
+
+**`bootstrap.sh` replaces the wrappers, so re-run the deliberate-break test
+afterwards** — section 5 above, "Confirm it moved". A pull that lands a fix to
+`run-chat.sh` is exactly the moment its check is worth watching fire once.
+
+Two things a pull does **not** carry, both by design:
+
+- **`model.default` lives in `~hermes/.hermes/config.yaml`, not in this repo.**
+  It survives a re-merge, because nothing here sets a `model:` block, but it
+  would not survive a fresh provision — that lands back on `claude-sonnet-5`,
+  and the wrappers would then refuse every turn on the mismatch. Loud, and the
+  right direction, but know what you are looking at.
+- **`exchange_calendars` is an optional extra** and `bootstrap.sh` installs
+  `-e .`, so the droplet keeps the weekday-shaped badges for Tokyo, Sydney and
+  Auckland until that becomes `-e ".[calendars]"`. `ClockFace.tracks_holidays`
+  reports False and the badge tooltip says so, which is the whole reason the
+  dependency is optional — nothing claims to know a holiday it cannot see.
 
 ## Moving off the VPS
 

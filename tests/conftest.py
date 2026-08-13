@@ -27,6 +27,25 @@ PAPER_EQUITY = 100_000.0
 INSIDE_SESSION = datetime(2026, 5, 4, 15, 0, tzinfo=UTC)
 
 
+def runtime_fingerprint(directories: list[Path]) -> dict[str, tuple[int, int]]:
+    """Size and mtime of everything directly inside `directories`.
+
+    Module level rather than a closure so the guard below can be tested — a
+    guard nobody has watched fail is the thing this repository keeps finding.
+    """
+    out: dict[str, tuple[int, int]] = {}
+    for directory in directories:
+        if not directory.exists():
+            continue
+        for path in directory.iterdir():
+            try:
+                stat = path.stat()
+            except OSError:  # pragma: no cover - vanished mid-scan
+                continue
+            out[f"{directory.name}/{path.name}"] = (stat.st_size, stat.st_mtime_ns)
+    return out
+
+
 @pytest.fixture(scope="session", autouse=True)
 def _runtime_dirs_stay_clean() -> Iterator[None]:
     """No test may leave a file in `data/` or `audit/`.
@@ -46,18 +65,36 @@ def _runtime_dirs_stay_clean() -> Iterator[None]:
     test, and because the interesting question is "did anything appear", not
     "which test did it" — the answer to the second is almost always the test
     that constructed something without a path.
+
+    **It compares CONTENTS, not a file listing, and that is the whole fix.**
+    Diffing names caught the first offence and went blind to every one after
+    it: once `data/dreams.db` existed, a test writing rows into it appeared in
+    `before` and in `after` and was reported as nothing at all — so the guard
+    was strongest on a clean machine and useless on a developer's, which is the
+    inverse of what a guard should be. A size-and-mtime fingerprint catches a
+    file that grew as well as one that arrived, and it is cheap: `stat` on a
+    handful of paths, once at each end of the run.
+
+    Size and mtime rather than a hash of the bytes because SQLite can rewrite a
+    page in place without changing the length, and reading a multi-megabyte
+    journal twice per run to notice would cost more than it is worth. mtime has
+    a coarse resolution on some filesystems, so this is not a proof — it is a
+    tripwire, and one that fires on every way a store has actually been left
+    pointed at `data/`.
     """
     watched = [REPO_ROOT / "data", REPO_ROOT / "audit"]
 
-    def snapshot() -> set[Path]:
-        return {p for d in watched if d.exists() for p in d.iterdir()}
-
-    before = snapshot()
+    before = runtime_fingerprint(watched)
     yield
-    new = sorted(str(p.relative_to(REPO_ROOT)) for p in snapshot() - before)
-    assert not new, (
-        f"tests wrote to a runtime directory: {new}. Pass a tmp_path to the "
-        "store instead of letting it use its production default."
+    after = runtime_fingerprint(watched)
+    created = sorted(set(after) - set(before))
+    changed = sorted(
+        name for name, mark in after.items() if name in before and before[name] != mark
+    )
+    assert not created and not changed, (
+        f"tests wrote to a runtime directory: created={created} "
+        f"modified={changed}. Pass a tmp_path to the store instead of letting "
+        "it use its production default."
     )
 
 

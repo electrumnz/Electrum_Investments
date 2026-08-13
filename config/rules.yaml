@@ -186,15 +186,85 @@ instruments:
     # the operator's job and is the genuinely hard part.
     strategy: mean_reversion
 
-    # Liquid, heavily covered US large caps and index ETFs. ETFs are the same
-    # asset class as equities at Alpaca, so they need no separate entry.
+    # ---------------------------------------------------------------------
+    # WHAT THE BOT MAY OPEN A POSITION IN. This is a PERMISSION, not a view.
+    #
+    # Widened from six names to twenty on the operator's decision: *"16 symbols
+    # was just for the ticker tape, 16 favourite symbols, we can open the
+    # approved instruments up way more than that."* It is a deliberate edit to
+    # a permission and belongs in a commit of its own, never as a side effect of
+    # a display change — and it is deliberately NOT the tape's list. See the
+    # rule below and the `watchlist:` block at the foot of this file.
+    #
+    # WHAT IT COSTS, because the cost is linear and somebody has to say the
+    # number. The loop runs ONE network call per symbol per feed per cycle:
+    # `fetch_market_ticks` on every cycle, `fetch_indicators` and
+    # `fetch_intraday` on the cycles that ask the model. Measured, on the
+    # 15-minute interval and this class's 16-hour weekday window:
+    #
+    #   quotes    20 x 96 = 1,920 calls a day, every day
+    #   bars      2 x 20 x 64 = 2,560 calls a weekday, none at the weekend
+    #   prompt    ~222 input tokens per symbol per call, measured by rendering
+    #             `build_market_context` over 1..24 synthetic symbols
+    #
+    # So the fourteen extra names cost roughly 3,100 extra input tokens on each
+    # of ~64 model calls a weekday. Marketaux and Finnhub do NOT scale with
+    # this — both send the symbol list as one query parameter — but the ten
+    # headlines Marketaux returns now cover twenty names instead of six, so
+    # per-symbol news coverage genuinely thins. That is a real cost, not a
+    # rounding error, and it is the reason this list is not fifty.
+    #
+    # THE RULE A NAME HAS TO MEET, which is the durable half of this block:
+    #
+    #   1. It is a bare US ticker, so `models.class_key_for_symbol` files it
+    #      under `us_equity` — the same rule `AlpacaBroker.place_order` routes
+    #      on. A symbol listed under a class it cannot belong to is the audited
+    #      bypass in `grants.py` arriving through the config file instead, so
+    #      `tests/test_config.py` fails the build if any entry here disagrees
+    #      with its own block. A test rather than a load-time refusal: refusing
+    #      to start denies at the least useful moment.
+    #   2. Deep, continuous liquidity. Alpaca's free feed is an IEX sample
+    #      rather than consolidated tape, so a thin name gives a thin sample and
+    #      the spread becomes the trade.
+    #   3. At least 200 sessions of history, or `sma_200` renders `unavailable`
+    #      and half the indicator block is missing on every cycle.
+    #   4. NO STRUCTURAL DECAY. This class trades `mean_reversion`, and a
+    #      volatility ETF rolling down the futures curve or a commodity fund
+    #      bleeding in contango is not cheap because it overshot — it is cheap
+    #      because that is what it does. VIXY and USO are on the tape for
+    #      exactly that reason and are deliberately absent here.
+    #   5. The LIQUID CORE only. Thematic, single-supplier and second-order
+    #      names are the dream vault's route: an adopted dream grants one symbol,
+    #      with a chain that argued for it and a clock that withdraws it. Adding
+    #      such a name here would be adoption with no argument and no expiry,
+    #      which is the interaction item 9 in TODO.md asks to be decided rather
+    #      than stumbled into. Decided: the static list is the liquid core, and
+    #      adoption stays the only way to reach outside it.
+    #
+    # Broad index and sector ETFs. ETFs are the same asset class as equities at
+    # Alpaca, so they need no separate entry.
     allowed_symbols:
-      - SPY
-      - QQQ
+      - SPY        # S&P 500
+      - QQQ        # Nasdaq 100
+      - IWM        # small caps: leads the others at turns
+      - DIA        # Dow 30
+      - GLD        # gold, physically backed — no roll, unlike USO
+      - TLT        # 20-year Treasuries: the other side of a risk-off day
+      - EEM        # emerging markets
+      - XLE        # energy sector
+      # Mega-cap US equities, heavily covered and continuously quoted.
       - AAPL
       - MSFT
+      - NVDA
+      - AMZN
+      - GOOGL
+      - META
+      - JPM
+      - XOM
+      - UNH
       - JNJ
       - KO
+      - PG
 
     # US regular session is 09:30-16:00 ET = 13:30-20:00 UTC (14:30-21:00 EDT).
     # Deliberately skips the first 30 minutes of the open, the noisiest period.
@@ -237,6 +307,59 @@ instruments:
     # daylight saving with no diary entry, and it can only ever narrow what the
     # window above permits.
     refuse_premarket: false
+
+    # ---------------------------------------------------------------------
+    # OFF. This is the switch that trades away one of the operator's four
+    # rules, and it is the most deliberate one in this file.
+    #
+    # WHAT IT BUYS: an entry submitted during the pre-market (04:00-09:30 New
+    # York) or after hours (16:00-20:00) that actually FILLS THERE, rather
+    # than resting until the next regular open. That is the fork nobody was
+    # offered when 21 SPY went in at 09:23:47 New York, came back
+    # filled_qty=0.0, sat through the pre-market and filled after 09:30 --
+    # correct behaviour, correct explanation, and the answer to the other
+    # question. "Place the trade now" and "get a position on now" are
+    # different instructions and the code can satisfy exactly one.
+    #
+    # WHAT IS SURRENDERED, stated as a consequence rather than a mechanism:
+    #
+    #   The position stands at the broker with NOTHING RESTING BEHIND IT.
+    #   Rule 3 -- hard stops on every trade -- stays true at sizing time and
+    #   stops being true at the broker. The stop becomes a journal figure and
+    #   stop_watch REPORTS a breach on the loop's fifteen-minute pulse; it
+    #   never closes, because closing out of hours is a new execution path
+    #   and one that fires unattended at 3am is its own decision.
+    #
+    # WHY THERE IS NO THIRD OPTION: place_order attaches the stop, which makes
+    # every entry a bracket or an OTO, and Alpaca accepts extended_hours on
+    # neither. An entry that carries a stop cannot fill out of hours; an entry
+    # that can fill out of hours carries no stop.
+    #
+    # WHAT IS SURRENDERED IS NARROWER THAN IT LOOKS, and the honest version
+    # matters here more than the alarming one. A resting stop could not have
+    # fired out of hours ANYWAY: a stop is a trigger that becomes a MARKET
+    # order, and extended-hours venues take limit orders only. So what is
+    # actually given up is the leg being THERE when the regular session
+    # reopens, and the window between the fill and that reopening in which
+    # nothing is resting at the broker. On a short horizon that is less than
+    # it sounds; held overnight it is exactly rule 3 missing.
+    #
+    # THIS IS NOT NEW GROUND. Crypto already lives here -- Alpaca accepts no
+    # bracket on it either -- so this is a new trigger for an arrangement that
+    # already exists, not a new concept. Same watcher, same reporting.
+    #
+    # TURNING IT ON TAKES TWO THINGS, on purpose. This flag, and the broker
+    # being constructed with the rules (`AlpacaBroker(env, rules)`); without
+    # the second, no class can be consulted and the path is unreachable
+    # whatever this says. Even then it engages only in the pre-market and
+    # after hours, never overnight or at the weekend, where it would give up
+    # the stop and buy no fill at all.
+    #
+    # HOW TO TELL AFTERWARDS: the OrderResult comes back
+    # stop_at_broker=ABSENT, a warning line reads
+    # `extended_hours_fill_no_broker_stop`, and Rules.extended_hours_fill_classes
+    # names every class in this state.
+    allow_extended_hours_fills: false
 
     # Monday to Friday. Monday is 0, Sunday is 6.
     #
@@ -301,9 +424,49 @@ instruments:
     max_position_pct: 15.0
     max_concurrent_positions: 1
 
+    # The operator's rule, and it is TWO limits rather than one restated:
+    # crypto shall not consume more than 0.5% of equity in risk on a trade
+    # (above), and shall not HOLD more than 0.5% of risk across every open
+    # position in the class (here). The second is what stops the first being
+    # applied four times over.
+    #
+    # Two clauses are easy to lose and are the whole point:
+    #
+    #   UNREALISED PROFIT DOES NOT OFFSET THIS. A position that is up is still
+    #   risking |entry - stop| x qty if the stop fills, so a winner buys no room
+    #   for a second position. The gate measures planned risk out of the journal
+    #   and never nets a paper gain against it — a mark can reverse before
+    #   anything is acted on, and the stop distance cannot.
+    #
+    #   A POSITION MUST BE CLOSED TO OPEN ANOTHER outside the profile. At the
+    #   cap the gate refuses, and closing what is already on is the only way
+    #   through. It will not size the new trade down to fit, and it will not
+    #   count a profitable position for less. The rejection message says this
+    #   out loud rather than quoting a number and leaving somebody hunting for
+    #   a limit to widen.
+    #
+    # With the per-trade cap also at 0.5% this makes crypto ONE full-size
+    # position at a time. That is intended rather than an accident of the two
+    # figures matching: it is max_concurrent_positions: 1 arrived at from the
+    # other direction, so the two agree instead of one silently overriding the
+    # other. Two half-size crypto positions are allowed by this arithmetic and
+    # refused by the position count; one full-size position is allowed by both.
+    # Loosening either one alone therefore changes nothing.
+    #
+    # Nothing global is overridden: max_total_risk_pct (2%) stays portfolio-wide
+    # and binds first whenever the equity book is already loaded up.
+    max_class_total_risk_pct: 0.5
+
     # Deliberately absent: refuse_premarket. A 24/7 market has no pre-market,
     # and the phases that rule reads are the US equity ones — switched on here
     # it would refuse every hour of every day.
+    #
+    # Deliberately absent for the mirror-image reason: allow_extended_hours_fills.
+    # A continuous market has no extended hours to fill in, and crypto is
+    # already unbracketed at Alpaca, so there is nothing here to surrender and
+    # nothing to buy. `broker.plan_extended_hours_fill` refuses a crypto symbol
+    # outright, so setting it here would change nothing — and it says so on the
+    # log line rather than ignoring it silently.
 
     # 24/7. This is the setting that was wrong under the old global sessions
     # block, and the reason instruments are configured separately at all.
@@ -437,3 +600,135 @@ watchlist:
   # not a figure anyone trades off, so a minute-old price is fine and a
   # rate-limit stall on the account read would not be.
   refresh_seconds: 60.0
+
+# ---------------------------------------------------------------------------
+# The dreamer's shelves, and the one setting in this file that can widen what
+# may be traded without an edit to `instruments:` above.
+#
+# `allow_symbol_grants` is `false` in the MODEL and `true` here, and the
+# asymmetry is deliberate rather than untidy. A config that never mentions this
+# feature grants nothing — every deployment predating it, and every test that
+# builds Rules without this block, fails closed. This file says `true` because
+# the operator asked for the behaviour, and a decision somebody made belongs in
+# a file that can be read and reverted in one line rather than in a default
+# nobody sees.
+#
+# WHAT ADOPTION BUYS, stated plainly because it is a widening:
+#
+#   An adopted dream's symbols join `allowed_symbols` for as long as that
+#   adoption is live. That is the whole grant. The symbol then faces every
+#   other gate under the limits of the class it was granted under — session,
+#   pre-market, per-trade risk, concentration, concurrency, the class total,
+#   the capital cap, buying power, the cooldown. Nothing is skipped and no
+#   number moves. A permission is not an order.
+#
+# WHAT IT CANNOT BUY, which is the part worth being strict about:
+#
+#   It cannot enable an instrument class. The hard block is derived from the
+#   `enabled:` flags above, so while `crypto.enabled` is false a dream naming
+#   BTC/USD grants NOTHING, whatever the dream says. That is what makes "crypto
+#   is off" mean off rather than "off unless a dream says otherwise".
+#
+#   It cannot raise a limit. A granted symbol is sized by the same arithmetic
+#   as a listed one, and a grant that would breach a cap is refused like any
+#   other trade.
+#
+#   It cannot outlive the adoption. Expiry or a return to the vault revokes the
+#   symbol immediately, and a trade proposed in it afterwards is refused like
+#   any other unlisted symbol. An OPEN position is never force-closed by that —
+#   closing sits outside the gated path on purpose — so the permission to open
+#   ends while the position stands.
+#
+# The grant is resolved OUTSIDE the risk gate, in src/bot/grants.py, and passed
+# in as a mapping. `RiskGate` reads no database and makes no network call, so it
+# stays deterministic and cannot fail open; a resolution that fails for any
+# reason yields NOTHING GRANTED and the account carries on trading exactly what
+# this file already allows.
+dreaming:
+
+  # Turn the whole permission half off with one word. The dreamer keeps
+  # dreaming; nothing it produces can widen `allowed_symbols`.
+  allow_symbol_grants: true
+
+  # Ceiling on how many symbols may be granted at once. Over it, NOTHING is
+  # granted and the resolver logs loudly rather than picking a subset — an
+  # arbitrary subset is a permission set nobody can predict, which is worse
+  # than no permission at all.
+  #
+  # Twice `caps.adopted`, so three live adoptions naming two symbols each fit
+  # and a runaway does not. A blast-radius bound, not a target: what actually
+  # limits the cost of a grant is the class's own risk limits.
+  max_granted_symbols: 6
+
+  # How many dreams each shelf holds. Working constraints, not risk rules —
+  # nothing in the dream store can lose money — and they exist because a vault
+  # with two hundred entries is a vault nobody reads.
+  #
+  # `adopted: 3` matches `account.max_concurrent_positions` ON PURPOSE. An
+  # adopted dream is a promise the trading agent may act on it, and a promise
+  # the account has no slot to keep reads as permission granted while the
+  # position it implies can never be opened. Change one, look at the other.
+  #
+  # `archive` is deliberately absent: the archive is uncapped, because the only
+  # alternative to archiving a dream when the archive is full is deleting it.
+  caps:
+    workbench: 24
+    prophecy: 12
+    vault: 12
+    adopted: 3
+
+  # How long a dream may sit on a shelf before it is reported as expired, in
+  # days, measured from when it ENTERED that shelf and never from when it was
+  # created — a dream pulled back for another pass gets a fresh clock, because
+  # the alternative punishes reworking a chain.
+  #
+  # The operator was explicitly unsure between ninety days and a year, which is
+  # why these are here to be argued with rather than constants in the code.
+  # `prophecy` gets the long one because a prophecy is a long-horizon claim by
+  # nature: a supply chain does not reprice in a quarter. `archive` is absent
+  # because the archive IS the retirement state, so a TTL on it would be an
+  # expiry on an expiry.
+  #
+  # Expiry MARKS; it never deletes. For an adopted dream it does one thing
+  # more, and that thing has teeth: it withdraws the symbol permission.
+  ttl_days:
+    workbench: 90
+    prophecy: 365
+    vault: 90
+    adopted: 90
+
+# Whether the LOOP may act on the position plans it writes, unattended.
+#
+# The operator asked for the trading agent to have control of its own open
+# position — to be able to close it, or pull its stop in, and to have the reason
+# recorded rather than reconstructed later. **That is satisfied with this set to
+# false.** The agent acts through the MCP tools `tighten_stop` and
+# `close_position_with_reason`, in a conversation, with a person present.
+#
+# This switch is about something else, and it is worth being blunt about which:
+# the fifteen-minute decision loop closing a position or moving a stop AT 3AM
+# WITH NOBODY WATCHING. That is a new unattended live execution path. Building
+# the record is not the same decision as arming the trigger, and the trigger is
+# the operator's to throw deliberately — in its own commit, with a reason.
+#
+# What it cannot do, whichever way it is set:
+#
+#   It cannot widen a stop. `position_actions.classify_stop_move` refuses any
+#   move away from entry, on a long or a short, before this flag is consulted.
+#   Widening a stop on an open position increases the loss at unchanged size,
+#   and `RiskGate` never sees a position move — closing and stop moves sit
+#   outside the gated path on purpose, so that a stand-down cannot strand an
+#   open trade. That exemption is only safe for moves that reduce exposure, so
+#   the one move that does not is refused in code rather than discouraged in a
+#   prompt.
+#
+#   It cannot act without a reason. Every move is stored with an actor, a
+#   timestamp, the before and after values and a required non-empty reason; a
+#   blank one is refused at three layers. A stop or a quantity that changed at
+#   the broker with no reason on file is reported as an `unexplained-move`,
+#   which is what stops the record hiding its own failures.
+#
+#   It cannot open anything. Opening exposure is `place_order` and nothing else,
+#   and that still goes through `RiskGate.evaluate` on every path.
+position_actions:
+  enabled: false

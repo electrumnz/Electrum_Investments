@@ -1,4 +1,28 @@
-"""Is any open position trading through the stop it was sized against?
+"""Is any open position trading through the stop that is PROTECTING it?
+
+## Which of the two stop figures this module reads, and why it is that one
+
+A `Trade` carries two stop levels on purpose and they answer different
+questions:
+
+- **`planned_stop`** is the SIZING figure. The quantity was computed from
+  `|entry - planned_stop|`, so it is what one R means and what `r_multiple` and
+  `metrics.py` grade the result against. It never moves, because redefining it
+  after the fact would make a trade that lost half what it risked read as a full
+  stop-out.
+- **`effective_stop`** is the level actually in force — the tightened one where
+  `position_actions.tighten_stop` has moved it, the planned one everywhere else.
+  It is what would fill, so it is what the risk caps count and what the model is
+  shown.
+
+**This module wants the protective one**, and the distinction is not academic.
+Short 21 SPY from 773.32 with the stop pulled in from 820 to 800, price at 810:
+against `planned_stop` there is no breach, against `effective_stop` the position
+is 10.00 a share through the level that is meant to be holding it. The question
+here is "is anything about to be — or already — losing more than the stop in
+force allows", not "what was this sized against", so `effective_stop` is the
+only figure that answers it. Reverting this to `planned_stop` silently
+under-reports every position whose stop has ever been tightened.
 
 ## Why this exists when the bracket already rests at the broker
 
@@ -47,11 +71,12 @@ __all__ = ["Breach", "check"]
 
 @dataclass(frozen=True)
 class Breach:
-    """One open trade whose stop level has been passed.
+    """One open trade that is trading through the stop in force on it.
 
     `distance_usd` is how far beyond the stop price has gone, per unit, so a
     reader can tell a one-cent brush from a genuine gap without doing the
-    arithmetic themselves.
+    arithmetic themselves. It is measured against `trade.effective_stop` — see
+    the module docstring for why that rather than `planned_stop`.
     """
 
     trade: Trade
@@ -59,11 +84,25 @@ class Breach:
     distance_usd: float
 
     @property
+    def stop(self) -> float:
+        """The level this breach was measured against. The one in force.
+
+        Named on the breach rather than left for a caller to re-derive, because
+        a caller reaching for `planned_stop` to print beside `distance_usd`
+        would produce two figures that do not add up on a position whose stop
+        has been moved.
+        """
+        return self.trade.effective_stop
+
+    @property
     def loss_if_closed_now_usd(self) -> float:
         """What closing at this price costs against entry.
 
-        Beyond the planned risk by exactly `distance_usd * qty`, which is the
-        figure the stop existed to prevent.
+        Beyond the risk currently in force by exactly `distance_usd * qty`,
+        which is the figure the stop existed to prevent. Compare it against
+        `Trade.current_risk_usd` rather than `planned_risk_usd`: the second is
+        what the position was built to lose and says nothing about what the
+        stop protecting it now allows.
         """
         if self.trade.direction == Direction.BUY:
             return (self.trade.entry_price - self.price) * self.trade.qty
@@ -71,18 +110,33 @@ class Breach:
 
     def describe(self) -> str:
         side = "below" if self.trade.direction == Direction.BUY else "above"
+        # "in force" rather than "planned", and the two are named apart when
+        # they differ. A breach reported against 800 on a trade whose journal
+        # row says 820 reads as an error unless the sentence says the stop was
+        # moved.
+        moved = (
+            f" (moved in from the planned {self.trade.planned_stop:,.2f})"
+            if self.trade.stop_has_moved
+            else ""
+        )
         return (
             f"{self.trade.symbol} {self.trade.direction.value} is through its stop: "
-            f"{self.price:,.2f} is {self.distance_usd:,.2f} {side} the planned "
-            f"{self.trade.planned_stop:,.2f}. Closing here costs "
+            f"{self.price:,.2f} is {self.distance_usd:,.2f} {side} the stop in "
+            f"force at {self.stop:,.2f}{moved}. Closing here costs "
             f"{self.loss_if_closed_now_usd:,.2f} against entry."
         )
 
 
 def check(open_trades: list[Trade], ticks: dict[str, Tick]) -> list[Breach]:
-    """Which open trades are trading through their stop, given these quotes.
+    """Which open trades are through the stop in force on them, at these quotes.
 
     Pure, so the loop can call it and a test can drive it without a broker.
+
+    **Measured against `Trade.effective_stop`, never `planned_stop`.** The
+    module docstring has the worked example; the short version is that a stop
+    tightened from 820 to 800 is protecting at 800, and checking the level it
+    was moved away from would report a position 10 a share through its
+    protection as fine.
 
     **A symbol with no quote is skipped rather than assumed safe**, and that is
     the distinction worth keeping: `fetch_market_ticks` drops a symbol whose
@@ -97,14 +151,18 @@ def check(open_trades: list[Trade], ticks: dict[str, Tick]) -> list[Breach]:
         if tick is None:
             continue
         price = tick.mid
+        # The stop PROTECTING the position, which is the tightened level where
+        # one has been recorded. `planned_stop` is the sizing figure and is a
+        # different question; see the module docstring.
+        stop = trade.effective_stop
         # Long stops sit below entry, short stops above. Compared against the
         # MID rather than the bid or the ask: a wide out-of-hours spread would
         # otherwise trip a long on the bid and a short on the ask, reporting a
         # breach that the traded price never reached.
-        if trade.direction == Direction.BUY and price < trade.planned_stop:
-            breaches.append(Breach(trade, price, trade.planned_stop - price))
-        elif trade.direction == Direction.SELL and price > trade.planned_stop:
-            breaches.append(Breach(trade, price, price - trade.planned_stop))
+        if trade.direction == Direction.BUY and price < stop:
+            breaches.append(Breach(trade, price, stop - price))
+        elif trade.direction == Direction.SELL and price > stop:
+            breaches.append(Breach(trade, price, price - stop))
     return breaches
 
 

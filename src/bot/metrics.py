@@ -31,6 +31,19 @@ THIN_SAMPLE_THRESHOLD = 20
 WEEKDAY_NAMES = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
 
 
+def _count(n: int, singular: str, plural: str | None = None) -> str:
+    """A count and its noun agreeing: `1 trade`, `3 trades`.
+
+    Deliberately a local four-liner rather than an import. These strings are
+    read by the Analytics page, but this module is pure functions over
+    `list[Trade]` and must not learn about a rendering layer to get a plural
+    right; `render.py` carries its own copy for the same reason `money` in the
+    browser matches `_money` in Python. The rule is that both agree, not that
+    one calls the other.
+    """
+    return f"{n} {singular if n == 1 else (plural or singular + 's')}"
+
+
 @dataclass(frozen=True)
 class PerformanceSummary:
     """Headline performance over a set of closed trades."""
@@ -66,12 +79,32 @@ class PerformanceSummary:
         return self.trade_count < THIN_SAMPLE_THRESHOLD
 
     @property
+    def is_empty(self) -> bool:
+        """No closed trades, so every figure on this object is a DEFAULT.
+
+        Worth a name because the defaults are not neutral: `win_rate` is 0.0,
+        which formats as "0%" and reads as *everything lost*; `expectancy_usd`
+        and `total_pnl_usd` are 0.0, which read as *broke even*. Three
+        plausible wrong figures on the page whose own strapline is that a wrong
+        metric is worse than no metric, because it gets believed and then acted
+        on. Measured on the live deck with an empty journal.
+
+        `profit_factor` was already right — it is `None` when undefined,
+        deliberately not 0.0 and deliberately not `inf`, "because both read as
+        a real number and one of them reads as terrible". The other three
+        cannot be `None` without every caller learning to handle it, so the
+        distinction is carried here instead and a renderer asks before it
+        formats.
+        """
+        return self.trade_count == 0
+
+    @property
     def health(self) -> str:
         """Plain reading of profit factor, hedged when the sample is thin."""
         if self.trade_count == 0:
             return "no closed trades yet"
         if self.profit_factor is None:
-            return f"no losing trades yet across {self.trade_count}"
+            return f"no losing trades yet across {_count(self.trade_count, 'trade')}"
         if self.profit_factor >= 2.0:
             verdict = "strong"
         elif self.profit_factor >= 1.5:
@@ -81,7 +114,10 @@ class PerformanceSummary:
         else:
             verdict = "losing money"
         if self.sample_is_thin:
-            return f"{verdict}, but only {self.trade_count} trades so treat as noise"
+            return (
+                f"{verdict}, but only {_count(self.trade_count, 'trade')} "
+                "so treat as noise"
+            )
         return verdict
 
 

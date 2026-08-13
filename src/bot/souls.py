@@ -35,10 +35,22 @@ log = structlog.get_logger(__name__)
 # never depend on a file outside their own tmp_path.
 DEFAULT_SOULS_DIR = Path(__file__).resolve().parents[2] / "souls"
 
-# The two that exist. Named as constants so a typo at a call site is an
+# The three that exist. Named as constants so a typo at a call site is an
 # AttributeError here rather than a silently voiceless agent there.
 YODA = "yoda"
 GROGU = "grogu"
+ARMORER = "armorer"
+
+# The set a request body is checked against before it reaches `load_soul`, which
+# builds a path from the name. One list, here, rather than a literal repeated at
+# every call site: a soul added to `souls/` and forgotten here is a character
+# nobody can select, and a name NOT in this set reaching a path join is a
+# traversal.
+#
+# An unknown name falls back to `YODA` at the call site rather than raising. The
+# worst case of getting it wrong is the wrong voice; refusing the question
+# outright would be the larger failure. See `bot.web.app.chat`.
+KNOWN_SOULS = frozenset({YODA, GROGU, ARMORER})
 
 
 @dataclass(frozen=True)
@@ -61,10 +73,19 @@ class Soul:
         and the most common result is that it starts describing the character
         rather than being it.
 
-        The final clause is the same rule the soul files carry in their own
-        Never sections, restated here because this is the text that actually
-        reaches the model. Saying it twice is cheap; a soul file edited on the
-        box without it would be a persona with no guard rail.
+        The rule about figures is the same one the soul files carry in their own
+        What-to-avoid sections, restated here because this is the text that
+        actually reaches the model. Saying it twice is cheap; a soul file edited
+        on the box without it would be a persona with no guard rail.
+
+        The sentence about length is here for a weaker but real reason. Each
+        file sets its own budget in `## How long to be`, and a model handed a
+        character reliably reads it as a licence to write more — the observed
+        failure was a one-line figure arriving inside three paragraphs. So the
+        instruction that a character is a way of saying something *shorter* sits
+        in the wrapper, where it applies to every soul including one added
+        later. It is style rather than safety, which is why it is one clause
+        rather than a section.
         """
         if not self.found:
             return ""
@@ -80,7 +101,10 @@ class Soul:
             else ""
         )
         return (
-            "You have a character, described below. Speak in it.\n\n"
+            "You have a character, described below. Speak in it. Do not "
+            "announce it, describe it or perform it: the character is in the "
+            "word choice and the rhythm, and it is a reason to say something "
+            "SHORTER rather than a licence to say more. Lead with the answer.\n\n"
             "It shapes how you say things and never what is true. Figures, "
             "symbols, dates and quantities are quoted exactly as the tools "
             "returned them, and anything you cannot say in character you say "

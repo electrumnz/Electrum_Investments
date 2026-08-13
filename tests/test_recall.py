@@ -19,10 +19,11 @@ import structlog
 
 import bot.main as main_mod
 from bot.audit import AuditLog
-from bot.claude_client import CallUsage, ClaudeDecision
 from bot.config import Env, Rules, load_rules
 from bot.context import build_market_context
+from bot.dreaming import DreamStore
 from bot.journal import Journal
+from bot.model_client import CallUsage, ModelDecision
 from bot.models import (
     AccountSnapshot,
     Decision,
@@ -165,10 +166,21 @@ def test_the_section_is_absent_when_nothing_was_proposed():
 
 
 class _StubClaude:
-    def __init__(self, decision: ClaudeDecision) -> None:
+    def __init__(self, decision: ModelDecision) -> None:
         self._decision = decision
 
-    def propose(self, market_context: str) -> tuple[ClaudeDecision, CallUsage]:
+    # Both read by the loop: one for the `loop_start` record, one to decide
+    # whether a cost can be stated at all. A double missing an attribute the
+    # real client has pins a path production never takes.
+    @property
+    def model_id(self) -> str:
+        return "claude-haiku-4-5-20251001"
+
+    @property
+    def price_is_known(self) -> bool:
+        return True
+
+    def propose(self, market_context: str) -> tuple[ModelDecision, CallUsage]:
         self.seen = market_context
         return self._decision, CallUsage(
             input_tokens=1, output_tokens=1, cache_read_tokens=0,
@@ -183,7 +195,13 @@ def _run(monkeypatch, tmp_path, client, *, in_session: bool = True) -> list[Any]
     monkeypatch.setattr(time, "sleep", _stop)
     monkeypatch.setattr(main_mod, "Journal", lambda: Journal(tmp_path / "journal.db"))
     monkeypatch.setattr(main_mod, "AuditLog", lambda: AuditLog(tmp_path / "audit"))
-    monkeypatch.setattr(main_mod, "ClaudeClient", lambda *a, **k: client)
+    monkeypatch.setattr(main_mod, "ModelClient", lambda *a, **k: client)
+    # The loop opens the dream store to resolve symbol grants, and the shipped
+    # rules turn grants on, so without this the cycle writes `data/dreams.db`
+    # beside the real journal.
+    monkeypatch.setattr(
+        main_mod, "DreamStore", lambda: DreamStore(tmp_path / "dreams.db")
+    )
     monkeypatch.setattr(Rules, "any_class_in_session", lambda self, moment: in_session)
 
     with structlog.testing.capture_logs() as logs:
@@ -206,7 +224,7 @@ def test_a_restart_recovers_the_last_assessments_from_the_audit_log(
         Decision(timestamp=datetime.now(UTC), proposals=[], assessments=[WATCHING])
     )
 
-    client = _StubClaude(ClaudeDecision(market_assessment="Quiet.", proposals=[]))
+    client = _StubClaude(ModelDecision(market_assessment="Quiet.", proposals=[]))
     logs = _run(monkeypatch, tmp_path, client)
 
     recalled = [e for e in logs if e["event"] == "recalled_previous_assessments"]
@@ -223,7 +241,7 @@ def test_a_broken_audit_log_costs_the_recall_and_nothing_else(monkeypatch, tmp_p
     stamp = datetime.now(UTC).strftime("%Y-%m-%d")
     (audit_dir / f"{stamp}.jsonl").write_text("{ this is not json\n", encoding="utf-8")
 
-    client = _StubClaude(ClaudeDecision(market_assessment="Quiet.", proposals=[]))
+    client = _StubClaude(ModelDecision(market_assessment="Quiet.", proposals=[]))
     logs = _run(monkeypatch, tmp_path, client)
 
     assert [e for e in logs if e["event"] == "cycle_complete"]
@@ -241,7 +259,7 @@ def test_a_skipped_cycle_does_not_blank_the_recollection(monkeypatch, tmp_path):
         Decision(timestamp=datetime.now(UTC), proposals=[], assessments=[WATCHING])
     )
 
-    client = _StubClaude(ClaudeDecision(market_assessment="unused", proposals=[]))
+    client = _StubClaude(ModelDecision(market_assessment="unused", proposals=[]))
     logs = _run(monkeypatch, tmp_path, client, in_session=False)
 
     # The cycle skipped, so the model never saw anything...

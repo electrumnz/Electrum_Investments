@@ -16,8 +16,8 @@ from __future__ import annotations
 
 import pytest
 
-from bot.claude_client import build_system_prompt
 from bot.config import load_rules
+from bot.model_client import build_system_prompt
 from bot.strategy import REGISTRY, Strategy, guidance_for
 
 
@@ -163,7 +163,7 @@ def test_no_unescaped_brace_reaches_the_prompt_template():
     Braces meant literally must be doubled. This asserts the template still
     renders rather than trying to police the source text.
     """
-    from bot.claude_client import SYSTEM_PROMPT_TEMPLATE, build_system_prompt
+    from bot.model_client import SYSTEM_PROMPT_TEMPLATE, build_system_prompt
 
     rendered = build_system_prompt(load_rules())
 
@@ -218,3 +218,50 @@ def test_the_prompt_exempts_crypto_from_the_session_mechanics():
     prompt = " ".join(build_system_prompt(load_rules()).split())
 
     assert "Crypto has no sessions" in prompt
+
+
+# ------------------------------------------------- moving a stop, in the prompt
+
+
+def test_the_prompt_asks_for_the_level_a_tighten_needs():
+    """`PositionPlan.new_stop_price` was in the schema and in nothing the model
+    reads, so it came back empty on every cycle and `execute_position_plan`
+    refused every tighten for want of a level.
+
+    A field the prompt never mentions is a field the model does not fill. This
+    is the plumbing half of the position-actions work rather than a wording
+    preference.
+    """
+    prompt = " ".join(build_system_prompt(load_rules()).split())
+
+    assert "new_stop_price" in prompt
+    assert "needs `reasoning` and `new_stop_price` together" in prompt
+
+
+def test_the_prompt_refuses_a_widened_stop_in_the_same_words_the_code_does():
+    """Tighter is toward ENTRY, which inverts between a long and a short, and
+    half the trades this repository can hold are shorts.
+
+    The refusal itself lives in `position_actions.classify_stop_move` and is
+    deterministic — this is the model being told what will happen rather than
+    the thing that makes it happen. Both are needed: prose is the wrong place
+    for the only guard, and a silent refusal every cycle is the wrong way to
+    teach.
+    """
+    prompt = " ".join(build_system_prompt(load_rules()).split())
+
+    assert "may only be TIGHTENED, never widened" in prompt
+    assert "on a long that is a HIGHER stop, on a short a LOWER one" in prompt
+    assert "bigger loss at the same size" in prompt
+
+
+def test_the_prompt_does_not_let_a_plan_read_as_an_action():
+    """`position_actions.enabled` ships false, so a plan is recorded and not
+    executed. The model must not write as though the move has happened, and
+    must not restate it as done next cycle — it has no memory, so the only
+    thing it can rely on is the level it is shown in the position line."""
+    prompt = " ".join(build_system_prompt(load_rules()).split())
+
+    assert "ships false" in prompt
+    assert "recorded and none is executed" in prompt
+    assert "do not restate a tighten as done" in prompt

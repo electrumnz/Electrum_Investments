@@ -1,0 +1,51 @@
+[Unit]
+Description=Confer over the dream vault once a day, after the dream
+Documentation=file:/opt/mudhorn/CLAUDE.md
+
+[Timer]
+# Daily, shortly AFTER mudhorn-dream.timer, so a conference always has that
+# morning's dream to talk about. A conference that ran first would be arguing
+# about yesterday's vault, which is not wrong — the change gate would simply
+# skip anything unaltered — but it wastes the one run a day on a stale shelf.
+#
+# **The timezone is named rather than converted, exactly as in
+# mudhorn-dream.timer, and for the same reason.** New Zealand observes daylight
+# saving: NZST is UTC+12 and NZDT is UTC+13, so a hardcoded UTC hour drifts by
+# an hour twice a year and drifts SILENTLY. Naming the zone makes systemd redo
+# the arithmetic on every elapse. Verified on systemd 255, which Ubuntu 24.04
+# ships:
+#
+#     $ systemd-analyze calendar "*-*-* 08:00:00 Pacific/Auckland"
+#     Normalized form: *-*-* 08:00:00 Pacific/Auckland
+#         Next elapse: Mon 2026-08-10 20:00:00 UTC
+#
+# The suffix needs systemd 252 or newer. On anything older the unit fails to
+# parse and the timer simply never fires, which is the kind of silent non-event
+# this repository keeps getting bitten by — check before backporting.
+#
+# **Do NOT set the box timezone to Pacific/Auckland instead.** Everything else
+# here reasons in UTC on purpose — `sessions_utc` in config/rules.yaml, every
+# journal timestamp, every figure the dashboard renders — and moving the system
+# clock would quietly reinterpret all of it. This suffix changes when one timer
+# fires and nothing else.
+#
+# An hour after the dream, and the gap is arithmetic rather than taste: the
+# dream fires at 07:00 with up to 600s of jitter and may run for its full
+# 1200-second timeout, so its worst case finishes at 07:30. 08:00 plus at most
+# 300s of jitter leaves half an hour of headroom, so the two never overlap on
+# the same SQLite file even on the slowest morning.
+OnCalendar=*-*-* 08:00:00 Pacific/Auckland
+# A box that was asleep still confers, for the same reason it still dreams: an
+# offer nobody answered is exactly the thing worth answering, and skipping days
+# in silence would make the page look like the two agents had stopped talking
+# rather than like nobody had asked them to. A catch-up run costs at most two
+# exchanges, because the change gate skips anything that has not moved since
+# the last one.
+Persistent=true
+# Smaller than the dream's 600s, so the ordering above holds. It exists for the
+# same reason: a fleet of boxes all calling the API at 08:00:00 exactly is
+# impolite and buys nothing.
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target

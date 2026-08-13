@@ -82,7 +82,7 @@ base input; reads cost 0.1×.
 
 At a 15-minute cadence a 5-minute cache expires between every call and never pays
 for itself — you would pay the write premium and never get a read. The 1-hour
-cache gets roughly **four reads per write**, which is why `claude_client.py` sets
+cache gets roughly **four reads per write**, which is why `model_client.py` sets
 `"ttl": "1h"` explicitly. An earlier version of this project's plan assumed only
 the 5-minute TTL existed and concluded caching was useless here. That was wrong.
 
@@ -176,7 +176,7 @@ day, so the cache has **always expired** by the time it is next asked: every
 single call pays the 2x write and never once collects a read.
 
 On the dreamer's system block that is $0.0095 a run against $0.0071 uncached — a
-third more, for a feature sold as a saving. So `ClaudeClient` takes
+third more, for a feature sold as a saving. So `ModelClient` takes
 `cache_system`, and the dreamer sets it to False.
 
 The general rule: **cache only when the call interval is shorter than the TTL.**
