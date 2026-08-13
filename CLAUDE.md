@@ -894,6 +894,29 @@ at one endpoint and without it at another. A check on the model name gets that
 exactly backwards the first time a familiar name appears in an unfamiliar
 catalogue.
 
+**That sentence was written before it was true, and an audit proved it false.**
+`Env.inference_provider` describes a CONFIGURATION; it did not describe the
+endpoint. The SDK resolves the base URL as `kwarg > ANTHROPIC_BASE_URL > a
+credentials profile on disk`, and `ModelClient` passed no `base_url` on the
+Anthropic branch — so a box with `ANTHROPIC_BASE_URL` aimed anywhere got the
+banner saying "Anthropic direct", the server-enforced transport with
+`output_config` attached to a proxy that may ignore it, and **the Anthropic key
+in the header, sent to that third party**. Not hypothetical: both timer units
+carry `EnvironmentFile=/opt/mudhorn/.env`, and `docs/DROPLET_AI.md` tells the
+operator to export exactly that variable.
+
+`base_url` is now passed explicitly on BOTH branches, which also closes the
+profile-file route — the SDK consults no other source once a kwarg arrives — and
+`Env.anthropic_base_url` is a declared field so the property can report the
+endpoint that will actually be called. A deliberate proxy is NAMED rather than
+refused, with the sentence saying this process cannot verify that endpoint
+enforces the schema.
+
+**The lesson is the one this file already records about the class hard-block: a
+guarantee written here is not a guarantee, and prose asserting one is how it
+stops being checked.** Where this file claims a structural property, there must
+be a test that fails when it is removed.
+
 **A reply with no tool call is a HARD FAILURE, and that is the one that
 matters.** A dropped schema breaks loudly in every case that produces a number
 and silently in exactly one: the quiet cycle. `proposals`, `assessments` and
@@ -939,6 +962,28 @@ matters.** Pydantic still rejects a malformed object, so a `qty` or a
 `model_call_failed` is logged and `RiskGate` never sees it. What degrades is
 RELIABILITY: the model is asked for the shape rather than constrained to it, so
 the rejection rate rises and every rejection costs a cycle.
+
+**An OMITTED key is a third case, and it used to be the worst of the three.**
+`EVERY_FIELD_REQUIRED` puts every property into the schema's `required` list, so
+the API's grammar makes an absence impossible on the server-enforced path.
+`model_validate` does not: it honours the Python defaults, which every one of
+these fields has. Measured across the five shapes actually sent, **24 properties
+could be left out** — and an omission was not rejected, it became a value
+invented HERE and attributed to the model. A `PositionPlan` carrying only
+`symbol` and `reasoning` was recorded as `action=hold, thesis_intact=True`: an
+opinion about an open position that nothing on the far end expressed, rendered
+to the operator as one that was.
+
+`_missing_required` walks the emitted schema and refuses an ABSENT key while
+never refusing an empty one — so `assessments: []` still reaches `cmd_loop`'s
+ratio check rather than being swallowed here. The two failures are different and
+are caught in different places on purpose.
+
+**`scripts/do_schema_fidelity.py` graded with the loose rule**, so every score
+in `docs/DROPLET_AI.md` recorded before 13 Aug was measured against a laxer
+system than the one that runs. It uses the transport's own check now. Re-run
+under it, the four candidates came back 10/10 with zero omissions — the hole was
+real and these models did not walk into it.
 
 **Nothing falls back, in either sense.** No prose parsing after a failed tool
 call — that hands back exactly the freedom the schema exists to remove. No retry
