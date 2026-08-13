@@ -1682,15 +1682,35 @@ asks about the configured provider's own credential; the loop asks the narrower
 `provider_is_unusable`, because a cycle with no model call still reconciles the
 journal and runs `stop_watch`.
 
-**What is NOT done, and neither can be done from a container:**
+**The switch is SHIPPED and NOT THROWN, and that is deliberate.** With
+`DO_INFERENCE_KEY` unset the deployed code runs on Anthropic exactly as before —
+the empty value is the supported default — so what merged is dormant rather than
+half-done.
 
-- **No model is pinned yet.** `DECISION_MODEL_ID` and `DREAM_MODEL_ID` are
-  unset, and with `DO_INFERENCE_KEY` set that REFUSES at startup rather than
-  running on a default nobody chose. The fidelity table below says which models
-  hold the shape; `scripts/agent_behaviour_live.py` is the harness for whether
-  they reason acceptably, and it has not been run on these candidates. **Do not
-  pin `propose` on the fidelity table alone** — it grades the shape, never the
-  judgement.
+**Throwing it is Josh's, on transfer** (operator's decision, 13 Aug 2026). That
+makes the rest of this a HANDOVER NOTE rather than a task list: whoever sets
+that key will not have this session's context, so the same three facts are in
+`.env.example` and in `deploy/README.md` under "Pointing the loop, the dreamer
+and the conference at DigitalOcean", not only here.
+
+**Set all three variables in ONE edit.** `DO_INFERENCE_KEY` alone, with no
+`DECISION_MODEL_ID`/`DREAM_MODEL_ID`, makes every command refuse to start —
+correctly, because a tier default resolves to a Claude id that endpoint calls by
+another name and 403s on this account's tier anyway. It refuses with a sentence
+naming the variables. **It used to TRACEBACK**, which under systemd is a restart
+into the identical failure with nothing reconciling the journal or watching
+stops meanwhile; that was the critical audit finding of the session, and the fix
+is most of what makes this handover safe.
+
+**And rotate the model access key.** It was pasted into a session transcript to
+run the measurements below, so it should not be the one left in service.
+
+**What is NOT done, and none of it can be done from a container:**
+
+- **No model is pinned yet.** The fidelity table below says which models hold
+  the shape. **Do not pin `propose` on it alone** — it grades the shape, never
+  the judgement, and `RiskGate` checks arithmetic rather than reasoning, so a
+  model can comply perfectly and propose nonsense.
 - **Caching — MEASURED 13 Aug 2026, and it does NOT engage.** The real
   `build_system_prompt(load_rules())` block (4,791 tokens) sent twice, eight
   seconds apart, with `cache_control` ttl 1h, to `deepseek-v4-pro` and
