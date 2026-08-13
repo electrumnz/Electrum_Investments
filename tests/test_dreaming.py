@@ -3467,6 +3467,45 @@ def test_plan_fusion_is_pure_and_needs_no_store():
     assert len(plan.chain) == 3
 
 
+def test_a_claim_two_parents_answered_OPPOSITE_ways_fuses_as_RULED_OUT():
+    """**The parent ORDER used to decide which operator answer survived.**
+
+    The answers were collected into a flat list and read into a dict, so the
+    last parent won. Measured: `[met, refuted]` produced a refuted child and
+    `[refuted, met]` produced a met one, over the same pair — and the dreamer
+    chooses that order, so a model was choosing between two of the operator's
+    answers on the route that ends in a symbol permission.
+
+    In dispute the refusal stands. It is the AND on `checked` in a second
+    place, and it makes the fusion harder to promote, which is the direction a
+    fusion is supposed to move in.
+    """
+    met = DreamCondition(text="t", subject="s", observable="o", observe_by=DUE,
+                         fulfilled=True, observed_by=OPERATOR, note="saw it")
+    refuted = DreamCondition(text="t", subject="s", observable="o", observe_by=DUE,
+                             ruled_out=True, observed_by=OPERATOR, note="it did not")
+    a = Dream(id=1, title="a", seed="s", chain=[Hop("m")], conditions=[met])
+    b = Dream(id=2, title="b", seed="s", chain=[Hop("m")], conditions=[refuted])
+
+    for parents in ([a, b], [b, a]):
+        settled = plan_fusion(parents).conditions[0]
+        assert settled.ruled_out is True
+        assert settled.fulfilled is False
+
+
+def test_expiry_reads_a_naive_clock_as_UTC_rather_than_raising(store):
+    """Two functions on one store answering the same argument must not fail
+    differently. `Adoption.is_live` reads a naive `now` as UTC; this raised
+    `TypeError: can't subtract offset-naive and offset-aware datetimes`, in a
+    scheduled command where an exception is a job that silently stopped."""
+    store.save(
+        Dream(title="ancient", seed="s",
+              vault_entered_at=datetime(2026, 1, 1, tzinfo=UTC))
+    )
+
+    assert [d.title for d in store.expired(datetime(2027, 1, 1))] == ["ancient"]
+
+
 def test_the_weaker_badge_wins_and_it_is_not_alphabetical():
     """`Verification` is a StrEnum, so `min()` over one would compare the WORDS
     — partial < sourced < unverified — putting the weakest badge last. A silent

@@ -2208,6 +2208,18 @@ def plan_fusion(parents: Sequence[Dream]) -> Fusion:
       than a second copy of it. `all_conditions_met` then needs all of them,
       which makes a fusion harder to promote than either parent — correct, for
       a strictly stronger claim.
+
+      **A claim two parents answered OPPOSITE ways arrives RULED OUT**, and
+      that is the AND on `checked` in a second place. The answers used to be
+      collected into a flat list and read into a dict, so the LAST parent won
+      — which meant the dreamer chose which of the operator's two answers
+      survived by choosing the order it listed the parents in. Measured:
+      `[A, B]` and `[B, A]` over the same pair produced a child that was
+      refuted and a child that was met. A model picking between two operator
+      answers is a model settling a condition by proxy, on the route that ends
+      in a symbol permission. In dispute the refusal stands: it is the reading
+      that makes the fusion harder to promote, and a fusion is not an
+      endorsement.
     - **`symbols` is the union and the class resolves only when the parents
       agree.** A disagreement leaves it empty, which grants nothing: the
       `scope_symbols` rule that one class or none may be claimed, arriving from
@@ -2267,9 +2279,23 @@ def plan_fusion(parents: Sequence[Dream]) -> Fusion:
                 continue
             keys.add(condition.key)
             incoming.append(_repin(condition, parent, position_of))
+    # One answer per claim, resolved BEFORE `carry_forward_grading` sees them.
+    # Handing it the flat list let a dict comprehension pick the last one
+    # written, so the order the parents were listed in decided which of two
+    # opposite operator answers the child carried — a choice the dreamer makes
+    # and must not have. In dispute the refusal wins, for the same reason a hop
+    # one parent sourced and another did not arrives unchecked.
+    answered: dict[tuple[str, ...], DreamCondition] = {}
+    for parent in parents:
+        for condition in parent.conditions:
+            if not condition.is_answered:
+                continue
+            held = answered.get(condition.key)
+            if held is None or (condition.ruled_out and not held.ruled_out):
+                answered[condition.key] = condition
     conditions = tuple(
         carry_forward_grading(
-            [c for parent in parents for c in parent.conditions if c.is_answered],
+            list(answered.values()),
             incoming,
         )
     )
@@ -4992,14 +5018,24 @@ class DreamStore:
         A vault with a `None` TTL — the archive — never expires. The archive IS
         the retirement state, so an expiry on it would be an expiry on an
         expiry.
+
+        A naive `now` is read as UTC rather than raising, which is what
+        `Adoption.is_live` already does and what this did not: measured,
+        `expired(datetime(2027, 1, 1))` came back `TypeError: can't subtract
+        offset-naive and offset-aware datetimes`. Two functions on one store
+        answering the same argument must not fail differently — the rule
+        `trailing_stop_level` states about its own two sides — and the caller
+        here is a scheduled command, where an exception is a job that silently
+        stopped rather than a shelf that was swept.
         """
         windows = ttls or DEFAULT_TTLS
+        stamp = _as_utc(now)
         out: list[Dream] = []
         for dream in self.recent(limit=10_000):
             days = windows.days_for(dream.vault)
             if days is None:
                 continue
-            if now - dream.vault_entered_at > timedelta(days=days):
+            if stamp - _as_utc(dream.vault_entered_at) > timedelta(days=days):
                 out.append(dream)
         return out
 
