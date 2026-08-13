@@ -2080,6 +2080,62 @@ Staged so nothing that can lose money moves first:
 
 ---
 
+## 26. A RESEARCHER the other agents can ask, with the web quarantined in it
+
+Operator's idea, and it is the right shape: a separate agent that has web
+access, which the existing agents reach over A2A when they need a fact.
+
+**Why a separate process rather than switching `browser` back on.** This
+repository already contains the argument: the dreamer runs on its own Hermes
+instance whose registry has no MCP server, so *"it cannot reach the broker"* is
+structural rather than a sentence in a soul file. A researcher with web access
+and nothing else is the same move — the web is quarantined in a process that
+cannot place an order, cannot write to the dream store and cannot read the
+journal. Enabling `browser` on the instance that also answers about the account
+would put both in one place, which is what the user split exists to prevent.
+
+**What it is actually for**, and it is not "more context": the first live dream
+came back with **3 of 4 hops unchecked**. `Hop.checked` exists because some of
+those sentences were invented, and `Verification` is arithmetic over those
+flags. A researcher returning attributable text is what turns an unchecked hop
+into a checked one — it feeds a mechanism that already exists rather than
+needing a new one.
+
+### NOT Grok, and the reason is structural rather than a preference
+
+**Web access is a TOOL, not a model property.** Grok's live search is an xAI
+*platform* feature; it does not arrive through a generic inference endpoint. So
+naming Grok means a second provider, a second key and a second prepaid balance —
+which is exactly what the Vercel decision rejected hours earlier, for a
+component whose entire bill is single digits. One account was the whole point.
+
+The instance runs on the SAME DigitalOcean key and catalogue. What differs is
+its config: web toolsets enabled for that instance only, and **no MCP server
+registered**. `deploy/run-dream.sh` already demonstrates the second-`HERMES_HOME`
+pattern.
+
+### Three requirements, and without them it makes things worse
+
+- **Quotes and URLs, never conclusions.** If the researcher summarises, the
+  dreamer reads a SECOND MODEL'S INTERPRETATION as fact. That launders
+  provenance, which is worse than no research at all — the standing rule is
+  *rendered, attributable text, never raw pages*, and a summary satisfies
+  neither half.
+- **Its own caps, and a schema change to carry them.** The A2A caps bound
+  dreamer↔trader at twelve calls a day and the transcript hangs off a dream
+  with two speakers. A third participant is a schema change, not a config edit,
+  and it needs its own per-run and per-epoch bounds or the bill is unbounded.
+- **Never a gating input.** Nothing web-derived reaches `RiskGate`, which stays
+  deterministic and must not fail open on a network call. Unchanged.
+
+**Sizing, honestly: a day, not an afternoon.** New instance, config, prompt, the
+A2A schema for a third speaker, caps, and the `Hop.checked` integration. The
+browser toolset also needs a browser on the box, which is why the current
+denylist calls those thirteen tools ones that *"nothing here can succeed"* — a
+fetch-shaped toolset may be the lighter answer and wants checking first.
+
+---
+
 ## 24. The ceilings closed the SUBTRACTION hole and left a CROSS-UNIT one open
 
 **Measured 13 Aug 2026**, 160 live calls through the real `ModelClient`, the

@@ -1010,3 +1010,293 @@ def test_an_estimated_exit_price_is_recorded_as_estimated_and_grades_unknown(
     assert closed.exit_price_estimated is True
     assert closed.exit_reason is ExitReason.UNKNOWN
     assert result.estimated_exits == 1
+
+
+# ------------ asking the broker what became of the entry, instead of inferring
+#
+# The deferral above fails closed and is still an inference: "not in that list"
+# was replaced by "cannot be established", which left a genuinely cancelled
+# entry holding planned risk against the 2% cap with nothing able to say so.
+# `Broker.get_order` is the direct question. These tests are about which of its
+# five answers writes anything — and, more importantly, which do not.
+
+
+def test_a_cancelled_entry_is_answered_rather_than_left_unresolved(
+    journal, broker, rules
+):
+    """The point of the whole change. The broker is asked, and it knows.
+
+    Before this the row sat in `entries_unresolved` for ever, which reads as
+    "nobody can tell" — so an operator had no way to distinguish an order that
+    is simply resting from one that was cancelled hours ago and is holding risk
+    the account will never lose.
+    """
+    _premarket_bracket(journal)
+    broker.set_price("AAPL", bid=307.9, ask=308.1)
+    broker.set_open_orders([])
+    broker.set_order("entry-aapl", broker_status="canceled")
+
+    result = reconcile(journal, broker, rules, now=AAPL_ENTRY + timedelta(minutes=15))
+
+    assert result.entries_never_opened == ["AAPL"]
+    assert result.entries_unresolved == []
+    assert result.closes_deferred == ["AAPL"]
+    assert result.closed == []
+
+
+@pytest.mark.parametrize("word", ["canceled", "expired", "rejected"])
+def test_every_terminal_entry_that_never_filled_reads_the_same_way(
+    journal, broker, rules, word
+):
+    """Three broker words, one fact: the order is over and nothing filled, so
+    the trade never opened. A rejection is not a different kind of non-trade
+    from an expiry."""
+    _premarket_bracket(journal)
+    broker.set_price("AAPL", bid=307.9, ask=308.1)
+    broker.set_open_orders([])
+    broker.set_order("entry-aapl", broker_status=word)
+
+    result = reconcile(journal, broker, rules, now=AAPL_ENTRY + timedelta(minutes=15))
+
+    assert result.entries_never_opened == ["AAPL"]
+
+
+def test_a_cancelled_entry_is_given_no_exit_price_and_no_realised_pnl(
+    journal, broker, rules
+):
+    """**Knowing it was cancelled is not permission to close it.**
+
+    A close needs an exit price and a realised figure, and this trade never
+    opened, so both would be invented. They do not stop at the journal: they
+    reach `metrics.py`, the Analytics page, and `journal.consecutive_losses`,
+    which feeds `evaluate_stand_down` — the operator's fourth rule. A
+    fabricated loss can move a real breaker, and a fabricated scratch is worse,
+    because a scratch neither counts nor resets and a real streak carries
+    straight across it.
+    """
+    _premarket_bracket(journal)
+    broker.set_price("AAPL", bid=307.9, ask=308.1)     # a mark it could have used
+    broker.set_open_orders([])
+    broker.set_order("entry-aapl", broker_status="canceled")
+
+    reconcile(journal, broker, rules, now=AAPL_ENTRY + timedelta(minutes=15))
+
+    assert journal.closed_trades() == []
+    assert journal.open_trades()[0].realised_pnl_usd is None
+    assert journal.consecutive_losses(rules.stand_down.loss_threshold_r) == 0
+
+
+def test_a_cancelled_entry_keeps_counting_its_risk_until_someone_retires_it(
+    journal, broker, rules
+):
+    """Overstated, which is the safe direction and the one this repository
+    picks. The row is a known non-trade holding 909.50 of planned risk against
+    the 2% cap; settling it in code needs a journal that can record 'this never
+    opened' with no price and no P&L."""
+    _premarket_bracket(journal)
+    broker.set_price("AAPL", bid=307.9, ask=308.1)
+    broker.set_open_orders([])
+    broker.set_order("entry-aapl", broker_status="canceled")
+
+    result = reconcile(journal, broker, rules, now=AAPL_ENTRY + timedelta(minutes=15))
+
+    snapshot = apply_journal_state(broker.get_account(), journal)
+    assert snapshot.open_risk_usd == pytest.approx(AAPL_RISK)
+    # And the figures on the row are still the proposal's, which is what that
+    # property exists to say out loud.
+    assert "AAPL" in result.entry_figures_are_the_proposal
+
+
+def test_a_lookup_that_failed_keeps_deferring_and_is_never_read_as_cancelled(
+    journal, broker, rules
+):
+    """The one that would undo everything.
+
+    `get_open_orders` returning `[]` on its own failure is why the original bug
+    existed. If a failed single-order lookup answered "cancelled", the same
+    defect would be back with a network error as its new trigger — so the two
+    are different branches and a failure leaves this exactly where asking found
+    it.
+    """
+    _premarket_bracket(journal)
+    broker.set_price("AAPL", bid=307.9, ask=308.1)
+    broker.set_open_orders([])
+    broker.set_order("entry-aapl", broker_status="canceled")
+    broker.set_order_lookup_fails(True)                # ...but nobody can ask
+
+    result = reconcile(journal, broker, rules, now=AAPL_ENTRY + timedelta(minutes=15))
+
+    assert result.entries_never_opened == []
+    assert result.entries_unresolved == ["AAPL"]
+    assert result.closed == []
+    assert journal.closed_trades() == []
+
+
+def test_a_status_this_build_cannot_classify_defers_rather_than_guessing(
+    journal, broker, rules
+):
+    """`replaced` is the real case: Alpaca cancelled this order in favour of a
+    new id, so it is neither dead nor working, and nothing here can follow the
+    chain to the successor. Unclassified defers, which is where this stood
+    before asking — the answer is lost and the safety is not."""
+    _premarket_bracket(journal)
+    broker.set_price("AAPL", bid=307.9, ask=308.1)
+    broker.set_open_orders([])
+    broker.set_order("entry-aapl", broker_status="replaced")
+
+    result = reconcile(journal, broker, rules, now=AAPL_ENTRY + timedelta(minutes=15))
+
+    assert result.entries_unresolved == ["AAPL"]
+    assert result.entries_never_opened == []
+    assert journal.closed_trades() == []
+
+
+def test_an_entry_alive_past_the_resting_lists_bound_is_resting_not_unresolved(
+    journal, broker, rules
+):
+    """`get_open_orders` is bounded at 100 and status-filtered, so an order can
+    be alive and absent from it. Asking directly recovers the same fact the
+    list would have carried, and it gets the same treatment."""
+    _premarket_bracket(journal)
+    broker.set_price("AAPL", bid=307.9, ask=308.1)
+    broker.set_open_orders([])                          # not in the bounded list
+    broker.set_order("entry-aapl", broker_status="new")
+
+    result = reconcile(journal, broker, rules, now=AAPL_ENTRY + timedelta(minutes=15))
+
+    assert result.entries_resting == ["AAPL"]
+    assert result.entries_unresolved == []
+    assert result.closes_deferred == ["AAPL"]
+    assert journal.open_trades()[0].fill_state is FillState.RESTING
+
+
+def test_an_entry_that_filled_and_is_gone_closes_off_the_fill_it_actually_got(
+    journal, broker, rules
+):
+    """The stall the deferral introduced, and the one answer that writes.
+
+    An entry that fills and is then stopped out between two cycles leaves no
+    position and no resting order, so the deferral held it open for ever. The
+    broker says FILLED, which makes the position's absence a close after all —
+    and the entry is squared against the order's own average fill first, so the
+    realised figure is measured from what filled rather than from the limit
+    price the proposal asked for.
+    """
+    _premarket_bracket(journal)
+    broker.set_price("AAPL", bid=305.9, ask=306.1)
+    broker.set_open_orders([])
+    broker.set_order(
+        "entry-aapl",
+        broker_status="filled",
+        filled_qty=AAPL_QTY,
+        filled_avg_price=308.42,
+    )
+
+    result = reconcile(journal, broker, rules, now=AAPL_ENTRY + timedelta(minutes=15))
+
+    assert result.closed == ["AAPL"]
+    assert [c.symbol for c in result.entries_corrected] == ["AAPL"]
+    closed = journal.closed_trades()[0]
+    assert closed.entry_price == 308.42            # the fill, not the 308.5 limit
+    assert closed.submitted_price == AAPL_LIMIT    # ...and the intention survives
+    assert closed.realised_pnl_usd == pytest.approx((306.0 - 308.42) * AAPL_QTY)
+
+
+def test_a_filled_answer_that_does_not_cover_the_order_settles_nothing(
+    journal, broker, rules
+):
+    """FILLED with a quantity short of what was submitted, against an account
+    holding nothing, is an answer that contradicts itself. Nothing is written
+    from a contradiction."""
+    _premarket_bracket(journal)
+    broker.set_price("AAPL", bid=307.9, ask=308.1)
+    broker.set_open_orders([])
+    broker.set_order(
+        "entry-aapl", broker_status="filled", filled_qty=3, filled_avg_price=308.42
+    )
+
+    result = reconcile(journal, broker, rules, now=AAPL_ENTRY + timedelta(minutes=15))
+
+    assert result.entries_unresolved == ["AAPL"]
+    assert result.entries_corrected == []
+    assert journal.closed_trades() == []
+
+
+def test_a_terminal_entry_with_a_partial_fill_and_nothing_held_settles_nothing(
+    journal, broker, rules
+):
+    """Cancelled after part of it filled left a real position behind, so this is
+    not 'never opened' — and the account holding nothing does not square with it
+    either. Two facts that disagree settle nothing."""
+    _premarket_bracket(journal)
+    broker.set_price("AAPL", bid=307.9, ask=308.1)
+    broker.set_open_orders([])
+    broker.set_order(
+        "entry-aapl", broker_status="canceled", filled_qty=3, filled_avg_price=308.40
+    )
+
+    result = reconcile(journal, broker, rules, now=AAPL_ENTRY + timedelta(minutes=15))
+
+    assert result.entries_never_opened == []
+    assert result.entries_unresolved == ["AAPL"]
+    assert journal.closed_trades() == []
+
+
+def test_the_broker_is_asked_only_where_the_evidence_is_actually_missing(
+    journal, broker, rules
+):
+    """One extra call, in the one branch that had no answer. A held position IS
+    the evidence and a resting order IS the evidence, so neither asks — a
+    per-trade lookup every cycle would put a network call on the ordinary path
+    to pay for the rare one."""
+    asked: list[str] = []
+    real_get_order = broker.get_order
+
+    def _spy(order_id: str):
+        asked.append(order_id)
+        return real_get_order(order_id)
+
+    broker.get_order = _spy
+
+    _resting_short(journal)
+    _held_short(broker)                                 # the position is the proof
+    broker.set_open_orders([])
+    reconcile(journal, broker, rules, now=NOW)
+    assert asked == []
+
+    _premarket_bracket(journal)
+    broker.set_price("AAPL", bid=307.9, ask=308.1)
+    broker.set_open_orders([_working_entry()])          # resting IS the proof
+    reconcile(journal, broker, rules, now=NOW)
+    assert asked == ["entry-aapl"]                      # only the AAPL row
+
+
+def test_a_working_entry_with_part_of_it_filled_is_a_reading_not_a_state(
+    journal, broker, rules
+):
+    """The two routes to "this order is still working" behave identically.
+
+    An order found IN the resting list splits on `filled_qty`, because
+    `RESTING` asserts that nothing has filled and `PARTIAL` asserts the rest is
+    not coming — and a working order has said neither. The route through
+    `get_order` has to split the same way, or the same order reports a state it
+    was never in depending on which side of a 100-order bound it landed.
+    """
+    _premarket_bracket(journal)
+    broker.set_price("AAPL", bid=307.9, ask=308.1)
+    broker.set_open_orders([])
+    broker.set_order(
+        "entry-aapl",
+        broker_status="partially_filled",
+        filled_qty=3,
+        filled_avg_price=308.40,
+    )
+
+    result = reconcile(journal, broker, rules, now=AAPL_ENTRY + timedelta(minutes=15))
+
+    assert result.entries_mid_fill == ["AAPL"]
+    assert result.entries_resting == []
+    assert result.closes_deferred == ["AAPL"]
+    stored = journal.open_trades()[0]
+    assert stored.fill_state is FillState.UNCONFIRMED
+    assert stored.qty == AAPL_QTY                # the submitted quantity stands

@@ -32,7 +32,7 @@ from datetime import UTC, datetime
 
 import structlog
 
-from .broker import Broker
+from .broker import Broker, OrderDisposition
 from .config import Rules
 from .exit_review import ExitReview, classify_exit
 from .journal import Journal
@@ -148,13 +148,35 @@ class ReconcileResult:
     # "could not ask" and never "nothing resting".
     entries_unchecked: list[str] = field(default_factory=list)
 
-    # The entry order is not in the resting list AND nothing is held. What
-    # became of that order cannot be established from here, so the close is
-    # withheld: see `_confirm_entries` for why absence from that list is not
-    # evidence of a fill, and why a terminal entry that never filled is not a
-    # close either. Overstates risk for as long as it lasts, which is the safe
-    # direction and the one this repository picks.
+    # The entry order is not in the resting list, nothing is held, AND the
+    # broker was asked about the order directly and still could not settle it:
+    # the lookup failed, or it came back in a status this build does not
+    # classify, or the answer contradicts what is held. **Asked and unanswered**,
+    # which is a narrower claim than this field used to make — before
+    # `Broker.get_order` existed it also covered every case now named below.
+    # Overstates risk for as long as it lasts, which is the safe direction and
+    # the one this repository picks.
     entries_unresolved: list[str] = field(default_factory=list)
+
+    # The broker says the entry order is terminal with NOTHING filled —
+    # cancelled, expired or rejected. **The trade never opened**, so there is no
+    # position, no exit, and no realised figure, and the row is a proposal that
+    # went nowhere rather than a trade that ended.
+    #
+    # It is named and NOT closed. `Journal.record_exit` requires a float exit
+    # price and a float realised P&L, and `ExitReason` has no member meaning
+    # "never opened", so closing the row here would manufacture all three — and
+    # they reach `metrics.py` and `journal.consecutive_losses`, which feeds
+    # `evaluate_stand_down`, the operator's fourth rule. A fabricated loss can
+    # move a real breaker, and a fabricated scratch is worse: it neither counts
+    # nor resets, so a losing streak carries straight across it.
+    #
+    # So this settles the QUESTION without settling the row: the answer is known
+    # and stated, the risk stays counted, and an operator retires it. Settling
+    # it in code needs a journal that can record "this never opened" with no
+    # price and no P&L, which is a schema change plus a rule in `metrics.py` and
+    # in `consecutive_losses` about not counting such a row.
+    entries_never_opened: list[str] = field(default_factory=list)
 
     # A position exists and cannot be attributed to one journal row: two open
     # trades in the symbol, a direction that disagrees, or more held than was
@@ -192,6 +214,7 @@ class ReconcileResult:
                 + self.entries_mid_fill
                 + self.entries_unchecked
                 + self.entries_unresolved
+                + self.entries_never_opened
             )
         )
 
@@ -313,6 +336,7 @@ def reconcile(
     #    price; this is where they become what happened.
     deferred_closes = _confirm_entries(
         journal,
+        broker=broker,
         held=held,
         open_trades=journal.open_trades(),
         orders=orders,
@@ -479,6 +503,7 @@ def reconcile(
 def _confirm_entries(
     journal: Journal,
     *,
+    broker: Broker,
     held: dict[str, Position],
     open_trades: list[Trade],
     orders: list[WorkingOrder],
@@ -517,7 +542,7 @@ def _confirm_entries(
       empty list means "could not ask" and never "nothing resting" — the same
       lesson as `FinnhubCalendar.is_degraded`. Concluding "terminal" from it
       would close a resting entry as a trade.
-    - **An entry that is neither resting nor held is UNRESOLVED, never closed.**
+    - **An entry that is neither resting nor held is ASKED ABOUT, never assumed.**
       This is the one that was wrong, and it cost a live position. Read on.
 
     ## Absence from the resting list is not evidence of a fill
@@ -552,11 +577,40 @@ def _confirm_entries(
     of the answer, the defect is here: this function cannot tell "not in the
     list" from "filled", and it must not try.
 
-    So the row is deferred and named instead. That leaves a cancelled entry
-    holding risk in the journal until somebody settles it, which OVERSTATES risk
-    — the safe direction, and the one this repository picks every time. It
-    resolves by itself in the case that matters: when the resting entry fills,
-    the position appears and the branch below squares it.
+    ## So it asks, and the deferral is what happens when the answer does not come
+
+    Deferring instead of closing fails closed, and a deferral is still an
+    inference: "not in that list" was replaced by "cannot be established", which
+    left a genuinely cancelled entry holding planned risk with nothing able to
+    say so. `Broker.get_order` is the direct question, and it is asked HERE and
+    nowhere else in this function — only when the order is absent from the
+    resting list and no position is held, which is the state that cost the
+    position. Every other branch already has its evidence.
+
+    Five answers, and only one of them writes anything:
+
+    - **FILLED** — the entry did become a position, and the position's absence
+      is therefore a CLOSE. The row is squared against the fill the broker
+      reports and released, so step 1 closes it with a confirmed entry price
+      rather than the proposal's limit. Before this it deferred for ever: an
+      entry that filled and was then stopped out between two cycles could never
+      leave the journal.
+    - **NEVER_FILLED** — cancelled, expired or rejected with nothing filled. The
+      trade never opened. Named in `entries_never_opened` and **still not
+      closed**: see that field for why manufacturing an exit price and a
+      realised figure here would reach the stand-down breaker.
+    - **WORKING** — alive after all, past the resting list's bound or in a
+      status that query does not return. Identical treatment to being in the
+      list: RESTING, and deferred.
+    - **PART_FILLED**, and FILLED where the figures do not support it — the
+      broker's answer contradicts an account holding nothing. Unresolved.
+    - **`None`, or a status this build cannot classify** — the question could
+      not be answered. Unresolved, which is exactly where this stood before
+      asking, so a broker outage costs the answer and never the safety.
+
+    Nothing is inferred from the ABSENCE of an answer, in either direction. A
+    lookup that failed and a lookup that said "cancelled" must not share a
+    branch, or the original defect returns with a network error as its trigger.
     """
     deferred: set[int] = set()
     working = {o.order_id: o for o in orders}
@@ -594,16 +648,110 @@ def _confirm_entries(
 
         # The entry order is not in the resting list. That is WEAKER than
         # "terminal", and reading it as terminal is what closed AAPL row 2.
+        ceiling = trade.submitted_qty if trade.submitted_qty is not None else trade.qty
         position = held.get(trade.symbol)
         if position is None:
-            # Nothing is held and nothing was ever confirmed, so there is no
-            # evidence this row was ever a position — and therefore none that it
-            # closed. The close is withheld and named. See the docstring.
+            # Nothing is held and nothing was ever confirmed, so nothing HERE is
+            # evidence this row was ever a position. Ask the broker about the
+            # order itself rather than inferring from a list that answers a
+            # different question. See the docstring for all five answers.
+            lookup = broker.get_order(trade.entry_order_id)
+            if lookup is None or lookup.disposition is OrderDisposition.UNCLASSIFIED:
+                # Could not ask, or the broker answered with a word this build
+                # does not classify. Both are "still not established", and both
+                # leave this exactly where it was before asking.
+                result.entries_unresolved.append(trade.symbol)
+                deferred.add(trade.id)
+                continue
+
+            if lookup.disposition is OrderDisposition.WORKING:
+                # Alive, and simply not in a bounded, status-filtered list.
+                # Treated identically to being in it, right down to the split
+                # below, because it is the same fact arrived at by a different
+                # route — and two routes to one fact that behaved differently
+                # would be worth less than the one route.
+                deferred.add(trade.id)
+                if lookup.filled_qty > _TOL:
+                    # A reading, never an outcome. `RESTING` asserts that
+                    # nothing has filled, which this answer contradicts, and
+                    # `PARTIAL` asserts the rest is not coming, which a working
+                    # order has not said. Nothing is written from either.
+                    result.entries_mid_fill.append(trade.symbol)
+                    continue
+                result.entries_resting.append(trade.symbol)
+                if trade.fill_state is not FillState.RESTING:
+                    journal.confirm_fill(trade.id, fill_state=FillState.RESTING)
+                continue
+
+            if lookup.disposition is OrderDisposition.NEVER_FILLED:
+                # Settled, and settled as NOT A TRADE. The row keeps counting
+                # its planned risk and an operator retires it; nothing here
+                # invents the exit price and realised figure a close would need.
+                result.entries_never_opened.append(trade.symbol)
+                deferred.add(trade.id)
+                continue
+
+            if (
+                lookup.disposition is OrderDisposition.FILLED
+                and lookup.filled_avg_price is not None
+                and lookup.filled_qty + _TOL >= ceiling
+            ):
+                # The entry DID become a position, so the position's absence is
+                # a close after all — and now it is a close with a confirmed
+                # entry price behind it rather than the proposal's limit. Not
+                # deferred: step 1 records the exit.
+                correction = FillCorrection(
+                    symbol=trade.symbol,
+                    trade_id=trade.id,
+                    fill_state=FillState.COMPLETE,
+                    qty_before=trade.qty,
+                    qty_after=lookup.filled_qty,
+                    entry_before=trade.entry_price,
+                    entry_after=lookup.filled_avg_price,
+                )
+                journal.confirm_fill(
+                    trade.id,
+                    fill_state=FillState.COMPLETE,
+                    qty=lookup.filled_qty,
+                    entry_price=lookup.filled_avg_price,
+                )
+                result.entries_corrected.append(correction)
+                log.info(
+                    "entry_squared_against_the_order_itself",
+                    symbol=trade.symbol,
+                    trade_id=trade.id,
+                    change=correction.describe(),
+                    broker_status=lookup.broker_status,
+                    detail=(
+                        "The entry order reports FILLED and no position is "
+                        "held, so this trade opened and has since closed. The "
+                        "entry is squared against the order's own average fill "
+                        "before the close is recorded, so the realised figure "
+                        "is measured from what filled rather than from what "
+                        "was asked for."
+                    ),
+                )
+                continue
+
+            # A terminal order with part of it filled, or a FILLED one whose
+            # figures do not support the claim, against an account holding
+            # nothing. The answer contradicts itself, so nothing is written.
             result.entries_unresolved.append(trade.symbol)
             deferred.add(trade.id)
+            log.warning(
+                "entry_answer_contradicts_the_account",
+                symbol=trade.symbol,
+                order=lookup.describe(),
+                filled_qty=lookup.filled_qty,
+                submitted_qty=ceiling,
+                detail=(
+                    "The broker's answer about this entry order does not "
+                    "square with holding no position in the symbol, so it "
+                    "settles nothing and the close stays withheld."
+                ),
+            )
             continue
 
-        ceiling = trade.submitted_qty if trade.submitted_qty is not None else trade.qty
         if (
             trades_per_symbol[trade.symbol] != 1
             or position.direction != trade.direction
@@ -661,17 +809,31 @@ def _confirm_entries(
             "entry_neither_resting_nor_held",
             symbols=result.entries_unresolved,
             detail=(
-                "This entry is not in the broker's resting orders and no "
-                "position is held, and its fill was never confirmed — so "
-                "whether it ever became a position cannot be established here. "
-                "The close is WITHHELD rather than recorded: an order absent "
-                "from the resting list may have filled, been cancelled, been "
-                "rejected or simply not been returned, and closing on that "
-                "would write an exit price and a realised P&L for a position "
-                "that may never have existed. The row keeps counting its "
-                "planned risk, which overstates the total rather than "
-                "understating it. It settles itself if the entry fills; a "
-                "cancelled entry needs an operator to say so."
+                "This entry is not in the broker's resting orders, no position "
+                "is held, and the broker was asked about the order directly "
+                "and still settled nothing — the lookup failed, or the status "
+                "is one this build does not classify, or the answer "
+                "contradicts holding nothing. The close is WITHHELD rather "
+                "than recorded: closing on an unestablished order would write "
+                "an exit price and a realised P&L for a position that may "
+                "never have existed. The row keeps counting its planned risk, "
+                "which overstates the total rather than understating it, and "
+                "it settles itself once the broker can answer."
+            ),
+        )
+    if result.entries_never_opened:
+        log.warning(
+            "entry_never_became_a_position",
+            symbols=result.entries_never_opened,
+            detail=(
+                "The broker reports this entry order as cancelled, expired or "
+                "rejected with nothing filled, so the trade never opened. It "
+                "is NOT closed here: a close needs an exit price and a "
+                "realised figure, and inventing those for a position that "
+                "never existed puts a fabricated sample into metrics and into "
+                "the consecutive-loss breaker. The row still counts its "
+                "planned risk against the 2% cap — overstated, which is the "
+                "safe direction — until an operator retires it."
             ),
         )
     if result.entries_ambiguous:
