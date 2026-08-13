@@ -369,8 +369,31 @@ def build_app(token: str, *, port: int = 8788) -> Any:
             supplied = request.headers.get("authorization", "")
             prefix = "Bearer "
             offered = supplied[len(prefix) :] if supplied.startswith(prefix) else ""
+
+            # **The query parameter exists because the client cannot send a
+            # header.** claude.ai's "Add custom connector" form takes a URL and
+            # OAuth credentials and offers no custom-header field at all, so a
+            # bearer token has nowhere to go. The alternatives were implementing
+            # an OAuth authorisation server for a single-operator console, or
+            # this.
+            #
+            # **It is genuinely weaker and the docs say so rather than pretending
+            # otherwise.** A URL travels further than a header: into browser
+            # history, into `Referer`, into proxy and webserver access logs, and
+            # into a screenshot of a settings page. A header does none of that.
+            # What makes it acceptable HERE is narrow and worth stating: the
+            # exposure is a Tailscale Funnel the operator controls, the token is
+            # rotatable with one command, and the box is paper-trading. It would
+            # not be acceptable for the order path, which is why the order path
+            # is a different process this one cannot reach.
+            #
+            # The header is preferred when present, so a client that CAN send
+            # one is never downgraded to the weaker channel.
+            if not offered:
+                offered = request.query_params.get("key", "")
+
             # compare_digest on every request, including the empty one, so a
-            # missing header and a wrong token take the same path and the same
+            # missing credential and a wrong one take the same path and the same
             # time. The response never says which it was.
             if not hmac.compare_digest(offered, token):
                 return JSONResponse({"error": "unauthorized"}, status_code=401)
