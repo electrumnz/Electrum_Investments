@@ -625,6 +625,113 @@ Compared against the **mid**, not the touch: a wide out-of-hours spread would
 otherwise trip a long on the bid and a short on the ask, reporting a breach the
 traded price never reached.
 
+### The stop's WIDTH is reported, and the gate still holds no opinion on it
+
+Size is the risk ceiling divided by the stop distance, so **the denominator is
+what decides how large a position gets**. Measured live: `qwen3-coder-flash`
+proposed KO with a $0.05 stop against a $1.32 ATR — 0.04 ATR, inside the
+spread — which at the same stated dollar risk buys a position roughly
+twenty-six times larger than a 1-ATR stop would. Every figure the sizing block
+prints stays correct while that happens and the division is performed
+honestly; the exposure arrives through the denominator, where nothing was
+looking.
+
+`src/bot/stop_width.py` measures it and states it, and **refuses nothing**.
+That is the load-bearing half. `_stops_on_correct_side` checks only which SIDE
+of entry each level sits on, deliberately and permanently, and a minimum stop
+distance would be an opinion on placement dressed up as a limit — a rule
+nobody agreed to, arriving through the back door. Do not "improve" this into a
+rejection.
+
+Four properties:
+
+- **Two counters, never one.** A symbol with no ATR is `stops_unmeasured` and
+  is never counted as not-tight. `stops_unchecked` one column across: counting
+  it as fine would make the reassuring answer the one an outage produces.
+- **A zero ATR is unmeasurable, not infinitely tight.** A flat instrument has
+  no denominator, and a very large number there would be a plausible wrong
+  figure on the surface built to refuse them.
+- **The Decisions page DERIVES it** from `MarketInputs.readings` — the figures
+  that cycle recorded — rather than reading a stored field, so there is no
+  third fact to disagree with the other two. One `CarriesATR` protocol serves
+  both `Indicators` and `IndicatorSnapshot`, because two implementations of one
+  piece of arithmetic are two answers and the one on the page is the one nobody
+  re-checks. A record predating `readings` renders NOT MEASURED, which is
+  honest: nothing recovers a number never written down.
+- **It renders AFTER the gate's verdict**, so nothing can read it as an input
+  to a decision it had no part in. The tight case states the CONSEQUENCE
+  ("26x") rather than only the ratio, because 0.04 reads as a small number and
+  the position it buys is a large one.
+
+### The request names a model; the response says what answered
+
+Two endpoints serve this repository's model calls, and they can disagree
+without anything raising. A catalogue aliasing a retired id, a proxy named in
+`ANTHROPIC_BASE_URL` routing elsewhere, an endpoint serving a familiar name
+from unfamiliar weights — every one succeeds, validates against the schema, is
+priced from the REQUESTED model's price sheet, and produces a completely
+ordinary-looking cycle whose orders were sized by weights nobody named. This
+is the endpoint-versus-configuration mistake recorded above, one level in.
+
+`CallUsage.served_as_requested` and `Decision.served_as_requested` are both
+three-valued, and the third value is the point: `None` is "no model id came
+back", which must not collapse into agreement or into a substitution nobody
+performed. The response's `model` field is read defensively for the reason the
+token counts are — the SDK builds responses with unchecked construction — and
+a non-string reads as unknown rather than being coerced with `str()`, which
+would manufacture a mismatch out of an object that is not a name.
+
+**It REPORTS and never refuses.** An alias is an ordinary thing for a
+catalogue to do, and throwing away a validated decision with its proposals,
+its assessments and its spent cost over a naming difference would cost far
+more than it protects. It reaches `claude_responded`, `cycle_complete`, the
+`Decision` audit record, and the Decisions page — where it is named beside the
+COST, because that is the figure a substitution makes wrong.
+
+### A fourth agent that can reach the web, and nothing else
+
+`souls/kuiil.md` and `deploy/run-research.sh`. The dreamer reasons about
+cicada broods with no way to look anything up, so every hop it writes is
+reference knowledge it already had or an invention. The researcher goes and
+looks.
+
+**It returns quotes and URLs and never conclusions, because a summary launders
+provenance.** The distilled sentence has no author and no date; the paragraph
+it came from had both, and after the distillation a reader cannot tell which
+half was published and which half the model supplied. So `research.Citation`
+has nowhere to put one — no summary, no implication, no significance — and the
+field overlap with `OrderProposal` AND with `Dream` is pinned empty. The second
+is the subtle half: `Dream` carries `symbols` and `asset_class_key`, which are
+a live permission once adopted, and a route from a fetched page to a
+tradeable-symbol claim is the connection this must never make.
+
+**Nothing web-derived may become a gating input**, which is `docs/HANDOFF.md`'s
+own rule. The module imports none of risk, broker, journal, reconcile,
+mcp_server, grants, models, dreaming or position_actions, proved by parsing
+its AST — the shape of the test pinning `TraderPowers` away from the broker —
+and it makes no network call itself.
+
+**A third Hermes home, because the quarantine has to be the process.** No
+`mcp_servers` block at all, and the wrapper greps its own config and refuses
+if one appears — and refuses equally when the config cannot be READ, because
+"I could not establish that this instance is isolated" and "this instance is
+isolated" are different answers. Its config is an ALLOWLIST where the other
+two are denylists: a denylist admits whatever the next release adds, and here
+that is a web-reading process gaining a capability nobody chose, invisibly.
+
+`KNOWN_SOULS` is narrower than `ALL_SOULS` now. Kuiil ships and no chat
+request may select it, because the Chat page's instance is the one holding
+`place_order`. The registry test enumerates the DIRECTORY rather than a
+hand-written tuple, and every shipped soul is held to the shared rails — a
+fourth character must not arrive carrying none of them.
+
+**`RESEARCHER` is a third A2A speaker and costs a constant**, because
+`DreamMessage.speaker` was already open for exactly this. It is not an
+`AGENT_SPEAKER`, so it does not move `confer.last_agent_turn_at` — a citation
+is not a negotiation, and moving the marker would silence the change it just
+created. It IS a new voice to `has_something_changed`, which is right: a
+published source under the weakest hop changes what adopting the dream means.
+
 ### The journal records the PROPOSAL, and a fill is not atomic
 
 `record_fill` runs immediately after `broker.place_order` and writes the
@@ -716,10 +823,26 @@ Miss it and the cap silently has nothing to count. This was a real bug, fixed in
 `14b88c8`. A held position with no journal entry has an unknowable stop, so its
 risk is reported as **missing** rather than guessed at.
 
-**One gate now goes further and REFUSES on that missing figure** — the per-class
-total-risk cap, where an unknown in the class means the cap cannot be enforced
-at all. Reporting is still the rule everywhere else; that one is the stated
-exception, not the new default.
+**TWO gates now go further and REFUSE on that missing figure**, and the second
+one is the account-wide 2%. The per-class total-risk cap was the first, where
+an unknown in the class means the cap cannot be enforced at all.
+`_total_risk` joined it because the same argument turned out to apply to the
+portfolio rule and nothing was making it — measured against the shipped
+config, an unknown position let a proposal through onto a book already at
+2.79% of a 2% cap, because `max_class_total_risk_pct` is configured on crypto
+alone and crypto is disabled. So in the shipped configuration NO gate refused
+on missing risk, while this file said one did.
+
+**The live consequence is real and is the right way round.** While a held
+position has no journal row, nothing new opens. That is recoverable by closing
+the position or journalling it, and it is better than a 2% rule that binds
+only when the paperwork happens to be complete.
+
+Reporting is still the rule everywhere else — `reconcile`'s
+`risk_is_understated`, `stops_unchecked`, `calendar_degraded`. What separates
+these two is that they are the gates whose ARITHMETIC is the missing number:
+a cap cannot be applied to a total it cannot compute, so there is no partial
+answer to report.
 
 ### A resting stop whose level nobody can read is most of the way to no stop
 
@@ -1322,6 +1445,36 @@ Three properties are load-bearing, and all three are the same principle:
 **The banner names the command that clears it** (`RECHECK_COMMAND`), because a
 warning that outlives the fix by six hours teaches an operator to ignore the
 next one.
+
+**A key that has not expired is not the same as a URL that answers, and that
+gap was live.** Measured 13 Aug 2026: every dashboard path on
+`https://mudhorn.tailc04415.ts.net` returned 404 from `server: uvicorn` while
+`POST /mcp` returned 401 — the Funnel was proxying to the MCP server rather
+than to `mudhorn-web`. The unit was `active (running)` and healthy on
+loopback, the checkout was clean, and this module reported the link in perfect
+health, because it only ever looked at the key.
+
+That is this module's OWN failure shape — service green, journal filling, and
+the only symptom a URL that does not answer — arriving through a cause it
+structurally could not see. `serves_the_dashboard` reads what the Funnel is
+actually proxied to out of `tailscale serve status --json` and compares it
+against `DASHBOARD_PORT`.
+
+Three things about it:
+
+- **Three-valued, and `None` is "could not ask".** No serve output, unreadable
+  serve output, or no host with the Funnel on at all — none of those may read
+  as True, and none of them escalates either. A check that raised an alarm on
+  its own inability to read would fire on every box that does not collect the
+  serve output, which is how a real warning gets trained out of a reader.
+- **A host served on the tailnet but NOT funnelled is ignored.** It says
+  nothing about the public URL, and counting it would let a correct private
+  mapping vouch for a broken public one.
+- **`funnel_hostnames` was already there and answered the wrong question.** It
+  said which hosts had the Funnel switched ON — which a Funnel pointed at the
+  wrong port satisfies perfectly — and it was parsed, stored and read by
+  nothing. `Dream.is_offerable` in a second place: defined, never called, and
+  the feature inert behind it.
 
 ### A feed writes into the model's document, so `.strip()` is not enough
 

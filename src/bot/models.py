@@ -66,6 +66,37 @@ def _require_every_property(schema: dict[str, Any]) -> None:
 EVERY_FIELD_REQUIRED = ConfigDict(json_schema_extra=_require_every_property)
 
 
+def served_matches_requested(*, requested: str, served: str) -> bool | None:
+    """Did the endpoint answer with the model that was asked for?
+
+    **Three-valued, and the third value is the point.** An empty string on
+    either side means the question could not be settled — the reply named no
+    model, or none was recorded to compare against — and that must never
+    collapse into agreement, nor into a substitution nobody performed.
+
+    **A dated snapshot of the requested alias counts as the same model.**
+    Anthropic resolves `claude-sonnet-5` to `claude-sonnet-5-20260401`, so
+    exact equality would report a mismatch on every ordinary Anthropic call —
+    and a warning that fires on every call is a warning nobody reads, which
+    would leave the real substitution as invisible as it was before anyone
+    looked. The exemption is deliberately NARROW: a hyphen and eight digits.
+    `nemotron-3-ultra` answered by `nemotron-3-ultra-550b` is a different model
+    with a plausible name, and it reads as False.
+
+    It lives here, in the leaf module, so `CallUsage` and `Decision` share ONE
+    implementation. Two copies of this comparison would be two answers, and the
+    one rendered on the Decisions page is the one nobody re-checks — the same
+    reasoning that gives `stop_width` a single `CarriesATR` protocol instead of
+    two functions.
+    """
+    if not requested or not served:
+        return None
+    if served == requested:
+        return True
+    suffix = served.removeprefix(requested)
+    return suffix.startswith("-") and len(suffix) == 9 and suffix[1:].isdigit()
+
+
 class Direction(StrEnum):
     BUY = "buy"
     SELL = "sell"
@@ -1563,3 +1594,43 @@ class Decision(BaseModel):
     claude_cached_tokens: int = 0
     estimated_cost_usd: float = 0.0
     notes: str = ""
+
+    # **Which model actually produced this decision, as the endpoint named it.**
+    # The token fields above are called `claude_*` because they are written into
+    # `audit/*.jsonl`, which is append-only and never migrated — renaming them
+    # would read every historical cycle back as `0 in / 0 out`. This one is new,
+    # so it gets the honest name.
+    #
+    # `None` means the response carried no model id, or the record predates this
+    # field. It is not "the requested one": a cycle whose served model is
+    # unknown and a cycle served by the model that was asked for are different
+    # findings, and only one of them is reassuring.
+    # `""` rather than `None`, matching `CallUsage`, so one convention answers
+    # "which model" everywhere. On this record the empty string covers both
+    # ways the answer can be missing — the reply named no model, and the record
+    # predates the field — and they are the same finding to a reader: nobody
+    # can say what produced this cycle. What it must never read as is
+    # agreement.
+    served_model_id: str = ""
+
+    # And what was ASKED for, so the two can be compared by anything reading
+    # this record back. Storing only the served id would leave the Decisions
+    # page comparing against whatever the process is configured for TODAY,
+    # which is a different fact about a different moment.
+    requested_model_id: str = ""
+
+    @property
+    def served_as_requested(self) -> bool | None:
+        """Did the endpoint answer with the model this cycle asked for?
+
+        One implementation, shared with `CallUsage.served_as_requested` through
+        `served_matches_requested` — two copies of this comparison would be two
+        answers, and the one on the page is the one nobody re-checks.
+
+        It matters on the Decisions page in particular because that page prints
+        a COST, and the cost was computed from the price sheet of the model
+        that was asked for. A substitution makes the figure beside it wrong.
+        """
+        return served_matches_requested(
+            requested=self.requested_model_id, served=self.served_model_id
+        )

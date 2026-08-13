@@ -185,7 +185,23 @@ def _phase_at(local: datetime) -> tuple[MarketPhase, datetime, MarketPhase]:
     if clock < REGULAR_END:
         return MarketPhase.OPEN, _at(local, REGULAR_END), MarketPhase.POST
     if clock < POST_END:
-        return MarketPhase.POST, _at(local, POST_END), MarketPhase.OVERNIGHT
+        # Every other day's after-hours session rolls straight into an overnight
+        # one at 8pm. FRIDAY'S DOES NOT — the weekend branch above reads Friday
+        # 20:00 as WEEKEND, and trading does not resume until Sunday 20:00.
+        #
+        # Saying OVERNIGHT here was wrong for the whole four-hour Friday
+        # after-hours session, and wrong in the direction that reads as
+        # reassurance: `render_sessions` put "Next: overnight at 20:00 Fri" into
+        # the model's own market-context block, so a proposal made at 17:30 on a
+        # Friday was told the market reopens in two and a half hours when it
+        # actually reopens in fifty-two. The phase itself and the countdown were
+        # both right; only the name of what comes next was invented, which is
+        # exactly the plausible-wrong-figure shape this module exists to refuse.
+        #
+        # Derived from the same weekday test the weekend branch uses rather than
+        # hardcoded a second time, so the two cannot drift apart.
+        after = MarketPhase.WEEKEND if weekday == 4 else MarketPhase.OVERNIGHT
+        return MarketPhase.POST, _at(local, POST_END), after
     # After 8pm on Mon-Thu: overnight, running until 4am tomorrow.
     return MarketPhase.OVERNIGHT, _at(local + timedelta(days=1), PRE_START), MarketPhase.PRE
 

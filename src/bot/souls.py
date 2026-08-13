@@ -24,6 +24,7 @@ being wrong would put a confident, incorrect message in front of someone.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -40,6 +41,9 @@ DEFAULT_SOULS_DIR = Path(__file__).resolve().parents[2] / "souls"
 YODA = "yoda"
 GROGU = "grogu"
 ARMORER = "armorer"
+# The researcher (TODO item 26). Deliberately NOT in `KNOWN_SOULS` below, and
+# that is the interesting part rather than an omission — see the note there.
+KUIIL = "kuiil"
 
 # The set a request body is checked against before it reaches `load_soul`, which
 # builds a path from the name. One list, here, rather than a literal repeated at
@@ -51,6 +55,25 @@ ARMORER = "armorer"
 # worst case of getting it wrong is the wrong voice; refusing the question
 # outright would be the larger failure. See `bot.web.app.chat`.
 KNOWN_SOULS = frozenset({YODA, GROGU, ARMORER})
+
+# Every character file that ships, which is a DIFFERENT question from which
+# ones a chat request may name, and the two sets stopped being the same when
+# the researcher arrived.
+#
+# `KUIIL` is in this one and not in `KNOWN_SOULS`, deliberately. The researcher
+# is not a voice on the Chat page: it runs on the dream timer, in its own
+# Hermes home, with the `web` toolset and no MCP server — see
+# `deploy/run-research.sh`. Letting a request body select it would put a
+# character whose entire job is quoting other people's pages into the process
+# that answers questions about the account, which is the wrong voice on the
+# wrong tools.
+#
+# Both sets exist because the test that pins them is enumerating the DIRECTORY
+# now rather than a hand-maintained tuple. A soul added to `souls/` and
+# registered nowhere is a character nobody can reach; a soul in `KNOWN_SOULS`
+# with no file is a name that falls back silently. Only one list can be
+# checked against the filesystem, and it has to be this one.
+ALL_SOULS = frozenset({YODA, GROGU, ARMORER, KUIIL})
 
 
 @dataclass(frozen=True)
@@ -116,14 +139,43 @@ class Soul:
         )
 
 
+#: A soul name that can only ever be a filename inside `souls_dir`.
+#:
+#: Letters, digits, underscore and hyphen. No dot, no slash, no backslash, so
+#: neither `..` nor an absolute path survives.
+_SAFE_NAME = re.compile(r"^[A-Za-z0-9_-]+$")
+
+
 def load_soul(name: str, *, souls_dir: Path | None = None) -> Soul:
     """Read one soul. Never raises.
 
     An unreadable soul is logged and reported as absent, for the reason in the
     module docstring: this is decoration on a surface whose job is to keep
     working.
+
+    **A name that is not a bare token is refused here, not only at the call
+    site.** `KNOWN_SOULS` above says a name outside it "reaching a path join is
+    a traversal", and every caller today does check — `bot.web.app.chat` maps an
+    unknown name to `YODA`, and the other three pass a constant. That is a
+    guarantee held by four callers remembering, which is the shape that failed
+    when `/live` was left out of the hand-maintained route list.
+
+    Measured, so it is a fact rather than a worry: `load_soul("../CLAUDE")`
+    returned a 180 KB file from the repository root, wrapped in
+    `--- begin character ---` and ready to be sent to a model as a personality;
+    `souls_dir / "/etc/anything.md"` discards the directory entirely, because a
+    join with an absolute path does. The `.md` suffix narrows what can be read
+    and does not stop it.
+
+    Refusing yields `Soul.absent`, which is the same answer a missing file
+    gives, so the failure direction is unchanged: a voiceless agent rather than
+    a dead page. The call site's fallback to `YODA` still runs first and is
+    still the better answer; this is the lock underneath it.
     """
     directory = souls_dir or DEFAULT_SOULS_DIR
+    if not _SAFE_NAME.match(name):
+        log.warning("soul_name_refused", soul=name)
+        return Soul.absent(name)
     path = directory / f"{name}.md"
     try:
         text = path.read_text(encoding="utf-8")

@@ -438,6 +438,32 @@ OPERATOR = "operator"
 # in a stronger form" genuinely changes what adopting the parent means.
 FUSION = "fusion"
 
+# The researcher (TODO item 26), speaking into a dream's transcript with
+# quotations it found. A third speaker rather than a second dreamer, and the
+# open `speaker` field is what makes that free — this constant exists to NAME
+# the two consequences, both of which fall out of rules already written and
+# both of which are the answer we want.
+#
+# **It is not an AGENT_SPEAKER, so it does not mark an exchange as having
+# happened.** `confer.last_agent_turn_at` reads only `DREAMER` and `TRADER`,
+# because that marker answers "when did the two of them last negotiate". A
+# researcher is not negotiating; it is handing over other people's sentences.
+# If it moved the marker it would silence the change it just created — the same
+# trap the operator's own note is kept out of the marker to avoid.
+#
+# **It IS a new voice to `confer.has_something_changed`**, for the same reason
+# `FUSION` is, and this half is worth stating rather than discovering. A dream
+# sitting in the vault becomes conferrable again when evidence arrives for it,
+# because "there is now a published source under the weakest hop" genuinely
+# changes what adopting it means. That is the change gate doing its job rather
+# than a loophole in it: every other cap — six turns, two dreams a run, the
+# lifetime ceiling — still holds while they discuss it.
+#
+# What it must never become is a mover. `_apply_move`'s rules are closed on
+# purpose, and this speaker is absent from all of them: it may add to a
+# transcript and nothing else.
+RESEARCHER = "researcher"
+
 # The dreamer's own shelves. It may move a dream between any of these, in any
 # direction, and may delete from them.
 #
@@ -971,7 +997,21 @@ class DreamMessage:
 # class docstring. `offer`, `accept` and `return` are written by the store
 # itself when an adoption starts or ends, so the transcript is complete even if
 # neither agent thought to narrate it.
-MESSAGE_KINDS = ("question", "answer", "offer", "accept", "return", "note")
+#
+# `citation` is the researcher's, and it is its own kind rather than a `note`
+# so a surface can render it as somebody else's words with a source, instead of
+# as a sentence one of the agents wrote. That distinction is the entire product
+# of the researcher — a quotation whose provenance a reader can no longer see
+# has become the summary the whole arrangement refuses to produce.
+MESSAGE_KINDS = (
+    "question",
+    "answer",
+    "offer",
+    "accept",
+    "return",
+    "note",
+    "citation",
+)
 
 
 @dataclass(frozen=True)
@@ -2026,14 +2066,47 @@ def carry_forward_grading(
     on the same question, which is the resource this whole arrangement is
     careful with. `is_answered` is the test, and both halves of the answer
     travel with it.
+
+    **And an answered condition the incoming list simply LEAVES OUT is kept.**
+    Carrying the verdict across a restatement was only half the rule, and the
+    other half was the exploitable one: the output used to be exactly
+    `incoming`, so a step that did not mention a claim deleted it. Measured
+    end to end through `Dreamer.run_once` — the operator ruled out an
+    observation, the next step returned the list minus that one, and the dream
+    went workbench → vault → adopted, granting a symbol in no allowlist. The
+    refutation was not overridden or argued with; it was gone, with nothing on
+    any surface saying it had ever been given. `ruled_out_conditions` was
+    empty, so even the absence was invisible.
+
+    Omission is strictly stronger than restatement, which is why it is worth
+    stating separately: restating a refuted claim puts it back on somebody's
+    worklist, and dropping it removes the thing that was blocking the vault.
+    `all_conditions_met` needs every condition fulfilled, so a ruled-out one is
+    a settled fact that the dream cannot travel — and a model must not be able
+    to change a settled fact by not mentioning it. Same rule as the trading
+    agent being unable to delete: an answer is a record, and a record is not
+    the answerer's to withdraw.
+
+    Both halves of an answer are retained, not only the "no". One rule reads as
+    one rule, and a retained fulfilment costs nothing — it is already met, so
+    it blocks nothing. A rule that only ever preserved refusals would itself be
+    a signal, and asymmetric bookkeeping is how the next reader talks
+    themselves out of it.
+
+    Retained conditions are appended after the incoming list, in the order they
+    already had. Threading them back into their original positions would need a
+    second ordering nobody stated; appending keeps the step's own list readable
+    as the step wrote it, with what it dropped visible underneath.
     """
     graded = {c.key: c for c in existing if c.is_answered}
     out: list[DreamCondition] = []
+    restated: set[tuple[str, ...]] = set()
     for condition in incoming:
         was = graded.get(condition.key)
         if was is None:
             out.append(condition)
             continue
+        restated.add(condition.key)
         out.append(
             replace(
                 condition,
@@ -2044,6 +2117,25 @@ def carry_forward_grading(
                 ruled_out=was.ruled_out,
             )
         )
+
+    dropped = [c for c in existing if c.is_answered and c.key not in restated]
+    if dropped:
+        # Loud rather than silent. Retaining these quietly would swap one
+        # surprise for another: a reader comparing the model's step against the
+        # stored dream would find conditions the step never wrote, with nothing
+        # saying where they came from.
+        log.warning(
+            "dream_conditions_answered_but_omitted",
+            kept=[c.text or c.subject for c in dropped],
+            ruled_out=sum(1 for c in dropped if c.ruled_out),
+            detail=(
+                "A restated condition list left out claims that had already "
+                "been answered. They are kept: an answer is a record, and a "
+                "ruled-out condition is what stops a dream reaching the vault. "
+                "Dropping one would be a settled question un-asked by omission."
+            ),
+        )
+    out.extend(dropped)
     return out
 
 
@@ -2156,6 +2248,18 @@ def plan_fusion(parents: Sequence[Dream]) -> Fusion:
       than a second copy of it. `all_conditions_met` then needs all of them,
       which makes a fusion harder to promote than either parent — correct, for
       a strictly stronger claim.
+
+      **A claim two parents answered OPPOSITE ways arrives RULED OUT**, and
+      that is the AND on `checked` in a second place. The answers used to be
+      collected into a flat list and read into a dict, so the LAST parent won
+      — which meant the dreamer chose which of the operator's two answers
+      survived by choosing the order it listed the parents in. Measured:
+      `[A, B]` and `[B, A]` over the same pair produced a child that was
+      refuted and a child that was met. A model picking between two operator
+      answers is a model settling a condition by proxy, on the route that ends
+      in a symbol permission. In dispute the refusal stands: it is the reading
+      that makes the fusion harder to promote, and a fusion is not an
+      endorsement.
     - **`symbols` is the union and the class resolves only when the parents
       agree.** A disagreement leaves it empty, which grants nothing: the
       `scope_symbols` rule that one class or none may be claimed, arriving from
@@ -2215,9 +2319,23 @@ def plan_fusion(parents: Sequence[Dream]) -> Fusion:
                 continue
             keys.add(condition.key)
             incoming.append(_repin(condition, parent, position_of))
+    # One answer per claim, resolved BEFORE `carry_forward_grading` sees them.
+    # Handing it the flat list let a dict comprehension pick the last one
+    # written, so the order the parents were listed in decided which of two
+    # opposite operator answers the child carried — a choice the dreamer makes
+    # and must not have. In dispute the refusal wins, for the same reason a hop
+    # one parent sourced and another did not arrives unchecked.
+    answered: dict[tuple[str, ...], DreamCondition] = {}
+    for parent in parents:
+        for condition in parent.conditions:
+            if not condition.is_answered:
+                continue
+            held = answered.get(condition.key)
+            if held is None or (condition.ruled_out and not held.ruled_out):
+                answered[condition.key] = condition
     conditions = tuple(
         carry_forward_grading(
-            [c for parent in parents for c in parent.conditions if c.is_answered],
+            list(answered.values()),
             incoming,
         )
     )
@@ -2502,6 +2620,24 @@ def _dream_payload(dream: Dream) -> tuple[object, ...]:
     One tuple shared by the INSERT and the UPDATE, so a column added to one
     cannot be forgotten in the other — which is a silent write of a stale value
     rather than an error.
+
+    **Every stamp goes through `_iso_utc`, and this was the one place it did
+    not.** `adoptions`, `dream_messages` and `_apply_move` all normalise;
+    `save` called `.isoformat()` on whatever the object carried. That matters
+    because `in_vault` orders on `vault_entered_at` as TEXT, and ISO text only
+    sorts by instant when every row carries the same offset — which is exactly
+    the bug this repository has now paid for twice. A `+13:00` stamp
+    (Pacific/Auckland, which the dream timer's schedule uses BY DESIGN) sorts
+    thirteen hours later than it is: measured, a dream shelved at
+    2026-08-11 20:00Z sorted AFTER one shelved ten hours later, so
+    `confer.run`'s longest-waiting-first reversal answered it LAST — the
+    starvation that reversal exists to prevent, with the code that prevents it
+    still in place.
+
+    No production caller writes a non-UTC stamp today, so this closed a latent
+    instance rather than a live fault. It is closed anyway: the invariant is
+    the thing `_iso_utc` was written to make unnecessary to think about, and an
+    invariant with an exception is an invariant nobody can rely on.
     """
     return (
         dream.title,
@@ -2514,10 +2650,10 @@ def _dream_payload(dream: Dream) -> tuple[object, ...]:
         json.dumps([h.to_row() for h in dream.chain]),
         json.dumps([t.to_row() for t in dream.thoughts]),
         json.dumps(dream.instruments),
-        dream.created_at.isoformat(),
-        dream.updated_at.isoformat(),
+        _iso_utc(dream.created_at),
+        _iso_utc(dream.updated_at),
         str(dream.vault),
-        dream.vault_entered_at.isoformat(),
+        _iso_utc(dream.vault_entered_at),
         json.dumps([c.to_row() for c in dream.conditions]),
         json.dumps(_symbols(dream.symbols)),
         dream.asset_class_key,
@@ -4120,6 +4256,22 @@ class DreamStore:
         )
         return SettleResult(ok=True, dream_id=dream_id, condition=settled)
 
+    def count_toward_cap(self, vault: Vault, *, now: datetime) -> int:
+        """How many dreams the CAP counts on `vault` right now.
+
+        Deliberately a different question from `counts_by_vault`, which counts
+        rows on the shelf, and the two disagree on ADOPTED the moment a grant
+        expires — see `_is_full` for why the cap counts live grants there.
+
+        It exists because a readout that showed only the row count told the
+        operator `adopted 3/3` while `has_room` said True and
+        `granted_symbols` was empty: the *inverse* of the bug that once bricked
+        the shelf, and just as wrong. Neither figure is the whole answer, so a
+        surface has to be able to state both rather than pick.
+        """
+        with self._connect() as conn:
+            return self._count_toward(vault, now=now, exclude=None, conn=conn)
+
     def has_room(
         self, vault: Vault, *, now: datetime, caps: VaultCaps | None = None
     ) -> bool:
@@ -4379,17 +4531,40 @@ class DreamStore:
             id=int(cursor.lastrowid or 0),
         )
 
-    def messages(self, dream_id: int, limit: int = 200) -> list[DreamMessage]:
+    def messages(
+        self, dream_id: int, limit: int | None = 200
+    ) -> list[DreamMessage]:
         """The conversation on one dream, oldest first.
 
         Oldest first because this is a transcript rather than a feed: a
         negotiation read newest-first is a negotiation read backwards.
+
+        **`limit=None` reads all of it, and a caller COUNTING has to.** The
+        default returns the oldest 200 and says nothing when it truncates,
+        which is right for rendering a transcript into a prompt and wrong for
+        arithmetic. Every conference cap is counted over this list —
+        `exchanges_so_far` counts opening offers, `epoch_started_at` reads the
+        newest change signal, `last_agent_turn_at` is the marker the change
+        gate measures against — and measured on 232 rows, twelve honest
+        exchanges past the window read as ZERO: the lifetime ceiling unreached,
+        the epoch empty, and the marker `None`, which
+        `has_something_changed` reads as "no exchange on this dream yet" and
+        answers True to forever. The cap the module calls *the one that
+        actually stops them talking* was off, on a read nobody had noticed was
+        partial.
+
+        `render_transcript`'s own note says it is "bounded by the caps rather
+        than by a slice here", which is circular while the caps are bounded by
+        the slice. The two questions are separated instead: counting reads all
+        of it, rendering keeps the default.
         """
+        sql = "SELECT * FROM dream_messages WHERE dream_id=? ORDER BY at, id"
+        params: tuple[object, ...] = (dream_id,)
+        if limit is not None:
+            sql += " LIMIT ?"
+            params = (dream_id, limit)
         with self._connect() as conn:
-            rows = conn.execute(
-                "SELECT * FROM dream_messages WHERE dream_id=? ORDER BY at, id LIMIT ?",
-                (dream_id, limit),
-            ).fetchall()
+            rows = conn.execute(sql, params).fetchall()
         return [
             DreamMessage(
                 id=int(r["id"]),
@@ -4899,14 +5074,24 @@ class DreamStore:
         A vault with a `None` TTL — the archive — never expires. The archive IS
         the retirement state, so an expiry on it would be an expiry on an
         expiry.
+
+        A naive `now` is read as UTC rather than raising, which is what
+        `Adoption.is_live` already does and what this did not: measured,
+        `expired(datetime(2027, 1, 1))` came back `TypeError: can't subtract
+        offset-naive and offset-aware datetimes`. Two functions on one store
+        answering the same argument must not fail differently — the rule
+        `trailing_stop_level` states about its own two sides — and the caller
+        here is a scheduled command, where an exception is a job that silently
+        stopped rather than a shelf that was swept.
         """
         windows = ttls or DEFAULT_TTLS
+        stamp = _as_utc(now)
         out: list[Dream] = []
         for dream in self.recent(limit=10_000):
             days = windows.days_for(dream.vault)
             if days is None:
                 continue
-            if now - dream.vault_entered_at > timedelta(days=days):
+            if stamp - _as_utc(dream.vault_entered_at) > timedelta(days=days):
                 out.append(dream)
         return out
 

@@ -1313,9 +1313,18 @@ class Conference:
         used its whole life, has it used the current epoch, and is there
         anything new to talk about. The first two cost a transcript read and the
         third costs nothing more, so a skip never reaches a model.
+
+        **The read is COMPLETE, and that is load-bearing rather than tidy.**
+        `DreamStore.messages` defaults to the oldest 200 turns and says nothing
+        when it truncates, which is right for a prompt and wrong for a count:
+        every cap below is arithmetic over this list, and measured on 232 rows
+        twelve honest exchanges past the window read as zero — the lifetime
+        ceiling unreached, the epoch empty, and `last_agent_turn_at` answering
+        `None`, which the change gate reads as "they have never spoken" and
+        answers True to forever.
         """
         dream_id = int(dream.id or 0)
-        messages = self._store.messages(dream_id)
+        messages = self._store.messages(dream_id, limit=None)
 
         lifetime = exchanges_so_far(messages)
         if lifetime >= MAX_EXCHANGES_LIFETIME:
@@ -1514,8 +1523,11 @@ class Conference:
                     caps=caps,
                 )
 
+        # Complete, like every other counting read here. A number in a note
+        # telling the two of them how many exchanges remain must not be
+        # computed over the oldest 200 turns of a longer conversation.
         remaining = MAX_EXCHANGES_PER_EPOCH - exchanges_in_epoch(
-            dream, self._store.messages(dream_id)
+            dream, self._store.messages(dream_id, limit=None)
         )
         self._note(
             dream_id,
@@ -1984,9 +1996,12 @@ class Conference:
         means.** An exchange adds exactly one offer, so the count passes through
         the cap rather than jumping it, and `confer_once` is reachable directly
         from a command — with `>=` it would repeat the note on every exchange
-        past the cap, which is the thing this method exists to prevent.
+        past the cap, which is the thing this method exists to prevent — and
+        `==` is exactly why the read below must be COMPLETE. A count taken over
+        a truncated transcript does not pass through the cap at all, so the
+        sentence announcing the ceiling would simply never be written.
         """
-        messages = self._store.messages(result.dream_id)
+        messages = self._store.messages(result.dream_id, limit=None)
         lifetime = exchanges_so_far(messages)
         dream = self._store.get(result.dream_id)
         held = exchanges_in_epoch(dream, messages) if dream is not None else lifetime

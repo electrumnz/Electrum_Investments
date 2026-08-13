@@ -1093,6 +1093,22 @@ MAX_ROWS = 200
 # should come back as an error rather than as a hung chat turn.
 QUERY_STEP_LIMIT = 5_000_000
 
+# The largest string or blob one query may build, in bytes.
+#
+# **The progress handler bounds STEPS and a step can be arbitrarily large**,
+# which is the gap this closes. Measured through `run_query` with the guard in
+# place: `SELECT length(randomblob(1000000000))` returned `ok` after 6.8 seconds
+# having taken the process to 988 MB RSS — one VM instruction, so the handler
+# never got a chance to abort it. SQLite's own default cap on a value is 1 GB,
+# and the droplet has 2 GB total with the trading loop and the web unit already
+# on it, so "bounded runtime" was true of the clock and false of the memory.
+#
+# 16 MiB is far above anything this index actually holds — the widest column is
+# a rationale capped at a few hundred characters — while leaving room for a
+# `group_concat` over a real result set. A query that wants more comes back as
+# an error, which is the same answer a query that ran too long gets.
+QUERY_VALUE_LIMIT_BYTES = 16 * 1024 * 1024
+
 
 def _read_only_connection(db_path: Path) -> sqlite3.Connection:
     """A connection that cannot write and cannot run forever.
@@ -1102,9 +1118,14 @@ def _read_only_connection(db_path: Path) -> sqlite3.Connection:
     so a bad query returns an error instead of hanging a chat turn. Both
     reading paths share this, so neither can be given one lock and not the
     other.
+
+    The value limit is the third, and it is there because the second does not
+    cover it: the handler counts VM instructions and one instruction can
+    allocate a gigabyte. See `QUERY_VALUE_LIMIT_BYTES`.
     """
     conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=10.0)
     conn.row_factory = sqlite3.Row
+    conn.setlimit(sqlite3.SQLITE_LIMIT_LENGTH, QUERY_VALUE_LIMIT_BYTES)
     steps = {"n": 0}
 
     def _guard() -> int:

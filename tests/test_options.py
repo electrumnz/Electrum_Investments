@@ -184,6 +184,84 @@ def test_missing_price_still_warns_on_time():
     assert alert.needs_action
 
 
+def test_a_written_option_is_assigned_and_claims_no_funding_answer():
+    """A SHORT position arrives with a NEGATIVE quantity, and three things
+    followed from nobody having looked at the sign.
+
+    `exercise_cost_usd` multiplied it straight through, so the cost came back
+    NEGATIVE — and `buying_power_usd >= cost` was then true for every account
+    on earth, which meant the most dangerous position on the book reported that
+    it could fund itself. The message also said AUTO-EXERCISED, when Alpaca's
+    own documented behaviour for a written option finishing in the money is
+    AUTO-ASSIGNMENT: done TO the account, and not declinable.
+
+    So: the cost is a magnitude, the funding answer is `None` rather than the
+    reassuring one, and the sentence names the event that actually happens.
+    """
+    c = parse_occ_symbol(SPY_CALL)
+    assert c is not None
+    now = c.expiry_close_utc - timedelta(days=0.5)
+
+    alert = assess_expiry(
+        c, qty=-5, now=now, warn_days=7.0, underlying_price=700.0, buying_power_usd=100.0
+    )
+
+    assert alert.is_short is True
+    assert alert.in_the_money is True
+    assert alert.exercise_cost_usd == pytest.approx(580 * CONTRACT_MULTIPLIER * 5)
+    assert alert.can_fund_exercise is None, "an unanswerable question is not a yes"
+    assert "ASSIGNED" in alert.message
+    assert "AUTO-EXERCISED" not in alert.message
+    assert alert.needs_action
+
+
+def test_a_long_put_is_not_described_as_costing_nothing():
+    """`exercise_cost_usd` is correctly 0 for a put — no cash is needed — and
+    the call branch rendered that as "leaves a stock position costing $0".
+
+    Exercising a long put DELIVERS the stock, so an account that does not hold
+    the shares ends up SHORT. A zero that is arithmetically right and reads as
+    "nothing happens" is the plausible-wrong-figure failure, one branch along.
+    """
+    c = parse_occ_symbol(SPY_PUT)
+    assert c is not None
+    now = c.expiry_close_utc - timedelta(days=0.5)
+
+    alert = assess_expiry(
+        c, qty=5, now=now, warn_days=7.0, underlying_price=400.0, buying_power_usd=100.0
+    )
+
+    assert alert.in_the_money is True
+    assert alert.exercise_cost_usd == 0.0
+    assert alert.can_fund_exercise is None, "funding decides nothing for a put"
+    assert "costing $0" not in alert.message
+    assert "SHORT stock position" in alert.message
+    assert alert.needs_action
+
+
+def test_a_zero_strike_occ_symbol_is_not_an_option_rather_than_a_raise():
+    """`parse_occ_symbol` promises `None` for anything it cannot parse, and an
+    OCC-shaped symbol with an all-zero strike made it RAISE instead.
+
+    `OptionContract.strike` is `Field(gt=0)`, correctly — a zero-strike
+    contract is not a contract — but the `ValidationError` came straight back
+    out of a function two other modules treat as total. `models.class_key_for_symbol`
+    calls it to decide which instrument class a symbol belongs to, and so does
+    `RiskGate._option_expiry`, so a symbol arriving from a model proposal or an
+    adopted dream's `symbols` list could raise out of the gate. A gate that can
+    fail is a gate that can fail open.
+    """
+    from bot.models import class_key_for_symbol
+
+    assert parse_occ_symbol("SPY260918C00000000") is None
+    assert is_option_symbol("SPY260918C00000000") is False
+    assert class_key_for_symbol("SPY260918C00000000") == "us_equity"
+
+    # A real contract still parses, so this is a refusal and not a blanket
+    # tightening of the pattern.
+    assert parse_occ_symbol(SPY_CALL) is not None
+
+
 # ------------------------------------------------------------ position sweep
 
 

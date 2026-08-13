@@ -61,6 +61,13 @@ class _StubClaude:
     def price_is_known(self) -> bool:
         return self.cost is not None
 
+    #: What the far end said answered. Defaults to agreement with `model_id`,
+    #: because that is what an ordinary call looks like and a double that
+    #: differs from the original in its resting state pins a path production
+    #: never takes — the trap `Broker.orders_degraded` was found by. A test
+    #: about a substitution overrides it.
+    served: str = "claude-haiku-4-5-20251001"
+
     def propose(self, market_context: str) -> tuple[ModelDecision, CallUsage]:
         return self._decision, CallUsage(
             input_tokens=2072,
@@ -68,6 +75,8 @@ class _StubClaude:
             cache_read_tokens=0,
             cache_write_tokens=0,
             estimated_cost_usd=self.cost,
+            served_model_id=self.served,
+            requested_model_id=self.model_id,
         )
 
 
@@ -78,7 +87,7 @@ class _UnpricedClaude(_StubClaude):
 
 
 def _run_one_cycle(
-    monkeypatch, tmp_path, decision: ModelDecision
+    monkeypatch, tmp_path, decision: ModelDecision, client_cls: type = _StubClaude
 ) -> list[MutableMapping[str, Any]]:
     """Run exactly one pass of `cmd_loop` and return the structlog events.
 
@@ -93,7 +102,7 @@ def _run_one_cycle(
     monkeypatch.setattr(time, "sleep", _stop)
     monkeypatch.setattr(main_mod, "Journal", lambda: Journal(tmp_path / "journal.db"))
     monkeypatch.setattr(main_mod, "AuditLog", lambda: AuditLog(tmp_path / "audit"))
-    monkeypatch.setattr(main_mod, "ModelClient", lambda *a, **k: _StubClaude(decision))
+    monkeypatch.setattr(main_mod, "ModelClient", lambda *a, **k: client_cls(decision))
     # The loop opens the dream store to resolve symbol grants, and the shipped
     # `config/rules.yaml` turns grants on — so without this the cycle writes
     # `data/dreams.db` next to the real journal. The runtime-directory guard in
@@ -2734,3 +2743,92 @@ def test_the_refusal_is_a_model_call_failure_rather_than_a_new_kind_of_error():
         ),
         shown=shown,
     )
+
+
+def test_the_heartbeat_names_the_model_that_actually_answered(monkeypatch, tmp_path):
+    """A substitution is invisible everywhere else on a successful cycle.
+
+    The call succeeds, the schema validates, and the cost is computed from the
+    price sheet of the model that was ASKED for — so a catalogue aliasing an id
+    to a successor, or a proxy named in `ANTHROPIC_BASE_URL` routing elsewhere,
+    produces a completely ordinary-looking cycle whose orders were sized by
+    weights nobody named. `CLAUDE.md` records the endpoint-versus-configuration
+    version of this mistake already; this is the same one a level in.
+    """
+    logs = _run_one_cycle(
+        monkeypatch,
+        tmp_path,
+        ModelDecision(market_assessment="Quiet.", proposals=[], assessments=[]),
+    )
+    beat = _heartbeat(logs)
+    assert beat["served_model"] == "claude-haiku-4-5-20251001"
+    assert beat["served_as_requested"] is True
+
+
+def test_a_model_that_did_not_answer_its_own_name_is_reported_not_refused(
+    monkeypatch, tmp_path
+):
+    """Reported. The cycle completes, and that is the deliberate half.
+
+    An alias is an ordinary thing for a catalogue to do. Throwing away a
+    validated decision — its proposals, its assessments and the cost already
+    spent — over a naming difference would cost far more than it protects, so
+    the mismatch goes on the pulse and into the audit record and the loop
+    carries on.
+    """
+
+    class _Substituted(_StubClaude):
+        served = "anthropic-claude-5-haiku"
+
+    logs = _run_one_cycle(
+        monkeypatch,
+        tmp_path,
+        ModelDecision(market_assessment="Quiet.", proposals=[], assessments=[]),
+        client_cls=_Substituted,
+    )
+    beat = _heartbeat(logs)
+    assert beat["served_model"] == "anthropic-claude-5-haiku"
+    assert beat["served_as_requested"] is False
+
+
+def test_a_response_carrying_no_model_id_reads_as_unknown_on_the_pulse(
+    monkeypatch, tmp_path
+):
+    """`None` is "could not ask", and it must not read as agreement.
+
+    The good outcome must not be what an absence of evidence looks like — the
+    same rule that makes the tailnet status report `unknown` rather than
+    healthy when the check itself has stopped.
+    """
+
+    class _Anonymous(_StubClaude):
+        served = ""
+
+    logs = _run_one_cycle(
+        monkeypatch,
+        tmp_path,
+        ModelDecision(market_assessment="Quiet.", proposals=[], assessments=[]),
+        client_cls=_Anonymous,
+    )
+    beat = _heartbeat(logs)
+    assert beat["served_model"] == ""
+    assert beat["served_as_requested"] is None
+
+
+def test_the_heartbeat_states_tight_and_unmeasured_stops_as_two_facts(
+    monkeypatch, tmp_path
+):
+    """`stops_unchecked` one column across, on a line that already carries it.
+
+    A cycle with no proposals states two empty lists rather than staying
+    silent, because an absent field is what an outage looks like — the same
+    reason `stops_breached` reports a zero every cycle.
+    """
+    logs = _run_one_cycle(
+        monkeypatch,
+        tmp_path,
+        ModelDecision(market_assessment="Quiet.", proposals=[], assessments=[]),
+    )
+    beat = _heartbeat(logs)
+    assert beat["tight_stops"] == []
+    assert beat["stops_unmeasured"] == []

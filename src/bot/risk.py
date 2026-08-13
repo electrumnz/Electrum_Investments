@@ -593,17 +593,61 @@ class RiskGate:
         account: AccountSnapshot,
         instrument: InstrumentRules | None = None,
     ) -> str | None:
+        """Cap what one symbol is worth once this order fills.
+
+        **The POSITION, not the order, and they are only the same thing on the
+        first one.** Alpaca aggregates per symbol, so a second order in a symbol
+        already held does not open a second position — it makes the existing one
+        bigger. Measured against the shipped config: 90 SPY held at 45% of
+        equity plus another 90 at 45% was APPROVED under a 50% cap, leaving one
+        symbol worth 90% of the account. Nothing else caught it either:
+        `_concurrent_positions` counts positions and the count did not change,
+        and 90% sits under the 150% gross-exposure cap.
+
+        That gap mattered because everything describing this limit describes the
+        position. `config/rules.yaml` calls it "a single position's market
+        value", the Armorer's `LimitFact` calls it "one position's market value
+        as a share of equity", and the system prompt tells the model "max single
+        position value". A cap that measured the order while every surface said
+        position is the label-is-a-claim failure arriving on the gate.
+
+        **Only a position on the SAME side is added.** An order opposite to what
+        is held nets the position down at the broker rather than growing it, so
+        counting it would refuse a trade that reduces concentration — the same
+        reasoning that keeps closing out of the gated path altogether.
+
+        The concentration cap stays deliberately generous and is still not meant
+        to be the binding constraint; what changes is that it now measures the
+        thing it is named after.
+        """
         if account.equity_usd <= 0:
             return "account equity is zero or negative"
-        pct = proposal.notional_usd / account.equity_usd * 100
+
+        symbol = proposal.symbol.strip().upper()
+        held = sum(
+            p.notional_usd
+            for p in account.open_positions
+            if p.symbol.strip().upper() == symbol and p.direction == proposal.direction
+        )
+        after = held + proposal.notional_usd
+        pct = after / account.equity_usd * 100
         cap = self._rules.account.max_position_pct
         if instrument is not None and instrument.max_position_pct is not None:
             # Overrides rather than floors. See `_per_trade_risk`.
             cap = instrument.max_position_pct
         if pct > cap:
+            # The held figure is named separately whenever there is one, because
+            # "position 90,000.00 is 90.0% of equity" against a 45,000 order
+            # reads as arithmetic nobody can check.
+            already = (
+                f" ({held:,.2f} already held in {symbol} plus "
+                f"{proposal.notional_usd:,.2f} for this order)"
+                if held > 0
+                else ""
+            )
             return (
-                f"position {proposal.notional_usd:,.2f} is {pct:.1f}% of equity "
-                f"(max {cap:.1f}%)"
+                f"position {after:,.2f} is {pct:.1f}% of equity "
+                f"(max {cap:.1f}%){already}"
             )
         return None
 
@@ -615,9 +659,49 @@ class RiskGate:
         whether the exposure came from cash equities, margin, options or
         futures — and it composes with the per-trade cap, so a 2% total against
         a 1% per-trade allows two full-size trades or four half-size ones.
+
+        **An unknown fails CLOSED here too, and until now it did not.**
+        `open_risk_usd` is summed from the journal's open rows, so a HELD
+        position the journal has no row for contributes nothing and this cap
+        counts it as risking zero. That is not a hypothetical: it happened on
+        the droplet on 13 Aug 2026, where 107 held AAPL shares the journal had
+        written off as closed left the reported total at 1,487.19 while the real
+        figure was 2,396.69 on 99,200.28 of equity — 2.42% against a 2% cap, a
+        fifth over and invisible on every surface.
+
+        `_class_total_risk` already refuses on exactly this input and its
+        reasoning transfers unchanged: a position whose planned stop is
+        unknowable makes the total unknowable, and approving against an
+        understated total is how a cap silently stops binding. What made the
+        class gate insufficient is that `max_class_total_risk_pct` is configured
+        on crypto alone, which is switched off — so in the shipped
+        configuration NO gate refused on missing risk, and rule 2 was the one
+        being quietly broken.
+
+        The consequence is deliberate and is the same one the class cap already
+        carries: while a held position has no journal row, nothing new opens.
+        That is recoverable by a person in two ways — close the position, or
+        journal it — and both are better than a 2% rule that binds only when
+        the paperwork happens to be complete. It refuses rather than reporting
+        because this gate is the thing the figure exists for; reporting stays
+        the rule everywhere the figure is only being shown.
         """
         if account.equity_usd <= 0:
             return None
+
+        unknown = sorted(account.symbols_with_unknown_risk)
+        if unknown:
+            return (
+                f"combined open risk cannot be established, so the "
+                f"{self._rules.account.max_total_risk_pct:.2f}%-of-equity total "
+                f"cap cannot be enforced. Held with no journal row: "
+                f"{', '.join(unknown)}. A position the journal has never seen "
+                f"has an unknowable planned stop, so its risk is missing rather "
+                f"than zero, and the {account.open_risk_usd:,.2f} counted here "
+                f"describes only the positions that do have rows. Close it or "
+                f"journal it before opening anything else."
+            )
+
         risk_after = account.open_risk_usd + proposal.risk_usd
         pct_after = risk_after / account.equity_usd * 100
         cap = self._rules.account.max_total_risk_pct

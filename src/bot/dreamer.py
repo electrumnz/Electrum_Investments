@@ -274,7 +274,12 @@ class DreamHop(BaseModel):
     )
     source: str = Field(
         default="",
-        description="Where it comes from. Empty when checked is false.",
+        description=(
+            "Where it comes from. Empty when checked is false — and a hop that "
+            "names no source is STORED UNCHECKED whatever the flag says, "
+            "because the two are one claim and the flag is the half that is "
+            "free to write."
+        ),
     )
 
 
@@ -1120,6 +1125,47 @@ def build_prompt(
     return "\n".join(out)
 
 
+def _hop(hop: DreamHop) -> Hop:
+    """One link as the model wrote it, with the contradiction resolved DOWNWARDS.
+
+    `checked` and `source` are two halves of one claim and a step can return
+    them disagreeing in both directions. Only one direction used to be
+    answered — a `source` on an UNCHECKED hop was dropped, "because that pair
+    is a contradiction and the unchecked flag is the honest half of it" — and
+    the mirror image, **`checked=True` naming no source at all**, was stored at
+    its most flattering reading.
+
+    That is not cosmetic, and it was measured through a real step. A chain
+    whose every hop claimed to be checked with an empty source came back:
+
+    - `verification: sourced`, which is the badge rendered into the trading
+      model's prompt beside the chain, on an argument citing nothing. The
+      badge is arithmetic over `checked` flags precisely because a model asked
+      to rate its own sourcing rates it generously — and a flag with nothing
+      behind it IS that rating, arriving through the field next to it.
+    - `awaits_settlement: False`, because no hop was unverified — which makes
+      `promotion_for` skip the weakest-hop clause entirely. The dream promoted
+      to the prophecy shelf naming no weakest hop and pinning no condition to
+      one, which is exactly what that clause was added to prevent: a prophecy
+      is a dream parked awaiting the link that could kill it, not a filing
+      decision.
+
+    So the two halves are resolved the same way round in both directions: the
+    pessimistic half wins, because the optimistic one is the half a model gets
+    for free. A hop that genuinely was checked loses nothing but a run — it
+    says where, and the flag stands. `source` is stripped rather than trusted,
+    so a hop whose source is a space is a hop with no source.
+
+    Deliberately here and NOT in `Hop` itself. Making `checked` conditional on
+    a source in the dataclass would silently rewrite the badge of every dream
+    already on disk, which is a migration wearing a property's clothes. This is
+    the point of storage, which is where the existing half already sits.
+    """
+    sourced = bool(hop.source.strip())
+    checked = hop.checked and sourced
+    return Hop(claim=hop.claim, checked=checked, source=hop.source.strip() if checked else "")
+
+
 def _observe_by(value: str) -> datetime | None:
     """A review date the model wrote, as an instant. `None` when unreadable.
 
@@ -1766,10 +1812,7 @@ class Dreamer:
         dream = target or Dream(title=step.title, seed=step.seed, origin=step.origin)
 
         if step.chain:
-            dream.chain = [
-                Hop(claim=h.claim, checked=h.checked, source=h.source if h.checked else "")
-                for h in step.chain
-            ]
+            dream.chain = [_hop(h) for h in step.chain]
         if step.weakest_hop:
             dream.weakest_hop = step.weakest_hop
             # Written TOGETHER, including when the step gave no number. A new

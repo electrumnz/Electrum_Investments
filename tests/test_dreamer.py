@@ -40,6 +40,7 @@ from bot.dreaming import (
     Hop,
     MoveRefusal,
     Vault,
+    Verification,
     fusion_candidates,
     promotion_for,
 )
@@ -318,6 +319,73 @@ def test_a_source_is_dropped_when_the_hop_is_not_checked(rules, journal, store):
     assert result is not None
     assert result.dream.chain[0].source == ""
     assert result.dream.chain[0].checked is False
+
+
+def test_a_checked_hop_that_names_no_source_is_stored_UNCHECKED(
+    rules, journal, store
+):
+    """**The mirror of the test above, and the one that was missing.**
+
+    The same contradiction points the other way and used to be taken at its
+    most flattering reading. Measured through a real step: a three-hop chain
+    where every hop claimed `checked=True` with an empty source came back
+    `verification: sourced` — the badge rendered into the trading model's
+    prompt beside the chain, on an argument citing nothing.
+
+    The badge is arithmetic over `checked` flags precisely because a model
+    asked to rate its own sourcing rates it generously. A flag with nothing
+    behind it IS that rating, arriving through the field next to it.
+    """
+    client = _StubClient(
+        _step(chain=[DreamHop(claim="a matter of public record", checked=True,
+                              source="   ")])
+    )
+    result = Dreamer(_env(), rules, store, journal, client=client).run_once()
+
+    assert result is not None
+    assert result.dream.chain[0].checked is False
+    assert result.dream.chain[0].source == ""
+    assert result.dream.verification is not Verification.SOURCED
+
+
+def test_a_sourceless_chain_cannot_skip_the_weakest_hop_clause(
+    rules, journal, store
+):
+    """The consequence, which is worth more than the badge.
+
+    `promotion_for` only demands a pinned weakest hop while the chain
+    `awaits_settlement` — correctly, since a chain with every link nailed down
+    has no link awaiting anything. A model that marks every hop checked
+    without sourcing one therefore turned that clause off for itself and
+    reached the prophecy shelf naming no weakest hop and pinning no condition
+    to one, which is exactly what the operator added the clause to prevent.
+    """
+    client = _StubClient(
+        _step(
+            stage=DreamStage.VERDICT,
+            verdict=DreamVerdict.KEEP,
+            chain=[
+                DreamHop(claim="one", checked=True, source=""),
+                DreamHop(claim="two", checked=True, source=""),
+            ],
+            weakest_hop="",
+            weakest_hop_index=None,
+            conditions=[
+                StepCondition(
+                    text="the export share rises",
+                    subject="the USDA oilseed circular",
+                    observable="shows the third producer above a fifth",
+                    observe_by="2027-03-01",
+                )
+            ],
+        )
+    )
+    result = Dreamer(_env(), rules, store, journal, client=client).run_once()
+
+    assert result is not None
+    assert result.dream.awaits_settlement is True
+    assert promotion_for(result.dream).to is None
+    assert "weakest" in promotion_for(result.dream).reason
 
 
 def test_a_verdict_is_only_honoured_on_a_verdict_step(rules, journal, store):
@@ -1265,6 +1333,82 @@ def test_an_unreadable_review_date_leaves_the_dream_where_it_was(
     assert result.dream.conditions[0].observe_by is None
     assert result.dream.conditions[0].is_observable is False
     assert promotion_for(result.dream).to is None
+
+
+def test_a_step_cannot_erase_an_operator_refusal_by_leaving_it_out(
+    rules, store, journal
+):
+    """**The whole chain, and it ended in a live grant.**
+
+    `carry_forward_grading` already refused to let a RESTATED claim erase an
+    answer. Omission was the entrance nobody had walked: the applied list was
+    exactly what the step returned, so a claim the step did not mention was
+    deleted — and a ruled-out condition is precisely what stops
+    `all_conditions_met` carrying a dream into the vault the trading agent can
+    see. Measured before the fix: operator says no, the next step returns the
+    list minus that claim, and the dream reaches ADOPTED with
+    `granted_symbols` handing out a symbol in no allowlist, with
+    `ruled_out_conditions` empty so the absence was invisible too.
+
+    A model settling its own condition is refused by name in
+    `settle_condition`. Un-asking one by silence has to be refused as well, or
+    the refusal is a formality.
+    """
+    keep = DreamCondition(
+        text="the brood map is published",
+        subject="the USGS periodical cicada brood map",
+        observable="shows Brood XIV over two of the three producing counties",
+        observe_by=datetime(2027, 3, 1, tzinfo=UTC),
+        settles_hops=(1,),
+    )
+    refused = DreamCondition(
+        text="the idled potline comes back",
+        subject="Century Aluminum's quarterly production release",
+        observable="reports the idled potline restarted",
+        observe_by=datetime(2027, 3, 1, tzinfo=UTC),
+    )
+    dream_id = store.save(
+        Dream(
+            title="t",
+            seed="s",
+            stage=DreamStage.EXPLORE,
+            chain=[Hop(claim="cicadas emerge over two of three", checked=False)],
+            weakest_hop="cicadas emerge over two of three",
+            weakest_hop_index=1,
+            conditions=[keep, refused],
+            symbols=["ZZZZ"],
+            asset_class_key="us_equity",
+        )
+    )
+    store.settle_condition(dream_id, keep.key, by=OPERATOR, met=True, note="published")
+    store.settle_condition(
+        dream_id, refused.key, by=OPERATOR, met=False, note="restart cancelled"
+    )
+
+    # The step restates the list and simply does not mention the refused claim.
+    step = _step(
+        advance_id=dream_id,
+        conditions=[
+            StepCondition(
+                text="the brood map is published",
+                settles_hops=[1],
+                subject="the USGS periodical cicada brood map",
+                observable="shows Brood XIV over two of the three producing counties",
+                observe_by="2027-03-01",
+            )
+        ],
+    )
+    Dreamer(_env(), rules, store, journal, client=_StubClient(step)).run_once()
+
+    after = store.get(dream_id)
+    assert after is not None
+    assert [c.text for c in after.ruled_out_conditions] == [refused.text]
+    assert after.all_conditions_met is False
+    # And the consequence, stated rather than inferred: nothing can be adopted
+    # off it, so no symbol is granted.
+    assert store.promote(dream_id).moved_to is not Vault.VAULT
+    assert store.adopt(dream_id).refused
+    assert store.granted_symbols(datetime.now(UTC)) == {}
 
 
 def test_the_prompt_shows_an_observation_with_its_date_and_its_state(

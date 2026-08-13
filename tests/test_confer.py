@@ -421,6 +421,51 @@ def test_the_lifetime_ceiling_stops_an_infinite_sequence_of_new_arguments(rules,
     assert "starts a fresh three" not in report.exchanges[0].detail
 
 
+def test_the_caps_are_counted_over_the_WHOLE_transcript(rules, store):
+    """**Every cap here is arithmetic over a read that used to be truncated.**
+
+    `DreamStore.messages` defaults to the oldest 200 turns and says nothing
+    when it drops the rest, which is right for rendering a transcript into a
+    prompt and wrong for counting. Measured on 232 rows: twelve honest
+    exchanges sitting past the window read as ZERO — the lifetime ceiling
+    unreached, the epoch empty, and `last_agent_turn_at` answering `None`,
+    which `has_something_changed` reads as "they have never spoken" and
+    answers True to forever.
+
+    So the cap the module calls *the one that actually stops them talking* was
+    switched off by a limit nobody had connected to it, and the two agents
+    would confer that dream every day until somebody read a bill.
+    """
+    dream_id = _vaulted(store)
+    # Enough non-offer turns to fill the default window on their own: operator
+    # notes, fusion marks, this module narrating a failed call.
+    for index in range(220):
+        store.add_message(
+            dream_id, speaker=OPERATOR, kind="note", text=f"note {index}",
+            at=BASE + timedelta(minutes=index),
+        )
+    for index in range(MAX_EXCHANGES_LIFETIME):
+        store.add_message(
+            dream_id, speaker=DREAMER, kind="offer", text=f"offer {index}",
+            at=BASE + timedelta(days=1, hours=index),
+        )
+    # The truncated read is what made this invisible; state it so the test
+    # says WHY rather than only what.
+    assert exchanges_so_far(store.messages(dream_id)) == 0
+    assert exchanges_so_far(store.messages(dream_id, limit=None)) == (
+        MAX_EXCHANGES_LIFETIME
+    )
+
+    dreamer, trader = _Speaker(), _Speaker()
+    report = _conference(rules, store, dreamer=dreamer, trader=trader).run(
+        now=LATER + timedelta(hours=1)
+    )
+
+    assert report.exchanges[0].outcome is ConferOutcome.LIFETIME_EXHAUSTED
+    assert dreamer.prompts == [] and trader.prompts == []
+    assert report.calls == 0
+
+
 def test_a_hand_back_reopens_a_dream_that_had_spent_its_budget(rules, store):
     """**The operator's case, and the one the lifetime cap used to swallow.**
 

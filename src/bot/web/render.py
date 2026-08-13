@@ -89,6 +89,7 @@ from ..settings_agent import (
     effective_value,
     format_value,
 )
+from ..stop_width import measure_stop_widths
 from ..tailnet import TailnetStatus
 
 # At module scope for consistency with everything else here rather than for
@@ -914,6 +915,15 @@ tr.why .quote{border-left:2px solid var(--patina);padding-left:.875rem;
   text-transform:uppercase;color:var(--pewter);margin-right:.5rem}
 .chain .rung.gate.no{color:var(--loss)}
 .chain .rung.gate.ok{color:var(--gain)}
+/* Two-class modifiers under a descendant selector, matching `.rung.gate.no`
+   above rather than being written as bare `.tight` — a modifier must not
+   depend on winning a tie against whatever is declared later, which is the
+   collision that has already cost `.pill.seed`, `.rung.gate` and `.note.alert`
+   in this stylesheet. Amber rather than red on purpose: neither of these is a
+   rejection. A tight stop is a fact about the denominator the size came from,
+   and an unmeasured one is an indicator that did not arrive. */
+.chain .rung.stopw.tight{color:var(--amber)}
+.chain .rung.stopw.unmeasured{color:var(--amber)}
 .reasons{margin:.35rem 0 0;padding-left:1.1rem;color:var(--loss);font-size:.8125rem}
 .reasons li{margin:.15rem 0}
 .pill.watch{color:var(--amber)}
@@ -4218,10 +4228,29 @@ def loop_activity(history: JobHistory | None, *, now: datetime | None = None) ->
             if history.truncated
             else ""
         )
+        # **One statement, not two.** This branch used to render `head_line`
+        # — "The loop recorded no pass covering <timestamp>" — and then this
+        # sentence underneath it, which says the same thing about the same
+        # silence in different words and against a different span. Found by
+        # reading the rendered Board: the operator gets one fact stacked twice,
+        # and has to work out whether the two are describing one problem or two.
+        #
+        # The window sentence is the one that survives, because it is the more
+        # honest of the pair when there are no jobs at all. "No pass covering
+        # 13:41" reads as a narrow claim about one instant; the truth is that
+        # nothing is on file for the whole window, and a reader who fixed the
+        # instant would still have the gap.
+        #
+        # `head_line` stays in the branch below, where it earns its place: with
+        # passes on file, "was there one covering right now" is a genuinely
+        # different question from "how many were there today". It keeps the
+        # `.loopnow` element here so the coloured left border still marks the
+        # severity — dropping the element as well as the duplicate would take a
+        # signal away along with the noise.
         return (
             '<section class="block"><h2>The decision loop</h2>'
-            + head_line
-            + '<p class="note"><span class="alert">No pass of the loop is on '
+            f'<p class="loopnow" data-loop="{_e(_loop_key(answer))}">'
+            '<span class="alert">No pass of the loop is on '
             f"file for the last {history.window_hours:g}h. It was not running, "
             "was restarting, or its records were lost — this is NOT a report "
             f"that it ran and found nothing to do.{caveat}</span></p></section>"
@@ -5977,10 +6006,30 @@ def _cycle(
         # writes a `model_cost_unknown` event naming it, because an inference
         # drawn here is not a record.
         priced = f"${d.estimated_cost_usd:.4f}" if d.estimated_cost_usd else "cost unknown"
+        # **A price is computed from the price sheet of the model that was
+        # ASKED for, so a substitution makes the figure beside it wrong.** The
+        # cost, the tokens and every proposal below came back from whatever
+        # actually answered — a catalogue aliasing a retired id, a proxy named
+        # in `ANTHROPIC_BASE_URL` routing elsewhere — and none of that raises,
+        # so the cycle reads as entirely ordinary. Named here rather than left
+        # to a log line that has long since scrolled.
+        #
+        # Only when the two are BOTH on file and disagree. `served_as_requested`
+        # is `None` for every record written before the fields existed, and
+        # rendering that as a mismatch would manufacture a finding about a
+        # cycle nobody recorded anything about.
+        substituted = (
+            f' &middot; <span class="alert">served by '
+            f"{_e(d.served_model_id)}, not the "
+            f"{_e(d.requested_model_id)} this cost is priced from</span>"
+            if d.served_as_requested is False
+            else ""
+        )
         cost = (
             f"{d.claude_input_tokens:,} in / {d.claude_output_tokens:,} out"
             + (f" / {d.claude_cached_tokens:,} cached" if d.claude_cached_tokens else "")
             + f" &middot; {priced}"
+            + substituted
         )
 
     # `<details>`, and the head line is its `<summary>`.
@@ -6019,6 +6068,20 @@ def _cycle(
             "usually the right answer, and it is recorded rather than "
             "assumed.</p></div>"
         )
+
+    # Derived here rather than read off a stored field, and derived from the
+    # readings THIS cycle recorded. `MarketInputs.readings` is what the model
+    # was shown, so the page states the stop's width against the same ATR the
+    # proposal was written over — not against a figure fetched today, which
+    # would answer a question nobody asked about a cycle three months old.
+    #
+    # A record predating `readings` has no figures at all, so every proposal on
+    # it renders as NOT MEASURED. That is the honest answer: nothing recovers a
+    # number that was never written down, and rendering an ordinary-looking
+    # width would be inventing one.
+    widths = measure_stop_widths(
+        d.proposals, d.inputs.readings if d.inputs is not None else {}
+    )
 
     for i, proposal in enumerate(d.proposals):
         verdict = entry.verdict_for(i)
@@ -6069,6 +6132,35 @@ def _cycle(
             out += (
                 '<div class="rung gate no"><span class="lbl">Gate</span>rejected'
                 f'<ul class="reasons">{reasons}</ul></div>'
+            )
+
+        # AFTER the gate's verdict, deliberately. Size is the risk ceiling
+        # divided by the stop distance, so a stop inside the spread buys an
+        # arbitrarily large position at the same stated risk — TODO.md item 25,
+        # measured on a live KO proposal at 0.04 ATR. It belongs on this page
+        # because this is the only surface a rejected proposal exists on.
+        #
+        # It reads last so that nothing can mistake it for an input to the
+        # verdict above it. `RiskGate` holds no opinion on where the stop goes,
+        # deliberately and permanently, and a line rendered ahead of the gate's
+        # own reasons would look like the opinion arriving through the UI.
+        if i < len(widths):
+            width = widths[i]
+            # Both the tight case and the unmeasured one are called out, and
+            # they are different findings: one is a measurement that came back
+            # alarming, the other is a measurement that never happened. Folding
+            # them into one class would let an indicator outage render in the
+            # colour of a clean read.
+            mark = (
+                " tight"
+                if width.is_tight
+                else " unmeasured"
+                if width.is_unmeasured
+                else ""
+            )
+            out += (
+                f'<div class="rung stopw{mark}"><span class="lbl">Stop</span>'
+                f"{_e(width.render())}</div>"
             )
 
         result = d.executed[i] if i < len(d.executed) else None

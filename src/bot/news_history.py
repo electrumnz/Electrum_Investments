@@ -85,15 +85,35 @@ class NewsItem:
     `first_seen` and `last_seen` answer different questions and both are worth
     having: the first is how old the story is, the second is whether it is
     still in the feed or has already dropped out of it.
+
+    **`first_seen` is the first sighting INSIDE the window, which is a floor on
+    the real one.** `recall` stops reading at the cutoff, so a story that has
+    been on file for three days and is still in the feed comes back from a
+    24-hour window with `first_seen` at the oldest cycle in that window and an
+    age of 24 hours. That understates it, and it understates it in the one
+    direction this module exists to prevent: towards looking fresher. The tool
+    description tells an agent to quote the age, so the age has to say when it
+    is a floor. `at_window_edge` is that, and it is the same fact
+    `Sightings.is_edge` already answers for the surface that renders one cycle.
     """
 
     text: str
     first_seen: datetime
     last_seen: datetime
     cycles: int = 1
+    # True when this item was already there in the oldest cycle the window
+    # reached, so nothing here can tell a story that broke then from one that
+    # had been running for a week. False is a real claim; True is "at least
+    # this old", never "this old".
+    at_window_edge: bool = False
 
     def age_minutes(self, now: datetime) -> float:
-        """How long ago this first appeared. Never negative, never guessed."""
+        """How long ago this first appeared. Never negative, never guessed.
+
+        Read with `at_window_edge`: when that is True this is a LOWER BOUND on
+        the age rather than the age, because the window ran out before the
+        item's first sighting did.
+        """
         return max(0.0, (now - self.first_seen).total_seconds() / 60.0)
 
 
@@ -148,6 +168,20 @@ class NewsRecall:
             or self.social_degraded
             or self.malformed_lines > 0
             or bool(self.unreadable_files)
+        )
+
+    @property
+    def ages_are_floors(self) -> bool:
+        """Whether any item was already there in the oldest cycle read.
+
+        Separate from the flag on each item so a caller rendering a summary can
+        say it once. False means every age here is the real one; True means at
+        least one is "at least this old", and the difference matters because the
+        tool that carries these tells an agent to quote the ages.
+        """
+        return any(
+            item.at_window_edge
+            for item in (*self.headlines, *self.social_posts, *self.news_windows)
         )
 
     def latest_cycle_age_minutes(self, now: datetime) -> float | None:
@@ -230,9 +264,11 @@ def recall(
         cycles_without_inputs=cycles_without_inputs,
         latest_cycle_at=latest,
         oldest_cycle_at=oldest,
-        headlines=_ordered(headlines, limit),
-        social_posts=_ordered(posts, limit),
-        news_windows=_ordered(windows, limit),
+        # `oldest` is the oldest cycle this read actually reached, so an item
+        # first sighted there is one whose true age the window cannot bound.
+        headlines=_ordered(headlines, limit, oldest),
+        social_posts=_ordered(posts, limit, oldest),
+        news_windows=_ordered(windows, limit, oldest),
         calendar_degraded=calendar_degraded,
         social_degraded=social_degraded,
         malformed_lines=view.malformed,
@@ -341,6 +377,18 @@ def render(result: NewsRecall, *, now: datetime | None = None) -> list[str]:
         lines.append(
             "The newest reading is over an hour old. Check the loop is running "
             "before treating any of this as current."
+        )
+    if result.ages_are_floors:
+        # Said as a sentence rather than left to the per-item flag, because the
+        # failure is somebody quoting one age out of the list. The window cuts
+        # the read off, so an item already present in the oldest cycle reached
+        # has no upper bound on its age here — and the error runs towards
+        # FRESHER, which is the reading this module exists to refuse.
+        lines.append(
+            f"Some items were already on file in the oldest cycle inside the "
+            f"{result.window_hours:g}h window, so their ages are floors rather "
+            "than ages — they may be far older. Widen the window, or say 'at "
+            "least', rather than quoting the figure as when the story broke."
         )
     if result.cycles_without_inputs:
         lines.append(
@@ -688,15 +736,34 @@ def _absorb(store: dict[str, _Seen], texts: list[str], stamp: datetime) -> None:
         seen.cycles += 1
 
 
-def _as_items(store: dict[str, _Seen]) -> dict[str, NewsItem]:
+def _as_items(
+    store: dict[str, _Seen], oldest_cycle: datetime | None = None
+) -> dict[str, NewsItem]:
+    """`_Seen` rows as items, flagging the ones the window cut short.
+
+    An item first sighted in the oldest cycle the read reached could equally
+    have been there for a week; nothing in this view can tell. `oldest_cycle`
+    is `None` for a caller that has not established one, and every item is then
+    unflagged — the same shape as `Sightings.is_edge`, which answers True in
+    that case because it is asked about one cycle rather than about a whole
+    window.
+    """
     return {
-        text: NewsItem(text=text, first_seen=s.first, last_seen=s.last, cycles=s.cycles)
+        text: NewsItem(
+            text=text,
+            first_seen=s.first,
+            last_seen=s.last,
+            cycles=s.cycles,
+            at_window_edge=oldest_cycle is not None and s.first <= oldest_cycle,
+        )
         for text, s in store.items()
     }
 
 
-def _ordered(store: dict[str, _Seen], limit: int) -> list[NewsItem]:
-    items = list(_as_items(store).values())
+def _ordered(
+    store: dict[str, _Seen], limit: int, oldest_cycle: datetime | None = None
+) -> list[NewsItem]:
+    items = list(_as_items(store, oldest_cycle).values())
     items.sort(key=lambda i: (i.first_seen, i.last_seen), reverse=True)
     return items[: max(0, limit)]
 

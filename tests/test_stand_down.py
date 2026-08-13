@@ -149,6 +149,64 @@ def test_active_stand_down_is_not_re_triggered(journal):
     assert second.stage == 1
 
 
+def test_a_served_streak_does_not_re_trigger_on_a_scratch(journal):
+    """**The same three losses must not buy a second sentence.**
+
+    `Journal.consecutive_losses` counts back through the journal, so a streak
+    does not reset when a stand-down expires — only a WIN clears it. So every
+    later close that was neither a win nor a loss found the same three losses
+    still standing.
+
+    Measured against the shipped config before this was fixed: three losses
+    triggered a 3-day stage 1; once it expired, ONE SCRATCH close escalated
+    straight to a 10-day stage 2 on the identical three losses, and the next
+    scratch did it again, without limit. A scratch neither counts nor resets a
+    streak by design; it must not be able to re-arm the breaker either.
+    """
+    for i in range(3):
+        _close_trade(journal, -100.0, minutes=i * 60)
+    first = evaluate_stand_down(journal, RULES, now=INSIDE_SESSION + timedelta(hours=4))
+    assert first.stage == 1
+
+    # Serve the sentence, then close one scratch — no new information at all.
+    after = INSIDE_SESSION + timedelta(days=4)
+    _close_trade(journal, 0.0, minutes=4 * 24 * 60)
+    again = evaluate_stand_down(journal, RULES, now=after)
+
+    assert again.stage == 0, "an expired stand-down was re-imposed"
+    assert not again.is_active(after)
+    # The streak itself is still on record — it is the SENTENCE that was served,
+    # not the losses that were forgotten.
+    assert again.consecutive_losses == 3
+
+    # And it does not creep back on the next one either.
+    later = INSIDE_SESSION + timedelta(days=5)
+    _close_trade(journal, 0.0, minutes=5 * 24 * 60)
+    third = evaluate_stand_down(journal, RULES, now=later)
+    assert third.stage == 0
+    assert not third.is_active(later)
+
+
+def test_a_new_loss_after_a_served_stand_down_still_escalates(journal):
+    """The guard above must not defuse the breaker.
+
+    A FOURTH loss is new information and is exactly what stage 2 is for. If
+    this passed only because nothing ever triggers again, the fix would have
+    replaced an over-firing breaker with a dead one.
+    """
+    for i in range(3):
+        _close_trade(journal, -100.0, minutes=i * 60)
+    evaluate_stand_down(journal, RULES, now=INSIDE_SESSION + timedelta(hours=4))
+
+    after = INSIDE_SESSION + timedelta(days=4)
+    _close_trade(journal, -100.0, minutes=4 * 24 * 60)
+    again = evaluate_stand_down(journal, RULES, now=after)
+
+    assert again.stage == 2
+    assert again.is_active(after)
+    assert again.consecutive_losses == 4
+
+
 def test_stand_down_expires_and_clears(journal):
     for i in range(3):
         _close_trade(journal, -100.0, minutes=i * 60)

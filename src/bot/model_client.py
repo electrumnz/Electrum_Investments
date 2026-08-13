@@ -62,7 +62,12 @@ from .models import (
     # every reader keeps importing it from where the reasoning is.
     EVERY_FIELD_REQUIRED as EVERY_FIELD_REQUIRED,
 )
-from .models import OrderProposal, PositionPlan, SymbolAssessment
+from .models import (
+    OrderProposal,
+    PositionPlan,
+    SymbolAssessment,
+    served_matches_requested,
+)
 
 # What a structured call comes back as. A TypeVar rather than `BaseModel` so
 # `propose` keeps its `ModelDecision` return type through the shared transport:
@@ -515,15 +520,12 @@ class CallUsage:
         eight digits. `nemotron-3-ultra` answered by `nemotron-3-ultra-550b` is
         a different model with a plausible name, and it reads as False.
         """
-        if not self.requested_model_id or not self.served_model_id:
-            return None
-        if self.served_model_id == self.requested_model_id:
-            return True
-        suffix = self.served_model_id.removeprefix(self.requested_model_id)
-        return (
-            suffix.startswith("-")
-            and len(suffix) == 9
-            and suffix[1:].isdigit()
+        # One implementation, in `models.served_matches_requested`, shared with
+        # `Decision.served_as_requested`. Two copies of this comparison would
+        # be two answers to one question, and the one rendered on the Decisions
+        # page is the one nobody re-checks.
+        return served_matches_requested(
+            requested=self.requested_model_id, served=self.served_model_id
         )
 
 

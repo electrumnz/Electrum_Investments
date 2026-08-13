@@ -229,6 +229,21 @@ def summarise(trades: list[Trade]) -> PerformanceSummary:
     win_rate = len(wins) / len(closed)
     avg_win = _mean(wins)
     avg_loss = abs(_mean(losses))
+    # **The loss weight is the loss RATE, not one minus the win rate**, and the
+    # two differ whenever a trade came out exactly flat. `wins` is `p > 0` and
+    # `losses` is `p < 0`, so a break-even close is in neither bucket while
+    # still counting toward `len(closed)` — and `1 - win_rate` then charges it
+    # the full average loss.
+    #
+    # Measured: pnls of +100, -50 and 0.00 reported an expectancy of $0.00
+    # against a true mean of +$16.67. It errs pessimistic, which is the safe
+    # direction, and it is still a figure that describes no sample — on the one
+    # page whose own strapline is that a wrong metric is worse than no metric
+    # because it gets believed and then acted on.
+    #
+    # With no flat trades the two expressions are identical, which is why every
+    # existing figure is unchanged.
+    loss_rate = len(losses) / len(closed)
 
     return PerformanceSummary(
         trade_count=len(closed),
@@ -241,7 +256,7 @@ def summarise(trades: list[Trade]) -> PerformanceSummary:
         gross_loss_usd=gross_loss,
         # Guarded: no losses means the ratio is undefined, not infinite.
         profit_factor=(gross_profit / gross_loss) if gross_loss > 0 else None,
-        expectancy_usd=(win_rate * avg_win) - ((1 - win_rate) * avg_loss),
+        expectancy_usd=(win_rate * avg_win) - (loss_rate * avg_loss),
         expectancy_r=_mean(r_values) if r_values else None,
         total_pnl_usd=sum(pnls),
         total_r=sum(r_values) if r_values else None,

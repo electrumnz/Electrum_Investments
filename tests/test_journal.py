@@ -7,7 +7,7 @@ would push the bot toward holding losers).
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
 
@@ -266,6 +266,64 @@ def test_closed_trades_filter_by_strategy_and_class(journal):
     assert len(journal.closed_trades(strategy="momentum")) == 1
     assert len(journal.closed_trades(asset_class=AssetClass.CRYPTO)) == 1
     assert len(journal.closed_trades()) == 2
+
+
+def test_a_since_in_another_offset_still_finds_the_trade(journal):
+    """**Timestamps are TEXT, and SQLite compares TEXT lexically.**
+
+    `'2026-08-12T20:00:00+00:00'` sorts BEFORE `'2026-08-13T00:00:00+13:00'`,
+    and the second is nine hours EARLIER. So one caller building a window from
+    a non-UTC clock was enough to make `closed_trades(since=...)` silently drop
+    rows that fall inside it — reporting "no trades in that window" for a
+    window that had one, which is the plausible-wrong-figure failure with no
+    exception to notice.
+
+    Not hypothetical as a shape: this repository already had the same string
+    comparison bite `grants.py`, and the operator's own clock is New Zealand,
+    so "since midnight" is exactly `+13:00`. Measured before the fix: one row
+    stored, and `closed_trades` returned zero for a cutoff nine hours before
+    the close.
+    """
+    nz = timezone(timedelta(hours=13))
+    trade_id = journal.record_entry(_trade(entry_time=datetime(2026, 8, 12, 18, 0, tzinfo=UTC)))
+    closed_at = datetime(2026, 8, 12, 20, 0, tzinfo=UTC)
+    journal.record_exit(
+        trade_id, exit_time=closed_at, exit_price=585.0, realised_pnl_usd=50.0
+    )
+
+    since = datetime(2026, 8, 13, 0, 0, tzinfo=nz)  # 11:00 UTC on the 12th
+    assert closed_at > since, "the close is genuinely after the cutoff"
+    # The instants say yes and the raw strings say no. That gap is the bug.
+    assert not (closed_at.isoformat() >= since.isoformat())
+
+    assert len(journal.closed_trades(since=since)) == 1
+    # And a cutoff genuinely after the close still excludes it, so this is not
+    # passing because the filter stopped filtering.
+    assert journal.closed_trades(since=datetime(2026, 8, 13, 12, 0, tzinfo=nz)) == []
+
+
+def test_a_timestamp_written_in_another_offset_is_stored_as_utc(journal, tmp_path):
+    """Storage is normalised, so lexical order IS chronological order.
+
+    Fixing only the `since` side would leave the ORDER BY clauses — `exit_time`
+    on `closed_trades`, `at` on `position_actions` — sorting two rows written
+    in different offsets into the wrong sequence, with nothing to say so.
+    """
+    import sqlite3
+
+    nz = timezone(timedelta(hours=13))
+    local = datetime(2026, 8, 13, 9, 0, tzinfo=nz)
+    trade_id = journal.record_entry(_trade(entry_time=local))
+
+    conn = sqlite3.connect(tmp_path / "journal.db")
+    stored = conn.execute(
+        "SELECT entry_time FROM trades WHERE id = ?", (trade_id,)
+    ).fetchone()[0]
+    conn.close()
+
+    assert stored == "2026-08-12T20:00:00+00:00"
+    # The instant survives the round trip unchanged; only its spelling moved.
+    assert journal.open_trades()[0].entry_time == local
 
 
 def test_open_trade_lookup_by_symbol(journal):

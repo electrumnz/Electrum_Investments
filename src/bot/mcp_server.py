@@ -1041,6 +1041,12 @@ def get_recent_news(hours: float = 24.0, limit: int = 40) -> dict[str, Any]:
     Report the ages. An item first seen six hours ago is not "the latest news",
     and presenting it as current is the failure this tool has to avoid.
 
+    **An item with `age_is_a_floor` true was already on file in the oldest cycle
+    inside the window, so its age is a MINIMUM and the real one is unknown.**
+    Say "at least N hours" for those, or ask again with a wider `hours`. The
+    error runs towards making a story look fresher than it is, which is the
+    same failure in a subtler place.
+
     If `cycles_read` is 0 the loop recorded nothing in the window — it was
     stopped, restarting, or the market was shut. That is NOT the same as there
     being no news, and it must not be reported as a quiet market. Read
@@ -1066,6 +1072,11 @@ def get_recent_news(hours: float = 24.0, limit: int = 40) -> dict[str, Any]:
             {
                 "text": i.text,
                 "age_minutes": round(i.age_minutes(now), 1),
+                # The window cut this item's history off, so the figure above
+                # is a lower bound. Named per item rather than only in the
+                # readout, because a caller that quotes one row must be able to
+                # see it from that row.
+                "age_is_a_floor": i.at_window_edge,
                 "first_seen": i.first_seen.isoformat(timespec="minutes"),
                 "last_seen": i.last_seen.isoformat(timespec="minutes"),
                 "seen_in_cycles": i.cycles,
@@ -1095,6 +1106,9 @@ def get_recent_news(hours: float = 24.0, limit: int = 40) -> dict[str, Any]:
         # "no headlines" off an empty list when the loop never ran has invented
         # a quiet market out of a stopped process.
         "loop_recorded_nothing_in_window": not result.has_cycles,
+        # Said once for the whole answer as well as per item, so a summary can
+        # carry the caveat without walking the lists.
+        "some_ages_are_floors": result.ages_are_floors,
         "headlines": _items(result.headlines),
         "social_posts": _items(result.social_posts),
         "news_windows": _items(result.news_windows),

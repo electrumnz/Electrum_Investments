@@ -108,15 +108,29 @@ class OptionContract(BaseModel):
         return self.strike - underlying_price >= AUTO_EXERCISE_THRESHOLD_USD - epsilon
 
     def exercise_cost_usd(self, qty: float) -> float:
-        """Cash needed to take delivery if a long call is exercised.
+        """Cash needed to take delivery if a call is exercised or assigned.
 
         This is the figure that decides whether Alpaca forces a liquidation:
         if the account cannot cover it, the position is sold out inside the
         hour before expiry rather than exercised.
+
+        **`abs(qty)` because cash at stake is a magnitude.** A short position
+        arrives from the broker with a NEGATIVE quantity, and multiplying it
+        straight through produced a negative cost — which then made
+        `buying_power_usd >= cost` true for any account, so the most dangerous
+        position on the book reported that it could fund itself. A quantity's
+        sign says which side of the trade this is, and that is a separate
+        question from how much money the expiry moves; `assess_expiry` answers
+        the side separately rather than smuggling it in here.
+
+        Zero for a put, and the zero is real rather than missing: exercising a
+        put DELIVERS shares and receives cash, so no buying power is needed.
+        What that leaves behind is a stock position, and the message says so —
+        a figure of zero must not be rendered as "this costs nothing".
         """
         if self.right != OptionRight.CALL:
             return 0.0
-        return self.strike * CONTRACT_MULTIPLIER * qty
+        return self.strike * CONTRACT_MULTIPLIER * abs(qty)
 
 
 def parse_occ_symbol(symbol: str) -> OptionContract | None:
@@ -135,12 +149,30 @@ def parse_occ_symbol(symbol: str) -> OptionContract | None:
     except ValueError:
         return None
 
+    # `OptionContract.strike` is `Field(gt=0)`, so an OCC-shaped symbol whose
+    # strike field is all zeroes made this function RAISE a `ValidationError`
+    # out of a docstring that promises `None` for anything it cannot parse.
+    #
+    # That matters well beyond this module. `models.class_key_for_symbol` calls
+    # here to decide which instrument class a symbol belongs to, and so does
+    # `RiskGate._option_expiry` — so a symbol arriving from a model proposal or
+    # from an adopted dream's `symbols` list could raise straight out of the
+    # gate. A gate that can fail is a gate that can fail open, and a parser with
+    # two possible answers must not have a third.
+    #
+    # Checked here rather than by widening the field, because `gt=0` is correct:
+    # a zero-strike contract is not a contract, so the honest answer is "this is
+    # not an option symbol" and never a contract with a nonsense strike.
+    strike = int(match.group("strike")) / 1000.0
+    if strike <= 0:
+        return None
+
     return OptionContract(
         symbol=symbol.strip().upper(),
         underlying=match.group("root"),
         expiry=expiry,
         right=OptionRight.CALL if match.group("right") == "C" else OptionRight.PUT,
-        strike=int(match.group("strike")) / 1000.0,
+        strike=strike,
     )
 
 
@@ -161,7 +193,15 @@ class ExpiryAlert(BaseModel):
     urgency: ExpiryUrgency
     in_the_money: bool | None = None
     exercise_cost_usd: float = 0.0
+    #: `None` means the question does not apply or could not be answered, and it
+    #: is deliberately not `True`. See `assess_expiry`: funding only decides
+    #: anything for a LONG CALL, and answering `True` anywhere else was the
+    #: reassuring reading at the moment it was least warranted.
     can_fund_exercise: bool | None = None
+    #: A negative quantity is a WRITTEN option. Alpaca assigns those rather than
+    #: exercising them, which is a different event with a different consequence,
+    #: so the two must not share one sentence.
+    is_short: bool = False
     message: str
 
     @property
@@ -189,7 +229,33 @@ def assess_expiry(
 
     itm = contract.is_itm(underlying_price) if underlying_price is not None else None
     cost = contract.exercise_cost_usd(qty)
-    can_fund = None if buying_power_usd is None else buying_power_usd >= cost
+
+    # A short position arrives from the broker with a negative quantity, and it
+    # is a genuinely different expiry event: Alpaca ASSIGNS a written option
+    # that finishes in the money rather than exercising it.
+    is_short = qty < 0
+
+    # Funding only decides an outcome for a LONG CALL — that is the one case
+    # where the account has to find cash to take delivery, and the one case
+    # where being unable to find it makes Alpaca liquidate inside the final
+    # hour. Everywhere else the comparison answers a question nobody asked:
+    #
+    #   - a long PUT costs nothing to exercise, so `0 >= cost` was trivially
+    #     True and rendered as reassurance about a position that leaves a SHORT
+    #     stock holding behind it;
+    #   - a SHORT call used to compare against a NEGATIVE cost, so every
+    #     account on earth could "fund" the most dangerous position on the book.
+    #
+    # `None` is the honest answer for both. Same rule as everywhere else here:
+    # a question that does not apply must not come back looking like the
+    # comfortable answer to it.
+    can_fund = (
+        None
+        if buying_power_usd is None
+        or is_short
+        or contract.right is not OptionRight.CALL
+        else buying_power_usd >= cost
+    )
 
     if time_left <= FORCED_LIQUIDATION_WINDOW:
         urgency = ExpiryUrgency.CRITICAL
@@ -212,7 +278,8 @@ def assess_expiry(
         in_the_money=itm,
         exercise_cost_usd=round(cost, 2),
         can_fund_exercise=can_fund,
-        message=_message(contract, urgency, days, itm, cost, can_fund),
+        is_short=is_short,
+        message=_message(contract, urgency, days, itm, cost, can_fund, is_short),
     )
 
 
@@ -282,12 +349,36 @@ def _message(
     itm: bool | None,
     cost: float,
     can_fund: bool | None,
+    is_short: bool = False,
 ) -> str:
-    label = f"{contract.underlying} {contract.strike:g} {contract.right.value}"
+    side = "short " if is_short else ""
+    label = f"{side}{contract.underlying} {contract.strike:g} {contract.right.value}"
     expiry = contract.expiry.isoformat()
 
     if urgency == ExpiryUrgency.NONE:
         return f"{label} expires {expiry} ({days:.1f} days) — nothing due yet."
+
+    # A WRITTEN option is assigned, not exercised, and the difference is not
+    # wording: assignment is done TO the account, it cannot be declined, and it
+    # is the one branch where "Do Not Exercise" is irrelevant because the choice
+    # was never the holder's. It also never has a funding answer — see
+    # `assess_expiry` — so this must not fall through to the branches below,
+    # which read the funding flag.
+    if itm and is_short:
+        lands = (
+            f"the stock is PUT TO the account at {contract.strike:g}, so it must "
+            "find the cash"
+            if contract.right is OptionRight.PUT
+            else f"the stock is CALLED AWAY at {contract.strike:g}, so it must "
+            "deliver shares it may not hold"
+        )
+        return (
+            f"ACTION NEEDED — {label} expires {expiry} ({days:.2f} days) and is "
+            f"in the money, so it will be AUTO-ASSIGNED after the close. "
+            f"Assignment is done TO the account and cannot be declined: {lands}. "
+            f"Whether the account can carry what that leaves is NOT established "
+            f"here. Close it first if that is not what you want."
+        )
 
     # The dangerous combination: in the money, and the account cannot fund
     # taking delivery. Alpaca sells this out for you, at whatever the market
@@ -298,6 +389,19 @@ def _message(
             f"in the money and exercise would cost ${cost:,.0f}, which the "
             f"account cannot fund. Alpaca will LIQUIDATE this position inside "
             f"the final hour unless you close it first."
+        )
+
+    if itm and contract.right is OptionRight.PUT:
+        # A long put costs nothing to exercise, so the call branch's
+        # "costing $0" read as harmless. It is not: exercising DELIVERS the
+        # stock, and an account that does not hold it ends up SHORT.
+        return (
+            f"ACTION NEEDED — {label} expires {expiry} ({days:.2f} days) and is "
+            f"in the money, so it will be AUTO-EXERCISED at 6pm ET. That "
+            f"DELIVERS the stock at {contract.strike:g} — leaving a SHORT stock "
+            f"position if the account does not already hold the shares — rather "
+            f"than costing cash. Close it first if that is not what you want — "
+            f"Do Not Exercise cannot be filed through the API."
         )
 
     if itm:

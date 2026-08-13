@@ -13,7 +13,7 @@ import importlib.util
 import subprocess
 import sys
 import textwrap
-from datetime import UTC, date, datetime, time
+from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -93,6 +93,72 @@ def test_friday_evening_runs_into_the_weekend_not_into_an_overnight():
 
     sunday_evening = at(8, 17, 0, 30)       # Sun 20:30 ET
     assert market_state(sunday_evening).phase is MarketPhase.OVERNIGHT
+
+
+def test_fridays_after_hours_session_names_the_weekend_as_what_comes_next():
+    """The test above only ever checked Friday AFTER 20:00, and the hole was
+    the four hours before it.
+
+    Every other weekday's after-hours session rolls into an overnight one at
+    8pm. Friday's does not — 20:00 Friday is already `WEEKEND` and nothing
+    trades again until Sunday 20:00. `_phase_at` still promised OVERNIGHT for
+    the whole of Friday's after-hours, so `render_sessions` put "Next:
+    overnight at 20:00 Fri" into the model's own market-context block: the
+    market reopens in two and a half hours, when it actually reopens in
+    fifty-two.
+
+    The phase and the countdown were both right. Only the NAME of what comes
+    next was invented, which is the plausible-wrong-figure shape this whole
+    module exists to refuse.
+    """
+    friday_after_hours = at(8, 14, 21, 30)  # Fri 14 Aug, 17:30 ET
+
+    state = market_state(friday_after_hours)
+    assert state.phase is MarketPhase.POST
+    assert state.next_phase is MarketPhase.WEEKEND
+
+    # The promise is checkable: step to the moment it names and read it back.
+    assert market_state(state.next_change).phase is MarketPhase.WEEKEND
+
+    # Thursday's after-hours genuinely does roll into an overnight session, so
+    # the fix must be Friday-shaped rather than a blanket change.
+    assert market_state(at(8, 13, 21, 30)).next_phase is MarketPhase.OVERNIGHT
+
+
+def test_every_promised_next_phase_is_the_phase_that_actually_arrives():
+    """Swept minute by minute, because this bug survived a hand-written case.
+
+    Two invariants, checked at every minute of a full week and of both 2026 and
+    2027 daylight-saving weekends: `next_change` is in the future, and stepping
+    to it lands in `next_phase`. The Friday hole above was 1,200 minutes wide
+    and no single-timestamp test found it.
+
+    The DST spans are here because `_at` rebuilds a wall-clock time on a day
+    whose offset changes; the sweep is what shows that every boundary this
+    module names — 04:00, 09:30, 16:00, 20:00 — sits outside the ambiguous and
+    non-existent hours, rather than that being assumed.
+    """
+    spans = [
+        (datetime(2026, 8, 10, tzinfo=UTC), 8),   # an ordinary week
+        (datetime(2026, 3, 6, tzinfo=UTC), 4),    # spring forward
+        (datetime(2026, 11, 1, tzinfo=UTC), 4),   # fall back
+        (datetime(2027, 3, 12, tzinfo=UTC), 4),
+        (datetime(2027, 11, 5, tzinfo=UTC), 4),
+    ]
+
+    for start, days in spans:
+        now = start
+        end = start + timedelta(days=days)
+        while now < end:
+            state = market_state(now, windows_by_day=WINDOWS)
+            assert state.next_change > now, f"{now} promised a boundary in the past"
+            landed = market_state(state.next_change, windows_by_day=WINDOWS)
+            assert landed.phase is state.next_phase, (
+                f"{now} (New York {now.astimezone(ZoneInfo('America/New_York'))}) "
+                f"is {state.phase} and promised {state.next_phase} at "
+                f"{state.next_change}, which is actually {landed.phase}"
+            )
+            now += timedelta(minutes=1)
 
 
 def test_the_countdown_points_at_the_next_boundary():

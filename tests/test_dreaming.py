@@ -1523,6 +1523,60 @@ def test_a_shelf_is_ordered_by_when_a_dream_ARRIVED_not_when_it_changed(store):
     assert next(d.title for d in reversed(shelf)) == "waiting since March"
 
 
+def test_a_dream_stamp_is_normalised_to_UTC_on_the_way_into_the_row(store):
+    """**`in_vault` orders on TEXT, so every offset in the column must match.**
+
+    `_iso_utc` exists so that "text ordering is instant ordering", and
+    `adoptions`, `dream_messages` and `_apply_move` all went through it while
+    `save` called `.isoformat()` on whatever the object carried. That is the
+    string-comparison bug this repository has already paid for twice, sitting
+    in the one table nobody had checked.
+
+    Pacific/Auckland is not a hypothetical offset here: it is what the dream
+    timer's schedule is written in, by design.
+    """
+    nz = timezone(timedelta(hours=13))
+    store.save(
+        Dream(
+            title="stamped in Auckland",
+            seed="s",
+            vault=Vault.VAULT,
+            created_at=datetime(2026, 8, 12, 9, 0, tzinfo=nz),
+            updated_at=datetime(2026, 8, 12, 9, 0, tzinfo=nz),
+            vault_entered_at=datetime(2026, 8, 12, 9, 0, tzinfo=nz),
+        )
+    )
+
+    with sqlite3.connect(store.path) as conn:
+        row = conn.execute(
+            "SELECT created_at, updated_at, vault_entered_at FROM dreams"
+        ).fetchone()
+
+    assert all(str(stamp).endswith("+00:00") for stamp in row)
+
+
+def test_a_shelf_ordered_on_text_still_answers_the_longest_wait_first(store):
+    """The consequence, measured rather than reasoned about.
+
+    A dream shelved at 2026-08-11 20:00Z but stamped `+13:00` sorted AFTER one
+    shelved ten hours later, so `confer.run`'s reversal answered it LAST — the
+    exact starvation the reversal exists to prevent.
+    """
+    nz = timezone(timedelta(hours=13))
+    store.save(
+        Dream(title="waiting longest", seed="s", vault=Vault.VAULT,
+              vault_entered_at=datetime(2026, 8, 12, 9, 0, tzinfo=nz))
+    )
+    store.save(
+        Dream(title="shelved later", seed="s", vault=Vault.VAULT,
+              vault_entered_at=datetime(2026, 8, 12, 6, 0, tzinfo=UTC))
+    )
+
+    shelf = store.in_vault(Vault.VAULT)
+
+    assert next(d.title for d in reversed(shelf)) == "waiting longest"
+
+
 # ------------------------------------------------------ promotion off the bench
 #
 # The gap that made the whole feature inert. `is_offerable` was defined and
@@ -2721,6 +2775,61 @@ def test_moving_only_the_review_date_keeps_the_answer():
     assert carried[0].observe_by == datetime(2028, 1, 1, tzinfo=UTC)
 
 
+def test_a_restated_list_that_OMITS_a_refused_claim_does_not_erase_it():
+    """**Omission was the hole that restatement was already closed against.**
+
+    Carrying the verdict across a reworded claim is only half the rule. The
+    other half is that the output used to be exactly `incoming`, so a step
+    that simply did not mention a claim DELETED it — and dropping a ruled-out
+    condition is strictly stronger than restating one, because
+    `all_conditions_met` is what promotes a dream to the vault and a
+    ruled-out condition is the thing stopping it. Measured end to end: the
+    dream went workbench → vault → adopted and granted a symbol in no
+    allowlist, with `ruled_out_conditions` empty so even the absence was
+    invisible.
+
+    A model must not be able to change a settled fact by not mentioning it.
+    """
+    refused = _observation(ruled_out=True, observed_by=OPERATOR, note="no restart")
+    was = [_checkable(fulfilled=True), refused]
+
+    carried = carry_forward_grading(was, [_checkable()])
+
+    assert [c.key for c in carried] == [_checkable().key, refused.key]
+    assert carried[-1].ruled_out is True
+    assert carried[-1].observed_by == OPERATOR
+
+
+def test_a_restated_list_that_omits_a_MET_claim_keeps_that_too():
+    """One rule reads as one rule.
+
+    `is_answered` is the test on the way in and it is the test here, so both
+    halves of an answer survive an omission. Retaining a fulfilment costs
+    nothing — it is met, so it blocks nothing — and a rule that preserved only
+    refusals would be asymmetric bookkeeping somebody talks themselves out of.
+    """
+    met = _observation(fulfilled=True, observed_by=OPERATOR, note="saw it")
+
+    carried = carry_forward_grading([met], [_checkable()])
+
+    assert [c.key for c in carried] == [_checkable().key, met.key]
+    assert carried[-1].fulfilled is True
+
+
+def test_an_unanswered_condition_a_step_drops_is_gone():
+    """The retention is about ANSWERS, not about every condition ever written.
+
+    A dreamer reworking its own unsettled claims is the ordinary case and must
+    stay possible; what it may not do is withdraw a question somebody has
+    already answered. Without this the list would only ever grow.
+    """
+    stale = _observation(subject="a subject nobody ever answered")
+
+    carried = carry_forward_grading([stale], [_checkable()])
+
+    assert [c.key for c in carried] == [_checkable().key]
+
+
 def test_a_threshold_and_an_observation_never_collide_on_one_key():
     """The key names the SHAPE first, so two different kinds of claim cannot be
     read as the same claim by filling the same blanks."""
@@ -3356,6 +3465,45 @@ def test_plan_fusion_is_pure_and_needs_no_store():
     assert plan.has_overlap
     assert plan.verification_ceiling is Verification.UNVERIFIED
     assert len(plan.chain) == 3
+
+
+def test_a_claim_two_parents_answered_OPPOSITE_ways_fuses_as_RULED_OUT():
+    """**The parent ORDER used to decide which operator answer survived.**
+
+    The answers were collected into a flat list and read into a dict, so the
+    last parent won. Measured: `[met, refuted]` produced a refuted child and
+    `[refuted, met]` produced a met one, over the same pair — and the dreamer
+    chooses that order, so a model was choosing between two of the operator's
+    answers on the route that ends in a symbol permission.
+
+    In dispute the refusal stands. It is the AND on `checked` in a second
+    place, and it makes the fusion harder to promote, which is the direction a
+    fusion is supposed to move in.
+    """
+    met = DreamCondition(text="t", subject="s", observable="o", observe_by=DUE,
+                         fulfilled=True, observed_by=OPERATOR, note="saw it")
+    refuted = DreamCondition(text="t", subject="s", observable="o", observe_by=DUE,
+                             ruled_out=True, observed_by=OPERATOR, note="it did not")
+    a = Dream(id=1, title="a", seed="s", chain=[Hop("m")], conditions=[met])
+    b = Dream(id=2, title="b", seed="s", chain=[Hop("m")], conditions=[refuted])
+
+    for parents in ([a, b], [b, a]):
+        settled = plan_fusion(parents).conditions[0]
+        assert settled.ruled_out is True
+        assert settled.fulfilled is False
+
+
+def test_expiry_reads_a_naive_clock_as_UTC_rather_than_raising(store):
+    """Two functions on one store answering the same argument must not fail
+    differently. `Adoption.is_live` reads a naive `now` as UTC; this raised
+    `TypeError: can't subtract offset-naive and offset-aware datetimes`, in a
+    scheduled command where an exception is a job that silently stopped."""
+    store.save(
+        Dream(title="ancient", seed="s",
+              vault_entered_at=datetime(2026, 1, 1, tzinfo=UTC))
+    )
+
+    assert [d.title for d in store.expired(datetime(2027, 1, 1))] == ["ancient"]
 
 
 def test_the_weaker_badge_wins_and_it_is_not_alphabetical():

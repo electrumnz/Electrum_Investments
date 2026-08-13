@@ -20,13 +20,14 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 import pytest
 
 from bot.broker import MockBroker
 from bot.journal import Journal
+from bot.market_clock import TradingDay
 from bot.models import (
     AccountSnapshot,
     Direction,
@@ -524,6 +525,43 @@ def test_the_degraded_flag_clears_once_the_orders_come_back(broker):
     broker.set_orders_degraded(False)
     poller.poll_once()
     assert poller.payload()["orders_unavailable"] is False
+
+
+def test_a_calendar_that_raises_costs_the_strip_and_never_the_equity(broker):
+    """The last unbounded sub-read in `_read`, found by making one raise.
+
+    `_read` said "never raises" over the calendar block, quoting
+    `SessionCalendar.refresh`, which says the same thing over a claim about the
+    BROKER: `get_calendar` is documented to catch its own errors and answer
+    `None`. Nothing in the `Broker` protocol makes that structural.
+    `AlpacaBroker` holds it inside one `try`, with the deferred
+    `from alpaca.trading.requests import GetCalendarRequest` sitting outside it.
+
+    Measured before the fix: an exception out of `get_calendar` took the WHOLE
+    poll down — `status=failing`, `snapshot=None`, no equity, no positions, no
+    orders — every five seconds, for a holiday strip. The order book above it
+    and the tape below it both degrade alone; this was the one that did not.
+    """
+
+    class _NoCalendar(MockBroker):
+        def get_calendar(self, start: date, end: date) -> list[TradingDay] | None:
+            raise RuntimeError("calendar endpoint 500")
+
+    poller = _poller(_NoCalendar(starting_equity=100_000.0))
+    poller.poll_once()
+
+    payload = poller.payload()
+    # The figure this page exists for survives.
+    assert payload["status"] == LiveStatus.LIVE.value
+    assert payload["account"] is not None
+    assert payload["account"]["equity_usd"] == pytest.approx(100_000.0)
+
+    snapshot = poller.latest()
+    assert snapshot is not None
+    # And the strip says it is unknown rather than saying there are no sessions.
+    assert snapshot.sessions_ahead == []
+    assert snapshot.calendar_loaded is False
+    assert snapshot.calendar_degraded is True
 
 
 def test_a_missing_quote_is_named_and_its_distance_stays_unknown(broker):
