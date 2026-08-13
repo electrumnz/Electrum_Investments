@@ -99,6 +99,33 @@ def test_headline_figures_match_by_hand(known_set):
     assert s.total_pnl_usd == pytest.approx(300.0)
 
 
+def test_a_break_even_trade_is_not_charged_as_an_average_loss(known_set):
+    """**A flat close is in neither bucket, and `1 - win_rate` charged it.**
+
+    `wins` is `p > 0` and `losses` is `p < 0`, so a trade that came out exactly
+    flat counts toward `trade_count` and toward neither. Weighting the loss
+    side by `1 - win_rate` therefore billed it the full average loss.
+
+    Measured before the fix: +100, -50 and 0.00 reported an expectancy of
+    $0.00 against a true mean of +$16.67. Pessimistic, which is the safe
+    direction, and still a figure describing no sample — on the page whose own
+    strapline is that a wrong metric gets believed and then acted on.
+
+    Expectancy is the mean result per trade, so the two must agree.
+    """
+    with_a_scratch = [*known_set, _trade(0.0, minutes=240)]
+    s = summarise(with_a_scratch)
+
+    assert s.trade_count == 5
+    assert s.wins == 2 and s.losses == 2  # the flat one is in neither
+    assert s.expectancy_usd == pytest.approx(s.total_pnl_usd / s.trade_count)
+    assert s.expectancy_usd == pytest.approx(60.0)  # 300 / 5
+
+    # And the four-trade set, which has no flat close, is untouched: the two
+    # expressions are identical whenever every trade lands in a bucket.
+    assert summarise(known_set).expectancy_usd == pytest.approx(75.0)
+
+
 def test_r_multiples_match_by_hand(known_set):
     s = summarise(known_set)
     assert s.total_r == pytest.approx(3.0)

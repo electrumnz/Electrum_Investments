@@ -463,6 +463,103 @@ def test_rejects_position_larger_than_max_position_pct(rules, account, spy_tick)
     assert _reasons_mention(verdict, "of equity")
 
 
+def test_an_add_on_to_a_held_position_breaches_the_concentration_cap(
+    rules, spy_tick
+):
+    """**The cap is on the POSITION, and a second order in a symbol grows one.**
+
+    Measured against the shipped config before this was fixed: 90 SPY held at
+    45% of equity plus an order for another 90 at 45% came back APPROVED under
+    a 50% cap, leaving one symbol worth 90% of the account. The gate was
+    measuring the order in hand while `config/rules.yaml`, the Armorer's
+    `LimitFact` and the system prompt all described the position.
+
+    Nothing else caught it. Alpaca aggregates per symbol, so
+    `_concurrent_positions` saw no new position, and 90% sits comfortably under
+    the 150% gross-exposure cap.
+
+    The risk numbers here are deliberately tiny — a $5 stop on 90 shares is
+    $450, well inside both the per-trade and the total caps — so the only thing
+    that can refuse this is the concentration gate.
+    """
+    held = Position(
+        symbol="SPY",
+        direction=Direction.BUY,
+        qty=90,
+        entry_price=500.00,
+        opened_at=INSIDE_SESSION,
+        current_price=500.00,
+    )
+    account = AccountSnapshot(
+        equity_usd=PAPER_EQUITY,
+        cash_usd=PAPER_EQUITY,
+        # Margin, so the buying-power guard is not what refuses this.
+        buying_power_usd=400_000.0,
+        open_positions=[held],
+        open_risk_usd=450.0,
+        open_risk_by_symbol={"SPY": 450.0},
+    )
+    assert held.notional_usd / PAPER_EQUITY * 100 == 45.0
+    assert rules.account.max_position_pct == 50.0
+
+    add = OrderProposal(
+        symbol="SPY",
+        direction=Direction.BUY,
+        qty=90,
+        limit_price=500.00,
+        stop_loss_price=495.00,
+        rationale="Adding to a held position; each order alone is under the cap.",
+    )
+    verdict = _gate(rules).evaluate(add, account=account, tick=_tick_at(500.00))
+
+    assert not verdict.approved
+    assert _reasons_mention(verdict, "90.0% of equity")
+    # The held half is named, because a 90,000 figure beside a 45,000 order is
+    # arithmetic the reader cannot check.
+    assert _reasons_mention(verdict, "already held in SPY")
+
+
+def test_an_order_opposite_to_what_is_held_is_not_added_to_it(rules):
+    """A sell against a long nets the position DOWN at the broker.
+
+    Counting it toward concentration would refuse the order that reduces
+    concentration, which is the same mistake as gating a close.
+    """
+    held = Position(
+        symbol="SPY",
+        direction=Direction.BUY,
+        qty=90,
+        entry_price=500.00,
+        opened_at=INSIDE_SESSION,
+        current_price=500.00,
+    )
+    account = AccountSnapshot(
+        equity_usd=PAPER_EQUITY,
+        cash_usd=PAPER_EQUITY,
+        buying_power_usd=400_000.0,
+        open_positions=[held],
+        open_risk_usd=450.0,
+        open_risk_by_symbol={"SPY": 450.0},
+    )
+    against = OrderProposal(
+        symbol="SPY",
+        direction=Direction.SELL,
+        qty=90,
+        limit_price=500.00,
+        stop_loss_price=505.00,
+        rationale="Opposite side; this reduces what is held rather than adding.",
+    )
+    verdict = _gate(rules).evaluate(against, account=account, tick=_tick_at(500.00))
+
+    assert verdict.approved, verdict.reasons
+
+
+def _tick_at(price: float) -> Tick:
+    return Tick(
+        symbol="SPY", bid=price - 0.01, ask=price + 0.01, timestamp=INSIDE_SESSION
+    )
+
+
 # --------------------------------------------------------- 2% total-risk cap
 
 
@@ -514,6 +611,92 @@ def test_third_full_size_trade_breaches_the_total_risk_cap(rules, spy_tick):
     )
     assert not verdict.approved
     assert _reasons_mention(verdict, "total risk")
+
+
+def test_a_held_position_with_no_journal_row_refuses_the_total_risk_cap(rules):
+    """**The live breach of rule 2, on the droplet, 13 Aug 2026.**
+
+    `open_risk_usd` is summed from the journal's open rows, so 107 held AAPL
+    shares the journal had written off as closed contributed nothing. Reported
+    total 1,487.19; real total 2,396.69 on 99,200.28 of equity — 2.42% against
+    a 2% cap, a fifth over and invisible on every surface.
+
+    `_class_total_risk` already refused on exactly this input, and it could not
+    help: `max_class_total_risk_pct` is configured on crypto alone, which is
+    switched off, so in the shipped configuration no gate refused on missing
+    risk at all.
+
+    The proposal below is a perfectly ordinary trade — 900 of risk against a
+    980.19 already known, which is 1.88% and would pass — so the only thing
+    that can refuse it is the unknown.
+    """
+    assert rules.instruments["us_equity"].max_class_total_risk_pct is None
+
+    account = AccountSnapshot(
+        equity_usd=PAPER_EQUITY,
+        cash_usd=PAPER_EQUITY,
+        buying_power_usd=400_000.0,
+        open_positions=[
+            Position(
+                symbol="AAPL",
+                direction=Direction.BUY,
+                qty=107,
+                entry_price=308.50,
+                opened_at=INSIDE_SESSION,
+                current_price=308.50,
+            )
+        ],
+        open_risk_usd=980.19,
+        open_risk_by_symbol={"SPY": 980.19},
+        symbols_with_unknown_risk=["AAPL"],
+    )
+
+    ordinary = OrderProposal(
+        symbol="SPY",
+        direction=Direction.BUY,
+        qty=18,
+        limit_price=500.00,
+        stop_loss_price=450.00,  # $50 x 18 = $900, 0.9% of equity
+        rationale="Fits the 2% total against the risk the gate can actually see.",
+    )
+    verdict = _gate(rules).evaluate(ordinary, account=account, tick=_tick_at(500.00))
+
+    assert not verdict.approved
+    # Exactly one reason, so this cannot pass because some other gate happened
+    # to refuse. Reverting the fix has to turn the verdict green, not merely
+    # change the wording of a rejection that was going to happen anyway.
+    assert len(verdict.reasons) == 1, verdict.reasons
+    assert _reasons_mention(verdict, "combined open risk cannot be established")
+    assert _reasons_mention(verdict, "AAPL")
+    # The number it CAN see is quoted, so an operator can tell how much of the
+    # picture is missing rather than only that some of it is.
+    assert _reasons_mention(verdict, "980.19")
+
+
+def test_the_total_risk_cap_still_approves_when_nothing_is_unknown(
+    rules, spy_tick, buy_proposal
+):
+    """The refusal above must not fire on an account whose rows are complete.
+
+    A guard that refused everything would pass its own rejection test and be
+    useless, which is the failure mode of a gate nobody checked the other way.
+    """
+    account = _account_with_open_risk(500.0)
+    account.open_positions = [
+        Position(
+            symbol="SPY",
+            direction=Direction.BUY,
+            qty=3,
+            entry_price=580.00,
+            opened_at=INSIDE_SESSION,
+            current_price=580.00,
+        )
+    ]
+    account.open_risk_by_symbol = {"SPY": 500.0}
+    assert not account.risk_is_understated
+
+    verdict = _gate(rules).evaluate(buy_proposal, account=account, tick=spy_tick)
+    assert verdict.approved, verdict.reasons
 
 
 def test_the_measured_over_size_is_still_rejected(rules):
@@ -972,15 +1155,22 @@ def test_strategy_label_resolves_per_class(rules):
 def _crypto_class_total(rules: Rules) -> Rules:
     """Crypto enabled with only the class total-risk cap left in the way.
 
-    The concurrent-position and capital caps are widened deliberately. Crypto
-    ships with one position and a 15% capital cap, and both would fire on a
-    second position long before the total-risk cap was reached — so a rejection
-    would prove nothing about the rule under test. The cap itself is left at
-    the shipped 0.5%, because that figure is the operator's rule and a test
+    The concurrent-position, capital and concentration caps are widened
+    deliberately. Crypto ships with one position, a 15% capital cap and a 15%
+    concentration cap, and every one of them would fire on a second position
+    long before the total-risk cap was reached — so a rejection would prove
+    nothing about the rule under test. The class total-risk cap itself is left
+    at the shipped 0.5%, because that figure is the operator's rule and a test
     that set its own would stop guarding the config.
+
+    `max_position_pct` joined that list when `_position_size` started counting
+    what is already held in the symbol rather than only the order in hand. It is
+    widened here for the same reason as the other two and is guarded on its own
+    by `test_an_add_on_to_a_held_position_breaches_the_concentration_cap`.
     """
     enabled = _with_crypto(rules, cap=100.0)
     enabled.instruments["crypto"].max_concurrent_positions = 5
+    enabled.instruments["crypto"].max_position_pct = 100.0
     return enabled
 
 

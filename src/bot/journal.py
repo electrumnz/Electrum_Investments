@@ -168,8 +168,39 @@ CREATE TABLE IF NOT EXISTS daily_equity (
 """
 
 
+def _utc(value: datetime) -> datetime:
+    """The same instant, expressed in UTC. A naive value is assumed to be UTC.
+
+    Every timestamp in this database is TEXT, and SQLite compares and orders
+    TEXT lexically. That is only the same thing as comparing instants while
+    every row carries the same offset — `'2026-08-12T20:00:00+00:00'` sorts
+    BEFORE `'2026-08-13T00:00:00+13:00'`, which is nine hours EARLIER. So one
+    caller handing in a non-UTC datetime is enough to make a window silently
+    exclude rows that fall inside it.
+
+    Naive is read as UTC because that is what `_dt` already does on the way
+    back: a row written before a timezone was attached compares as UTC, so
+    writing one has to mean the same thing.
+
+    This repository reasons in UTC everywhere on purpose — `sessions_utc`,
+    every journal timestamp, every figure the dashboard renders — and the only
+    place a local offset can arrive is a caller building a "since midnight"
+    from the operator's own clock, which is New Zealand. Normalising here is
+    what makes that harmless rather than a filter that quietly answers a
+    different question.
+    """
+    return value.astimezone(UTC) if value.tzinfo else value.replace(tzinfo=UTC)
+
+
 def _iso(value: datetime | None) -> str | None:
-    return value.isoformat() if value else None
+    """Storage form: always UTC, so lexical order IS chronological order.
+
+    See `_utc`. Written this way rather than left to callers because the two
+    places it matters — `closed_trades(since=...)` filtering on `exit_time`,
+    and `position_actions` ordering on `at` — read what other code wrote, so a
+    rule enforced at the call sites is a rule one new call site can break.
+    """
+    return _utc(value).isoformat() if value else None
 
 
 def _dt(value: str | None) -> datetime | None:

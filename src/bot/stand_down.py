@@ -43,6 +43,11 @@ def evaluate_stand_down(
         journal.save_stand_down(state)
         return state
 
+    # The streak recorded against the last write, which is the streak the last
+    # stand-down was served for. A trigger has to rest on a loss that has NOT
+    # already been paid for; see `already_served` below.
+    served = state.consecutive_losses
+
     if streak < rules.consecutive_losses_trigger:
         # Not in a stand-down and not in trouble: keep the counter current but
         # leave any previous trigger timestamp intact, since escalation looks
@@ -50,6 +55,38 @@ def evaluate_stand_down(
         state.consecutive_losses = streak
         if state.stage and state.ends_at and moment >= state.ends_at:
             state.stage = 0  # previous stand-down has expired
+        journal.save_stand_down(state)
+        return state
+
+    # **A streak already served does not trigger again**, and this is the guard
+    # that was missing. `consecutive_losses` counts back through the journal, so
+    # it does not reset when a stand-down expires — only a WIN clears it. So
+    # every subsequent close that was neither a win nor a loss found the same
+    # three losses still standing and started the sentence over.
+    #
+    # Measured against the shipped config: three losses trigger a 3-day stage 1;
+    # once it expires, ONE SCRATCH close escalates straight to a 10-day stage 2
+    # on the identical three losses, and the next scratch does it again, without
+    # limit. A scratch neither counts nor resets a streak — that is deliberate —
+    # so it must not be able to re-arm the breaker either.
+    #
+    # Escalation is supposed to mean "a pattern rather than variance", which is
+    # a claim about a SECOND run of losses. Firing it on no new information
+    # makes stage 2 mean nothing and locks live trading out indefinitely, and
+    # a breaker whose severity is not tied to what happened is one an operator
+    # stops reading.
+    #
+    # The comparison is against the recorded streak rather than a new stored
+    # field, and that is not a shortcut: `evaluate_stand_down` is called on
+    # every close, so `state.consecutive_losses` is always the streak as of the
+    # previous close. Each additional loss therefore lengthens the streak past
+    # what is on file and buys exactly one trigger. A new field would need a
+    # migration on `stand_down_state` for a fact the row already carries.
+    already_served = state.last_triggered_at is not None and streak <= served
+    if already_served:
+        if state.stage and state.ends_at and moment >= state.ends_at:
+            state.stage = 0  # the sentence was served; it is not re-imposed
+        state.consecutive_losses = streak
         journal.save_stand_down(state)
         return state
 
