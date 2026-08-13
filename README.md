@@ -124,8 +124,10 @@ src/bot/
   broker.py               Broker Protocol + AlpacaBroker + MockBroker
   mcp_server.py           MCP tools exposing the gate
   models.py               Domain models (shares/coin units, never "lots")
-  claude_client.py        Anthropic SDK wrapper, 1h prompt cache
-  context.py              Renders market state for Claude
+  model_client.py         The model call. Two transports, chosen by the
+                          ENDPOINT: a server-enforced schema at Anthropic, a
+                          forced tool call validated here at DigitalOcean
+  context.py              Renders market state for the model
   audit.py                Append-only JSONL log
   main.py                 CLI entry point
   data/                   News and calendar adapters (stubs for now)

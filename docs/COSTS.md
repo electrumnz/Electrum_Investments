@@ -3,11 +3,28 @@
 Prices verified against the [Claude pricing page](https://platform.claude.com/docs/en/about-claude/pricing)
 on **9 August 2026**. Re-check before relying on the arithmetic; these move.
 
+> **Every figure below is for a CLAUDE model, and the Python model path now
+> follows `DO_INFERENCE_KEY`.** The arithmetic is still the right shape — token
+> counts, cadence and the cache multipliers do not change with the destination
+> — but the per-million rates do: DigitalOcean's open models run roughly
+> $0.18–$0.99 per million against Sonnet's $2/$10. No DigitalOcean model has
+> prices on file in `MODEL_SPECS`, deliberately: a price reaches that table in a
+> commit with a reason, exactly as a limit reaches `config/rules.yaml`, and
+> until one does its calls report an **unknown** cost rather than a zero. An
+> invented price is the same class of error as an invented indicator.
+>
+> Two figures here are also **not yet measured at that endpoint**. Prompt
+> caching is undocumented for its `/v1/messages`, and a dropped `cache_control`
+> does not raise — it bills 10x on the system block. And a model that reasons
+> before answering spends output tokens the Claude arithmetic below does not
+> account for. `cached_tokens` on the `cycle_complete` line is what settles the
+> first; the second wants a week of real cycles.
+
 ## The stack
 
 | Service | Purpose | Cost |
 |---|---|---|
-| **Anthropic API** | The decision engine | ~$5–15/mo (see below) |
+| **The model API** | The decision engine | ~$5–15/mo on Claude (see below) |
 | **Alpaca** | Broker, paper trading | **$0** |
 | **Alpaca market data** | Quotes and bars, free tier | **$0** |
 | **Finnhub** | Earnings calendar for the news blackout | **$0** (60 req/min) |
