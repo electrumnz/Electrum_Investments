@@ -752,18 +752,48 @@ class LivePoller:
 
         ticker, ticker_at = self._read_ticker(broker)
 
-        # A no-op on all but one read a day. Never raises: a calendar failure
-        # must not cost the equity reading this snapshot exists for.
-        self._calendar.refresh(broker, self._clock())
-        today = self._clock().astimezone(NY).date()
-        sessions = [
-            SessionDayView(
-                date=d.date.isoformat(),
-                label=d.render(),
-                early_close=d.is_early_close,
+        # A no-op on all but one read a day, and it must not be able to cost the
+        # equity reading this snapshot exists for.
+        #
+        # **That was a promise rather than a fact.** The comment here used to say
+        # "never raises", quoting `SessionCalendar.refresh`, whose own docstring
+        # says the same — and both were resting on a claim about the BROKER:
+        # `get_calendar` is documented to catch its own errors and answer `None`.
+        # `AlpacaBroker` does, inside one `try`; the deferred
+        # `from alpaca.trading.requests import GetCalendarRequest` above it does
+        # not, and neither does iterating whatever the SDK hands back. Nothing in
+        # the `Broker` protocol makes the guarantee structural, so it holds for
+        # exactly as long as one adapter keeps holding it.
+        #
+        # Measured: a broker whose `get_calendar` raises took the WHOLE read down
+        # — `status=failing`, `snapshot=None`, no equity, no positions, no orders
+        # — and did it again every five seconds. A holiday strip is the least
+        # important thing on this snapshot and it was the only degradation in
+        # `_read` that was not contained; the tape below it and the order book
+        # above it both degrade alone.
+        #
+        # So the promise is kept where it is made. The same failure direction as
+        # `_read_ticker`: an unreadable calendar renders as unloaded, which
+        # `SessionCalendar` already answers `None` to every question about, and
+        # `calendar_degraded` says the reading was attempted and did not land.
+        calendar_degraded = False
+        sessions: list[SessionDayView] = []
+        try:
+            self._calendar.refresh(broker, self._clock())
+            today = self._clock().astimezone(NY).date()
+            sessions = [
+                SessionDayView(
+                    date=d.date.isoformat(),
+                    label=d.render(),
+                    early_close=d.is_early_close,
+                )
+                for d in self._calendar.upcoming(today, count=5)
+            ]
+        except Exception as exc:
+            calendar_degraded = True
+            log.warning(
+                "live_calendar_read_failed", error=f"{type(exc).__name__}: {exc}"
             )
-            for d in self._calendar.upcoming(today, count=5)
-        ]
 
         return LiveSnapshot(
             taken_at=self._clock(),
@@ -776,7 +806,10 @@ class LivePoller:
             ticker_taken_at=ticker_at,
             sessions_ahead=sessions,
             calendar_loaded=self._calendar.is_loaded,
-            calendar_degraded=self._calendar.is_degraded,
+            # `or` rather than the calendar's own flag alone: a refresh that
+            # RAISED never reached the point of setting one, so the calendar
+            # would report itself undegraded about a read that did not happen.
+            calendar_degraded=self._calendar.is_degraded or calendar_degraded,
         )
 
     def _read_ticker(

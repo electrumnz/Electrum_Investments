@@ -471,6 +471,32 @@ def test_the_connection_itself_is_read_only(tmp_path):
         conn.close()
 
 
+def test_one_instruction_cannot_eat_the_droplet(tmp_path):
+    """The progress handler bounds STEPS, and a step can be arbitrarily large.
+
+    Measured through `run_query` with the handler installed:
+    `SELECT length(randomblob(1000000000))` came back `ok` after 6.8 seconds
+    having taken the process to 988 MB RSS. One VM instruction, so the handler
+    was never called between the allocation and the answer, and the docstring's
+    claim that runtime was bounded was true of the clock and false of the
+    memory. This runs on a 2 GB droplet that is also running the trading loop
+    and the web unit.
+
+    A query wanting more than `QUERY_VALUE_LIMIT_BYTES` gets an error, which is
+    the same answer a query that ran too long already gets.
+    """
+    index = build(tmp_path, cycle())
+
+    result = run_query(index._path, "SELECT length(randomblob(1000000000))")
+    assert not result.ok
+    assert "too big" in result.error
+
+    # And an ordinary value is untouched, or the cap would be a new outage.
+    fine = run_query(index._path, "SELECT length(randomblob(1000)) AS n")
+    assert fine.ok
+    assert fine.rows == [{"n": 1000}]
+
+
 def test_a_syntax_error_is_reported_rather_than_raised(tmp_path):
     index = build(tmp_path, cycle())
     result = run_query(index._path, "SELECT nope FROM cycles")

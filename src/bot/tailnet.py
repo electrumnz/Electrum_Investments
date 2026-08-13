@@ -38,6 +38,14 @@ rule as `FinnhubCalendar.is_degraded` and `reconcile`'s `risk_is_understated`.
 
 Equally, a key expiry that is genuinely absent — a tailnet that permits
 disabling it — is reported as disabled rather than as zero days remaining.
+
+And the other half of that, which is the one that was wrong: **"expiry is
+disabled" is a claim about a node we could actually read.** `KeyExpiry` missing
+from a `Self` object is the good outcome. `Self` missing altogether, or arriving
+as something that is not an object, is output this module did not understand —
+and reading that as the good outcome makes the all-clear what an unparseable
+reading looks like. Same rule as `Verification` treating an empty chain as
+`unverified` rather than `sourced`.
 """
 
 from __future__ import annotations
@@ -181,6 +189,20 @@ def parse(status: Any, serve: Any = None, *, now: datetime | None = None) -> Tai
     `KeyExpiry` missing from `Self` means expiry is disabled — which is why it
     is passed through as `None` and rendered as "disabled" rather than being
     defaulted to anything.
+
+    **A missing `Self` is NOT that, and conflating the two produced an
+    all-clear out of output nobody could read.** `expiry_disabled` is
+    `logged_in and key_expires_at is None`, so a payload carrying
+    `BackendState: Running` and no usable `Self` node came back as "Tailscale
+    key expiry is disabled. Nothing to do.", with `needs_attention` False and
+    the unit exiting 0 — the good outcome manufactured from a reading that
+    failed. The `Self` node is where the expiry lives, so its absence means the
+    expiry is UNKNOWN, and an error is recorded so every downstream reader
+    (banner, exit code, headline) treats it that way.
+
+    The existing schema-change test passed over this: it garbled `Self` *and*
+    `BackendState` together, so the attention came from the mangled state
+    rather than from the unreadable node.
     """
     moment = now or datetime.now(UTC)
     if not isinstance(status, dict):
@@ -189,9 +211,16 @@ def parse(status: Any, serve: Any = None, *, now: datetime | None = None) -> Tai
         )
 
     self_node = status.get("Self")
-    expiry = (
-        _timestamp(self_node.get("KeyExpiry")) if isinstance(self_node, dict) else None
-    )
+    if not isinstance(self_node, dict):
+        return TailnetStatus(
+            checked_at=moment,
+            backend_state=str(status.get("BackendState") or ""),
+            error=(
+                "tailscale status carried no readable Self node, so the key "
+                "expiry is unknown rather than disabled"
+            ),
+        )
+    expiry = _timestamp(self_node.get("KeyExpiry"))
 
     hostnames: list[str] = []
     if isinstance(serve, dict):

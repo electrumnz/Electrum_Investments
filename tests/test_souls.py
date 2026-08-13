@@ -297,3 +297,35 @@ def test_an_unreadable_directory_is_absent_not_an_exception(tmp_path):
 
 def test_an_absent_soul_contributes_nothing_to_a_prompt():
     assert Soul.absent("x").prompt_prefix() == ""
+
+
+def test_load_soul_refuses_a_traversal_itself_and_not_only_its_caller(tmp_path):
+    """The test above says a name outside `KNOWN_SOULS` "reaching `load_soul` is
+    a path traversal", and then leaves the checking to four call sites.
+
+    Measured before the fix: `load_soul("../CLAUDE")` returned the 180 KB
+    repository root file, wrapped in `--- begin character ---` and ready to be
+    sent to a model as a personality. An absolute name is worse, because
+    `Path("souls") / "/etc/anything.md"` discards the directory entirely — that
+    is what a join with an absolute path does. The `.md` suffix narrows what can
+    be read and does not stop it.
+
+    Every caller today does check, and that is exactly the arrangement that
+    failed when `/live` was left out of the hand-maintained route list. The
+    refusal answers `absent`, the same as a missing file, so the failure
+    direction is unchanged: a voiceless agent, never a dead page.
+    """
+    outside = tmp_path / "secret.md"
+    outside.write_text("# not a character\n")
+    souls = tmp_path / "souls"
+    souls.mkdir()
+    (souls / "yoda.md").write_text("# a real one\n")
+
+    for name in ("../secret", str(outside)[:-3], "..", "sub/yoda", "yoda\x00"):
+        soul = load_soul(name, souls_dir=souls)
+        assert not soul.found, name
+        assert soul.text == ""
+        assert soul.prompt_prefix() == ""
+
+    # The ordinary name still loads, or the guard would be an outage.
+    assert load_soul("yoda", souls_dir=souls).found

@@ -99,6 +99,30 @@ def test_a_schema_change_costs_a_reading_rather_than_raising():
     assert status.needs_attention(now=NOW)
 
 
+def test_an_unreadable_self_node_is_unknown_rather_than_disabled():
+    """The good outcome must not be what a failed reading looks like.
+
+    `expiry_disabled` is `logged_in and key_expires_at is None`, and the expiry
+    lives on the `Self` node — so a payload with a healthy `BackendState` and no
+    usable `Self` came back as "Tailscale key expiry is disabled. Nothing to
+    do.", `needs_attention` False, and `main` exiting 0. A check that could not
+    read the node reported the link as permanently safe.
+
+    The test above passed over this because it garbled `BackendState` at the
+    same time, so the attention came from the mangled state rather than from the
+    unreadable node. Both halves are pinned separately here, with the state left
+    healthy so only the `Self` node is doing the work.
+    """
+    for payload in ({"BackendState": "Running"}, {"BackendState": "Running", "Self": 7}):
+        status = parse(payload, now=NOW)
+
+        assert not status.expiry_disabled
+        assert status.days_remaining(now=NOW) is None
+        assert status.needs_attention(now=NOW)
+        assert "could not be read" in status.headline(now=NOW)
+        assert "unknown rather than disabled" in status.headline(now=NOW)
+
+
 def test_funnel_hostnames_are_picked_up_when_present():
     serve = {"AllowFunnel": {"mudhorn.tailc04415.ts.net:443": True, "other:443": False}}
 

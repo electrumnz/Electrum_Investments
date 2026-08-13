@@ -121,6 +121,61 @@ def test_cycles_outside_the_window_are_excluded(tmp_path):
     assert result.cycles_read == 1
 
 
+def test_a_story_older_than_the_window_reports_its_age_as_a_floor(tmp_path):
+    """The window clips `first_seen`, and it clips it towards FRESHER.
+
+    A story on file for three days and still in the feed comes back from a
+    24-hour window with `first_seen` at the oldest cycle inside it — measured at
+    23 hours against a real 72 — and `get_recent_news` tells the agent to quote
+    that age. Understating the age of a headline is the exact failure this
+    module exists to prevent, arriving through the arithmetic rather than
+    through the wording.
+
+    `Sightings.is_edge` already answered this for the surface rendering one
+    cycle; `NewsRecall` carried `oldest_cycle_at` and nothing used it.
+    """
+    view = _view(
+        *(
+            _cycle(minutes_ago=60 * h, headlines=["cicada brood hits the sesame belt"])
+            for h in (72, 30, 23, 12, 1)
+        ),
+        _cycle(minutes_ago=30, headlines=["broke inside the window"]),
+        tmp_path=tmp_path,
+    )
+
+    result = recall(view, hours=24, now=NOW)
+    by_text = {i.text: i for i in result.headlines}
+
+    old = by_text["cicada brood hits the sesame belt"]
+    assert old.at_window_edge is True
+    # The figure itself is unchanged and still a floor: 23 hours, not 72.
+    assert old.age_minutes(NOW) == 60 * 23
+
+    # A story that genuinely appeared inside the window is NOT flagged. Marking
+    # everything would make the caveat furniture and it would stop being read.
+    assert by_text["broke inside the window"].at_window_edge is False
+
+    assert result.ages_are_floors is True
+    assert any("floors rather than ages" in line for line in render(result, now=NOW))
+
+
+def test_a_window_that_reaches_past_every_story_states_no_floor(tmp_path):
+    """The other half: a caveat that always fires says nothing."""
+    view = _view(
+        _cycle(minutes_ago=200, headlines=["older"]),
+        _cycle(minutes_ago=20, headlines=["newer"]),
+        tmp_path=tmp_path,
+    )
+
+    result = recall(view, hours=24, now=NOW)
+
+    # "older" IS the oldest cycle read, so it sits on the edge; "newer" does not.
+    assert {i.text: i.at_window_edge for i in result.headlines} == {
+        "older": True,
+        "newer": False,
+    }
+
+
 def test_a_degraded_feed_anywhere_in_the_window_marks_the_list_incomplete(tmp_path):
     """An empty post list from an expired token looks like a quiet morning."""
     view = _view(

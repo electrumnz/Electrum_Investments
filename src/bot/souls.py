@@ -24,6 +24,7 @@ being wrong would put a confident, incorrect message in front of someone.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -116,14 +117,43 @@ class Soul:
         )
 
 
+#: A soul name that can only ever be a filename inside `souls_dir`.
+#:
+#: Letters, digits, underscore and hyphen. No dot, no slash, no backslash, so
+#: neither `..` nor an absolute path survives.
+_SAFE_NAME = re.compile(r"^[A-Za-z0-9_-]+$")
+
+
 def load_soul(name: str, *, souls_dir: Path | None = None) -> Soul:
     """Read one soul. Never raises.
 
     An unreadable soul is logged and reported as absent, for the reason in the
     module docstring: this is decoration on a surface whose job is to keep
     working.
+
+    **A name that is not a bare token is refused here, not only at the call
+    site.** `KNOWN_SOULS` above says a name outside it "reaching a path join is
+    a traversal", and every caller today does check — `bot.web.app.chat` maps an
+    unknown name to `YODA`, and the other three pass a constant. That is a
+    guarantee held by four callers remembering, which is the shape that failed
+    when `/live` was left out of the hand-maintained route list.
+
+    Measured, so it is a fact rather than a worry: `load_soul("../CLAUDE")`
+    returned a 180 KB file from the repository root, wrapped in
+    `--- begin character ---` and ready to be sent to a model as a personality;
+    `souls_dir / "/etc/anything.md"` discards the directory entirely, because a
+    join with an absolute path does. The `.md` suffix narrows what can be read
+    and does not stop it.
+
+    Refusing yields `Soul.absent`, which is the same answer a missing file
+    gives, so the failure direction is unchanged: a voiceless agent rather than
+    a dead page. The call site's fallback to `YODA` still runs first and is
+    still the better answer; this is the lock underneath it.
     """
     directory = souls_dir or DEFAULT_SOULS_DIR
+    if not _SAFE_NAME.match(name):
+        log.warning("soul_name_refused", soul=name)
+        return Soul.absent(name)
     path = directory / f"{name}.md"
     try:
         text = path.read_text(encoding="utf-8")
