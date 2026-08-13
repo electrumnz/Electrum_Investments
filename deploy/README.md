@@ -799,15 +799,95 @@ should not live on the trading box.
 ## Updating
 
 ```sh
+sudo /opt/mudhorn/deploy/update.sh
+```
+
+That is the whole thing. It pulls, provisions, restarts and verifies, and
+**every step is asserted rather than assumed** — which is the difference between
+it and the four commands it replaces.
+
+What it checks that a paste cannot:
+
+- **The commit actually moved.** `HEAD` is recorded before and after and
+  compared against the upstream ref. A pull that did not land is a hard stop
+  *before* anything is provisioned or restarted, so a failed update leaves the
+  box exactly as it was rather than half-done.
+- **A dirty tree stops it, with the diff printed.** Local changes are a refusal
+  unless you pass `--stash`, which sets them aside recoverably
+  (`sudo git -C /opt/mudhorn stash list`). It will not silently discard a
+  hand-edit — that is a legitimate thing to have been doing.
+- **The services came back.** It waits, then checks `is-active`, and prints
+  `systemctl status` on the one that did not.
+- **The deployed wrapper still refuses a model mismatch.** It puts a
+  deliberately mismatched `inference.env` and `.hermes/config.yaml` in a
+  temporary directory and runs the real `run-chat.sh` against them with a stub
+  binary, requiring exit 78 *and* both values in the message. **It touches
+  `/home/hermes` not at all** — mutating an agent's credentials file as a deploy
+  step is not a trade worth making for a check. `--skip-verify` turns it off.
+
+It does not switch on `--execute`, the dream timer or the confer timer. Those
+are a person's decision and a deploy is not it.
+
+### The four commands it replaces, and why they are no longer the runbook
+
+They are still what it does, and running them by hand still works. What made
+them unsafe was that **three of the four cannot tell whether the first one
+happened**:
+
+```sh
 cd /opt/mudhorn
-sudo git pull
-sudo /opt/mudhorn/deploy/bootstrap.sh          # picks up dependency changes
+sudo git pull                                  # STOP. Did it say "Updating ..."?
+sudo /opt/mudhorn/deploy/bootstrap.sh
 sudo systemctl restart mudhorn-bot mudhorn-web
 ```
 
 **`bootstrap.sh` replaces the wrappers, so re-run the deliberate-break test
 afterwards** — section 5 above, "Confirm it moved". A pull that lands a fix to
 `run-chat.sh` is exactly the moment its check is worth watching fire once.
+
+### When the pull refuses
+
+```
+error: Your local changes to the following files would be overwritten by merge:
+        deploy/run-chat.sh
+Aborting
+```
+
+Debugging on the box leaves the tree dirty and git will not overwrite it. **Look
+before discarding** — a local edit may be the only copy of something:
+
+```sh
+sudo git status                # staged AND unstaged, which is the point
+sudo git diff                  # UNSTAGED only
+sudo git diff --cached         # STAGED only
+```
+
+**`git diff` alone is a trap here.** It shows unstaged changes only, so a
+*staged* edit prints nothing while the pull keeps refusing — and `git checkout
+-- <file>` restores from the **index**, so it dutifully rewrites the modified
+version back and changes nothing. Both commands report success and the file is
+untouched. Observed exactly this way on 13 Aug 2026.
+
+`stash` does not care which side the change is on, and is recoverable:
+
+```sh
+sudo git stash push -u -m "box-local edits, pre-<sha>"
+sudo git pull                                  # now says "Updating ..."
+sudo git stash list                            # still there if you want it back
+```
+
+**This is written down because it cost a deploy.** Two wrappers had been
+hand-edited, the pull aborted, `bootstrap.sh` provisioned the old tree and
+printed "Provisioned.", and the verification step afterwards reproduced the exact
+bug the pull was meant to fix — under a banner claiming the check had run. Every
+line of output was true. `bootstrap.sh` now prints the branch and commit it is
+provisioning from and shouts when the tree is dirty, because "Provisioned." is
+otherwise a claim about a checkout nobody identified.
+
+It does **not** refuse on a dirty tree. A deliberate local edit is a legitimate
+thing to be doing on a box, and refusing to provision would be the config-load
+validator mistake in a new place: the line has to be impossible to miss, not
+impossible to reach.
 
 Two things a pull does **not** carry, both by design:
 
