@@ -819,13 +819,25 @@ each was believed for a while:
   access or whatever it is, and you cant even place trades currently cz the
   agent is doing it?? and its paper currently??"*
 
-  That reasoning holds and the mechanics check out. The account is PAPER, the
-  dashboard is read-only apart from `POST /chat`, chat needs
-  `DASHBOARD_CHAT_TOKEN` as a separate second secret on top of the password,
-  and every order path behind it still re-runs `RiskGate`. So the password buys
-  a VIEW of a paper account, not the ability to trade one — and device-level
-  access control in front of the whole thing makes an internet-facing guessing
-  bound moot.
+  That reasoning holds, and **one clause of the mechanics as first stated was
+  wrong and is corrected here.** The account is PAPER, the dashboard is
+  read-only apart from `POST /chat`, and every order path behind chat re-runs
+  `RiskGate` — all true and all load-bearing.
+
+  What was wrong: *"chat needs `DASHBOARD_CHAT_TOKEN` as a separate second
+  secret on top of the password, so the password buys a VIEW of a paper
+  account, not the ability to trade one."* Found by the web audit. `app.py`
+  renders the chat token into the markup of `/chat` and `/settings` as
+  `var TOKEN = "..."`, because the browser needs it to POST — so anyone who can
+  sign in can read it out of the page source. The token separates a viewer from
+  a driver only for somebody holding NEITHER secret. **The password is the
+  whole gate.**
+
+  It does not overturn the decision, and it does narrow it: what a guesser
+  would get is an agent that can propose into `RiskGate` on a paper account,
+  rather than a read-only view. Device-level access control in front of the
+  whole thing is what actually answers that, which is the operator's stated
+  plan.
 
   **What would change it:** real money, or the dashboard fronting anything that
   can move funds. `CLAUDE.md` already says `auth.py` is the file to replace

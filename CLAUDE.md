@@ -2692,10 +2692,29 @@ Four things about it are load-bearing:
   work: that was static files in a public GitHub repo, so the password would
   have been readable in the repo and in the page source, and there was no
   server there to check it against. The site is gone; the rule is not.
-- **`POST /chat` keeps its own separate token on top.** Viewing an account and
-  driving an agent that can reach the broker are different privileges, and one
-  secret must not grant both. Exposure used to risk disclosure; with chat it
-  risks action.
+- **`POST /chat` keeps its own separate token on top — and that separation is
+  narrower than it reads.** Viewing an account and driving an agent that can
+  reach the broker are different privileges, and the token is what keeps them
+  apart from someone holding NEITHER secret. It does not keep them apart from
+  someone holding the password: `app.py` passes `dashboard_chat_token` into
+  `chat_page` and `settings_page`, which render it into the markup as
+  `var TOKEN = "..."`, because the browser genuinely needs the value to POST
+  with. So anyone who can sign in can read the chat token out of the page
+  source and drive the agent.
+
+  **Say it that way round rather than "one secret must not grant both", which
+  is what this said and is not what the code does.** The claim that survives is
+  the one that was always doing the work: `RiskGate.evaluate` runs on every
+  order path behind chat, so what is gained is an agent that can propose, not a
+  route around the four rules. Exposure without chat risks disclosure; exposure
+  with chat risks action, and the password is the whole gate on both.
+
+  Fixing it properly means the browser never holding the token — a per-session
+  CSRF-style value minted after sign-in, or moving the check to the session
+  cookie the middleware already validates. Not done, and it is only worth doing
+  if the account stops being paper: see `TODO.md`, where the operator's decision
+  to rely on Tailscale device access instead is recorded with what would change
+  it.
 - **Chat working at all costs the web unit two sandbox settings**, and the
   operator turned it on knowing that. `NoNewPrivileges` and `RestrictSUIDSGID`
   both block `sudo` (systemd makes the second imply the first), so they are
