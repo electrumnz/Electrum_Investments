@@ -148,16 +148,24 @@ class ReconcileResult:
     # "could not ask" and never "nothing resting".
     entries_unchecked: list[str] = field(default_factory=list)
 
+    # The entry order is not in the resting list AND nothing is held. What
+    # became of that order cannot be established from here, so the close is
+    # withheld: see `_confirm_entries` for why absence from that list is not
+    # evidence of a fill, and why a terminal entry that never filled is not a
+    # close either. Overstates risk for as long as it lasts, which is the safe
+    # direction and the one this repository picks.
+    entries_unresolved: list[str] = field(default_factory=list)
+
     # A position exists and cannot be attributed to one journal row: two open
     # trades in the symbol, a direction that disagrees, or more held than was
     # ever ordered. Alpaca aggregates per symbol, so its average entry is not
     # this row's fill, and correcting from it would be a plausible wrong figure.
     entries_ambiguous: list[str] = field(default_factory=list)
 
-    # Closes withheld because the entry may still be resting. Without this, an
-    # order placed out of hours — which rests and fills at the next open — was
-    # closed as a trade on the very next cycle, and then filled into a position
-    # the journal no longer had a row for.
+    # Closes withheld because the entry has never been confirmed as a position.
+    # Without this, an order placed out of hours — which rests and fills at the
+    # next open — was closed as a trade on the very next cycle, and then filled
+    # into a position the journal no longer had a row for.
     closes_deferred: list[str] = field(default_factory=list)
 
     # Why each position that closed this cycle closed. The plan, never the
@@ -179,7 +187,12 @@ class ReconcileResult:
         that does not describe the account.
         """
         return sorted(
-            set(self.entries_resting + self.entries_mid_fill + self.entries_unchecked)
+            set(
+                self.entries_resting
+                + self.entries_mid_fill
+                + self.entries_unchecked
+                + self.entries_unresolved
+            )
         )
 
     @property
@@ -316,9 +329,14 @@ def reconcile(
         if trade.symbol in held:
             continue
         if trade.id is not None and trade.id in deferred_closes:
-            # Not a close. The entry order is still working at the broker, or
-            # the order read failed and cannot say it is not — either way this
-            # row has never been a position, so there is nothing to have closed.
+            # Not a close, and the test is what the journal can ESTABLISH rather
+            # than what it can guess. This row's fill has never been confirmed,
+            # so nothing has ever read back a position behind it — and a row
+            # that was never a position cannot have closed. The entry may be
+            # resting, the order read may have failed, or the order may simply
+            # not have come back in a list that is status-filtered and bounded;
+            # `_confirm_entries` says which, and none of the three is a fill.
+            #
             # Without this an out-of-hours entry, which rests until the next
             # regular open, was written off as a trade on the very next cycle
             # and then filled into a position with no journal row behind it.
@@ -499,6 +517,46 @@ def _confirm_entries(
       empty list means "could not ask" and never "nothing resting" — the same
       lesson as `FinnhubCalendar.is_degraded`. Concluding "terminal" from it
       would close a resting entry as a trade.
+    - **An entry that is neither resting nor held is UNRESOLVED, never closed.**
+      This is the one that was wrong, and it cost a live position. Read on.
+
+    ## Absence from the resting list is not evidence of a fill
+
+    The degraded flag above guards the whole list failing. It does NOT guard one
+    order going missing from a list that came back fine, and that is the same
+    missing-versus-absent distinction one level down:
+    `Broker.get_open_orders` asks Alpaca for the orders it classifies as OPEN,
+    bounded at 100, so an order id that is not in the answer may be filled,
+    cancelled, expired, rejected, past the bound, or in a status that query does
+    not return. Only the first of those is a position.
+
+    **And even a genuinely terminal entry that never filled is not a close.** A
+    cancelled order means the trade never opened; closing the row invents an
+    exit price and a realised P&L for a position that never existed, and both go
+    on to reach `metrics.py`.
+
+    Read off `data/journal.db` on the droplet, 11 Aug 2026: 107 AAPL submitted
+    09:00:03 UTC — 05:00 New York, so a bracket that could not fill and rested —
+    was marked CLOSED at 09:15:04, one cycle later, with a realised figure
+    nobody had traded. The order then filled at the regular open, leaving 107
+    shares at the broker with no open journal row: `open_risk_usd` read 1,487.19
+    against a true 2,396.69, which is 2.42% of equity against a 2% cap, and
+    `stop_watch` no longer looked at it.
+
+    **This branch is the only way into that close, and that is established by
+    running the other four rather than by reasoning about Alpaca.** With the
+    order in the resting list the row defers; with the order read degraded it
+    defers; with the fill confirmed the close is a real one; and a row with no
+    `entry_order_id` cannot arise from `record_fill`, which takes the id off an
+    accepted `OrderResult`. So whatever Alpaca's reason for leaving that id out
+    of the answer, the defect is here: this function cannot tell "not in the
+    list" from "filled", and it must not try.
+
+    So the row is deferred and named instead. That leaves a cancelled entry
+    holding risk in the journal until somebody settles it, which OVERSTATES risk
+    — the safe direction, and the one this repository picks every time. It
+    resolves by itself in the case that matters: when the resting entry fills,
+    the position appears and the branch below squares it.
     """
     deferred: set[int] = set()
     working = {o.order_id: o for o in orders}
@@ -534,13 +592,15 @@ def _confirm_entries(
                 journal.confirm_fill(trade.id, fill_state=FillState.RESTING)
             continue
 
-        # The entry order is terminal: filled, cancelled or expired.
+        # The entry order is not in the resting list. That is WEAKER than
+        # "terminal", and reading it as terminal is what closed AAPL row 2.
         position = held.get(trade.symbol)
         if position is None:
-            # Nothing is held, so there is nothing to square against. Step 1
-            # closes the row and `classify_exit` reports what it can and cannot
-            # establish — including that this entry was never confirmed, so the
-            # row may describe an order that never filled at all.
+            # Nothing is held and nothing was ever confirmed, so there is no
+            # evidence this row was ever a position — and therefore none that it
+            # closed. The close is withheld and named. See the docstring.
+            result.entries_unresolved.append(trade.symbol)
+            deferred.add(trade.id)
             continue
 
         ceiling = trade.submitted_qty if trade.submitted_qty is not None else trade.qty
@@ -594,6 +654,24 @@ def _confirm_entries(
                 "That is a reading, not an outcome, so nothing is written from "
                 "it — the journal keeps the submitted quantity, which "
                 "overstates risk rather than understating it."
+            ),
+        )
+    if result.entries_unresolved:
+        log.warning(
+            "entry_neither_resting_nor_held",
+            symbols=result.entries_unresolved,
+            detail=(
+                "This entry is not in the broker's resting orders and no "
+                "position is held, and its fill was never confirmed — so "
+                "whether it ever became a position cannot be established here. "
+                "The close is WITHHELD rather than recorded: an order absent "
+                "from the resting list may have filled, been cancelled, been "
+                "rejected or simply not been returned, and closing on that "
+                "would write an exit price and a realised P&L for a position "
+                "that may never have existed. The row keeps counting its "
+                "planned risk, which overstates the total rather than "
+                "understating it. It settles itself if the entry fills; a "
+                "cancelled entry needs an operator to say so."
             ),
         )
     if result.entries_ambiguous:
