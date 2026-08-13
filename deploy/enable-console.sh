@@ -56,6 +56,7 @@ while [[ $# -gt 0 ]]; do
     --off) MODE="off" ;;
     --status) MODE="status" ;;
     --rotate) MODE="rotate" ;;
+    --url) MODE="url" ;;
     -h|--help) sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
@@ -68,6 +69,33 @@ if [[ $EUID -ne 0 ]]; then
 fi
 
 say() { printf '%s\n' "$*"; }
+
+# ---------------------------------------------------------------------- url
+#
+# Printing the token is a deliberate act with its own flag, never a line in
+# every run's scrollback. The connector form needs it IN the URL — claude.ai
+# takes a URL and OAuth fields and offers no custom-header input — so there has
+# to be a way to get it, and the way is asking for it by name.
+if [[ "$MODE" == "url" ]]; then
+  [[ -f "$ENV_FILE" ]] || { echo "Not configured: $ENV_FILE does not exist." >&2; exit 1; }
+  TOKEN="$(sed -n 's/^MUDHORN_CONSOLE_TOKEN=//p' "$ENV_FILE" | head -1)"
+  HOST="$(sed -n 's/^MUDHORN_CONSOLE_HOSTS=//p' "$ENV_FILE" | head -1 | cut -d, -f1)"
+  [[ -n "$TOKEN" ]] || { echo "No token in $ENV_FILE." >&2; exit 1; }
+  if [[ -z "$HOST" ]]; then
+    echo "No public host recorded in $ENV_FILE." >&2
+    echo "Bring the Funnel up, then re-run this script with no arguments." >&2
+    exit 1
+  fi
+  say "Connector URL. This CONTAINS the token, so it is the secret:"
+  say ""
+  say "    https://$HOST/mcp?key=$TOKEN"
+  say ""
+  say "A URL travels further than a header — browser history, Referer headers,"
+  say "proxy logs, a screenshot of a settings page. Rotate it if it lands"
+  say "anywhere it should not:"
+  say "    sudo $0 --rotate"
+  exit 0
+fi
 
 # ------------------------------------------------------------------- status
 
@@ -194,7 +222,14 @@ else
 fi
 
 systemctl daemon-reload
-systemctl enable --now "$UNIT"
+systemctl enable --quiet "$UNIT"
+# **restart, not `enable --now`.** `--now` STARTS a stopped unit and does
+# nothing at all to one already running, so every re-run that rewrote the shell
+# flag or the allowed hosts above would leave the old values in force while
+# reporting success. Observed exactly that: the hostname was detected, the
+# script printed "Allowing Host: ...", and the service went on refusing 421
+# until somebody restarted it by hand.
+systemctl restart "$UNIT"
 
 sleep 2
 if ! systemctl is-active --quiet "$UNIT"; then
@@ -228,9 +263,17 @@ say ""
 say "    sudo tailscale funnel --bg $PORT"
 say "    tailscale funnel status          # note the https:// URL"
 say ""
-say "Then at claude.ai -> Settings -> Connectors -> Add custom connector:"
-say "    URL     <that URL>/mcp"
-say "    Header  Authorization: Bearer <the token above>"
+say "Then at claude.ai -> Settings -> Connectors -> Add custom connector."
+say "That form takes a URL and OAuth fields, and offers NO custom header, so"
+say "the token goes in the URL:"
+say ""
+say "    sudo $0 --url        # prints it, token included"
+say ""
+say "A URL travels further than a header -- browser history, Referer, proxy"
+say "logs, a screenshot of a settings page. It is accepted here because the"
+say "exposure is a Funnel you control, the token rotates with one command, and"
+say "this box is paper-trading. Rotate it if the URL is ever pasted anywhere:"
+say "    sudo $0 --rotate"
 say ""
 say "Turn it all off with:"
 say "    sudo $0 --off"

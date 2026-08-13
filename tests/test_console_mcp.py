@@ -333,3 +333,66 @@ def test_the_enable_script_detects_the_tailnet_name():
     assert "MUDHORN_CONSOLE_HOSTS" in script
     assert "tailscale status --json" in script
     assert "421" in script, "the failure the operator would otherwise see is not named"
+
+
+def test_the_token_is_accepted_in_the_query_string_and_the_header_wins():
+    """claude.ai's connector form has no custom-header field.
+
+    It takes a URL and OAuth credentials, so a bearer token has nowhere to go
+    and the choice was an OAuth server for a single-operator console or this.
+
+    **The header is preferred when present**, so a client that CAN send one is
+    never silently downgraded to the weaker channel — a URL travels into browser
+    history, `Referer`, proxy logs and screenshots where a header does not.
+    """
+    from starlette.testclient import TestClient
+
+    token = "t" * 32
+
+    def status(path: str, headers: dict[str, str]) -> int:
+        app = console_mcp.build_app(token, port=9999)
+        with TestClient(app, base_url="http://127.0.0.1:9999") as client:
+            return client.post(
+                path,
+                json={"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+                headers={"content-type": "application/json", "host": "127.0.0.1:9999", **headers},
+            ).status_code
+
+    accept = {"accept": "application/json, text/event-stream"}
+
+    assert status(f"/mcp?key={token}", accept) != 401, "the query token was refused"
+    assert status("/mcp?key=wrong", accept) == 401, "a wrong query token was accepted"
+    assert status("/mcp", accept) == 401, "no credential at all was accepted"
+
+    # A valid header beats a junk query parameter: the header is read first.
+    assert status(
+        "/mcp?key=wrong", {**accept, "authorization": f"Bearer {token}"}
+    ) != 401, "a good header was overridden by a bad query parameter"
+
+
+def test_the_enable_script_restarts_rather_than_enable_now():
+    """`--now` starts a STOPPED unit and does nothing to a running one.
+
+    So a re-run that rewrote the allowed hosts or the shell flag would leave the
+    old values in force while printing success. That happened: the hostname was
+    detected, the script said "Allowing Host: ...", and the service kept
+    refusing 421 until it was restarted by hand.
+    """
+    script = (REPO_ROOT / "deploy" / "enable-console.sh").read_text()
+    directives = [ln.strip() for ln in script.splitlines() if not ln.strip().startswith("#")]
+
+    assert any(ln.startswith("systemctl restart") for ln in directives)
+    assert not any("enable --now" in ln for ln in directives), (
+        "enable --now does not apply a config change to a running unit"
+    )
+
+
+def test_the_url_flag_exists_so_printing_the_token_is_deliberate():
+    """The token must be gettable — the connector needs it in the URL — but not
+    printed into every run's scrollback. An explicit flag is the difference."""
+    script = (REPO_ROOT / "deploy" / "enable-console.sh").read_text()
+
+    assert '--url) MODE="url"' in script
+    # And the normal path still does not print it.
+    on_path = script.split('if [[ "$MODE" == "url" ]]')[1].split("# ---")[1]
+    assert "$TOKEN" not in on_path, "the token is printed outside --url"
