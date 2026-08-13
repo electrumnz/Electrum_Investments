@@ -13,12 +13,36 @@ on **9 August 2026**. Re-check before relying on the arithmetic; these move.
 > until one does its calls report an **unknown** cost rather than a zero. An
 > invented price is the same class of error as an invented indicator.
 >
-> Two figures here are also **not yet measured at that endpoint**. Prompt
-> caching is undocumented for its `/v1/messages`, and a dropped `cache_control`
-> does not raise — it bills 10x on the system block. And a model that reasons
-> before answering spends output tokens the Claude arithmetic below does not
-> account for. `cached_tokens` on the `cycle_complete` line is what settles the
-> first; the second wants a week of real cycles.
+> **MEASURED 13 Aug 2026 — prompt caching does NOT engage there, so every
+> figure below that assumes a cache is wrong for DigitalOcean.** The real
+> `build_system_prompt(load_rules())` block (4,791 tokens) was sent twice,
+> eight seconds apart, carrying
+> `cache_control: {"type":"ephemeral","ttl":"1h"}`, to `deepseek-v4-pro` and
+> `qwen3-coder-flash`. Both calls returned **HTTP 200** and both reported
+> `cache_creation_input_tokens: 0`, `cache_read_input_tokens: 0`,
+> `ephemeral_1h_input_tokens: 0`, and an identical `input_tokens: 4791` on the
+> repeat. So `cache_control` is **accepted and ignored** — the same
+> accept-and-ignore pattern as `output_config`, which is the whole reason the
+> Python path uses a forced tool call.
+>
+> **"Reported zero" is not the same as "definitely not cached"**, and the
+> difference is not observable from here: the counters read zero either because
+> nothing was cached or because the proxy does not report caching it performed.
+> Only the DigitalOcean billing dashboard settles which. The safe planning
+> assumption is the expensive one — that the system prompt is billed in full on
+> every call.
+>
+> **What that costs, as arithmetic rather than a measurement:** ~4,800 system
+> tokens on ~96 cycles a day is ~13.8M input tokens a month before the
+> per-cycle context is counted. At the open-model band of $0.18–$0.99 per
+> million that is roughly **$2.50–$14/month** of input the cache was supposed
+> to make ~10x cheaper. It does not change the decision — the open models are
+> still far below Sonnet — and it does mean the "1h cache pays for itself"
+> arithmetic further down applies to Anthropic only.
+>
+> One figure is **still** unmeasured: a model that reasons before answering
+> spends output tokens this page does not account for. That wants a week of
+> real cycles.
 
 ## The stack
 
