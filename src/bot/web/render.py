@@ -326,11 +326,28 @@ section.block>h2{margin-bottom:.75rem}
   border-bottom:1px solid var(--slate);background:var(--graphite);
   box-shadow:inset 0 1px 0 rgba(233,236,239,.04),0 1px 0 rgba(0,0,0,.5);
   display:flex;align-items:stretch;overflow:hidden;position:relative;z-index:19}
-.tape .fixed{display:flex;align-items:center;gap:.45rem;padding:0 .875rem;
+/* Two pinned facts, STACKED rather than strung along the row: when NYSE next
+   changes state, and what the prices scrolling past it are plus when they were
+   read. Stacking costs the strip the width of the wider line instead of the sum
+   of the two, which is the only way a second pinned fact fits at 320px — and
+   the band is a fixed 3.15rem, so two lines of micro-type have the room.
+   `.ln` keeps the countdown and the "not ticking" marker on one row, because
+   that marker qualifies the countdown and nothing else. */
+.tape .fixed{display:flex;flex-direction:column;align-items:flex-start;
+  justify-content:center;gap:.15rem;padding:0 .875rem;
   white-space:nowrap;border-right:1px solid var(--slate);background:var(--ink);
   font-family:var(--mono);font-size:.625rem;letter-spacing:.12em;
   text-transform:uppercase;color:var(--pewter);position:relative;z-index:1}
+.tape .fixed .ln{display:flex;align-items:center;gap:.45rem}
 .tape .fixed .until{color:var(--bone)}
+/* Tabular figures, so the minute rolling over cannot change the width of the
+   pinned block and nudge the whole strip sideways once a minute.
+   It inherits pewter and does not take `--bone` back off the countdown: this is
+   a qualifier on the prices scrolling past, not a thing to act on.
+   Scoped under `.tape .fixed` so a later bare `.rd` rule cannot restyle it by
+   winning a tie at equal specificity — the collision that has bitten
+   `.pill.seed`, `.rung.gate` and `.note.alert`. */
+.tape .fixed .rd{font-variant-numeric:tabular-nums}
 .tape .view{flex:1;overflow:hidden;position:relative}
 /* The view carries `tabindex="0"` because under `prefers-reduced-motion` it
    becomes a horizontal scroller with no focusable descendant, and Safari and
@@ -610,7 +627,10 @@ section.block>h2{margin-bottom:.75rem}
      Shortening the text instead would mean dropping "NYSE", and the exchange
      name is the whole reason this is allowed to be pinned at all. */
   .tape .fixed{font-size:.5625rem;padding:0 .55rem;letter-spacing:.04em;
-    gap:.3rem}
+    gap:.05rem}
+  /* The horizontal gap belongs to the countdown's own row now. Left on
+     `.fixed` it would only push the two stacked lines apart. */
+  .tape .fixed .ln{gap:.3rem}
   /* The clock module keeps its inset but gives back the horizontal margin.
      At 390px the strip is a hand-scroller and a 19px gap either side of four
      clocks is a fifth of the visible width spent on air. */
@@ -2506,6 +2526,28 @@ SCRIPT = """
      strip every fifteen seconds with nothing having moved. */
   var lastTick = {};
 
+  /* The tape's own read stamp, which is NOT the account's.
+
+     `as_of` above dates the five-second account poll; this dates the sixty-
+     second tape read, and the whole reason the strip can show a price a cent
+     away from the positions table is that the two moments are different. A
+     stamp left at what the server said would go on describing a reading the
+     stream has already replaced — the same failure `paintStamp` exists to
+     prevent, on the figure most likely to be behind. */
+  function paintTapeStamp(data) {
+    var el = document.querySelector('[data-tape-read]');
+    if (!el) return;
+    if (!data.ticker_as_of) { el.textContent = 'mid, read time unknown'; return; }
+    var when = new Date(data.ticker_as_of);
+    if (isNaN(when.getTime())) return;
+    /* Matches `render._tape_read` exactly, for the reason `money`, `whenUTC`
+       and `tapePrice` all match their server halves: one figure formatted two
+       ways eventually disagrees, and here the two would alternate on screen
+       every few seconds. */
+    el.textContent = 'mid, read ' + pad(when.getUTCHours()) + ':' +
+      pad(when.getUTCMinutes()) + ' UTC';
+  }
+
   function tapePrice(v) {
     /* Matches `render._tape_price`. Third formatter, same rule as the other
        two: one figure formatted two ways eventually disagrees. */
@@ -2581,6 +2623,7 @@ SCRIPT = """
     }
 
     paintStamp(data);
+    paintTapeStamp(data);
     paintTape(data);
 
     var account = data.account;
@@ -3635,6 +3678,43 @@ def _tape_price(value: float) -> str:
     return f"{value:,.2f}" if value < 10_000 else f"{value:,.0f}"
 
 
+#: What the tape's tooltip says the strip is, once, for the whole run.
+#:
+#: The cells carry no column header, so without this the tape is a row of prices
+#: with nothing saying which price. It is the SAME measurement the resting
+#: orders quote — `LivePoller._read_ticker` calls `broker.get_tick(symbol).mid`,
+#: exactly as the order rows do — read on the tape's own slower clock, so what
+#: separates the two figures is the moment rather than the method. If that call
+#: ever stops being the midpoint, this label is the first thing that becomes a
+#: lie.
+TAPE_SOURCE_TITLE = (
+    "Bid-ask midpoints, read on the tape's own clock — slower than the account "
+    "figures on the Board, which is why it can differ from them."
+)
+
+
+def _tape_read(read_at: datetime | None) -> str:
+    """What the strip shows and when it was read, pinned beside the countdown.
+
+    The Board's tiles carry a `taken_at` stamp because a figure with no reading
+    time is a present-tense claim about an account nobody may have read since
+    last night. The tape had no stamp at all AND its own deliberately slower
+    cadence, so it was the one price on the page that could disagree with the
+    others for a reason nobody could see.
+
+    Hours and minutes rather than `_when`'s full date: the strip refreshes every
+    sixty seconds, so the date would be four fixed characters of noise on the
+    tightest row in the interface. The word "mid" travels with it because a time
+    on its own would say when the tape was read without saying what it read.
+
+    `None` is "read time unknown" and never a default of now — the same rule as
+    the Board's stamp, in the place where the reading is oldest by design.
+    """
+    if read_at is None:
+        return "mid, read time unknown"
+    return f"mid, read {read_at.astimezone(UTC):%H:%M UTC}"
+
+
 #: The move, in percent, at which the power rail is full. Beyond it the rail
 #: simply stays full rather than growing — the gauge is for telling a drift from
 #: a move, and a scale that ran to the day's worst case would render every
@@ -3811,6 +3891,7 @@ def ticker_tape(
     *,
     watchlist: WatchlistRules | None = None,
     calendar: SessionCalendar | None = None,
+    read_at: datetime | None = None,
 ) -> str:
     """The strip under the header: session phase, four clocks, the watchlist.
 
@@ -3822,9 +3903,21 @@ def ticker_tape(
     the loop seamless: at -50% the second copy sits exactly where the first
     began, so the animation restarting is invisible. One copy would snap back.
 
-    One thing is pinned outside the scroller: when New York's session next
+    Two things are pinned outside the scroller. When New York's session next
     changes, which is the fact a clock cannot give and a marquee would carry
-    out of sight every ninety seconds.
+    out of sight every ninety seconds — and what these prices ARE.
+
+    **`read_at` is when the TAPE was read, which is not when the account was.**
+    The tape runs on `watchlist.refresh_seconds` (60) against a five-second
+    account poll, deliberately: a tape is orientation and a minute-old price is
+    fine there, where a minute-old equity figure would not be. That gap is
+    exactly why the strip showed SPY at 774.12 above a positions table saying
+    774.0900 in one render, and with no stamp the older figure looked like a
+    contradiction rather than an older figure. `None` renders "read time
+    unknown" and never the clock: a caller that cannot say when the quotes were
+    read must not be handed a timestamp by default. `LiveSnapshot` carries the
+    moment as `ticker_taken_at`, and the stream repaints this stamp from
+    `ticker_as_of` on the next message.
     """
     faces = clock_faces(state.now)
 
@@ -3908,11 +4001,25 @@ def ticker_tape(
         f'data-change-at="{state.next_change.isoformat()}" '
         f'data-next-phase="{_e(state.next_phase.value)}">'
         '<div class="fixed">'
-        f'<span class="until">{_e(until)}</span>'
+        # Two lines stacked, and the countdown keeps its own row so the
+        # "not ticking" marker stays beside the thing it qualifies. The band is
+        # a fixed 3.15rem and both lines are micro-type, so stacking costs the
+        # strip the width of the WIDER line rather than the sum of the two —
+        # which is what makes a second pinned fact affordable at 320px.
+        #
+        # SCRIPT removes `.frozen` through its own `parentNode`, so wrapping it
+        # here needs no change there.
+        f'<span class="ln"><span class="until">{_e(until)}</span>'
         # Removed by SCRIPT before its first tick, so its presence means the
         # clocks below — and the countdown beside it — are frozen at page-load
         # time.
-        '<span class="frozen">not ticking</span>'
+        '<span class="frozen">not ticking</span></span>'
+        # What the prices on this strip are, and when they were read. Both
+        # halves are needed: the time alone would say when without saying what,
+        # and the word alone would put an unlabelled reading beside two
+        # differently-measured prices on the page below.
+        f'<span class="rd" data-tape-read title="{_e(TAPE_SOURCE_TITLE)}">'
+        f"{_e(_tape_read(read_at))}</span>"
         "</div>"
         # The run twice, but the second copy in its own element and marked
         # `aria-hidden`. Both halves of that matter and they fix different bugs.
@@ -4757,7 +4864,9 @@ def _order_table(
     kind: str,
     empty: str,
 ) -> str:
-    """One of the two tables. `kind` chooses the caption and nothing else."""
+    """One of the two tables. `kind` chooses the caption's opening and nothing
+    else; the sentence naming what the price column measures is shared, because
+    it is true of both tables and one copy cannot drift from the other."""
     label = (
         "Stop losses and targets in force" if kind == "protective"
         else "Pending entries"
@@ -4800,7 +4909,11 @@ def _order_table(
         # on a multi-part f-string: the ternary binds to the whole expression,
         # not the last fragment, and silently eats the rest of the row.
         level_cell = _order_level(o)
-        market_cell = f"{price:,.4f}" if price else "unknown"
+        # The bid-ask midpoint the poller computed, which is what `_order_gap`
+        # measures from — see the caption. Not the broker's mark on a position:
+        # the two are a cent or so apart and only one of them answers "how far
+        # is this order from doing something".
+        mid_cell = f"{price:,.4f}" if price else "unknown"
         filled_note = (
             f' <span class="muted">({o.filled_qty:g} filled)</span>'
             if o.filled_qty
@@ -4839,7 +4952,7 @@ def _order_table(
             f'<td data-l="Qty" class="r num"><span>{o.qty:g}{filled_note}</span></td>'
             f'<td data-l="Trigger / limit" class="r num">'
             f"<span>{level_cell}</span></td>"
-            f'<td data-l="Market" class="r num">{market_cell}</td>'
+            f'<td data-l="Bid-ask mid" class="r num">{mid_cell}</td>'
             f'<td data-l="Needs" class="r num {gap_cls}">{gap_text}</td>'
             f'<td data-l="Submitted">{_e(submitted)}</td></tr>'
         )
@@ -4864,6 +4977,15 @@ def _order_table(
         "limit; an order placed out of hours rests until the next regular open "
         "rather than trading now."
     )
+    # Named on both tables rather than once, because each is read on its own.
+    # The column was "Market", which is the word every other price on this page
+    # could equally have claimed — and three of them did, in one render.
+    caption += (
+        " &ldquo;Bid-ask mid&rdquo; is the midpoint of this reading's quote and "
+        "is what &ldquo;Needs&rdquo; is measured from; the positions table shows "
+        "the broker's own mark on the position, which is a different measurement "
+        "of the same instrument."
+    )
     cap_id = f"ord-cap-{kind}"
     return (
         # The caption is already the sentence that describes this table, so it
@@ -4874,7 +4996,8 @@ def _order_table(
         f'<caption id="{cap_id}">{caption}</caption>'
         "<thead><tr><th scope=col>Symbol</th><th scope=col>Side</th>"
         "<th scope=col>Status</th><th scope=col class=r>Qty</th>"
-        "<th scope=col class=r>Trigger / limit</th><th scope=col class=r>Market</th>"
+        "<th scope=col class=r>Trigger / limit</th>"
+        "<th scope=col class=r>Bid-ask mid</th>"
         "<th scope=col class=r>Needs</th>"
         "<th scope=col>Submitted</th></tr></thead>"
         f"<tbody>{rows}</tbody></table></div>"
@@ -5112,6 +5235,30 @@ def _positions(
     `unexplained` is optional so a caller with no broker order book — a test, a
     cold start — renders exactly as before rather than claiming a clean check it
     never ran.
+
+    **The price column is named for the MEASUREMENT, not for the moment.** It
+    said "Now", and so did the resting orders' "Market" column, and so did the
+    tape — three columns in one render reading as "the current price of SPY"
+    while showing 774.0900, 774.0800 and 774.12. Every one was correctly
+    obtained and they are different facts: this is `Position.current_price`,
+    Alpaca's own mark on the position, which is what the broker settles against
+    and what unrealised P&L is computed from; the orders table quotes the
+    bid-ask midpoint, because that is what an order's distance to its level is
+    measured from. Labelled the same, a disagreement between them reads as
+    something broken, which is the `market_clock` rule arriving in a new place:
+    the venue's phase and the gate's window are stated separately and never
+    merged into one green light. They are named, never unified — collapsing
+    them onto one source would take the right number away from one of the two
+    jobs.
+
+    **A position with no mark reports that, rather than borrowing the entry
+    price.** The cell was `current_price or entry_price`, which renders a
+    position that opened at 773.32 and cannot be valued as though it were
+    sitting exactly at 773.32 — flat, unmoved, and indistinguishable from a real
+    reading. That is a fourth price in this column wearing the third one's
+    label. `notional_usd` keeps that fallback deliberately, because a rough
+    valuation beats none for a total; a per-position column has room to say
+    unknown.
     """
     if not account.open_positions:
         return (
@@ -5134,7 +5281,9 @@ def _positions(
             if trade and equity
             else "unknown"
         )
-        current = p.current_price or p.entry_price
+        # Missing stays missing. See the docstring: the entry price standing in
+        # for a mark is a figure that looks like a measurement and is not.
+        mark = f"{p.current_price:,.4f}" if p.current_price else "unknown"
         tags, notes = _position_tags(p.symbol, trade, unexplained)
         wisp_attr, wisps = _from_dream(trade)
         # `.alert` on an INNER span, never beside `.note` on the `<p>`. Both are
@@ -5161,7 +5310,7 @@ def _positions(
             f'<td data-l="Side">{_e(p.direction.value)}</td>'
             f'<td data-l="Qty" class="r num">{p.qty:g}</td>'
             f'<td data-l="Entry" class="r num">{p.entry_price:,.4f}</td>'
-            f'<td data-l="Now" class="r num">{current:,.4f}</td>'
+            f'<td data-l="Broker mark" class="r num">{mark}</td>'
             f'<td data-l="Stop" class="r num">{stop}</td>'
             # Value and qualifier inside one element — see `_working_orders`.
             # Under 760px a bare "$980.19" and a bare "(0.98%)" are two flex
@@ -5195,10 +5344,14 @@ def _positions(
         "journal entry, so its risk cannot be counted. That is reported rather "
         "than guessed at. &ldquo;unexplained-move&rdquo; means the broker's own "
         "figure differs from the journal's with no recorded reason for the "
-        "change.</caption>"
+        "change. &ldquo;Broker mark&rdquo; is Alpaca's own valuation of the "
+        "position, which is what unrealised follows; the resting orders below "
+        "quote the bid-ask midpoint instead, so the two differ slightly and "
+        "both are right.</caption>"
         "<thead><tr><th scope=col>Symbol</th><th scope=col>Side</th>"
         "<th scope=col class=r>Qty</th>"
-        "<th scope=col class=r>Entry</th><th scope=col class=r>Now</th>"
+        "<th scope=col class=r>Entry</th>"
+        "<th scope=col class=r>Broker mark</th>"
         "<th scope=col class=r>Stop</th>"
         "<th scope=col class=r>At risk</th>"
         "<th scope=col class=r>Unrealised</th></tr></thead>"

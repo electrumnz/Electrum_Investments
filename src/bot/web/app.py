@@ -382,6 +382,14 @@ def build_app(
             # of showing yesterday's close at full strength.
             watchlist=watchlist,
             calendar=resolved_poller.calendar,
+            # WHEN the tape's prices were read, not when this page rendered.
+            # The strip runs on its own 60-second clock, deliberately slower
+            # than the 5-second account poll, so its figures are routinely
+            # older than everything around them and the stamp is the only
+            # thing that says so. `None` renders "read time unknown" rather
+            # than the wall clock — a caller that cannot say when the figures
+            # were read must not imply they are current.
+            read_at=snapshot.ticker_taken_at if snapshot else None,
         )
 
     def _page(

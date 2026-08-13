@@ -2841,7 +2841,11 @@ def test_a_trail_stated_as_an_amount_is_rendered_as_one():
     )
 
     assert "12.0000 behind" in row
-    assert "%" not in row.split("Market")[0]
+    # Everything up to the price column, which is where a stray percentage
+    # would be. The anchor is the column's `data-l`, because the header word
+    # itself moved once already: "Market" was the name three differently
+    # measured prices on this page could all have claimed.
+    assert "%" not in row.split('data-l="Bid-ask mid"')[0]
 
 
 def test_the_distance_to_a_stop_is_the_mirror_of_the_distance_to_a_limit():
@@ -4347,6 +4351,181 @@ def test_a_recorded_tighten_is_not_dressed_as_a_warning():
     # And never both classes on one element: `.note` is declared after `.alert`,
     # so the two together resolve to pewter and the warning loses its colour.
     assert 'class="note alert"' not in body
+
+
+# ====================================================== three prices, one page
+#
+# Found by cross-checking the live Board against itself: one render showed SPY
+# at 774.12 on the tape, 774.0900 in the positions "Now" column and 774.0800 in
+# the orders "Market" column. Every figure was correct and every one was a
+# DIFFERENT measurement — the broker's mark, the bid-ask midpoint, and the
+# midpoint again on the tape's own slower clock.
+#
+# Nothing was broken and the page still misled, because three facts sat in
+# three columns that all read as "the current price of SPY". The fix is
+# labelling and never unification: each is the right number for its own job.
+
+
+def test_three_prices_in_one_render_are_named_by_what_they_MEASURE():
+    """Both old headings named the MOMENT, and the moment is the one thing the
+    three figures have in common. Named for the measurement instead, a
+    disagreement between them reads as two different readings rather than as a
+    fault."""
+    body = render.board(
+        _held(price=774.09),                       # the broker's mark
+        load_rules(),
+        [],
+        [_short_spy()],
+        StandDownState(),
+        0,
+        orders=[_order(stop_price=820.0, order_type="stop")],
+        prices={"SPY": 774.08},                    # the bid-ask midpoint
+        env=_env(),
+    )
+
+    assert '<th scope=col class=r>Broker mark</th>' in body
+    assert '<th scope=col class=r>Bid-ask mid</th>' in body
+    # Both figures still on the page, unmoved. This was never a unification.
+    assert "774.0900" in body and "774.0800" in body
+
+    # The labels a reader compares are the small-screen ones too, where the
+    # `th` is gone and `data-l` is injected as generated content instead.
+    assert 'data-l="Broker mark"' in body
+    assert 'data-l="Bid-ask mid"' in body
+    assert 'data-l="Now"' not in body
+    assert 'data-l="Market"' not in body
+
+    # Each table says what the OTHER one is showing, once. A reader arrives at
+    # whichever one they arrive at, and the surprise is the disagreement.
+    assert "the resting orders below quote the bid-ask midpoint" in body
+    assert "the broker's own mark on the position" in body
+
+
+def test_a_position_with_no_broker_mark_does_not_borrow_its_entry_price():
+    """The fourth price, and the quietest of them.
+
+    The cell was `current_price or entry_price`, so a position that could not
+    be valued rendered at exactly what it opened at — flat, unmoved, and
+    indistinguishable from a real reading under a column heading claiming to be
+    the broker's mark. Missing stays missing.
+    """
+    from bot.models import AccountSnapshot, Position
+
+    account = AccountSnapshot(
+        equity_usd=100_000.0,
+        cash_usd=100_000.0,
+        buying_power_usd=100_000.0,
+        open_positions=[
+            Position(
+                symbol="SPY",
+                direction=Direction.SELL,
+                qty=21,
+                entry_price=773.32,
+                opened_at=ENTRY,
+                current_price=None,
+            )
+        ],
+    )
+
+    body = render._positions(account, [], 100_000.0)
+
+    assert '<td data-l="Broker mark" class="r num">unknown</td>' in body
+    # The entry column is still 773.3200 and is the only place it appears —
+    # borrowed into the mark column it would have been there twice.
+    assert body.count("773.3200") == 1
+
+
+def test_the_tape_says_which_price_it_is_showing_and_when_it_was_read():
+    """The strip has no column header, so without this it is a row of prices
+    with nothing saying which price — and it runs on a sixty-second clock
+    against a five-second account poll, which is the whole reason it can differ
+    from the figures below it."""
+    from bot.market_clock import market_state
+
+    state = market_state(datetime(2026, 8, 10, 15, 59, tzinfo=UTC))
+    body = render.ticker_tape(
+        state,
+        [_quote("SPY", last=774.12, prev=770.0)],
+        read_at=datetime(2026, 8, 10, 15, 56, tzinfo=UTC),
+    )
+
+    assert "mid, read 15:56 UTC" in body
+    # Pinned outside the scroller, beside the countdown, rather than scrolling
+    # out of sight every ninety seconds with the cells it qualifies.
+    assert "mid, read 15:56 UTC" in body.split('<div class="view"')[0]
+    # Through `_e`, because it lands in a `title` attribute and the sentence
+    # carries an apostrophe.
+    assert f'title="{render._e(render.TAPE_SOURCE_TITLE)}"' in body
+
+
+def test_the_tape_reports_an_unknown_read_time_rather_than_the_clock():
+    """The Board's rule, in the place where the reading is oldest by design. A
+    caller that cannot say when the quotes were read must not be handed a
+    timestamp, and 15:59 stamped on a 15:56 reading is exactly the confident
+    wrong figure the stamp exists to prevent."""
+    from bot.market_clock import market_state
+
+    state = market_state(datetime(2026, 8, 10, 15, 59, tzinfo=UTC))
+    body = render.ticker_tape(state, [_quote("SPY", last=774.12)], read_at=None)
+
+    assert "mid, read time unknown" in body
+    assert "15:59" not in body
+
+
+def test_the_tape_stamp_is_server_rendered_and_the_stream_only_updates_it():
+    """The projection layer's rule on the one figure the stream is most likely
+    to correct: every value is in the markup before any script runs, so a
+    blocked script shows the reading it was served rather than an empty box.
+
+    And the two formatters have to agree, for the reason `money` matches
+    `_money` — one figure written two ways would alternate on screen every few
+    seconds as the stream repainted it.
+    """
+    from bot.market_clock import market_state
+
+    body = render.ticker_tape(
+        market_state(datetime(2026, 8, 10, 15, 59, tzinfo=UTC)),
+        [_quote("SPY", last=774.12)],
+        read_at=datetime(2026, 8, 10, 15, 56, tzinfo=UTC),
+    )
+
+    assert "data-tape-read" in body
+    assert "document.querySelector('[data-tape-read]')" in render.SCRIPT
+    # Its own field on the wire. `as_of` dates the account poll, and stamping
+    # the tape with that would put the fast reading's time on the slow one.
+    assert "data.ticker_as_of" in render.SCRIPT
+    assert "'mid, read '" in render.SCRIPT
+    assert "'mid, read time unknown'" in render.SCRIPT
+
+
+def test_the_pinned_block_stacks_without_orphaning_the_frozen_marker():
+    """The strip gained a second pinned fact and the band is a fixed 3.15rem,
+    so the two lines stack rather than running along the row — at 320px the
+    countdown alone is most of the available width.
+
+    `.frozen` stays inside the countdown's own line, because it qualifies the
+    countdown and nothing else, and the script takes it down through its
+    `parentNode` — which is what makes the new wrapper free.
+    """
+    from bot.market_clock import market_state
+    from bot.web.render import STYLES
+
+    body = render.ticker_tape(
+        market_state(datetime(2026, 8, 10, 15, 59, tzinfo=UTC)),
+        [_quote("SPY", last=774.12)],
+    )
+
+    line = body.split('<span class="rd"')[0]
+    assert 'class="until"' in line and "not ticking" in line
+    assert "stale.parentNode.removeChild(stale)" in render.SCRIPT
+
+    fixed = STYLES[STYLES.index(".tape .fixed{") : STYLES.index(".tape .view{")]
+    assert "flex-direction:column" in fixed
+    # Scoped, so a later bare `.rd` or `.ln` rule cannot restyle either by
+    # winning a tie at equal specificity — the collision that has now bitten
+    # `.pill.seed`, `.rung.gate` and `.note.alert`.
+    assert ".tape .fixed .ln{" in STYLES
+    assert ".tape .fixed .rd{" in STYLES
 
 
 # ============================================================== resting orders
