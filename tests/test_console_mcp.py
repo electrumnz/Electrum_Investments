@@ -396,3 +396,39 @@ def test_the_url_flag_exists_so_printing_the_token_is_deliberate():
     # And the normal path still does not print it.
     on_path = script.split('if [[ "$MODE" == "url" ]]')[1].split("# ---")[1]
     assert "$TOKEN" not in on_path, "the token is printed outside --url"
+
+
+def test_oauth_discovery_answers_404_and_never_401():
+    """**A 401 on discovery is a positive claim, and it broke the connector.**
+
+    A client probes `/.well-known/oauth-protected-resource` and
+    `/.well-known/oauth-authorization-server` before attaching. A 401 there says
+    *this resource is OAuth-protected, go and register* — so claude.ai attempted
+    dynamic client registration against a server with no OAuth at all and failed
+    with "Couldn't register with ...'s sign-in service".
+
+    404 is the honest answer: no authorisation server here, the credential is
+    the one already in the URL.
+
+    **The exemption reveals nothing.** The MCP app mounts `/mcp` alone, so every
+    exempted path is one the application refuses by itself — a 404 discloses
+    only that a server exists, which the URL already told whoever holds it.
+    """
+    from starlette.testclient import TestClient
+
+    token = "t" * 32
+
+    def get(path: str) -> int:
+        app = console_mcp.build_app(token, port=9999)
+        with TestClient(app, base_url="http://127.0.0.1:9999") as client:
+            return client.get(path, headers={"host": "127.0.0.1:9999"}).status_code
+
+    for path in (
+        "/.well-known/oauth-protected-resource",
+        "/.well-known/oauth-authorization-server",
+        "/.well-known/openid-configuration",
+    ):
+        assert get(path) == 404, f"{path} must 404, or a client will try to register"
+
+    # And the exemption is narrow: it must not have opened the real endpoint.
+    assert get("/mcp") == 401, "the MCP endpoint is no longer gated"
