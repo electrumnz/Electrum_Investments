@@ -8,6 +8,54 @@ Ordered by what is actually blocking, not by size.
 
 ---
 
+## START HERE — where the last session left it, 13 Aug 2026
+
+The box runs `22f3221` and everything below `## 20` is closed. Two things are
+worth knowing before picking anything up.
+
+### There is a console now, and it may already be talking to you
+
+`src/bot/console_mcp.py` is an MCP server on the droplet — deploy, service
+status, journal tail, git state, disk and memory, and the wrapper self-test —
+reachable over a Tailscale Funnel and gated by one token. If this session has
+tools called `deploy_update`, `git_state` or `journal_tail`, **that is the box
+itself and you can stop asking the operator to paste terminal output.**
+
+It runs as ROOT and reaches no broker: `tests/test_console_mcp.py` parses the
+AST and fails the build if it imports `broker`, `risk`, `journal`, `models`,
+`reconcile`, `grants` or `mcp_server`. `run_command` is absent unless
+`MUDHORN_CONSOLE_SHELL=1`. Turn it off with `deploy/enable-console.sh --off`
+**and** `tailscale funnel --https=443 off` — the Funnel outlives the service.
+
+**The operator has declined to rotate the console token**, which is in the
+session transcript that created it. Their call, stated twice: paper account.
+Do not raise it again.
+
+### Deploying is one command, and it asserts every step
+
+    sudo /opt/mudhorn/deploy/update.sh
+
+It records HEAD before and after and **refuses to provision if the commit did
+not move**, checks the services came back, and re-runs the wrapper's
+model-mismatch check in a sandbox. That exists because on 13 Aug the four-command
+runbook was pasted as one block, the `git pull` aborted, and everything after it
+ran against the old checkout and reported success.
+
+**Hand the operator ONE command at a time and wait for the output.** That is not
+a preference, it is the other half of the same fix — see the section at the top
+of `CLAUDE.md`.
+
+### What is actually left
+
+1. **The all-DigitalOcean migration** — item 20 below, and the only substantial
+   code left. The souls are already there; `propose`, `dream` and `confer` are
+   not. The measurements that gate it are done and recorded.
+2. **Multi-agent dreaming** — optional, deferred, nothing blocks it.
+3. **A subscription** for the X feed (item 11) and the open design question in
+   item 2.
+
+---
+
 ## CURRENT STATE — there is a live position
 
 Not a task. Recorded because it outlives the session that opened it and nothing
@@ -1544,6 +1592,65 @@ Two that are worth stating as rules rather than as tests:
 ---
 
 ## 20. Move ALL model calls to DigitalOcean, choosing per task from its catalogue
+
+> ### The state of it, 13 Aug 2026 — every measurement is done, the code is not
+>
+> **The souls already run on DigitalOcean** (`deepseek-v4-pro`, via
+> `run-chat.sh` and `run-dream.sh`). What has NOT moved is the three Python
+> calls: `claude.propose`, `claude.dream` and `claude.confer`.
+>
+> **The blocker is measured and is not a plumbing problem.** DigitalOcean
+> accepts `output_config` with HTTP 200 and **silently ignores it**, returning
+> prose. Forced tool calling is the substitute and it works.
+>
+> **What to build, in order:**
+>
+> 1. A forced-tool-call path in `model_client.py` — `tools=[{...schema...}]`
+>    plus `tool_choice={"type":"tool","name":...}`, validated client-side by
+>    Pydantic. Chosen by `env.inference_provider.is_digitalocean`, because it
+>    is a property of the ENDPOINT and not of the model: an Anthropic model
+>    served through DigitalOcean needs it too.
+> 2. **A reply with no `tool_use` block must be a HARD FAILURE.** This is the
+>    one that matters. `docs/MODEL_CALLS.md` finding 3: a dropped schema breaks
+>    loudly in every case that produces a number and **silently in exactly
+>    one** — the quiet cycle, where `{"market_assessment": "..."}` alone parses
+>    as a completed cycle that considered nothing. `qwen3.8-max` returned prose
+>    on 2 of 3 attempts against the real schema, so this is a live failure mode
+>    and not a hypothetical.
+> 3. Point the client at the DO base URL with `DO_INFERENCE_KEY`, and **refuse
+>    rather than fall back** when the provider is configured-but-unusable —
+>    `InferenceProvider` already has the three states for it.
+> 4. Flip `PYTHON_MODEL_PATH_USES_DO`, then move the `ANTHROPIC_API_KEY` guards
+>    in `main.py` (three of them), the two systemd unit descriptions, the
+>    `bootstrap.sh` banner and the Settings page.
+>
+> **Which model for which path — measured, `scripts/do_schema_fidelity.py`.**
+> The real `ModelDecision` (11,234 bytes, 10 nested `$defs`) and `DreamStep`,
+> as forced tool calls, validated by Pydantic:
+>
+> | Model | ModelDecision | median | DreamStep | median |
+> |---|---|---|---|---|
+> | `deepseek-v4-pro` | **10/10** | 26.1s | **6/6** | 21.2s |
+> | `nemotron-3-ultra-550b` | **10/10** | 30.7s | **6/6** | 19.7s |
+> | `mistral-3-14B` | **10/10** | 12.6s | **6/6** | 7.0s |
+> | `qwen3-coder-flash` | **10/10** | 14.1s | **6/6** | 4.2s |
+> | `deepseek-4-flash` | 10/10 | 70.1s | 4/6 | 102.5s |
+> | `kimi-k2.5` | 8/10 | 81.7s | 3/6 | 233.4s |
+> | `llama3.3-70b-instruct` | **4/10** | 2.2s | — | — |
+>
+> **`llama3.3-70b-instruct` scored 3/3 on three samples and 4/10 on ten.** Its
+> six failures are all empty `assessments` and `position_plans` after being
+> shown four symbols and an open position, at a 2.2s median — valid, useless,
+> and exactly the gap `assessments` exists to close. Three samples would have
+> shipped it. **Do not pin anything off a small sample.**
+>
+> **This measures SCHEMA FIDELITY ONLY.** It says nothing about whether a model
+> reasons well about a trade, and the gate checks arithmetic rather than
+> judgement. `scripts/agent_behaviour_live.py` is the harness for that half and
+> **has not been run on these candidates** — do that before pinning `propose`.
+>
+> Full findings, including the models disqualified outright, are in
+> `docs/DROPLET_AI.md` under "Which models hold the real schema".
 
 **The instruction, and note it is not the question that was first answered:**
 *"We don't have to just use anthropic models through DO, there's a full base of
