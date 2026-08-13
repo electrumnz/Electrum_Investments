@@ -135,25 +135,35 @@ SESSION_TTL_SECONDS = 7 * 24 * 3600
 COOKIE_NAME = "mudhorn_session"
 
 # Rate limiting on the login form. One operator on one password does not need
-# more than a handful of attempts; a guesser needs thousands. Five per window
-# is generous for the first and useless for the second.
+# more than a handful of WRONG answers; a guesser needs thousands. Five per
+# window is generous for the first and useless for the second.
+#
+# The budget is spent by wrong answers only, and a correct password neither
+# spends it nor is refused by it — see the module docstring for why the caller
+# is not a thing this file is willing to key on.
 MAX_ATTEMPTS = 5
 ATTEMPT_WINDOW_SECONDS = 300
 
 
 @dataclass
 class SessionStore:
-    """In-memory sessions and login attempt counters.
+    """In-memory sessions and the wrong-answer budget.
 
     In-memory on purpose. A restart logging everyone out is the correct
     behaviour for a single-operator dashboard, and persisting session tokens
     would put a second credential in the journal file that is already the only
     irreplaceable thing on the box.
+
+    `_wrong_answers` is one list rather than a dict keyed by client, and that is
+    the fix for the Funnel lockout rather than a simplification: behind a proxy
+    the key was the same string for everybody, and in production it is whatever
+    `uvicorn` resolved out of `X-Forwarded-For`. A budget nothing outside this
+    process can name is the only one worth counting.
     """
 
     password: str
     _sessions: dict[str, float] = field(default_factory=dict)
-    _attempts: dict[str, list[float]] = field(default_factory=dict)
+    _wrong_answers: list[float] = field(default_factory=list)
 
     @property
     def required(self) -> bool:
@@ -181,26 +191,108 @@ class SessionStore:
         return True
 
     def check_password(self, candidate: str) -> bool:
-        """Constant-time comparison.
+        """Constant-time comparison, and the ONLY place the throttle bites.
 
         A plain `==` on a secret leaks its length and its matching prefix
         through timing. That is a marginal risk over the internet and it costs
         one function call to remove, so it is removed.
+
+        The budget is consulted AFTER the comparison, and that order is the
+        whole fix. A correct password is not a guess, so it is answered before
+        anything has been asked about how many guesses have gone before it —
+        which is what stops a stranger's five failures from shutting the
+        operator out of their own account.
+
+        **Refusing by raising is load-bearing, not a flourish.** `app.py` asks
+        `throttled()` before it asks this, and at that point nothing here can
+        tell a guess from the operator; returning False for a spent budget
+        would therefore answer it as an ordinary "incorrect password" and the
+        rate limit would simply be gone. Raising is the only way to refuse at
+        the first moment the answer is known.
+
+        Worth knowing: this raises past `app.py`'s login renderer, so the body
+        is FastAPI's JSON rather than the themed sign-in page. Only a WRONG
+        answer ever reaches it, so the cost falls on a guesser and on an
+        operator who has just mistyped six times — and the alternative is
+        refusing before the answer is known, which is the bug.
         """
-        return hmac.compare_digest(candidate.encode(), self.password.encode())
+        # Compared the same way whatever the budget says, because a candidate
+        # that is right is right. Nothing above this line reads the counters.
+        if hmac.compare_digest(candidate.encode(), self.password.encode()):
+            return True
+
+        if self._budget_spent():
+            # 429 rather than a second 401 because the two are different facts:
+            # one says the password was wrong, the other says we have stopped
+            # counting wrong ones for a while. The sentence about a correct
+            # password is not a leak — this file is public, and it is exactly
+            # what an operator who has just fat-fingered six attempts needs to
+            # read instead of concluding they are locked out.
+            raise HTTPException(
+                status_code=429,
+                detail=(
+                    "Too many incorrect passwords. Wait five minutes to guess again. "
+                    "A correct password is never refused."
+                ),
+                headers={"Retry-After": str(ATTEMPT_WINDOW_SECONDS)},
+            )
+        return False
 
     def throttled(self, client: str) -> bool:
-        """Whether this client has spent its attempts for the window."""
-        now = time.time()
-        recent = [t for t in self._attempts.get(client, []) if now - t < ATTEMPT_WINDOW_SECONDS]
-        self._attempts[client] = recent
-        return len(recent) >= MAX_ATTEMPTS
+        """Whether to refuse before the password has even been read. Never.
+
+        `app.py` asks this BEFORE the candidate is compared, and at that moment
+        nothing separates the operator from a guesser: same address behind the
+        proxy, same headers, same everything this file is prepared to believe.
+        A refusal here is therefore aimed at both of them, which is precisely
+        the lockout described in the module docstring. So the answer is no, and
+        the refusal moved to `check_password`, the first point where the
+        question can be answered honestly.
+
+        Kept rather than deleted because `app.py` calls it, and pinned by
+        `tests/test_auth.py` rather than left as a quiet `return False` that
+        somebody tidying up re-arms. `client` is accepted and ignored for the
+        same reason the budget is global.
+        """
+        return False
 
     def record_failure(self, client: str) -> None:
-        self._attempts.setdefault(client, []).append(time.time())
+        """One wrong answer, spent from the one global budget.
+
+        Nothing is recorded for an attempt that was already refused, because
+        `check_password` raises before returning and `app.py` never reaches
+        here — so the window decays on its own and five quiet minutes restore
+        the five cheap attempts, rather than a sustained hammering pinning the
+        budget shut for ever. That is affordable now in a way it was not
+        before: a spent budget no longer costs the operator anything.
+
+        `client` is accepted and ignored. See the module docstring: behind the
+        Funnel it is one string for everybody, and in production it is whatever
+        `uvicorn` resolved out of a header.
+        """
+        self._wrong_answers.append(time.time())
 
     def clear_attempts(self, client: str) -> None:
-        self._attempts.pop(client, None)
+        """A correct password clears the budget.
+
+        Only reachable once `check_password` has returned True, so this is the
+        operator saying they are here. `client` is ignored because there is one
+        budget, and therefore one thing to clear.
+        """
+        self._wrong_answers.clear()
+
+    def _budget_spent(self) -> bool:
+        """Have `MAX_ATTEMPTS` wrong answers landed inside the window.
+
+        Prunes as it reads, and it is the only pruner: `record_failure` appends
+        and nothing else forgets, so without this the list would be the one
+        thing here that grows without bound.
+        """
+        now = time.time()
+        self._wrong_answers = [
+            t for t in self._wrong_answers if now - t < ATTEMPT_WINDOW_SECONDS
+        ]
+        return len(self._wrong_answers) >= MAX_ATTEMPTS
 
     def logout(self, token: str | None) -> None:
         if token:

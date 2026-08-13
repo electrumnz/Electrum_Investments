@@ -5603,6 +5603,292 @@ def test_a_dream_still_being_worked_is_not_told_off(dreams):
     assert "Not a prophecy yet" not in body
 
 
+# ============================== whether the prophecy shelf can move at all ==
+#
+# `PromotionRun` counts all of this onto a log line and none of it reached a
+# page, so a shelf that COULD NOT move looked exactly like a shelf being
+# patient. What these pin is the pair of findings that must never render alike:
+# nothing fired because nothing is gradeable (establishable here, and stated),
+# against nothing fired because the loop recorded no figures (NOT establishable
+# here, and named as missing rather than assumed away).
+
+GRADING_NOW = datetime(2026, 8, 13, 12, 0, tzinfo=UTC)
+
+
+def _prophecy(
+    conditions: list[DreamCondition],
+    *,
+    days_on_shelf: float = 3.0,
+    updated_days_ago: float = 0.25,
+    title: str = "Low water lifts the marginal barge operator",
+    dream_id: int = 1,
+) -> Dream:
+    """A dream on the prophecy shelf, with everything the card reads off it."""
+    from bot.dreaming import DreamVerdict, Hop
+
+    return Dream(
+        id=dream_id,
+        title=title,
+        seed="Gauge readings at Memphis are near record lows",
+        chain=[Hop("first", checked=True, source="USACE"), Hop("second")],
+        weakest_hop="second",
+        weakest_hop_index=2,
+        verdict=DreamVerdict.KEEP,
+        vault=Vault.PROPHECY,
+        vault_entered_at=GRADING_NOW - timedelta(days=days_on_shelf),
+        updated_at=GRADING_NOW - timedelta(days=updated_days_ago),
+        conditions=conditions,
+    )
+
+
+def _threshold(**kw: Any) -> DreamCondition:
+    fields: dict[str, Any] = {
+        "text": "SPY closes below 600",
+        "symbol": "SPY",
+        "field": TriggerField.CLOSE,
+        "op": TriggerOp.BELOW,
+        "value": 600.0,
+        "settles_hops": (2,),
+    }
+    fields.update(kw)
+    return DreamCondition(**fields)
+
+
+def _observation(**kw: Any) -> DreamCondition:
+    fields: dict[str, Any] = {
+        "text": "dry cargo is a double-digit share of revenue",
+        "subject": "Kirby's most recent 10-Q",
+        "observable": "dry-cargo revenue as a share of the total",
+        "observe_by": GRADING_NOW + timedelta(days=20),
+        "settles_hops": (2,),
+    }
+    fields.update(kw)
+    return DreamCondition(**fields)
+
+
+def _grading_card(held: list[Dream], now: datetime = GRADING_NOW) -> str:
+    body = render.dreaming_page(
+        held,
+        DreamSummary.of(held),
+        enabled=False,
+        token="",
+        hermes_available=False,
+        soul_found=True,
+        now=now,
+    )
+    if 'id="grading-state"' not in body:
+        return ""
+    return body.split('id="grading-state"')[1].split("</section>")[0]
+
+
+def test_a_shelf_with_nothing_gradeable_does_not_read_like_a_shelf_being_patient():
+    """The finding that had nowhere to be reported.
+
+    Every unsettled condition here is prose or a number with no symbol, so no
+    reading the loop ever records can move this shelf and no amount of looking
+    can either. That is a fact about what was WRITTEN DOWN, establishable from
+    stored state, and it is stated outright rather than left to look like
+    waiting.
+    """
+    card = _grading_card(
+        [_prophecy([_threshold(symbol=""), DreamCondition(text="the market comes round")])]
+    )
+
+    assert "Nothing on this shelf can be settled by anybody" in card
+    # And the two causes are counted apart, because the repairs differ: one is
+    # a claim missing its subject, the other was never a claim.
+    assert "carries a number and no symbol" in card
+    assert "pre-registered nothing at all" in card
+    # The `cycles_available` caveat belongs to the OTHER finding. Printing it
+    # here would offer an excuse for a shelf whose problem is not the market.
+    assert "cycles_available" not in card
+
+
+def test_a_shelf_waiting_on_figures_says_which_count_this_page_cannot_give():
+    """The opposite finding, and the half that is NOT establishable here.
+
+    A threshold code can look up has not fired. Whether the loop recorded any
+    figures to check it against is `PromotionRun.cycles_available`, produced at
+    grading time and written to a log line — so a page that said "waiting on the
+    market" and stopped would be reporting patience over a loop that may have
+    recorded nothing at all.
+    """
+    card = _grading_card([_prophecy([_threshold()])])
+
+    assert "cycles_available" in card
+    assert "not visible from this page" in card
+    # The definitive sentence from the other test must NOT appear: this shelf
+    # can move, and saying otherwise would be the confident wrong answer.
+    assert "Nothing on this shelf can be settled by anybody" not in card
+    assert "Nothing on this shelf is waiting on the market" not in card
+
+
+def test_the_two_reasons_a_shelf_has_graded_nothing_render_differently():
+    """The pair stated as a pair, because they are the whole point.
+
+    Same empty result, opposite findings — the `can_grade_anything` rule.
+    """
+    ungradeable = _grading_card([_prophecy([DreamCondition(text="prose only")])])
+    waiting = _grading_card([_prophecy([_threshold()])])
+
+    # The establishable one is asserted; the one this page cannot establish is
+    # named as missing. Neither sentence appears on the other card.
+    assert "Nothing on this shelf can be settled by anybody" in ungradeable
+    assert "Nothing on this shelf can be settled by anybody" not in waiting
+    assert "cycles_available" in waiting
+    assert "cycles_available" not in ungradeable
+
+
+def test_a_threshold_with_no_symbol_is_named_as_the_claim_that_can_never_fire():
+    """`is_gradeable` is strictly narrower than `is_checkable`, and the gap is
+    this: a field, an operator and a value with nothing to look them up on.
+
+    `grade_conditions` skips it into `ungradeable`, so it sits in its dream's
+    unmet count for ever while reading, on every other surface, exactly like a
+    pre-registered threshold.
+    """
+    card = _grading_card([_prophecy([_threshold(symbol=""), _threshold()])])
+
+    assert "1 condition carries a number and no symbol" in card
+    # Counted apart from the one that CAN be looked up, which is on the same
+    # dream — the tile figures must not merge them.
+    assert ">1</b><small>code settles these" in card
+
+
+def test_the_grading_card_counts_conditions_the_way_grade_conditions_does():
+    """One classification, not two.
+
+    A condition carrying BOTH a threshold and an observation is graded on the
+    threshold by `grade_conditions`, because code settles it without needing
+    anybody. Counting it as waiting on a person here would put a second opinion
+    about what is gradeable beside the one that runs.
+    """
+    both = _threshold(
+        subject="Kirby's most recent 10-Q",
+        observable="dry-cargo revenue as a share of the total",
+        observe_by=GRADING_NOW + timedelta(days=20),
+    )
+    assert both.is_gradeable and both.is_observable
+
+    card = _grading_card([_prophecy([both])])
+
+    assert ">1</b><small>code settles these" in card
+    assert ">0</b><small>nothing here waits on you" in card
+
+
+def test_the_grading_card_says_how_long_the_shelf_has_been_waiting():
+    """"How many prophecies, and for how long" — measured from `vault_entered_at`.
+
+    Never `created_at`: a dream pulled back out for another pass and returned
+    has been waiting since it came back, and that is the clock its expiry runs
+    on too.
+    """
+    old = _prophecy([_threshold()], days_on_shelf=31.0, dream_id=1, title="The old one")
+    # Far older than the shelf clock, and deliberately not what is reported.
+    old.created_at = GRADING_NOW - timedelta(days=400)
+    fresh = _prophecy([_threshold()], days_on_shelf=1.0, dream_id=2, title="The new one")
+
+    card = _grading_card([old, fresh])
+
+    assert "oldest 31d 0h on this shelf" in card
+    assert "The old one" in card
+    # The count is the shelf, not the page.
+    assert ">2</b><small>oldest" in card
+
+
+def test_a_prophecy_that_cleared_the_rule_and_did_not_move_is_shouted_about():
+    """The strongest evidence on this page that promotion has stopped running.
+
+    `promotion_for` is the same pure function `dreamer.promote_dreams` acts on,
+    so this cannot develop its own opinion about what should have moved. It
+    knows nothing about the vault's caps, which is why the sentence names both
+    explanations instead of choosing one.
+    """
+    from bot.dreaming import promotion_for
+
+    dream = _prophecy([_threshold(fulfilled=True, fulfilled_at=GRADING_NOW)])
+    assert promotion_for(dream).moves
+
+    card = _grading_card([dream])
+
+    assert "still on this shelf" in card
+    assert "the dream vault is full" in card
+
+
+def test_a_shelf_whose_conditions_are_all_unmet_is_not_reported_as_stuck():
+    """The other side of it. A prophecy waiting on a threshold nobody has
+    reached is the shelf doing exactly its job, and reporting that as a stalled
+    promotion would train an operator to ignore the case that is."""
+    card = _grading_card([_prophecy([_threshold()])])
+
+    assert "still on this shelf" not in card
+
+
+def test_the_grading_card_says_when_the_page_last_moved_and_what_that_proves():
+    """Grading runs inside `electrum-bot dream` and nowhere else, so a
+    deployment that stops dreaming stops grading with nothing to say so.
+
+    What IS establishable here is that nothing on the page has been written to
+    since a moment — a run writes a step every time it completes. What is not is
+    whether the timer is enabled, or whether a run since then failed, and the
+    card names both limits rather than letting the figure carry more than it
+    can.
+    """
+    card = _grading_card(
+        [_prophecy([_threshold()], updated_days_ago=9.0)]
+    )
+
+    assert "Nothing shown on this page has been written to for 9d 0h" in card
+    assert "nothing above has been graded in that time" in card
+    # The two things this figure cannot establish, named where it is made.
+    assert "systemctl list-timers" in card
+    assert "failed writes nothing and grades nothing" in card
+
+
+def test_a_page_written_to_this_morning_does_not_claim_the_last_run_succeeded():
+    """A recent write proves a run landed, not that the newest one did. A
+    failed model call writes nothing at all, so the quiet reading has to stop
+    short of the claim it invites."""
+    card = _grading_card([_prophecy([_threshold()], updated_days_ago=0.25)])
+
+    assert "Nothing shown on this page has been written to" not in card
+    assert "not the same as the last run having succeeded" in card
+
+
+def test_the_grading_card_is_absent_rather_than_announcing_an_empty_shelf():
+    """The `_awaiting_you` precedent. With nothing on the prophecy shelf there
+    is no grading state to report, and the shelf rail and the shelf's own
+    section already state that nought in their own words. A panel announcing
+    zero teaches an operator to skip the panel."""
+    body = render.dreaming_page(
+        [Dream(id=1, title="Still on the bench", seed="s")],
+        DreamSummary.of([Dream(id=1, title="Still on the bench", seed="s")]),
+        enabled=False,
+        token="",
+        hermes_available=False,
+        soul_found=True,
+        now=GRADING_NOW,
+    )
+
+    assert "Whether the shelf can move" not in body
+    assert 'id="grading-state"' not in body
+
+
+def test_the_grading_card_never_pairs_note_with_alert_on_one_element():
+    """The declaration-order trap, which has bitten three times.
+
+    `.note` is declared after `.alert` and both are single-class rules, so
+    `class="note alert"` renders pewter and the most severe line on the card
+    stops looking like a warning. The modifier goes on an inner span, exactly as
+    `_positions` does it.
+    """
+    card = _grading_card([_prophecy([DreamCondition(text="prose only")])])
+
+    assert 'class="note alert"' not in card
+    assert 'class="alert note"' not in card
+    assert '<span class="alert">' in card
+
+
 # ========================================== what the two agents settled on ==
 #
 # The storing half refuses an incoherent row and skips one it cannot parse, so
