@@ -4994,6 +4994,47 @@ def test_no_recorded_pass_is_never_reported_as_a_quiet_loop():
     assert '<span class="alert">' in body
 
 
+def test_an_empty_window_states_the_silence_ONCE():
+    """Found by reading the rendered Board, not by a test.
+
+    The card used to print `JobAnswer.describe()` — "The loop recorded no pass
+    covering <timestamp>" — and then, immediately underneath, a second sentence
+    saying the same thing about the same silence in different words and against
+    a different span. One fact, stacked twice, leaving the operator to work out
+    whether they were looking at one problem or two.
+
+    The window sentence is the one kept, because it is the more honest of the
+    pair here: "no pass covering 13:41" reads as a narrow claim about one
+    instant, when nothing at all is on file for the whole window.
+
+    The `.loopnow` element survives so the coloured left border still marks
+    severity — removing the duplicate must not also remove the signal.
+    """
+    body = render.loop_activity(_history())
+
+    assert body.count("NOT a report") == 1
+    assert "recorded no pass covering" not in body
+    assert 'class="loopnow"' in body
+    assert body.count('class="loopnow"') == 1
+
+
+def test_a_window_WITH_passes_still_answers_both_questions():
+    """`describe()` earns its place the moment there is a record to describe.
+
+    "Was there a pass covering right now" and "how many were there today" are
+    genuinely different questions once passes exist, and collapsing them here
+    would lose the first one.
+    """
+    from bot import jobs
+
+    body = render.loop_activity(
+        _history((10, jobs.Outcome.RAN, {"proposals": 0, "approved": 0, "executed": 0}))
+    )
+
+    assert 'class="loopnow"' in body
+    assert "Passes" in body
+
+
 def test_a_moment_nothing_covers_is_not_a_moment_out_of_range():
     """`Coverage.OUT_OF_RANGE` says the read could not speak for the moment;
     `NOT_RECORDED` says nothing covers it. Opposite claims about one silence,

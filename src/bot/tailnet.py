@@ -80,6 +80,23 @@ RUNNING = "Running"
 # people to ignore the next one.
 RECHECK_COMMAND = "systemctl start mudhorn-tailnet.service"
 
+# What `deploy/systemd/mudhorn-web.service` binds. The Funnel has to be pointed
+# HERE for the public URL to be the dashboard, and this constant is the only
+# thing that makes a mismatch detectable.
+#
+# It is a duplicate of a number in a unit file, which is normally the wrong
+# shape — but the alternative is parsing the unit at runtime, and this check has
+# to work from a reading taken by a timer that may run when the unit file is not
+# readable. A wrong constant here produces a FALSE ALARM naming both ports,
+# which is loud and self-correcting; the failure it catches is silent and was
+# not caught for an unknown length of time.
+DASHBOARD_PORT = 8787
+
+# The command that shows what is actually being served, and the one that fixes
+# it. Named in the banner for the reason `RECHECK_COMMAND` is: a warning whose
+# remedy the reader has to go and look up is a warning they postpone.
+SERVE_STATUS_COMMAND = "tailscale serve status"
+
 
 @dataclass(frozen=True)
 class TailnetStatus:
@@ -89,6 +106,11 @@ class TailnetStatus:
     backend_state: str = ""
     key_expires_at: datetime | None = None
     funnel_hostnames: list[str] | None = None
+    # Hostname -> what the Funnel actually proxies that host to, as read out of
+    # `tailscale serve status --json`. `None` means the serve output was never
+    # supplied or could not be read, which is a DIFFERENT state from an empty
+    # mapping — see `serves_the_dashboard`.
+    funnel_targets: dict[str, str] | None = None
     error: str = ""
 
     @property
@@ -99,6 +121,47 @@ class TailnetStatus:
     def expiry_disabled(self) -> bool:
         """No expiry at all, which is the good outcome rather than a missing one."""
         return self.logged_in and self.key_expires_at is None and not self.error
+
+    @property
+    def serves_the_dashboard(self) -> bool | None:
+        """Is the public URL actually pointed at this dashboard?
+
+        **This is a completely separate failure from key expiry, and nothing
+        watched it.** Measured live on 13 Aug 2026: every dashboard path on
+        `https://mudhorn.tailc04415.ts.net` answered `404` from `server:
+        uvicorn`, while `POST /mcp` answered `401` — the Funnel was proxying to
+        the MCP server rather than to `mudhorn-web`. Throughout, the unit was
+        `active (running)` and healthy on loopback, the checkout was clean, and
+        this module reported the link in perfect health, because the key had
+        not expired and a key is all it looked at.
+
+        That is the same shape as the expiry failure it was written for —
+        systemd green, journal filling, and the only symptom a URL that does
+        not answer — arriving through a cause the existing check structurally
+        could not see.
+
+        Three-valued, and the third value is the whole point:
+
+        - `True`  — a Funnel host proxies to `DASHBOARD_PORT`.
+        - `False` — a Funnel host is up and proxies somewhere ELSE. A positive
+          finding: the public URL is serving something that is not this.
+        - `None`  — could not ask. No serve output was supplied, or none of it
+          could be read, or no host has the Funnel on at all. It must NOT read
+          as True: an unreadable `tailscale serve status` and a correctly
+          pointed Funnel are different facts, and only one of them is
+          reassuring. `FinnhubCalendar.is_degraded` again, on a different
+          reading.
+
+        A host whose target cannot be parsed is left out of the mapping rather
+        than guessed at, so it lands in `None` rather than manufacturing either
+        answer.
+        """
+        if not self.funnel_targets:
+            return None
+        return any(
+            _target_port(target) == DASHBOARD_PORT
+            for target in self.funnel_targets.values()
+        )
 
     def days_remaining(self, *, now: datetime | None = None) -> float | None:
         if self.key_expires_at is None:
@@ -113,6 +176,16 @@ class TailnetStatus:
     def needs_attention(self, *, now: datetime | None = None) -> bool:
         """True when a person should do something, including "the check stopped"."""
         if self.is_stale(now=now) or self.error or not self.logged_in:
+            return True
+        # A Funnel serving the wrong thing is an outage of the dashboard, now,
+        # rather than a warning about one in ten days — so it is attention-
+        # worthy on its own and does not wait for the expiry clock.
+        #
+        # Only `False` trips it. `None` is "could not ask", and a check that
+        # escalated on its own inability to read would fire on every box where
+        # the serve output is simply not collected, which is how a real warning
+        # gets trained out of a reader.
+        if self.serves_the_dashboard is False:
             return True
         days = self.days_remaining(now=now)
         return days is not None and days <= WARN_WITHIN_DAYS
@@ -134,6 +207,25 @@ class TailnetStatus:
                 "This dashboard is reachable now only because you are already "
                 "connected. Run `tailscale up` on the droplet, then "
                 f"`{RECHECK_COMMAND}` to clear this."
+            )
+
+        # Ahead of the expiry sentence, because this one is an outage happening
+        # now and that one is notice of an outage in some days' time. A banner
+        # leading with "the key expires in 47 days" above a URL that is already
+        # serving somebody else's app buries the live fault under the pending
+        # one.
+        if self.serves_the_dashboard is False:
+            served = ", ".join(
+                f"{host} -> {target}"
+                for host, target in sorted((self.funnel_targets or {}).items())
+            )
+            return (
+                "The public URL is NOT this dashboard. The Funnel is up and "
+                f"pointed elsewhere ({served}), while this dashboard is on port "
+                f"{DASHBOARD_PORT}. Every page there answers 404 while the bot "
+                f"trades normally. Run `{SERVE_STATUS_COMMAND}` on the droplet "
+                "to see what is being served, re-point it at "
+                f"127.0.0.1:{DASHBOARD_PORT}, then `{RECHECK_COMMAND}`."
             )
 
         days = self.days_remaining(now=now)
@@ -163,10 +255,30 @@ class TailnetStatus:
                     self.key_expires_at.isoformat() if self.key_expires_at else None
                 ),
                 "funnel_hostnames": self.funnel_hostnames or [],
+                # `null` rather than `{}` when nothing was read, so the
+                # could-not-ask state survives the round trip. An empty object
+                # would come back as "the Funnel points nowhere", which is a
+                # claim, where absence is the honest lack of one.
+                "funnel_targets": self.funnel_targets,
                 "error": self.error,
             },
             indent=2,
         )
+
+
+def _target_port(target: str) -> int | None:
+    """The port a serve target proxies to, or `None` if it cannot be read.
+
+    Targets look like `http://127.0.0.1:8787`, and occasionally like a bare
+    `127.0.0.1:8787` or a plain port. Anything this cannot parse answers `None`
+    rather than a guess: a wrong port here would either invent a mismatch or
+    hide one, and both are worse than saying the target was unreadable.
+    """
+    tail = target.rsplit(":", 1)[-1].strip("/")
+    try:
+        return int(tail)
+    except ValueError:
+        return None
 
 
 def _timestamp(value: object) -> datetime | None:
@@ -223,18 +335,51 @@ def parse(status: Any, serve: Any = None, *, now: datetime | None = None) -> Tai
     expiry = _timestamp(self_node.get("KeyExpiry"))
 
     hostnames: list[str] = []
+    # `None`, not `{}`. No serve output at all has to stay distinguishable from
+    # serve output that carried no Funnel — see `serves_the_dashboard`.
+    targets: dict[str, str] | None = None
     if isinstance(serve, dict):
         allow = serve.get("AllowFunnel")
+        funnelled: set[str] = set()
         if isinstance(allow, dict):
-            hostnames = sorted(
-                str(host).split(":")[0] for host, on in allow.items() if on
-            )
+            funnelled = {str(host) for host, on in allow.items() if on}
+            hostnames = sorted(host.split(":")[0] for host in funnelled)
+
+        # **What each funnelled host is actually proxied TO**, which is the
+        # question `funnel_hostnames` never asked. That field said only which
+        # hosts had the Funnel switched on — it was parsed, stored, and read by
+        # nothing, and a Funnel pointed at the wrong port satisfies it
+        # perfectly. Same shape as `Dream.is_offerable`, which was defined and
+        # never called and made the dream vault inert for a week.
+        web = serve.get("Web")
+        if isinstance(web, dict):
+            targets = {}
+            for host, config in web.items():
+                if str(host) not in funnelled:
+                    # A host served on the tailnet but NOT funnelled is not the
+                    # public URL, so it says nothing about whether the public
+                    # URL is right. Counting it would let a correct private
+                    # mapping vouch for a broken public one.
+                    continue
+                handlers = (
+                    config.get("Handlers") if isinstance(config, dict) else None
+                )
+                if not isinstance(handlers, dict):
+                    continue
+                for handler in handlers.values():
+                    proxy = (
+                        handler.get("Proxy") if isinstance(handler, dict) else None
+                    )
+                    if isinstance(proxy, str) and proxy:
+                        targets[str(host).split(":")[0]] = proxy
+                        break
 
     return TailnetStatus(
         checked_at=moment,
         backend_state=str(status.get("BackendState") or ""),
         key_expires_at=expiry,
         funnel_hostnames=hostnames,
+        funnel_targets=targets,
     )
 
 
@@ -257,11 +402,21 @@ def read(path: Path | None = None) -> TailnetStatus | None:
         return None
 
     hostnames = payload.get("funnel_hostnames")
+    # A reading written before this field existed has no key here, and that
+    # comes back `None` — could not ask — rather than an empty mapping claiming
+    # the Funnel points nowhere.
+    stored_targets = payload.get("funnel_targets")
+    targets = (
+        {str(k): str(v) for k, v in stored_targets.items()}
+        if isinstance(stored_targets, dict)
+        else None
+    )
     return TailnetStatus(
         checked_at=checked,
         backend_state=str(payload.get("backend_state") or ""),
         key_expires_at=_timestamp(payload.get("key_expires_at")),
         funnel_hostnames=[str(h) for h in hostnames] if isinstance(hostnames, list) else [],
+        funnel_targets=targets,
         error=str(payload.get("error") or ""),
     )
 

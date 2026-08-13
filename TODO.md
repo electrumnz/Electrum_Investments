@@ -2198,7 +2198,7 @@ green over every one of these.** Every finding has a reproduction that was
 actually run, and every fix has a test that was verified to FAIL when the fix
 is reverted. Baseline 2,227 → 2,316.
 
-### The one to act on first, and it needs a shell on the box
+### The one to act on first — the CHECK is built, the re-point still needs a shell
 
 **`https://mudhorn.tailc04415.ts.net` does not serve the dashboard. It serves
 the MCP server.** Reproduced with `curl`: every dashboard path — `/`,
@@ -2214,9 +2214,34 @@ its dashboard banner were written for, arriving through a cause that check
 cannot see. `tailnet.py` watches KEY EXPIRY; nothing watches what the Funnel is
 actually pointed at.
 
-Fixing it needs `tailscale serve status` on the droplet. Worth considering
-afterwards: `tailnet.py` already shells to `tailscale`, so reading the serve
-target and reporting a mismatch is the same shape as the check it already does.
+**The detection is now built.** `TailnetStatus.serves_the_dashboard` reads
+what the Funnel is actually proxied to out of `tailscale serve status --json`
+and compares it against `DASHBOARD_PORT` (8787, what
+`deploy/systemd/mudhorn-web.service` binds). A mismatch trips
+`needs_attention`, so the unit exits non-zero and `systemctl --failed` shows
+it, and it renders AHEAD of a pending expiry — an outage happening now
+outranks notice of one in ten days.
+
+Three-valued, so an unreadable or uncollected serve output reads as "could not
+ask" rather than as a clean bill, and does not escalate either.
+
+**Note the pre-existing `funnel_hostnames` answered the wrong question.** It
+said which hosts had the Funnel switched ON, which a Funnel pointed at the
+wrong port satisfies perfectly — and nothing read it. `Dream.is_offerable`
+again.
+
+**What still needs a shell**, because nothing here can re-point a Funnel:
+
+    tailscale serve status                 # see what it is actually serving
+    tailscale funnel --bg 8787             # re-point it at the dashboard
+    systemctl start mudhorn-tailnet.service   # clear the banner
+
+Until that is run, the public URL keeps serving the MCP endpoint.
+
+The plumbing for the new check was already there and is verified:
+`deploy/check-tailscale.sh` runs `tailscale serve status --json` and passes it
+as `--serve`, so the reading has had the serve output in it all along — the
+module simply never asked what it said.
 
 ### What the four agents found
 

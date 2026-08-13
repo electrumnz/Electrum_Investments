@@ -4228,10 +4228,29 @@ def loop_activity(history: JobHistory | None, *, now: datetime | None = None) ->
             if history.truncated
             else ""
         )
+        # **One statement, not two.** This branch used to render `head_line`
+        # — "The loop recorded no pass covering <timestamp>" — and then this
+        # sentence underneath it, which says the same thing about the same
+        # silence in different words and against a different span. Found by
+        # reading the rendered Board: the operator gets one fact stacked twice,
+        # and has to work out whether the two are describing one problem or two.
+        #
+        # The window sentence is the one that survives, because it is the more
+        # honest of the pair when there are no jobs at all. "No pass covering
+        # 13:41" reads as a narrow claim about one instant; the truth is that
+        # nothing is on file for the whole window, and a reader who fixed the
+        # instant would still have the gap.
+        #
+        # `head_line` stays in the branch below, where it earns its place: with
+        # passes on file, "was there one covering right now" is a genuinely
+        # different question from "how many were there today". It keeps the
+        # `.loopnow` element here so the coloured left border still marks the
+        # severity — dropping the element as well as the duplicate would take a
+        # signal away along with the noise.
         return (
             '<section class="block"><h2>The decision loop</h2>'
-            + head_line
-            + '<p class="note"><span class="alert">No pass of the loop is on '
+            f'<p class="loopnow" data-loop="{_e(_loop_key(answer))}">'
+            '<span class="alert">No pass of the loop is on '
             f"file for the last {history.window_hours:g}h. It was not running, "
             "was restarting, or its records were lost — this is NOT a report "
             f"that it ran and found nothing to do.{caveat}</span></p></section>"

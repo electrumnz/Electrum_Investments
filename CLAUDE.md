@@ -1446,6 +1446,36 @@ Three properties are load-bearing, and all three are the same principle:
 warning that outlives the fix by six hours teaches an operator to ignore the
 next one.
 
+**A key that has not expired is not the same as a URL that answers, and that
+gap was live.** Measured 13 Aug 2026: every dashboard path on
+`https://mudhorn.tailc04415.ts.net` returned 404 from `server: uvicorn` while
+`POST /mcp` returned 401 — the Funnel was proxying to the MCP server rather
+than to `mudhorn-web`. The unit was `active (running)` and healthy on
+loopback, the checkout was clean, and this module reported the link in perfect
+health, because it only ever looked at the key.
+
+That is this module's OWN failure shape — service green, journal filling, and
+the only symptom a URL that does not answer — arriving through a cause it
+structurally could not see. `serves_the_dashboard` reads what the Funnel is
+actually proxied to out of `tailscale serve status --json` and compares it
+against `DASHBOARD_PORT`.
+
+Three things about it:
+
+- **Three-valued, and `None` is "could not ask".** No serve output, unreadable
+  serve output, or no host with the Funnel on at all — none of those may read
+  as True, and none of them escalates either. A check that raised an alarm on
+  its own inability to read would fire on every box that does not collect the
+  serve output, which is how a real warning gets trained out of a reader.
+- **A host served on the tailnet but NOT funnelled is ignored.** It says
+  nothing about the public URL, and counting it would let a correct private
+  mapping vouch for a broken public one.
+- **`funnel_hostnames` was already there and answered the wrong question.** It
+  said which hosts had the Funnel switched ON — which a Funnel pointed at the
+  wrong port satisfies perfectly — and it was parsed, stored and read by
+  nothing. `Dream.is_offerable` in a second place: defined, never called, and
+  the feature inert behind it.
+
 ### A feed writes into the model's document, so `.strip()` is not enough
 
 `context.py` renders each headline as `f"- {h}"` into a **markdown document**

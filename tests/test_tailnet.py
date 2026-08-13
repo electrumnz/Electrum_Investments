@@ -18,6 +18,7 @@ from typing import Any
 
 import pytest
 
+from bot import tailnet
 from bot.tailnet import WARN_WITHIN_DAYS, TailnetStatus, main, parse, read
 
 NOW = datetime(2026, 8, 9, 22, 0, tzinfo=UTC)
@@ -269,3 +270,147 @@ def test_the_banner_names_the_command_that_clears_it():
 
     assert RECHECK_COMMAND in logged_out.headline(now=NOW)
     assert RECHECK_COMMAND in expiring.headline(now=NOW)
+
+
+# ------------------------------------------ what the Funnel actually serves
+
+
+def _serve(
+    host: str = "mudhorn.tailc04415.ts.net:443",
+    proxy: str = "http://127.0.0.1:8787",
+) -> dict[str, Any]:
+    """The shape `tailscale serve status --json` returns."""
+    return {
+        "TCP": {"443": {"HTTPS": True}},
+        "Web": {host: {"Handlers": {"/": {"Proxy": proxy}}}},
+        "AllowFunnel": {host: True},
+    }
+
+
+def _status() -> dict[str, Any]:
+    return {
+        "BackendState": "Running",
+        "Self": {"KeyExpiry": "2026-11-01T00:00:00Z"},
+    }
+
+
+def test_a_funnel_pointed_at_the_wrong_port_is_a_positive_finding():
+    """The live failure, reproduced. Measured 13 Aug 2026.
+
+    Every dashboard path on the public URL answered 404 from `server: uvicorn`
+    while `POST /mcp` answered 401 — the Funnel was proxying to the MCP server.
+    Throughout, `mudhorn-web` was active and healthy on loopback and this module
+    reported the link in perfect health, because the key had not expired and a
+    key is all it looked at.
+    """
+    now = datetime(2026, 8, 13, 13, 0, tzinfo=UTC)
+    reading = tailnet.parse(_status(), _serve(proxy="http://127.0.0.1:9090"), now=now)
+
+    assert reading.serves_the_dashboard is False
+    assert reading.needs_attention(now=now)
+    headline = reading.headline(now=now)
+    assert "NOT this dashboard" in headline
+    # Both ports named, so the reader can see which way round it is wrong.
+    assert "9090" in headline
+    assert "8787" in headline
+    assert tailnet.SERVE_STATUS_COMMAND in headline
+
+
+def test_a_correctly_pointed_funnel_says_nothing_about_it():
+    """A caveat that fires on a healthy box is furniture."""
+    now = datetime(2026, 8, 13, 13, 0, tzinfo=UTC)
+    reading = tailnet.parse(_status(), _serve(), now=now)
+
+    assert reading.serves_the_dashboard is True
+    assert not reading.needs_attention(now=now)
+    assert "NOT this dashboard" not in reading.headline(now=now)
+
+
+def test_no_serve_output_is_COULD_NOT_ASK_and_never_a_clean_bill():
+    """`None`, not True, and it must not escalate either.
+
+    An unreadable `tailscale serve status` and a correctly pointed Funnel are
+    different facts, and only one of them is reassuring. But a check that
+    escalated on its own inability to read would fire on every box where the
+    serve output is simply not collected, which is how a real warning gets
+    trained out of a reader.
+    """
+    now = datetime(2026, 8, 13, 13, 0, tzinfo=UTC)
+    for serve in (None, {}, "not an object", {"Web": "garbled"}):
+        reading = tailnet.parse(_status(), serve, now=now)
+        assert reading.serves_the_dashboard is None, serve
+        assert not reading.needs_attention(now=now), serve
+
+
+def test_a_host_served_but_NOT_funnelled_cannot_vouch_for_the_public_url():
+    """A private mapping says nothing about what the public URL does.
+
+    Counting it would let a correct tailnet-only handler vouch for a Funnel
+    pointed somewhere else entirely.
+    """
+    now = datetime(2026, 8, 13, 13, 0, tzinfo=UTC)
+    serve = {
+        "Web": {
+            "private.ts.net:443": {"Handlers": {"/": {"Proxy": "http://127.0.0.1:8787"}}},
+            "public.ts.net:443": {"Handlers": {"/": {"Proxy": "http://127.0.0.1:9090"}}},
+        },
+        "AllowFunnel": {"public.ts.net:443": True},
+    }
+    reading = tailnet.parse(_status(), serve, now=now)
+
+    assert reading.funnel_targets == {"public.ts.net": "http://127.0.0.1:9090"}
+    assert reading.serves_the_dashboard is False
+
+
+def test_an_unparseable_target_is_left_out_rather_than_guessed_at():
+    now = datetime(2026, 8, 13, 13, 0, tzinfo=UTC)
+    reading = tailnet.parse(_status(), _serve(proxy="not-a-target"), now=now)
+    # Present but unreadable as a port: it cannot claim the dashboard is served.
+    assert reading.serves_the_dashboard is False
+
+
+def test_the_wrong_funnel_is_reported_AHEAD_of_a_pending_expiry():
+    """An outage happening now outranks notice of one in ten days.
+
+    A banner leading with "the key expires in 8 days" above a URL already
+    serving somebody else's app buries the live fault under the pending one.
+    """
+    now = datetime(2026, 8, 13, 13, 0, tzinfo=UTC)
+    soon = {
+        "BackendState": "Running",
+        "Self": {"KeyExpiry": "2026-08-21T00:00:00Z"},
+    }
+    headline = tailnet.parse(soon, _serve(proxy="http://127.0.0.1:9090"), now=now).headline(now=now)
+    assert "NOT this dashboard" in headline
+    assert "expires in" not in headline
+
+
+def test_the_could_not_ask_state_survives_the_round_trip(tmp_path):
+    """An empty mapping on disk would come back as "the Funnel points nowhere".
+
+    That is a claim; absence is the honest lack of one. A reading written
+    before this field existed has no key at all and must read as `None`.
+    """
+    now = datetime(2026, 8, 13, 13, 0, tzinfo=UTC)
+    out = tmp_path / "tailnet-status.json"
+
+    unknown = tailnet.parse(_status(), None, now=now)
+    out.write_text(unknown.to_json(), encoding="utf-8")
+    restored_unknown = tailnet.read(out)
+    assert restored_unknown is not None
+    assert restored_unknown.serves_the_dashboard is None
+
+    known = tailnet.parse(_status(), _serve(proxy="http://127.0.0.1:9090"), now=now)
+    out.write_text(known.to_json(), encoding="utf-8")
+    restored = tailnet.read(out)
+    assert restored is not None
+    assert restored.funnel_targets == {
+        "mudhorn.tailc04415.ts.net": "http://127.0.0.1:9090"
+    }
+    assert restored.serves_the_dashboard is False
+
+    # And a record written before the field existed.
+    out.write_text(json.dumps({"checked_at": now.isoformat(), "backend_state": "Running"}))
+    older = tailnet.read(out)
+    assert older is not None
+    assert older.serves_the_dashboard is None
