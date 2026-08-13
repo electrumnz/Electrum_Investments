@@ -245,6 +245,38 @@ the `data/`-and-`audit/` conftest guard will fail every other agent's suite —
 and point Playwright at loopback with
 `executable_path="/opt/pw-browsers/chromium-1194/chrome-linux/chrome"`.
 
+**There IS a fix, found 13 Aug 2026, and it is worth recording so this stops
+reading as a dead end.** The agent proxy's own status endpoint
+(`curl http://127.0.0.1:39717/__agentproxy/status`) reports `noProxy`
+containing **`100.64.0.0/10`** — the Tailscale CGNAT range. So traffic to a
+TAILNET address bypasses the proxy entirely and goes direct, where the Funnel
+hostname resolves publicly, goes through the proxy, and has its TLS
+re-terminated there. `recentRelayFailures` is empty, which confirms the reset
+is the gateway rather than a policy denial.
+
+**So joining the session container to the tailnet fixes it** — install
+Tailscale, auth with an EPHEMERAL key so the node self-reaps, and Chromium
+reaches the dashboard over `100.x.y.z` with no proxy, no MITM and no Funnel
+gateway in the way. Ten minutes. The alternative is running Playwright on the
+droplet itself against `127.0.0.1:8787`, which has no network problem at all
+and costs ~400 MB of Chromium on a 2 GB box.
+
+**Neither is recommended for AUDITING, and that is the point worth keeping.**
+The live box shows exactly ONE state. A functional audit needs the states that
+are not on screen: a cold start where the poller has never read, a degraded
+feed, an empty prophecy shelf against one where every condition is settled, an
+expired grant still holding a position, a stale-reading banner. All of those
+are seconds away against `--mock` and unreachable against production.
+
+That is not theoretical. The grading card that reported patience over the dream
+stuck hardest only misbehaved on a MIXED shelf, and the "no claim to settle"
+state needed a shelf nobody had. Neither is reachable on live data.
+
+**Live access is for VERIFICATION rather than for auditing** — confirming the
+deployed thing matches the code — and `curl` already does that, which is how
+the auth gate was checked on every route and the figures cross-checked to the
+cent on 10 Aug.
+
 Anything in this file phrased as "verify on the box" means exactly that: it
 needs a session with the credentials, or the operator at a shell on the droplet.
 Do not report these as done from a container that cannot see them.
