@@ -20,6 +20,7 @@ import ast
 from dataclasses import fields
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import ClassVar
 
 from bot.dreaming import Dream
 from bot.models import OrderProposal
@@ -299,3 +300,155 @@ def test_dropped_counts_are_stated_in_the_rendered_answer() -> None:
     rendered = answer.render()
     assert "3 further item(s) dropped: carried no usable URL" in rendered
     assert "2 further item(s) dropped" in rendered
+
+
+# -------------------------------------------------- the third A2A speaker
+
+
+def test_the_researcher_is_a_voice_but_never_a_TURN() -> None:
+    """Two consequences, and both have to be the way round they are.
+
+    A researcher is not negotiating, so it must not move
+    `confer.last_agent_turn_at` — that marker answers "when did the two of them
+    last speak to each other", and a citation moving it would silence the very
+    change it just created. Exactly why the operator's own note is kept out of
+    it.
+
+    It IS a new voice to the change gate, because "there is now a published
+    source under the weakest hop" genuinely changes what adopting the dream
+    means. Every other cap still holds while they discuss it.
+    """
+    from datetime import timedelta
+
+    from bot.confer import ChangeKind, change_signals, last_agent_turn_at
+    from bot.dreaming import RESEARCHER, DreamMessage
+
+    spoke = datetime(2026, 8, 13, 9, 0, tzinfo=UTC)
+    cited = spoke + timedelta(hours=2)
+    messages = [
+        DreamMessage(dream_id=1, at=spoke, speaker="dreamer", text="offered", kind="offer"),
+        DreamMessage(
+            dream_id=1,
+            at=cited,
+            speaker=RESEARCHER,
+            text='"Exports fell 12%." https://x.test/a',
+            kind="citation",
+        ),
+    ]
+
+    # Not a turn: the marker stays on the dreamer's message.
+    assert last_agent_turn_at(messages) == spoke
+
+    # But a voice: the change gate sees it and names who spoke.
+    class _Dream:
+        updated_at = spoke
+        vault_entered_at = spoke
+        vault = "vault"
+        conditions: ClassVar[list[object]] = []
+
+    voices = [
+        s
+        for s in change_signals(_Dream(), messages)  # type: ignore[arg-type]
+        if s.kind is ChangeKind.VOICE
+    ]
+    assert [s.subject for s in voices] == [RESEARCHER]
+
+
+def test_a_citation_is_its_own_message_kind() -> None:
+    """Not a `note`, so a surface can render it as somebody else's words.
+
+    A quotation whose provenance a reader can no longer see has become the
+    summary this whole arrangement exists to refuse.
+    """
+    from bot.dreaming import MESSAGE_KINDS
+
+    assert "citation" in MESSAGE_KINDS
+
+
+def test_the_researcher_may_not_move_a_dream(tmp_path) -> None:
+    """It may add to a transcript and nothing else.
+
+    `DreamStore.move` closes its actor rule inline — the trader gets two named
+    exceptions and everything that is not the dreamer is refused — so this
+    falls out of a rule already written. Pinned anyway, because the researcher
+    is the newest speaker and the shelf it would be moving a dream onto is the
+    one an adoption, and therefore a live symbol permission, is taken from.
+
+    Driven against the real store rather than against a constant: an actor
+    rule is behaviour, and a test reading the list it is written from would
+    pass on a list that had stopped being consulted.
+    """
+    from bot.dreaming import RESEARCHER, Dream, DreamStore, MoveRefusal, Vault
+
+    store = DreamStore(tmp_path / "dreams.db")
+    dream_id = store.save(Dream(title="t", seed="s"))
+
+    refused = store.move(dream_id, Vault.VAULT, by=RESEARCHER, reason="found a source")
+
+    assert not refused.ok
+    assert MoveRefusal.FORBIDDEN_ACTOR in refused.refusals
+    still_there = store.get(dream_id)
+    assert still_there is not None
+    assert still_there.vault is Vault.WORKBENCH
+
+
+# ------------------------------------------- the adopted shelf's two counts
+
+
+def test_the_vault_readout_does_not_report_a_full_shelf_that_has_free_slots(
+    tmp_path, capsys, monkeypatch
+) -> None:
+    """The inverse of the bug that once bricked the ADOPTED shelf, and as wrong.
+
+    `counts_by_vault` counts ROWS; the cap counts LIVE GRANTS, because a dream
+    whose grant expired is no longer a promise the account has to keep a slot
+    for. After three expiries the readout said `adopted 3/3` while `has_room`
+    was True and `granted_symbols` was empty — the operator told to go and
+    clear space that was already free.
+
+    Both figures are true and neither is the whole answer, so both are printed
+    and the difference is named.
+    """
+    from datetime import timedelta
+
+    from bot import main as main_mod
+    from bot.config import load_rules
+    from bot.dreaming import Dream, DreamStore, Vault
+
+    store = DreamStore(tmp_path / "dreams.db")
+    long_ago = datetime(2026, 1, 1, tzinfo=UTC)
+    for i in range(3):
+        dream_id = store.save(
+            Dream(title=f"d{i}", seed="s", symbols=["ZZZZ"], asset_class_key="us_equity")
+        )
+        store.move(dream_id, Vault.PROPHECY, by="dreamer", reason="r")
+        store.move(dream_id, Vault.VAULT, by="dreamer", reason="r")
+        taken = store.adopt(dream_id, at=long_ago, ttl_days=1)
+        assert taken.ok, taken.refusals
+
+    now = long_ago + timedelta(days=30)
+    assert store.has_room(Vault.ADOPTED, now=now), "the slots really are free"
+    assert store.counts_by_vault().get(Vault.ADOPTED) == 3
+    assert store.count_toward_cap(Vault.ADOPTED, now=now) == 0
+
+    monkeypatch.setattr(main_mod, "DreamStore", lambda: store)
+    monkeypatch.setattr(main_mod, "datetime", _FrozenClock(now))
+    main_mod.cmd_vault(load_rules())
+    printed = capsys.readouterr().out
+
+    assert "0/3" in printed, printed
+    assert "3/3" not in printed, printed
+    assert "no longer hold a live grant" in printed
+
+
+class _FrozenClock:
+    """Only `now(UTC)` is used by `cmd_vault`; everything else is the real thing."""
+
+    def __init__(self, at: datetime) -> None:
+        self._at = at
+
+    def now(self, tz: object = None) -> datetime:
+        return self._at
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(datetime, name)

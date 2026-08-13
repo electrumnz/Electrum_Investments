@@ -1900,9 +1900,36 @@ def cmd_vault(rules: Rules) -> int:
         cap = caps.limit_for(shelf)
         ttl = ttls.days_for(shelf)
         held = counts.get(shelf, 0)
-        cap_text = f"{held}/{cap}" if cap is not None else f"{held} (uncapped)"
+        # **Two counts, and on ADOPTED they legitimately disagree.** The rows on
+        # the shelf are one fact; what the CAP counts is another, because a cap
+        # measuring live grants stops counting a dream whose grant expired —
+        # see `DreamStore._is_full`, where counting the row instead once bricked
+        # the shelf permanently.
+        #
+        # Printing only the row count is the inverse of that bug and just as
+        # wrong: measured after three expiries, this line read `adopted 3/3`
+        # while `has_room` was True and `granted_symbols` was empty. The
+        # operator was told to go and clear space that was already free.
+        #
+        # Printing only the cap count would be wrong the other way — the three
+        # dreams are still on the shelf, and their adoption rows are the only
+        # record that a permission ever existed. So both, with the difference
+        # named rather than left for a reader to notice.
+        counted = store.count_toward_cap(shelf, now=now)
+        if cap is None:
+            cap_text = f"{held} (uncapped)"
+        elif counted == held:
+            cap_text = f"{held}/{cap}"
+        else:
+            cap_text = f"{counted}/{cap} ({held} here)"
         ttl_text = f"{ttl}d" if ttl is not None else "never expires"
-        print(f"  {shelf!s:<10} {cap_text:<14} ttl {ttl_text}")
+        print(f"  {shelf!s:<10} {cap_text:<20} ttl {ttl_text}")
+        if cap is not None and counted != held:
+            print(
+                f"      {held - counted} on this shelf no longer hold a live "
+                f"grant, so they occupy no slot. `electrum-bot vault-expire` "
+                f"hands them back."
+            )
         # Said out loud rather than left as a blank space under the heading. An
         # empty shelf is an ordinary state, an unreadable store is not, and the
         # two look identical if nothing at all is printed.

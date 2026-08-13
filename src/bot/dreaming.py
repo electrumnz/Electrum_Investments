@@ -438,6 +438,32 @@ OPERATOR = "operator"
 # in a stronger form" genuinely changes what adopting the parent means.
 FUSION = "fusion"
 
+# The researcher (TODO item 26), speaking into a dream's transcript with
+# quotations it found. A third speaker rather than a second dreamer, and the
+# open `speaker` field is what makes that free — this constant exists to NAME
+# the two consequences, both of which fall out of rules already written and
+# both of which are the answer we want.
+#
+# **It is not an AGENT_SPEAKER, so it does not mark an exchange as having
+# happened.** `confer.last_agent_turn_at` reads only `DREAMER` and `TRADER`,
+# because that marker answers "when did the two of them last negotiate". A
+# researcher is not negotiating; it is handing over other people's sentences.
+# If it moved the marker it would silence the change it just created — the same
+# trap the operator's own note is kept out of the marker to avoid.
+#
+# **It IS a new voice to `confer.has_something_changed`**, for the same reason
+# `FUSION` is, and this half is worth stating rather than discovering. A dream
+# sitting in the vault becomes conferrable again when evidence arrives for it,
+# because "there is now a published source under the weakest hop" genuinely
+# changes what adopting it means. That is the change gate doing its job rather
+# than a loophole in it: every other cap — six turns, two dreams a run, the
+# lifetime ceiling — still holds while they discuss it.
+#
+# What it must never become is a mover. `_apply_move`'s rules are closed on
+# purpose, and this speaker is absent from all of them: it may add to a
+# transcript and nothing else.
+RESEARCHER = "researcher"
+
 # The dreamer's own shelves. It may move a dream between any of these, in any
 # direction, and may delete from them.
 #
@@ -971,7 +997,21 @@ class DreamMessage:
 # class docstring. `offer`, `accept` and `return` are written by the store
 # itself when an adoption starts or ends, so the transcript is complete even if
 # neither agent thought to narrate it.
-MESSAGE_KINDS = ("question", "answer", "offer", "accept", "return", "note")
+#
+# `citation` is the researcher's, and it is its own kind rather than a `note`
+# so a surface can render it as somebody else's words with a source, instead of
+# as a sentence one of the agents wrote. That distinction is the entire product
+# of the researcher — a quotation whose provenance a reader can no longer see
+# has become the summary the whole arrangement refuses to produce.
+MESSAGE_KINDS = (
+    "question",
+    "answer",
+    "offer",
+    "accept",
+    "return",
+    "note",
+    "citation",
+)
 
 
 @dataclass(frozen=True)
@@ -4215,6 +4255,22 @@ class DreamStore:
             by=OPERATOR,
         )
         return SettleResult(ok=True, dream_id=dream_id, condition=settled)
+
+    def count_toward_cap(self, vault: Vault, *, now: datetime) -> int:
+        """How many dreams the CAP counts on `vault` right now.
+
+        Deliberately a different question from `counts_by_vault`, which counts
+        rows on the shelf, and the two disagree on ADOPTED the moment a grant
+        expires — see `_is_full` for why the cap counts live grants there.
+
+        It exists because a readout that showed only the row count told the
+        operator `adopted 3/3` while `has_room` said True and
+        `granted_symbols` was empty: the *inverse* of the bug that once bricked
+        the shelf, and just as wrong. Neither figure is the whole answer, so a
+        surface has to be able to state both rather than pick.
+        """
+        with self._connect() as conn:
+            return self._count_toward(vault, now=now, exclude=None, conn=conn)
 
     def has_room(
         self, vault: Vault, *, now: datetime, caps: VaultCaps | None = None
