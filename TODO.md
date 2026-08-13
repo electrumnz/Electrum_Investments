@@ -1882,7 +1882,49 @@ test — and because `main.py` was being edited concurrently when it was found.
 
 ---
 
-## 21. The model sizes over the cap, and it is an arithmetic-delegation bug
+## 21. DONE — the ceilings are handed over in dollars, on BOTH sides of the seam
+
+**Shipped.** `context.sizing_ceilings` computes the ceilings in Python and
+renders them in dollars, and the system prompt sends the model to that block
+instead of to the percentages.
+
+**The prompt half is the part worth naming, because the item did not ask for
+it.** The context work landed first and `model_client.py` was never touched, so
+the fix existed on one side of the seam only — the model was handed a block of
+dollars by one document while the other still said "here are three percentages,
+size against them". The failure was always the seam between two documents, and
+fixing one side leaves the other intact.
+
+**Seven ceilings, not the three this item named.** Rendering three would let the
+model size to a figure `_buying_power` or `_gross_notional` then refuses, which
+is the same class of error one gate along. Each rendered figure was checked
+against where its gate actually flips.
+
+Three things found by RENDERING the block rather than reading it:
+
+- **The summary line laundered the overstatement.** With an unjournalled
+  position the caveat sat on the combined-risk ceiling while the tightest-ceiling
+  line printed clean — and that line is a claim about the whole set, so the one
+  line most likely to be divided out of was the one with no warning on it.
+- **`less $0.00 already at risk`** was a confident claim that nothing was at
+  risk, one line above the caveat correcting it, on precisely the account where
+  the figure reads zero because there is no row to add up.
+- **A model meeting `BUDGET SPENT` had never been told what it means**, so it
+  guesses, and the available guess is "some small number". The prompt now says.
+
+**The cap arithmetic is still duplicated** — `equity * pct / 100` lives in both
+`risk.py` and `context.py`. Factoring it means a renderer growing a public API
+on the gate, which was refused twice deliberately. What holds them in step is a
+pair of tests that drive the real `RiskGate` at the rendered figure and one cent
+past it. If the duplication is to go, that is a `risk.py` change and its own
+decision.
+
+The REJECT test runs the other way round from the one in `test_risk.py`: it
+takes the figure the block actually renders, does the division the prompt now
+asks for (→ 91 shares), proves the gate approves it, and proves the 185 that
+started this is still refused on both counts.
+
+## 21a. The original item, kept for the reasoning
 
 **Live, measured twice, and the gate caught both.** Not a prompting-tone
 problem — the prompt already says the right thing and is ignored, so more
