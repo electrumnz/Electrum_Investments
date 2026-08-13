@@ -870,6 +870,100 @@ is a change. The old side is **the exact text on the line**, never a
 re-rendering of the parsed number — `90000` and `90000.0` are one limit and two
 different diffs.
 
+### Two transports, and which one runs is a property of the ENDPOINT
+
+Every Python model call — `propose`, `dream`, `confer` — goes to DigitalOcean
+when `DO_INFERENCE_KEY` is set. Empty means Anthropic, which is still a fully
+supported configuration, so the rollback is unsetting a variable.
+
+**It is not a base-URL swap, and the reason was measured rather than reasoned
+about.** DigitalOcean's `/v1/messages` accepts `output_config` with **HTTP 200
+and silently ignores it**, returning prose. Not a 400. That is the worst of the
+three possible answers: a caller checking only for an error would believe the
+schema was in force while it was not.
+
+So `ModelClient` has two transports. `messages.parse` where the schema is
+enforced server-side, and a **forced tool call** where it is not — one tool
+whose `input_schema` is the model's JSON schema, `tool_choice` pinned to it, and
+the arguments validated **here** by Pydantic.
+
+**It keys on `Env.inference_provider.is_digitalocean` and never on the model
+id.** Whether a schema is enforced is a property of the thing SERVING the
+request, not of the weights behind it; the same model is served with enforcement
+at one endpoint and without it at another. A check on the model name gets that
+exactly backwards the first time a familiar name appears in an unfamiliar
+catalogue.
+
+**A reply with no tool call is a HARD FAILURE, and that is the one that
+matters.** A dropped schema breaks loudly in every case that produces a number
+and silently in exactly one: the quiet cycle. `proposals`, `assessments` and
+`position_plans` all default to `[]` in Python — correctly, an empty list is a
+real answer — so a bare `{"market_assessment": "..."}` parses as a completed
+cycle that considered nothing, which is indistinguishable afterwards from a loop
+that never looked. `qwen3.8-max` returned prose on 2 of 3 attempts against the
+real schema *with `tool_choice` forcing the call*, so this is live rather than
+hypothetical.
+
+**The same hole has a second entrance, and it is still open.** A tool call that
+IS made and comes back with `assessments: []` after being shown six symbols
+arrives at the identical place. `llama3.3-70b-instruct` does that on 6 of 10
+samples, in 2.2 seconds, and passes validation. `TODO.md` item 23 holds it.
+
+Three refusals rather than one, kept apart because they are three different
+findings about the far end: no tool call at all, a tool call whose argument KEYS
+are the model's own markup (`glm-5.2` half-parsed by the proxy), and arguments
+Pydantic rejects (`openai-gpt-oss-20b` inventing `ticker`/`action`/`shares`
+against a schema demanding `symbol`/`direction`/`qty`).
+
+**What is lost is narrower than it sounds; what is kept is the part that
+matters.** Pydantic still rejects a malformed object, so a `qty` or a
+`stop_loss_price` that comes back wrong is refused rather than coerced,
+`model_call_failed` is logged and `RiskGate` never sees it. What degrades is
+RELIABILITY: the model is asked for the shape rather than constrained to it, so
+the rejection rate rises and every rejection costs a cycle.
+
+**Nothing falls back, in either sense.** No prose parsing after a failed tool
+call — that hands back exactly the freedom the schema exists to remove. No retry
+onto a second model. And **no falling back to the other PROVIDER**: a
+`DO_INFERENCE_KEY` that is set but unusable REFUSES rather than quietly
+answering from Anthropic, which would run, bill the wrong account and leave
+nothing on any surface saying which model produced the orders.
+
+**A Claude tier default named against DigitalOcean refuses at construction.**
+That endpoint calls Anthropic models by different ids (`anthropic-claude-5-sonnet`,
+not `claude-sonnet-5`) and 403s the ones it lists on this account's tier, so it
+is a guaranteed failure — caught once, rather than 96 times a day inside the
+loop's broad `except` as one more skipped cycle. `DECISION_MODEL_ID` and
+`DREAM_MODEL_ID` are how a model is named.
+
+**The guards moved because they were asking the wrong question.** `smoketest`,
+`dream` and `confer` each tested `ANTHROPIC_API_KEY`. With two endpoints that
+passes over a half-finished swap — endpoint set, model access key not, Anthropic
+key present — which is a configuration the operator believes is live.
+`model_calls_are_impossible` asks about the CONFIGURED provider's own
+credential. The loop asks the narrower `provider_is_unusable`, and that
+asymmetry is deliberate: a cycle with no model call still reconciles the journal
+and runs `stop_watch`, and that safety work is worth more than the proposal.
+
+**Three groups of vendor names are deliberately NOT renamed**, and each would
+break something. `import anthropic` and `ANTHROPIC_BASE_URL`/`ANTHROPIC_API_KEY`
+are read BY the SDK — DigitalOcean speaks the Anthropic wire format, so renaming
+them breaks the transport. `sends_anthropic_thinking` and
+`sends_anthropic_effort` are named after the wire fields they control, so a
+generically-named flag would send the wrong field in the wrong shape at an
+endpoint that wants a flat `reasoning_effort`. And the `claude_*_tokens` fields
+are written into `audit/*.jsonl`, which is append-only and never migrated — a
+rename would read every historical cycle back as `0 in / 0 out`. The
+model-facing half is already clean and `tests/test_model_client.py` pins it: no
+schema, prompt, soul, journal or audit value sent to a model carries a vendor
+name, because Pydantic turns a docstring into the schema's `description`.
+
+**Caching is unverified at that endpoint and fails silently in the money
+direction.** `cache_control` is not in DigitalOcean's published request schema,
+and a dropped one does not raise — it bills 10x on the system block forever.
+`cached_tokens` is already on the `cycle_complete` line, so a run of cycles
+reading zero is the answer; nothing needs building to check it.
+
 ### The model call is a feed too, and prose truncates while numbers reject
 
 The same rule as the feeds below, learned the hard way. `claude.propose` was

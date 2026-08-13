@@ -9198,6 +9198,276 @@ def _awaiting_you(dreams: Sequence[Dream], now: datetime) -> str:
     )
 
 
+#: How stale the newest write on this page may be before the grading card says
+#: the daily run is not landing.
+#:
+#: Two days rather than one, because `mudhorn-dream.timer` fires once a day and
+#: a twenty-five-hour gap is an ordinary late run. Shouting at one of those
+#: teaches an operator to stop reading the warning that matters — the same
+#: reasoning that puts the Tailscale banner at ten days rather than at the first
+#: hour of the notice period.
+GRADING_STALE_AFTER_SECONDS = 2 * 24 * 3600.0
+
+
+def _shelf_grading(dreams: Sequence[Dream], now: datetime) -> str:
+    """Whether the prophecy shelf can move at all, and what is holding it.
+
+    `PromotionRun` counts every one of these — `cycles_available`,
+    `conditions_fulfilled`, `awaiting_operator` — onto a log line, and not one
+    of them reached a page. So a shelf that CANNOT move looked exactly like a
+    shelf being patient, which is the `can_grade_anything` question with nowhere
+    to be asked: no condition fired because nothing was recorded, and no
+    condition fired because nothing here is gradeable, are opposite findings
+    that produce the same empty result.
+
+    **Only one of those two is establishable from this page, and the card
+    renders them apart rather than picking the comfortable one.**
+
+    - **Every unanswered condition being ungradeable** is a fact about what is
+      stored, so it is stated outright: no amount of market movement moves this
+      shelf, and the reason is named per cause.
+    - **Whether the loop recorded any figures to grade against** is not on this
+      page at all. That is `PromotionRun.cycles_available`, produced at grading
+      time and written to `dream_promotion`, and letting a stated zero above
+      stand in for it would be inventing the missing half of the answer. The
+      card says which figure is missing and where it lives instead.
+
+    **Absent rather than empty**, following `_awaiting_you`. With nothing on the
+    prophecy shelf there is no grading state to report, and the shelf rail and
+    the shelf's own section already state that nought in their own words. A
+    panel announcing zero teaches an operator to skip the panel.
+
+    Every count comes off the conditions' stored fields through the model's own
+    properties, in the SAME precedence `grade_conditions` applies — answered,
+    then a threshold code can look up, then an observation, then neither. A
+    second classification written here would be a second opinion about what is
+    gradeable, and the page and the log line would drift apart at exactly the
+    moment somebody was comparing them.
+
+    Ages are measured from `vault_entered_at`, which is when a dream entered
+    THIS shelf, never `created_at`. A dream pulled back out for another pass and
+    returned has been waiting since it came back, and the expiry clock it is
+    actually running against is the same one.
+    """
+    shelf = [d for d in dreams if d.vault is Vault.PROPHECY]
+    if not shelf:
+        return ""
+
+    settled = on_figure = on_person = no_symbol = unregistered = overdue = 0
+    for dream in shelf:
+        for cond in dream.conditions:
+            # The order is `grade_conditions`', deliberately. A condition
+            # carrying BOTH a threshold and an observation is graded on the
+            # threshold there, because code settles it without needing anybody,
+            # so it has to be counted on the threshold here too.
+            if cond.is_answered:
+                settled += 1
+            elif cond.is_gradeable:
+                on_figure += 1
+            elif cond.is_observable:
+                on_person += 1
+                if cond.state(now) is ConditionState.OVERDUE:
+                    overdue += 1
+            elif cond.is_checkable:
+                # A number with nothing to look it up on. See below: this is the
+                # one bucket that reads as a pre-registered claim and can never
+                # be settled by anything.
+                no_symbol += 1
+            else:
+                unregistered += 1
+
+    unanswered = on_figure + on_person + no_symbol + unregistered
+    stuck = no_symbol + unregistered
+
+    # Pairs rather than a mapping keyed by the dream: `Dream` is a mutable
+    # dataclass and so unhashable, and the alternative — keying by `id`, which
+    # is `int | None` — would collapse every unsaved dream onto one entry.
+    ages = [
+        (d, max(0.0, (now - _aware(d.vault_entered_at)).total_seconds()))
+        for d in shelf
+    ]
+    oldest, oldest_age = max(ages, key=lambda pair: pair[1])
+
+    # Dreams that have cleared the promotion rule and are still sitting here.
+    #
+    # `promotion_for` rather than a re-reading of the rule: it is the same pure
+    # function `_stuck` renders and `dreamer.promote_dreams` acts on, so this
+    # cannot develop its own opinion about what should have moved. It answers
+    # over stored state alone and knows nothing about the vault's caps, which is
+    # why the sentence below names both explanations instead of choosing.
+    cleared = [d for d in shelf if promotion_for(d).moves]
+
+    tiles = (
+        stat(
+            "Prophecies waiting",
+            str(len(shelf)),
+            f"oldest {_e(_span(oldest_age))} on this shelf",
+        )
+        + stat(
+            "On a figure",
+            str(on_figure),
+            # The caption changes with the figure rather than reading as a
+            # claim about claims that are not there. "Code settles these" over
+            # a nought describes an empty set.
+            "code settles these, next time the dreamer runs"
+            if on_figure
+            else "nothing here waits on the market",
+        )
+        + stat(
+            "On a person",
+            str(on_person),
+            f"{overdue} past the review date"
+            if overdue
+            else ("only you settle these" if on_person else "nothing here waits on you"),
+            "alert" if overdue else "",
+        )
+        + stat(
+            "Nothing can settle",
+            str(stuck),
+            "these will never fire" if stuck else "every claim here is settleable",
+            "alert" if stuck else "",
+        )
+    )
+
+    notes = ""
+    if unanswered and not on_figure:
+        # The finding that used to be invisible. Stated flatly, because it is a
+        # fact about what is stored rather than a guess about the world: not one
+        # unsettled claim on this shelf names a figure the loop can look up, so
+        # the market cannot move any of it however it moves.
+        if on_person:
+            notes += (
+                '<p class="note"><span class="alert">Nothing on this shelf is '
+                "waiting on the market.</span> Every unsettled condition here "
+                "needs somebody to go and look, so no reading the loop records "
+                "will move any of it. The card above names them and the command "
+                "that answers one.</p>"
+            )
+        else:
+            notes += (
+                '<p class="note"><span class="alert">Nothing on this shelf can '
+                "be settled by anybody.</span> No condition here names a figure "
+                "code can look up or a claim a person could answer, so the shelf "
+                "cannot move at all — not by the market, not by you. That is a "
+                "fact about what was written down, not about whether any of it "
+                "is true.</p>"
+            )
+    elif on_figure:
+        # And its opposite, which is the half this page CANNOT establish. Saying
+        # "waiting on the market" and stopping there would report patience over
+        # a loop that may have recorded nothing to check against.
+        notes += (
+            f'<p class="note">{_count(on_figure, "unsettled condition")} here '
+            f"{_word(on_figure, 'names', 'name')} a threshold code can look up. "
+            "<b>Whether the loop recorded any figures to check them against is "
+            "not visible from this page</b> — that count is "
+            "<code>cycles_available</code> on the <code>dream_promotion</code> "
+            "log line, and a nought there means nothing could have fired however "
+            "the market moved. A shelf waiting on the market and a shelf with "
+            "nothing to grade against look identical from here, so this says "
+            "which figure is missing rather than assuming the first.</p>"
+        )
+
+    if no_symbol:
+        notes += (
+            f'<p class="note"><span class="alert">'
+            f'{_count(no_symbol, "condition")} '
+            f"{_word(no_symbol, 'carries', 'carry')} a number and no symbol."
+            "</span> A field, an operator and a value with nothing to look them "
+            "up on is a comparison with no subject, so <code>grade_conditions"
+            "</code> skips it: it will never fire, however the market moves, and "
+            "it counts against its dream's unmet conditions for as long as it "
+            "stands. This is the one bucket that reads as a pre-registered claim "
+            "and is not one.</p>"
+        )
+
+    if unregistered:
+        notes += (
+            f'<p class="note">{_count(unregistered, "condition")} pre-registered '
+            "nothing at all — no threshold and no observation — so nothing can "
+            "settle "
+            f"{_word(unregistered, 'it', 'them')}. Counted rather than dropped, "
+            "the same as a watch with prose and no trigger: a claim nobody can "
+            "grade is the interesting failure, and an invisible one reads as "
+            "patience.</p>"
+        )
+
+    if cleared:
+        notes += (
+            f'<p class="note"><span class="alert">'
+            f'{_count(len(cleared), "prophecy", "prophecies")} '
+            f"{_word(len(cleared), 'has', 'have')} met every condition and "
+            f"{_word(len(cleared), 'is', 'are')} still on this shelf.</span> "
+            "Promotion moves a dream only when <code>electrum-bot dream</code> "
+            "runs, so either it has not run since the last condition fired or "
+            "the dream vault is full. <code>DreamStore.promote</code> is the "
+            "only thing that knows which, and it says so on the run that "
+            "refuses.</p>"
+        )
+
+    # Linked only when there is an id to link to. `_dream` puts the anchor on a
+    # card that has one, so `#dream-None` would be a link to nowhere on exactly
+    # the dream a reader was being pointed at.
+    waiting_longest = (
+        f'<a href="#dream-{oldest.id}">{_e(oldest.title)}</a>'
+        if oldest.id is not None
+        else f"<b>{_e(oldest.title)}</b>"
+    )
+
+    # Every dream on the page, not only the prophecies: a run writes whichever
+    # dream it worked on, and that is usually one on the workbench.
+    last = max(_aware(d.updated_at) for d in dreams)
+    age = max(0.0, (now - last).total_seconds())
+    if age >= GRADING_STALE_AFTER_SECONDS:
+        cadence = (
+            '<p class="note"><span class="alert">Nothing shown on this page has '
+            f"been written to for {_e(_span(age))}</span> — the newest is "
+            f"{_e(_when(last))}. A dream run writes a step every time it "
+            "completes, so a gap longer than the daily timer means no run has "
+            "landed here, and nothing above has been graded in that time.</p>"
+        )
+    else:
+        cadence = (
+            f'<p class="note">The newest write on this page is {_e(_when(last))}, '
+            f"{_e(_span(age))} ago. A dream run writes a step every time it "
+            "completes, so something has landed recently — which is not the same "
+            "as the last run having succeeded.</p>"
+        )
+
+    return (
+        '<section class="block" id="grading-state">'
+        "<h2>Whether the shelf can move</h2>"
+        '<p class="note" style="max-width:68ch;margin-bottom:1rem">The prophecy '
+        "shelf holds claims somebody can settle, and a claim nobody can settle "
+        "looks exactly the same sitting there. These are the conditions on it, "
+        "counted by <em>who or what could ever answer them</em> — which is the "
+        "question that decides whether this shelf is being patient or is "
+        "stuck.</p>"
+        f'<div class="grid g4">{tiles}</div>'
+        + notes
+        + f'<p class="note">{_count(settled, "condition")} '
+        f"{_word(settled, 'has', 'have')} been settled here, either way — met "
+        "or ruled out. The oldest prophecy is "
+        + waiting_longest
+        + f", on this shelf {_e(_span(oldest_age))}, measured from when it "
+        "entered this shelf and never from when it was first dreamt: a dream "
+        "taken apart again starts its wait over.</p>"
+        '<p class="note">Grading and promotion both run inside '
+        "<code>electrum-bot dream</code>, once a day, and nowhere else. The "
+        "decision loop's fifteen-minute pulse deliberately does not touch this "
+        "shelf — so a deployment that has stopped dreaming stops grading, and "
+        "every figure above freezes looking like patience.</p>"
+        + cadence
+        + '<p class="note">Whether the timer is ENABLED is not visible from this '
+        "process; Settings names <code>systemctl list-timers</code> and says so "
+        "for the same reason. A run whose model call failed writes nothing and "
+        "grades nothing, so neither figure can tell a stopped timer from a "
+        "failing one — the log is where that shows.</p>"
+        '<pre class="cmd">electrum-bot dream\n'
+        "systemctl list-timers mudhorn-dream.timer</pre></section>"
+    )
+
+
 def dreaming_page(
     dreams: list[Dream],
     summary: DreamSummary,
@@ -9360,6 +9630,12 @@ def dreaming_page(
     # Ahead of both, because it is the only thing on this page addressed to the
     # READER rather than describing what the agents did.
     body += _awaiting_you(dreams, moment)
+
+    # And immediately under it, because it answers the question the card above
+    # provokes: nothing waiting on you is not nothing stuck, and this is where
+    # the other kind of stuck is counted. Second rather than first — that one is
+    # addressed to the reader and this one describes the shelf.
+    body += _shelf_grading(dreams, moment)
 
     # Above the shelves, because it answers a question about the two AGENTS and
     # the shelves answer one about the dreams. Below the early return on an empty

@@ -34,10 +34,16 @@ EnvironmentFile=/opt/mudhorn/.env
 ExecStart=/opt/mudhorn/.venv/bin/electrum-bot confer
 
 # A run is capped at two dreams and six turns each, so twelve model calls at
-# worst, each sharing the dreamer's 900-second client timeout. This has to
-# outlast the worst case or systemd kills an exchange half-written: the
-# transcript is append-only, so a killed run leaves a conversation with a
-# dangling turn that nothing will ever finish.
+# worst, each sharing the dreamer's client bound — DREAM_TIMEOUT_SECONDS (240s)
+# with one retry. This has to outlast the worst case or systemd kills an
+# exchange half-written: the transcript is append-only, so a killed run leaves a
+# conversation with a dangling turn that nothing will ever finish. The figure
+# here said 900 seconds until that bound was cut, and the headroom is the point
+# rather than the arithmetic, so the value stands.
+#
+# Same as the dream unit on credentials: the endpoint comes from `.env`, the
+# command authenticates with the configured provider's own key, and it refuses
+# rather than falling back to the other provider.
 TimeoutStartSec=3600
 
 # Sandboxed like the dream unit, and it can be: this places nothing and reaches

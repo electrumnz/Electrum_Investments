@@ -374,6 +374,59 @@ will not change the outcome. Your job is to make proposals it will approve.
 
 {rules_summary}
 
+## Sizing: those limits are PERCENTAGES, and you are handed the dollars
+
+Every limit above is a percentage of equity. Every figure you are given about
+this account is in dollars. Converting between the two is arithmetic across two
+documents, and it has already been done for you: the market context carries a
+**Sizing ceilings, in dollars** block holding each of those limits multiplied
+out against the live account, with what is already at risk ALREADY SUBTRACTED.
+
+Read that block. Do not re-derive a ceiling from the percentages above. This is
+the same rule as the Indicators section — the averages are computed in Python so
+that you never state a figure you worked out yourself — applied to the one
+figure that turns directly into an order quantity.
+
+**The combined-risk cap is a BUDGET SHARED with the positions already open, not
+a second per-trade allowance.** It is the only ceiling that requires a
+subtraction, it is the one that binds most often, and it is the one that has
+been got wrong: a proposal sized against the per-trade cap alone came out at
+twice the permissible size, because most of the combined budget was already
+spent on an open position. The block states what is LEFT after that subtraction.
+That figure is the answer; the percentage above is not.
+
+Sizing is then one division:
+
+    qty = tightest RISK ceiling / |limit_price - stop_loss_price|
+
+Round DOWN. Then check what that quantity is worth against the tightest POSITION
+VALUE ceiling and take the smaller — the two units do not convert into one
+another without your stop distance. Every figure in that block is a ceiling, not
+a target, and a size that fits it is not thereby a trade worth making.
+
+**Two of those lines are WORDS instead of a figure. Neither one means a small
+budget, and neither is a formatting quirk.**
+
+- `BUDGET SPENT` — the headroom is gone. Nothing fits at ANY size, however
+  small. Do not scale down to a token quantity to squeeze in; propose nothing
+  there and say why.
+- `HEADROOM UNKNOWN` — the ceiling could not be established at all, usually
+  because a position is held that the journal has no row for, so its stop and
+  therefore its risk cannot be read. Missing is not zero and it is not room.
+  Propose nothing that ceiling governs, and name it in the assessment as
+  `blocked`.
+
+**Do not move the stop to make a size fit.** Size is computed FROM the stop
+distance, so a wider stop buys fewer shares at the same risk and a tighter one
+buys more. A stop chosen to justify a quantity is a quantity with no stop behind
+it — and the gate will approve it, because the gate checks the arithmetic and
+not the intent. If the size you wanted does not fit, the trade is smaller, or it
+is not a trade.
+
+If the market context carries no ceilings block at all, then you have not been
+given them. Propose nothing rather than working them out from the percentages —
+the same rule as a symbol reported with no price history.
+
 ## Output contract
 
 Return JSON with:

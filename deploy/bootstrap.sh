@@ -199,18 +199,21 @@ echo "    mudhorn-backup.timer started (hourly)"
 # The dream timer is installed but NOT started, and that asymmetry is the point.
 # The backup timer costs nothing and the failure it prevents is unrecoverable,
 # so it starts itself. This one spends money on an API call every time it fires
-# and needs ANTHROPIC_API_KEY to do anything at all — without one it exits 1 and
-# would post a failed unit every morning, which teaches an operator to ignore
-# systemctl --failed. Same reasoning as --execute and the chat token: anything
-# that spends or acts is switched on by a person who decided to.
+# and needs a model credential to do anything at all — without one it exits 1
+# and would post a failed unit every morning, which teaches an operator to
+# ignore systemctl --failed. Same reasoning as --execute and the chat token:
+# anything that spends or acts is switched on by a person who decided to.
 echo "    mudhorn-dream.timer installed, NOT started"
 echo "      enable with: systemctl enable --now mudhorn-dream.timer"
-echo "      needs ANTHROPIC_API_KEY in .env. Costs roughly a few pounds a year."
-# Said here because this is the line somebody reads while wondering whether the
-# DigitalOcean key they just created covers it. It does not: this timer runs
-# `electrum-bot dream`, which is the Anthropic SDK in Python, and the
-# DigitalOcean switch moves the Hermes souls and nothing else.
-echo "      DO_INFERENCE_KEY does not change this timer -- it is an Anthropic SDK call."
+echo "      costs roughly a few pounds a year."
+# Said here because this is the line somebody reads while wondering which key
+# this timer needs, and the answer changed. It used to be ANTHROPIC_API_KEY
+# unconditionally and the note here said the DigitalOcean switch did not reach
+# it. That is no longer true: `electrum-bot dream` follows whichever provider
+# .env configures, and it authenticates with that provider's OWN key. Naming
+# the wrong variable sends an operator to the wrong console.
+echo "      needs the configured provider's key in .env: DO_INFERENCE_KEY when"
+echo "      that is set, ANTHROPIC_API_KEY otherwise. The command says which."
 
 # The conference timer, on the same footing and for the same reasons: it spends
 # money on model calls and needs the same key. It fires an hour after the dream
@@ -269,8 +272,17 @@ Next, in order:
          # then DO_INFERENCE_KEY / DO_INFERENCE_MODEL, one per line
      Prove the model slug BEFORE the first message. deploy/README.md,
      "Pointing the souls at DigitalOcean", has the check that reads the served
-     model back. Nothing else moves: the loop and the dreamer's own model call
-     still go to Anthropic.
+     model back.
+
+  6. The PYTHON model calls -- the loop, the dreamer and the conference -- move
+     with a SEPARATE key, and this one DOES go in $APP_DIR/.env:
+         DO_INFERENCE_KEY=<a model access key, never a dop_v1_ token>
+         DECISION_MODEL_ID=<a model that holds the schema; see docs/DROPLET_AI.md>
+         DREAM_MODEL_ID=<likewise>
+     Naming the models is not optional here. That endpoint calls Anthropic
+     models by different ids and 403s them on this account's tier, so leaving
+     the ids unset refuses at startup rather than failing on every cycle.
+     Unsetting DO_INFERENCE_KEY is the whole rollback: empty means Anthropic.
 
 The loop runs WITHOUT --execute. It proposes and vets orders and places none.
 Read deploy/README.md before changing that.

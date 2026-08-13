@@ -19,6 +19,7 @@ from bot.config import Rules, load_rules
 from bot.context import (
     BUDGET_SPENT,
     HEADROOM_UNKNOWN,
+    RISK_UNIT,
     Ceiling,
     build_market_context,
     fetch_indicators,
@@ -29,6 +30,7 @@ from bot.context import (
 )
 from bot.dreaming import Dream, Hop
 from bot.grants import GrantBriefing
+from bot.model_client import build_system_prompt
 from bot.models import (
     AccountSnapshot,
     Bar,
@@ -657,6 +659,72 @@ def test_the_caps_reach_the_model_in_dollars_with_the_subtraction_done():
     assert "Tightest risk ceiling for a us_equity trade: $500.71" in blob
 
 
+def test_the_gate_still_rejects_the_size_this_block_was_written_for():
+    """**The fix is a rendering change, and it must not be mistaken for a
+    relaxation.**
+
+    The standing rule for anything touching the risk path is a test that proves
+    a REJECT. `tests/test_risk.py` pins the live shape against the gate directly;
+    this one runs the other way round, through the block — it takes the figure
+    the context ACTUALLY RENDERS, performs the single division the system prompt
+    now asks for, and drives the real `RiskGate` with the result.
+
+    That is the whole claim of the feature in one test: a size read off the block
+    is approved, and the size the model reached by skipping the subtraction is
+    refused exactly as it was on 12 Aug 2026. If the block ever renders a figure
+    the gate will not accept, or the 185 that started this is quietly permitted,
+    this fails.
+    """
+    rules = load_rules()
+    account = AccountSnapshot(
+        equity_usd=99_383.00,
+        cash_usd=116_239.81,
+        buying_power_usd=198_766.00,
+        open_positions=[_held("SPY", qty=21, price=774.18)],
+        open_risk_usd=1_486.95,
+        open_risk_by_symbol={"SPY": 1_486.95},
+        planned_stop_by_symbol={"SPY": 820.0},
+    )
+
+    # $5.50 of stop distance on a $305 name, as on the day.
+    def sized(qty: float) -> OrderProposal:
+        return OrderProposal(
+            symbol="MSFT",
+            direction=Direction.BUY,
+            qty=qty,
+            limit_price=305.00,
+            stop_loss_price=299.50,
+            rationale="Sized by dividing the rendered ceiling by the stop distance.",
+        )
+
+    tick = Tick(symbol="MSFT", bid=304.98, ask=305.02, timestamp=IN_SESSION)
+    ceilings = sizing_ceilings(account=account, rules=rules)
+    # The tightest RISK ceiling, taken from the rendering rather than restated:
+    # a test that hardcoded 500.71 would pass while the block printed something
+    # else entirely.
+    tightest = min(
+        c.headroom_usd
+        for c in ceilings
+        if c.unit == RISK_UNIT and c.headroom_usd is not None
+    )
+    # The one division the prompt describes, rounded DOWN as it says.
+    qty = int(tightest / 5.50)
+    assert qty == 91
+
+    permitted = RiskGate(
+        rules, equity_at_session_start=99_383.00, now=IN_SESSION
+    ).evaluate(sized(qty), account=account, tick=tick)
+    assert permitted.approved, permitted.reasons
+
+    # And the size that skipping the subtraction produced — 2.03x over.
+    over = RiskGate(
+        rules, equity_at_session_start=99_383.00, now=IN_SESSION
+    ).evaluate(sized(185), account=account, tick=tick)
+    assert not over.approved
+    assert any("total risk would reach" in r for r in over.reasons)
+    assert any("per-trade cap" in r for r in over.reasons)
+
+
 def test_the_combined_risk_headroom_is_exactly_where_the_gate_flips():
     """**The property that makes rendering these figures safe at all.**
 
@@ -861,6 +929,110 @@ def test_the_portfolio_figure_is_still_the_gates_own_but_flagged_as_overstated()
     assert "OVERSTATED: SPY held with no journal row" in blob
 
 
+def test_an_unknown_is_not_subtracted_as_nothing_already_at_risk():
+    """The basis line said `less $0.00 already at risk`, which is a claim.
+
+    `open_risk_usd` reads $0.00 on an account whose only position has no journal
+    row — there is no row to add up — so the sentence asserted that nothing was
+    at risk, one line above the caveat correcting it. Both cannot be read; the
+    figure is the one that gets read. What the subtraction actually measured is
+    what the journal could account for, so that is what it now says, and the
+    caveat is left to carry the rest.
+    """
+    account = AccountSnapshot(
+        equity_usd=100_000.0,
+        cash_usd=100_000.0,
+        buying_power_usd=200_000.0,
+        open_positions=[_held("SPY")],
+        symbols_with_unknown_risk=["SPY"],
+    )
+
+    blob = "\n".join(render_sizing_ceilings(account=account, rules=load_rules()))
+
+    assert "$0.00 the journal can account for" in blob
+    assert "$0.00 already at risk" not in blob
+
+    # And the phrasing narrows only where something is unknown: on an account
+    # the journal fully describes, the subtracted figure IS all of what is at
+    # risk, and hedging it there would teach the reader to discount the words.
+    known = AccountSnapshot(
+        equity_usd=100_000.0,
+        cash_usd=100_000.0,
+        buying_power_usd=200_000.0,
+        open_positions=[_held("SPY")],
+        open_risk_usd=600.0,
+        open_risk_by_symbol={"SPY": 600.0},
+        planned_stop_by_symbol={"SPY": 520.0},
+    )
+    assert "$600.00 already at risk" in "\n".join(
+        render_sizing_ceilings(account=known, rules=load_rules())
+    )
+
+
+def test_the_tightest_line_carries_the_overstatement_it_summarises():
+    """**The summary line is the one a quantity gets divided out of.**
+
+    The unknown reaches the portfolio ceiling as a caveat on that ceiling's own
+    line. The tightest line is a claim about the whole SET — the smallest of
+    them — so a member that is overstated can truly be smaller than the figure
+    printed, whether or not it is the member that won.
+
+    Here it is not: the per-trade cap wins at $1,000 while the contaminated
+    combined budget prints $2,000 and could genuinely be anything below it. A
+    reader of the summary alone would size to $1,000 with nothing on the line to
+    say the set it was drawn from is not fully known — which is the
+    confident-partial-answer failure arriving through the one line most likely
+    to be acted on.
+    """
+    account = AccountSnapshot(
+        equity_usd=100_000.0,
+        cash_usd=100_000.0,
+        buying_power_usd=200_000.0,
+        open_positions=[_held("SPY")],
+        symbols_with_unknown_risk=["SPY"],
+    )
+
+    lines = render_sizing_ceilings(account=account, rules=load_rules())
+    tightest = next(x for x in lines if "Tightest risk ceiling" in x)
+
+    # The figure is still the gate's own, so it is still stated.
+    assert "$1,000.00" in tightest
+    assert "UPPER BOUND, not a measurement" in tightest
+    assert "OVERSTATED" in tightest
+    # And it says which way the error runs, because the gate will not refuse a
+    # trade sized to an overstated figure: this one is the reader's to be
+    # careful about rather than a rejection waiting to happen.
+    assert "smaller size or no trade, never a larger one" in tightest
+
+    # The POSITION VALUE summary is untouched: an unjournalled stop makes RISK
+    # unknowable and says nothing whatever about what a position is worth.
+    value = next(x for x in lines if "Tightest position value ceiling" in x)
+    assert "UPPER BOUND" not in value
+
+
+def test_a_fully_journalled_account_gets_no_upper_bound_warning():
+    """The warning must mean something, so it cannot appear unconditionally.
+
+    Same rule as `DATA YOU DO NOT HAVE` in the strategy blocks: a caveat printed
+    on every cycle is a caveat that stops being read, and this one has to survive
+    for the cycle where a position really is unjournalled.
+    """
+    account = AccountSnapshot(
+        equity_usd=100_000.0,
+        cash_usd=100_000.0,
+        buying_power_usd=200_000.0,
+        open_positions=[_held("SPY")],
+        open_risk_usd=600.0,
+        open_risk_by_symbol={"SPY": 600.0},
+        planned_stop_by_symbol={"SPY": 520.0},
+    )
+
+    blob = "\n".join(render_sizing_ceilings(account=account, rules=load_rules()))
+
+    assert "UPPER BOUND" not in blob
+    assert "OVERSTATED" not in blob
+
+
 def test_zero_equity_cannot_be_stated_rather_than_being_a_small_budget():
     """A percentage of nothing is not a tight limit, it is no limit anybody can
     read. The two would be acted on completely differently."""
@@ -949,3 +1121,90 @@ def test_the_ceilings_sit_directly_under_the_account_figures(account):
 
     assert blob.index("## Account") < blob.index("## Sizing ceilings")
     assert blob.index("## Sizing ceilings") < blob.index("## Market snapshot")
+
+
+# ------------------------------------------- the other half, in the other document
+#
+# The bug was never in one document. It was the SEAM: percentages in the cached
+# system prompt, dollars in this one, and five steps of arithmetic between them
+# that nobody had asked whether the model would actually do. Rendering the
+# ceilings fixes one side of that seam and leaves the prompt still saying "here
+# are three percentages, size against them".
+#
+# So these tests live here rather than in `tests/test_strategy.py` with the rest
+# of the prompt assertions: the claim they pin spans both documents, and the
+# thing they are guarding is that the two agree. Same shape as the out-of-hours
+# mechanics being stated in `market_clock` AND in the prompt, deliberately both —
+# the context block is conditional on a caller passing `rules`, and the prompt
+# half is a permanent property of how a size is arrived at.
+
+
+def test_the_prompt_sends_the_model_to_the_block_rather_than_the_percentages():
+    """The prompt asked for the arithmetic and the model did it wrong, twice.
+
+    Telling it harder was already tried — the combined cap is described there as
+    "the binding constraint most of the time", explicitly, and the subtraction
+    still did not happen. What was missing was somewhere else to look. This
+    pins that the prompt now names the block, says which cap needs the
+    subtraction, and gives the division that replaced the five steps.
+    """
+    prompt = " ".join(build_system_prompt(load_rules()).split())
+
+    assert "Sizing ceilings, in dollars" in prompt
+    assert "Do not re-derive a ceiling from the percentages above" in prompt
+    assert "BUDGET SHARED with the positions already open" in prompt
+    assert "qty = tightest RISK ceiling / |limit_price - stop_loss_price|" in prompt
+    assert "Round DOWN" in prompt
+
+
+def test_the_prompt_refuses_the_stop_as_a_way_to_reach_a_size():
+    """The failure mode the fix itself creates.
+
+    A ceiling in dollars makes the constraint concrete, and the cheapest way to
+    make a wanted quantity fit a concrete constraint is to widen the stop —
+    which buys a bigger loss at the same percentage, and which the gate
+    APPROVES, because it checks the arithmetic and not the intent. The block
+    says this and so must the prompt: the block is conditional on a caller
+    passing `rules`, and this is not conditional on anything.
+    """
+    prompt = " ".join(build_system_prompt(load_rules()).split())
+
+    assert "Do not move the stop to make a size fit" in prompt
+    assert "a quantity with no stop behind it" in prompt
+    assert "the trade is smaller, or it is not a trade" in prompt
+
+
+def test_the_prompt_explains_the_words_the_block_prints_instead_of_a_figure():
+    """**The words are the join between the two documents, so they are asserted
+    against the constants rather than retyped.**
+
+    `BUDGET_SPENT` and `HEADROOM_UNKNOWN` are module constants in `context.py`
+    precisely so a renderer and a test cannot drift apart. The prompt is where
+    they are given a MEANING — a model that meets `BUDGET SPENT` having never
+    been told what it is reads an unfamiliar token beside a limit and guesses,
+    and the available guess is "some small number". A rename that reached only
+    one of the two documents fails here.
+    """
+    prompt = build_system_prompt(load_rules())
+
+    assert BUDGET_SPENT in prompt
+    assert HEADROOM_UNKNOWN in prompt
+    # Both are explained as "nothing fits", never as a small budget — which is
+    # the whole reason they are words and not `$0.00`.
+    assert "Nothing fits at ANY size" in prompt
+    assert "Missing is not zero and it is not room" in prompt
+
+
+def test_the_prompt_treats_an_absent_block_as_missing_rather_than_unlimited():
+    """A cycle rendered without `rules` carries no ceilings at all.
+
+    Both `main.py` call sites pass it, so this is a code change away rather than
+    a live state — which is exactly when the instruction is worth having, because
+    the failure would otherwise be silent: no block, no figures, and a model
+    falling back to the percentages and the arithmetic that started this. Same
+    answer as a symbol reported with no price history: propose nothing on it.
+    """
+    prompt = " ".join(build_system_prompt(load_rules()).split())
+
+    assert "no ceilings block at all" in prompt
+    assert "Propose nothing rather than working them out from the percentages" in prompt

@@ -2063,3 +2063,114 @@ def test_a_pass_that_stated_no_cadence_says_so_instead_of_claiming_a_gap(tmp_pat
     assert "did not state its cadence" in answer.describe()
     # And it is not counted as a gap either, for the same reason.
     assert history.gaps == []
+
+
+# ------------------------------------------- which credential, and who refuses
+#
+# `smoketest`, `dream` and `confer` each asked whether ANTHROPIC_API_KEY was
+# set. With two possible endpoints that question is wrong in both directions,
+# and the loop asks a deliberately narrower one. These pin the asymmetry,
+# because it looks like an inconsistency and is the opposite of one.
+
+
+def _provider_env(**overrides: Any) -> Any:
+    from bot.config import Env
+
+    env = Env(_env_file=None)  # type: ignore[call-arg]
+    env.anthropic_api_key = ""
+    env.do_inference_key = ""
+    env.do_inference_base_url = ""
+    for key, value in overrides.items():
+        setattr(env, key, value)
+    return env
+
+
+def test_a_missing_key_is_reported_against_the_provider_that_would_read_it():
+    """The guard that said yes about a credential nothing was going to use.
+
+    Both directions are checked, and the second is the one that hurts.
+
+    A DigitalOcean box with no Anthropic key used to REFUSE, naming a variable
+    the operator had deliberately not set. That is loud and merely annoying.
+
+    The quiet one is a half-finished swap: the endpoint set, the model access
+    key not. The old check asked about `ANTHROPIC_API_KEY`, found it, and said
+    everything was fine — while `inference_provider` was reporting in as many
+    words that nothing had moved. A guard that passes over a configuration the
+    operator believes is live is worse than no guard.
+    """
+    on_anthropic = _provider_env()
+    blocked = main_mod.model_calls_are_impossible(on_anthropic)
+    assert blocked and "ANTHROPIC_API_KEY" in blocked
+
+    half_a_swap = _provider_env(
+        anthropic_api_key="anthropic-key",
+        do_inference_base_url="https://inference.do-ai.run",
+    )
+    assert half_a_swap.anthropic_api_key  # what the old check looked at, and found
+    blocked = main_mod.model_calls_are_impossible(half_a_swap)
+    assert blocked and "nothing has moved" in blocked
+
+    configured = _provider_env(do_inference_key="do-model-access-key")
+    assert main_mod.model_calls_are_impossible(configured) is None
+    # And the Anthropic key is neither required nor consulted once it is.
+    assert not configured.anthropic_api_key
+
+
+def test_an_unusable_provider_is_reported_even_with_a_key_present():
+    """Configured and wrong is not the same fault as incomplete.
+
+    `usable=False` means the operator set something that cannot work, and no key
+    makes that better. Reporting it as "no credential" would send them to create
+    a second key for a configuration that would still refuse.
+    """
+    env = _provider_env(
+        do_inference_key="do-model-access-key",
+        do_inference_base_url="http://inference.do-ai.run",  # not https
+    )
+
+    assert env.model_api_key  # the key IS there
+    blocked = main_mod.model_calls_are_impossible(env)
+    assert blocked and "NOT a fall back to Anthropic" in blocked
+    assert main_mod.provider_is_unusable(env) is not None
+
+
+def test_the_loop_refuses_a_wrong_endpoint_and_tolerates_a_missing_key():
+    """The asymmetry, and it is deliberate rather than an oversight.
+
+    A cycle with no model call still reconciles the journal against the broker
+    and still runs `stop_watch` over open positions. That safety work is worth
+    more than the proposal, so a missing key degrades the cycle exactly as a
+    dead feed does — which is also why every loop test in this file runs with no
+    key at all and a stub client.
+
+    A provider that is configured and WRONG is the other case. `ModelClient`
+    refuses to construct against it, once, at loop start, outside the per-cycle
+    `except` that turns a bad call into a skipped cycle. Uncaught that is a
+    traceback, and under systemd a traceback is a restart into the identical
+    failure — the shape `CLAUDE.md` records as costing a live cycle once
+    already.
+    """
+    no_key = _provider_env()
+    assert main_mod.provider_is_unusable(no_key) is None
+    assert main_mod.model_calls_are_impossible(no_key) is not None
+
+    wrong_endpoint = _provider_env(
+        do_inference_key="do-model-access-key",
+        do_inference_base_url="http://inference.do-ai.run",
+    )
+    assert main_mod.provider_is_unusable(wrong_endpoint) is not None
+
+
+def test_the_refusal_never_prints_the_key():
+    """Credentials are reported as configured or not configured, never rendered.
+
+    This sentence goes to the journal and to `systemctl --failed`, both of which
+    outlive the process and neither of which is private.
+    """
+    env = _provider_env(
+        do_inference_key="do-secret-value",
+        do_inference_base_url="http://inference.do-ai.run",
+    )
+
+    assert "do-secret-value" not in (main_mod.model_calls_are_impossible(env) or "")

@@ -34,6 +34,7 @@ from __future__ import annotations
 import ast
 import os
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -45,6 +46,7 @@ from bot.model_client import (
     DREAM_MAX_RETRIES,
     DREAM_MAX_TOKENS,
     DREAM_TIMEOUT_SECONDS,
+    STRUCTURED_TOOL_NAME,
     ModelDecision,
 )
 
@@ -759,3 +761,377 @@ def test_the_wire_schema_marker_actually_finds_something():
     """Or the check above passes by finding nothing to check."""
     names = {f"{m.__module__}.{m.__name__}" for m in _wire_schemas()}
     assert "bot.model_client.ModelDecision" in names, names
+
+
+# ------------------------------------------- the endpoint that ignores the schema
+#
+# DigitalOcean's `/v1/messages` accepts `output_config` with HTTP 200 and
+# **silently ignores it**, returning prose. Measured 12 Aug 2026 on four models;
+# `docs/DROPLET_AI.md` section 2. That is the worst of the three possible
+# answers — a caller checking only for an error would believe the schema was in
+# force — so the transport switches to a forced tool call validated here.
+#
+# Everything below stands behind that substitute. The load-bearing one is
+# `test_a_reply_with_no_tool_call_is_a_hard_failure`: it is the only failure in
+# the set that is SILENT without a raise.
+
+
+def _text_block(text: str) -> SimpleNamespace:
+    return SimpleNamespace(type="text", text=text)
+
+
+def _tool_block(arguments: Any, *, name: str = STRUCTURED_TOOL_NAME) -> SimpleNamespace:
+    return SimpleNamespace(type="tool_use", name=name, input=arguments)
+
+
+def _reply(*blocks: Any) -> SimpleNamespace:
+    return SimpleNamespace(
+        content=list(blocks),
+        usage=SimpleNamespace(input_tokens=1_000, output_tokens=200),
+    )
+
+
+class _Endpoint:
+    """A DigitalOcean-shaped endpoint: it answers `create` and refuses `parse`.
+
+    The refusal is a property under test rather than test scaffolding. This
+    endpoint accepts `output_config` and ignores it, so a transport that reached
+    for `messages.parse` here would get a 200 and prose — the exact silent
+    failure the substitute exists to avoid. Raising makes that a red test
+    instead of a plausible one.
+    """
+
+    def __init__(self, reply: Any) -> None:
+        self.captured: dict[str, Any] = {}
+        self.reply = reply
+        outer = self
+
+        class _Messages:
+            def create(self, **kw: Any) -> Any:
+                outer.captured.update(kw)
+                return outer.reply
+
+            def parse(self, **kw: Any) -> Any:
+                raise AssertionError(
+                    "messages.parse was used against an endpoint that accepts "
+                    "output_config and ignores it. The schema would not be "
+                    "enforced anywhere and nothing would say so."
+                )
+
+        self.messages = _Messages()
+
+    def with_options(self, **kw: Any) -> _Endpoint:
+        self.captured["options"] = kw
+        return self
+
+
+def _do_env(**overrides: Any) -> Any:
+    from bot.config import Env
+
+    env = Env(_env_file=None)  # type: ignore[call-arg]
+    env.do_inference_key = "do-model-access-key"
+    env.do_inference_base_url = ""
+    for key, value in overrides.items():
+        setattr(env, key, value)
+    return env
+
+
+def _do_client(reply: Any, monkeypatch: Any, *, model_id: str = "deepseek-v4-pro") -> Any:
+    from bot.config import ModelSpec
+    from bot.model_client import ModelClient
+
+    client = ModelClient(
+        _do_env(), "system text", spec=ModelSpec(model_id=model_id), cache_system=False
+    )
+    monkeypatch.setattr(client, "_client", _Endpoint(reply))
+    return client
+
+
+def test_a_digitalocean_endpoint_forces_a_tool_call_instead_of_a_schema(monkeypatch):
+    """The substitute, and the shape it has to take.
+
+    One tool, `tool_choice` pinned to it, and the schema unflattened — `$defs`
+    and `$ref` intact, because that is what `scripts/do_schema_fidelity.py`
+    graded these models against. Resolving refs before sending would quietly
+    ask something different from what the evidence describes.
+
+    `output_config` must be absent. Sending it costs nothing and would be a
+    claim: the endpoint answers 200 and ignores it, so a request carrying both
+    would read to anybody debugging as though the schema were being enforced
+    server-side.
+    """
+    decision = {"market_assessment": "quiet", "proposals": [], "assessments": [],
+                "position_plans": []}
+    client = _do_client(_reply(_tool_block(decision)), monkeypatch)
+
+    got, usage = client.propose("context")
+
+    sent = client._client.captured
+    assert sent["tool_choice"] == {"type": "tool", "name": STRUCTURED_TOOL_NAME}
+    assert "output_format" not in sent
+    assert "output_config" not in sent
+
+    (tool,) = sent["tools"]
+    assert tool["name"] == STRUCTURED_TOOL_NAME
+    assert tool["input_schema"]["$defs"], (
+        "the schema went out flattened. The fidelity measurement was taken "
+        "against the nested shape, so flattening makes the evidence describe a "
+        "different request."
+    )
+    assert got.market_assessment == "quiet"
+    assert usage.input_tokens == 1_000
+
+
+def test_a_reply_with_no_tool_call_is_a_hard_failure(monkeypatch):
+    """**The one that matters, and the only one here that is silent without it.**
+
+    A dropped schema breaks loudly in every case that produces a number and
+    silently in exactly one: the quiet cycle. `ModelDecision` defaults
+    `proposals`, `assessments` and `position_plans` to `[]` in Python — that is
+    correct, an empty list is a real answer — so a model that returns prose and
+    nothing else, or a bare `market_assessment`, produces an object that parses
+    as a completed cycle which considered nothing.
+
+    "Nothing met the conditions" and "the loop never looked" are opposite
+    findings, and `assessments` exists precisely to keep them apart. A partial
+    answer here is indistinguishable from a good one downstream.
+
+    Live rather than hypothetical: `qwen3.8-max` returned prose on 2 of 3
+    attempts against this exact schema with `tool_choice` forcing the call
+    (`docs/DROPLET_AI.md`, 13 Aug 2026).
+    """
+    from bot.model_client import ModelDecision, UnstructuredReply
+
+    # The premise, asserted rather than assumed. If this ever stops being true
+    # the raise below is guarding nothing and this test should say so first.
+    assert ModelDecision.model_validate({"market_assessment": "mixed"}).assessments == []
+
+    client = _do_client(
+        _reply(_text_block("The market looks mixed today, with SPY near its 20-day.")),
+        monkeypatch,
+    )
+
+    with pytest.raises(UnstructuredReply) as raised:
+        client.propose("context")
+
+    # The prose is quoted back. A bare "no tool call" reads as a transport
+    # fault, when what actually happened is that the model answered a different
+    # question convincingly.
+    assert "SPY near its 20-day" in str(raised.value)
+
+
+def test_a_tool_call_under_another_name_is_not_an_answer(monkeypatch):
+    """A model that invents its own tool has not answered what it was asked.
+
+    Accepting any `tool_use` block would let a reply that ignored `tool_choice`
+    through on the strength of being structured, which is a different claim from
+    being the requested structure.
+    """
+    from bot.model_client import UnstructuredReply
+
+    client = _do_client(
+        _reply(_tool_block({"market_assessment": "quiet"}, name="my_own_tool")),
+        monkeypatch,
+    )
+
+    with pytest.raises(UnstructuredReply):
+        client.propose("context")
+
+
+def test_tool_call_markup_in_the_argument_keys_is_refused_as_corrupt(monkeypatch):
+    """The `glm-5.2` failure, kept apart from a plain validation failure.
+
+    It emits its own tool-call markup as text and the proxy half-parses it, so
+    the arguments arrive as `{'<tool_call>record  <arg_key>symbol': 'SPY'}`.
+    Pydantic would reject most of these anyway, on the required fields the
+    mangling swallowed — which is not a reason to drop the check. The two
+    produce the same outcome and different DIAGNOSES, and "this model cannot
+    serve this path at all" is worth telling apart from "this cycle went wrong".
+    """
+    from bot.model_client import CorruptToolCall
+
+    client = _do_client(
+        _reply(
+            _tool_block(
+                {
+                    "<tool_call>record  <arg_key>market_assessment": "quiet",
+                    "market_assessment": "quiet",
+                }
+            )
+        ),
+        monkeypatch,
+    )
+
+    with pytest.raises(CorruptToolCall):
+        client.propose("context")
+
+
+def test_arguments_the_schema_forbids_are_refused_here(monkeypatch):
+    """The client-side half of the guarantee, doing the job the server used to.
+
+    This is what the substitute actually costs and what it keeps. The model is
+    ASKED for the shape rather than constrained to it, so this happens more
+    often than it did — and a `qty` or a `stop_loss_price` that comes back wrong
+    is still refused rather than coerced, so `RiskGate` never sees it and the
+    cycle is skipped. Loud and safe.
+    """
+    from bot.model_client import ModelCallFailed
+
+    client = _do_client(
+        # `openai-gpt-oss-20b` and `gemma-4-31B-it` do exactly this: invent
+        # their own vocabulary against the schema. 0/3 each.
+        _reply(_tool_block({"ticker": "AAPL", "action": "BUY", "shares": "30"})),
+        monkeypatch,
+    )
+
+    with pytest.raises(ModelCallFailed):
+        client.propose("context")
+
+
+def test_nothing_falls_back_to_prose_or_to_the_other_provider(monkeypatch):
+    """One attempt, one transport, no second answer.
+
+    Two silent downgrades are refused by the same property. Retrying a failed
+    tool call by parsing the prose hands back exactly the freedom the schema
+    exists to remove; retrying against Anthropic bills a different account and
+    runs the orders on a model nobody chose. Both would still emit
+    `cycle_complete`.
+    """
+    from bot.model_client import UnstructuredReply
+
+    client = _do_client(_reply(_text_block("I cannot do that.")), monkeypatch)
+
+    with pytest.raises(UnstructuredReply):
+        client.propose("context")
+
+    assert client._client.captured["tool_choice"]["name"] == STRUCTURED_TOOL_NAME
+    # A single `create`, and the request that was made is the only one made.
+    assert "output_format" not in client._client.captured
+
+
+def test_an_anthropic_endpoint_still_gets_the_server_enforced_schema(monkeypatch):
+    """The other branch, unchanged. This is a decoupling, not a migration.
+
+    A deployment that never set `DO_INFERENCE_KEY` must build the request it
+    always built: `output_format` on `messages.parse`, no tools, no
+    `tool_choice`.
+    """
+    from bot.config import CLAUDE_MODEL_SPECS, ClaudeTier
+
+    client = _client(CLAUDE_MODEL_SPECS[ClaudeTier.SONNET], monkeypatch)
+
+    with pytest.raises(RuntimeError):  # the recorder refuses to answer
+        client.propose("context")
+
+    captured = client._client.captured
+    assert captured["output_format"].__name__ == "ModelDecision"
+    assert "tools" not in captured
+    assert "tool_choice" not in captured
+
+
+def test_the_transport_is_chosen_by_the_endpoint_and_never_by_the_model(monkeypatch):
+    """The distinction to preserve, stated as a test because it is easy to lose.
+
+    Whether a schema is enforced is a property of the thing SERVING the request,
+    not of the weights behind it — the same model is served with enforcement at
+    one endpoint and without it at another. A check on the model name would get
+    that backwards the first time a familiar name appeared in an unfamiliar
+    catalogue.
+    """
+    from bot.config import ModelSpec
+    from bot.model_client import ModelClient
+
+    named = ModelSpec(model_id="deepseek-v4-pro")
+
+    on_anthropic = ModelClient(_env_without_do(), "system", spec=named, cache_system=False)
+    on_digitalocean = ModelClient(_do_env(), "system", spec=named, cache_system=False)
+
+    assert on_anthropic._forces_tool_call is False
+    assert on_digitalocean._forces_tool_call is True
+
+
+def _env_without_do() -> Any:
+    from bot.config import Env
+
+    env = Env(_env_file=None)  # type: ignore[call-arg]
+    env.anthropic_api_key = "test"
+    env.do_inference_key = ""
+    env.do_inference_base_url = ""
+    return env
+
+
+def test_a_configured_but_unusable_provider_refuses_rather_than_falling_back():
+    """Three states, and the third one has to be actionable.
+
+    A key that is present but unusable must not read as "Anthropic, all fine".
+    Quietly serving the loop from a provider the operator did not choose would
+    run, bill the wrong account and leave nothing on any surface saying which
+    model produced the orders — a silent downgrade with money attached.
+    """
+    from bot.model_client import ModelCallFailed, ModelClient
+
+    env = _do_env(do_inference_base_url="http://inference.do-ai.run")  # not https
+
+    with pytest.raises(ModelCallFailed) as raised:
+        ModelClient(env, "system text")
+
+    assert "NOT a fall back to Anthropic" in str(raised.value)
+
+
+def test_a_claude_tier_default_against_digitalocean_refuses_at_construction():
+    """A guaranteed failure, caught once instead of ninety-six times a day.
+
+    Two independent reasons, both measured. That endpoint names Anthropic models
+    differently — `anthropic-claude-5-sonnet`, not `claude-sonnet-5` — and 403s
+    the ones it does list on this account's subscription tier. Neither produces
+    a useful error at call time: one is a 404 and the other is an authorisation
+    message about a subscription, each arriving inside the loop's broad `except`
+    as one more skipped cycle with no cumulative signal.
+    """
+    from bot.model_client import ModelCallFailed, ModelClient
+
+    with pytest.raises(ModelCallFailed) as raised:
+        ModelClient(_do_env(), "system text")  # no DECISION_MODEL_ID: falls to a tier
+
+    assert "DECISION_MODEL_ID" in str(raised.value)
+
+
+def test_the_digitalocean_client_authenticates_with_the_digitalocean_key():
+    """The key is the switch, so it had better be the key that goes out.
+
+    Checked because the failure would be invisible in the good case: an
+    Anthropic key sent to DigitalOcean is a 401 on every call, and a
+    DigitalOcean key sent to Anthropic is the same — but a process that read the
+    WRONG one while a valid other one happened to be set would work, on the
+    wrong bill, with nothing to say so.
+    """
+    from bot.config import DO_INFERENCE_DEFAULT_BASE_URL, ModelSpec
+    from bot.model_client import ModelClient
+
+    env = _do_env(anthropic_api_key="anthropic-key-that-must-not-be-used")
+    client = ModelClient(env, "system", spec=ModelSpec(model_id="mistral-3-14B"))
+
+    assert client._client.api_key == "do-model-access-key"
+    assert str(client._client.base_url).rstrip("/") == DO_INFERENCE_DEFAULT_BASE_URL
+
+
+def test_a_forced_tool_call_is_not_sent_under_the_budget_it_was_measured_at(monkeypatch):
+    """8192 is what `scripts/do_schema_fidelity.py` graded these models at.
+
+    Shipping under it would make the evidence describe a different request —
+    and the failure it would buy is the quiet one, because a model that runs out
+    of budget mid-reasoning emits no tool call at all. It is a ceiling and not a
+    spend: a short answer costs what a short answer costs.
+
+    A caller asking for MORE keeps it. The dreamer's 16,000 is a deliberate
+    budget for a long chain plus the thinking that produced it, and a floor that
+    silently capped it would undo that.
+    """
+    from bot.model_client import FORCED_TOOL_CALL_MAX_TOKENS
+
+    decision = {"market_assessment": "quiet"}
+    client = _do_client(_reply(_tool_block(decision)), monkeypatch)
+
+    client.propose("context")  # propose asks for 4096
+
+    assert client._client.captured["max_tokens"] == FORCED_TOOL_CALL_MAX_TOKENS

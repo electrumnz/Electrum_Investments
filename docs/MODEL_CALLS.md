@@ -648,7 +648,35 @@ MOVE** as instructed.
 | **`scripts/dream_cycle_live.py`** | Judge **STAY** | MOVE WITH CHANGES | MOVE WITH CHANGES |
 | **`scripts/confer_live.py`** | — | MOVE FREELY with `confer` | MOVE FREELY with `confer` |
 
-### `claude.propose` — DO NOT MOVE, and the reason has narrowed
+### `claude.propose` — ~~DO NOT MOVE~~ MOVED 13 Aug 2026, to DigitalOcean
+
+**Superseded, and the sentence below that survives is the one about the
+quiet-cycle hole.** Read the rest for the reasoning; read this for what is
+actually true now.
+
+The verdict here rested on *"it still buys nothing"* — price parity on a
+like-for-like swap. That is correct about Anthropic models reached from further
+away, and it was never the thing being proposed. The operator's instruction was
+to reach a different catalogue: *"there's a full base of models there including
+better ones for the task."* This section anticipated exactly that and called it
+two decisions in two commits — the second having nothing to do with providers —
+which is a fair description of what was done, in one commit rather than two,
+with the model still unpinned pending a behaviour run.
+
+Of the two extra preconditions this audit added:
+
+- **Read the served model off the response and treat a mismatch as a failed
+  cycle** — STILL OPEN. `ModelClient.model_id` is recorded, so what was
+  *requested* is on file; nothing reads what was *served*.
+- **Fix the quiet-cycle hole** — HALF DONE, and the open half is named in
+  `TODO.md` item 23. A reply carrying no tool call is now a hard failure, which
+  closes the route this move created. A tool call that IS made and comes back
+  with `assessments: []` reaches the same place by a different road and is still
+  recorded as a considered decision. `llama3.3-70b-instruct` does exactly that
+  on 6 of 10 samples.
+
+Vercel is moot — see `TODO.md` item 18, the gateway is dropped on one-account
+grounds. What follows is the original assessment.
 
 It had two independent reasons. **One is now gone on Vercel and one is not.**
 

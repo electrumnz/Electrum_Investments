@@ -1543,7 +1543,59 @@ Two that are worth stating as rules rather than as tests:
 
 ---
 
-## 20. Move ALL model calls to DigitalOcean, choosing per task from its catalogue
+## 20. RESOLVED — all model calls move to DigitalOcean, through a forced tool call
+
+**Shipped 13 Aug 2026.** `PYTHON_MODEL_PATH_USES_DO` is True and `propose`,
+`dream` and `confer` all follow `DO_INFERENCE_KEY`. Empty still means Anthropic,
+so the rollback is unsetting a variable rather than reverting a commit.
+
+The blocker was measured and the substitute is what was built: **that endpoint
+accepts `output_config` with HTTP 200 and silently ignores it**, so the schema
+is enforced by Pydantic on this side instead. It keys on the ENDPOINT
+(`Env.inference_provider.is_digitalocean`) and never on the model id, because
+whether a schema is enforced is a property of the thing serving the request.
+
+**A reply carrying no tool call is a hard failure**, which is the clause the
+whole thing rests on: an empty structured object parses as a completed cycle
+that considered nothing, and `qwen3.8-max` returned prose on 2 of 3 attempts
+against the real schema with `tool_choice` forcing the call. Two more refusals
+sit beside it and are kept apart deliberately — a tool call whose argument KEYS
+are the model's own markup (`glm-5.2`), and arguments Pydantic rejects
+(`openai-gpt-oss-20b` inventing its own vocabulary). Each of the five new guards
+was verified to FAIL when its fix is reverted.
+
+Nothing falls back: not to prose, not to a second model, and **not to the other
+provider** — a key that is set but unusable refuses rather than quietly
+answering from Anthropic. A Claude tier default named against DigitalOcean
+refuses at construction, because that endpoint names Anthropic models
+differently and 403s the ones it lists on this account's tier.
+
+The three `ANTHROPIC_API_KEY` guards were asking a question that had stopped
+being the right one — it passes over a half-finished swap. `model_calls_are_impossible`
+asks about the configured provider's own credential; the loop asks the narrower
+`provider_is_unusable`, because a cycle with no model call still reconciles the
+journal and runs `stop_watch`.
+
+**What is NOT done, and neither can be done from a container:**
+
+- **No model is pinned yet.** `DECISION_MODEL_ID` and `DREAM_MODEL_ID` are
+  unset, and with `DO_INFERENCE_KEY` set that REFUSES at startup rather than
+  running on a default nobody chose. The fidelity table below says which models
+  hold the shape; `scripts/agent_behaviour_live.py` is the harness for whether
+  they reason acceptably, and it has not been run on these candidates. **Do not
+  pin `propose` on the fidelity table alone** — it grades the shape, never the
+  judgement.
+- **Caching is unverified at that endpoint**, and it fails silently in the money
+  direction: a dropped `cache_control` does not raise, it bills 10x on the
+  system block forever. Nothing needs building to check it — `cached_tokens` is
+  already on the `cycle_complete` line, so a run of cycles reading zero is the
+  answer.
+- **The served model is still not read back.** What was REQUESTED is recorded;
+  what was served is reported in a response field nothing here reads.
+
+Item 23 holds the one hole this did not close. The original item follows.
+
+## 20a. The original item, kept for the reasoning
 
 **The instruction, and note it is not the question that was first answered:**
 *"We don't have to just use anthropic models through DO, there's a full base of
@@ -1786,6 +1838,47 @@ Staged so nothing that can lose money moves first:
 4. **`propose` last.** It feeds the risk gate. Whatever model ends up here is
    PINNED, and the failure path stays `model_call_failed` plus a skipped cycle
    — never a retry onto a second model.
+
+---
+
+## 23. The quiet-cycle hole has a second entrance, and it is still open
+
+Found while closing the first one, and named in `docs/MODEL_CALLS.md` as a
+precondition for moving `propose` — half met.
+
+`assessments` exists so that "nothing met the conditions" and "the loop never
+looked at QQQ" are different entries afterwards. A reply with no tool call at
+all now fails hard, which closes the route the DigitalOcean move created. **A
+tool call that IS made and comes back with `assessments: []` arrives at exactly
+the same place and is still recorded as a considered decision.**
+
+It is not hypothetical and it is not rare. `llama3.3-70b-instruct` returns an
+almost-empty decision — `assessments=0`, `position_plans=0` — on **6 of 10**
+samples after being shown four symbols and an open position, in a 2.2-second
+median. Structurally valid, passes Pydantic, and reintroduces the whole gap.
+**Three samples would have shipped it**, which is the sampling lesson from the
+fidelity run rather than a fact about that model.
+
+The check cannot live in `ModelDecision` or in `ModelClient`: neither knows how
+many symbols were shown. It belongs in `cmd_loop`, which does — a decision with
+zero assessments against a non-empty indicator set is a malformed answer and
+should raise into the existing `model_call_failed` path rather than be recorded
+as a quiet cycle.
+
+Two things to get right when building it:
+
+- **Zero assessments given zero symbols is not the same fault.** A cycle where
+  every class was shut and nothing was fetched has nothing to assess, and
+  refusing that would turn a correct quiet cycle into a failed one. The
+  comparison is against what the model was actually shown.
+- **It is a failed cycle, never a downgraded one.** No retry, no second model,
+  no "record it but flag it". A recorded decision that considered nothing is the
+  thing being prevented, so recording it with a flag is the bug wearing a
+  warning label.
+
+Not built here because it changes what the loop does with a valid response, on
+the path that feeds the risk gate, and it deserves its own commit with its own
+test — and because `main.py` was being edited concurrently when it was found.
 
 ---
 

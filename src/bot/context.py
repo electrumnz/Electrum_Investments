@@ -586,7 +586,15 @@ def sizing_ceilings(
     total_pct = rules.account.max_total_risk_pct
     total_cap = equity * total_pct / 100
     caveat = ""
+    # "already at risk" claims the subtracted figure is the WHOLE of what is at
+    # risk. With a position the journal has never seen it is not, and on that
+    # account the figure is frequently $0.00 — so the basis would assert that
+    # nothing is at risk, one line above the caveat correcting it. The phrasing
+    # narrows to what the journal can account for, which is all the subtraction
+    # ever measured.
+    subtracted = f"${account.open_risk_usd:,.2f} already at risk"
     if account.symbols_with_unknown_risk:
+        subtracted = f"${account.open_risk_usd:,.2f} the journal can account for"
         # **The figure is still rendered, and it is still the gate's own.**
         # `_total_risk` does not refuse on an unknown — it computes with the
         # understated total — so a ceiling that went `HEADROOM UNKNOWN` here
@@ -606,10 +614,7 @@ def sizing_ceilings(
             label="Combined risk left across ALL open positions",
             unit=RISK_UNIT,
             headroom_usd=total_cap - account.open_risk_usd,
-            basis=(
-                f"${total_cap:,.2f} at {total_pct:.2f}% of equity, less "
-                f"${account.open_risk_usd:,.2f} already at risk"
-            ),
+            basis=f"${total_cap:,.2f} at {total_pct:.2f}% of equity, less {subtracted}",
             spent_note=(
                 f"the {total_pct:.2f}% portfolio cap is ${total_cap:,.2f} and "
                 f"${account.open_risk_usd:,.2f} is already at risk across open "
@@ -826,6 +831,22 @@ def _tightest_line(ceilings: list[Ceiling], class_key: str, unit: str) -> str:
     matters. An unknown could be smaller than anything established, so taking a
     minimum over what happens to be known would answer a question nobody asked
     and answer it optimistically.
+
+    **A caveat on ANY applicable ceiling qualifies this line, including when
+    some other ceiling is the one that won.** This is a claim about the whole
+    set — the smallest of them — so a member that is overstated can be
+    genuinely smaller than the figure printed here, and the reader has no way to
+    tell from this line which member was chosen. Carried on the line itself
+    rather than left to the note four lines above it: this is the summary, it is
+    the line a size gets divided out of, and a qualification a reader has to
+    scroll for is a qualification that only reaches the people who did not need
+    it.
+
+    The unknown and spent branches need no such qualification and deliberately
+    return before it. Both are already stronger statements than "this may be
+    lower" — nothing fits at any size, and nothing can be established at all —
+    so adding a hedge to either would soften the two answers that must not be
+    softened.
     """
     applicable = [c for c in ceilings if c.unit == unit and c.applies_to(class_key)]
     if not applicable:
@@ -850,10 +871,26 @@ def _tightest_line(ceilings: list[Ceiling], class_key: str, unit: str) -> str:
 
     known = [(c.headroom_usd, c.label) for c in applicable if c.headroom_usd is not None]
     smallest, label = min(known, key=lambda pair: pair[0])
-    return (
+    line = (
         f"- Tightest {unit} ceiling for a {class_key} trade: ${smallest:,.2f} "
         f"— {label.lower()}."
     )
+
+    overstated = [c for c in applicable if c.caveat]
+    if overstated:
+        # The symbols are named once, on the qualified ceiling's own line, so
+        # there is one place the set of unjournalled positions is written down.
+        # What is repeated here is the DIRECTION of the error, which is the part
+        # that changes what a reader does with this number.
+        names = "; ".join(c.label.lower() for c in overstated)
+        line += (
+            f" UPPER BOUND, not a measurement: {names} is OVERSTATED (see the "
+            f"note above it), so the true tightest figure may be lower than "
+            f"this. The gate will use the same overstated figure and will not "
+            f"refuse you for it — the correct response to an unknown is a "
+            f"smaller size or no trade, never a larger one."
+        )
+    return line
 
 
 def render_sizing_ceilings(

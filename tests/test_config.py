@@ -1382,3 +1382,49 @@ def test_the_widened_list_is_still_DERIVED_and_not_a_second_copy():
     assert off.allowed_symbols == []
     for symbol in rules.allowed_symbols:
         assert not off.is_symbol_allowed(symbol)
+
+
+def test_the_credential_follows_the_provider_and_never_falls_back(no_do_key):
+    """One question, one answer, and the wrong answer was the dangerous one.
+
+    Three call sites tested `anthropic_api_key` directly and reported
+    `ANTHROPIC_API_KEY is not set`. That was the right question while there was
+    one endpoint. With two it is wrong in both directions, and the second is the
+    shape that hurts: on a box configured for DigitalOcean the check PASSES with
+    an Anthropic key present that nothing will use, and FAILS with a perfectly
+    good model access key set.
+
+    The absence of a fallback is the property under test. If this reached for
+    the Anthropic key when the DigitalOcean one were missing, an operator who
+    mistyped `DO_INFERENCE_KEY` would get a working bot billed to the wrong
+    account, running orders on a model nobody chose, with nothing on any surface
+    saying which.
+    """
+    on_anthropic = _env(ANTHROPIC_API_KEY="anthropic-key")
+    assert on_anthropic.model_api_key == "anthropic-key"
+    assert on_anthropic.inference_provider.credential_name == "ANTHROPIC_API_KEY"
+
+    on_digitalocean = _env(
+        ANTHROPIC_API_KEY="anthropic-key-that-must-not-be-used",
+        DO_INFERENCE_KEY="do-model-access-key",
+    )
+    assert on_digitalocean.model_api_key == "do-model-access-key"
+    assert on_digitalocean.inference_provider.credential_name == "DO_INFERENCE_KEY"
+
+
+def test_a_claude_tier_default_is_recognised_from_the_spec_table(no_do_key):
+    """Derived, so a fourth tier cannot arrive without this following it.
+
+    These three ids reach a DigitalOcean endpoint as a guaranteed failure — that
+    endpoint names Anthropic models differently and 403s the ones it lists on
+    this account's tier — so `ModelClient` refuses at construction rather than
+    letting the loop discover it 96 times a day. A hand-written list of three
+    strings would go stale silently the first time the table changed.
+    """
+    from bot.config import CLAUDE_MODEL_IDS, is_claude_tier_default
+
+    for model_id in CLAUDE_MODEL_IDS.values():
+        assert is_claude_tier_default(model_id), model_id
+
+    assert not is_claude_tier_default("deepseek-v4-pro")
+    assert not is_claude_tier_default("")
