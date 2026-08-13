@@ -70,10 +70,17 @@ and the operator does. So:
 
 ## What that trades away, stated rather than glossed
 
-Somebody can now keep *submitting* guesses. Past the budget every one is
-refused with a 429 and none can ever produce a session, but the candidate is
-still compared, so the number of guesses that may be MADE is no longer bounded
-— only the number that can be answered with anything other than a refusal.
+Somebody can now keep *submitting* guesses. Every WRONG one past the budget is
+refused with a 429 and none of them can produce a session — but the candidate
+is compared BEFORE the budget is read, so a guess that happens to be right is
+answered as such however many wrong ones went before it.
+
+**So what is given up is the rate limit as a brute-force defence, entire, and
+not merely the tidiness of a counter.** How many guesses an attacker may make
+is now bounded by how fast they can send requests and by nothing in this file.
+That is worth writing in the uncomfortable form, because the comfortable
+reading — "past the budget nothing gets in" — is true of every guess except the
+only one that matters.
 
 That bound could not be kept. Recognising the operator's password means
 comparing the operator's password, and while the operator and the guesser are

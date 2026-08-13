@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import html
 import json
+import re
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
@@ -3236,6 +3237,39 @@ DREAMER = """
 
 def _e(value: object) -> str:
     return html.escape(str(value))
+
+
+#: The `user:password@` a URL is allowed to carry between its scheme and its
+#: host. Matched loosely on purpose — anything at all sitting in that position
+#: is userinfo, whether or not it looks like a secret.
+_URL_USERINFO = re.compile(r"([a-zA-Z][a-zA-Z0-9+.-]*://)([^/\s@]+)@")
+
+
+def _redact_urls(text: str) -> str:
+    """Any credential a URL is carrying, removed before the page renders it.
+
+    **This page reports a credential as configured or not configured and never
+    renders one, and a base URL is the hole in that rule.** `ANTHROPIC_API_KEY`
+    and `DO_INFERENCE_KEY` are only ever asked about; `DO_INFERENCE_BASE_URL` is
+    operator-supplied free text that is PRINTED — as the Inference row's value,
+    inside `InferenceProvider.detail`, and again on the dream card — and
+    `https://user:secret@host` is a perfectly ordinary way to write one, which
+    every http client in the world accepts. So an operator who put the
+    credential where the URL wanted it would have it rendered three times on a
+    page that may be exposed behind one shared password, and a screenshot
+    travels.
+
+    Nothing here validates the URL and nothing rejects one: this is a display
+    rule, and the value that reaches the endpoint is untouched. The failure
+    direction is deliberately towards over-redaction — an `@` in that position
+    is userinfo whether or not it looks like a secret, and a host printed as
+    `https://***@host` is a legible surprise, where a printed password is not.
+
+    Applied to `detail` as well as to `base_url`, because that sentence embeds
+    the URL — including in the half-configured case, where `base_url` is empty
+    and the declared one appears in the prose and nowhere else.
+    """
+    return _URL_USERINFO.sub(r"\1***@", text)
 
 
 def _money(value: float | None, *, sign: bool = False) -> str:
@@ -7175,6 +7209,12 @@ def settings_page(
     # three times on this page and one call means the three rows cannot disagree
     # about which provider is in force.
     provider = env.inference_provider
+    # And redacted once, for the same reason. `DO_INFERENCE_BASE_URL` is the one
+    # credential-bearing value on this page that is PRINTED rather than asked
+    # about — see `_redact_urls`. Both are taken here so no later row can render
+    # the raw pair by reaching for `provider` directly.
+    provider_url = _redact_urls(provider.base_url)
+    provider_detail = _redact_urls(provider.detail)
 
     a = rules.account
     # The reasoning beside each figure comes from `settings_agent.limits_for`
@@ -7435,21 +7475,42 @@ def settings_page(
         # provider swap leaves no trace in a figure, so a page reporting only
         # the model id would say `deepseek-v4-pro` and leave "where does that
         # run, and is the schema still enforced" unanswerable from any surface.
-        # `provider.detail` is written to be printed and never contains the key.
+        # `provider.detail` is written to be printed and never contains the KEY
+        # — but it embeds the base URL, which is operator-supplied and may carry
+        # a credential of its own. `_redact_urls` is what keeps the promise in
+        # the sentence above this card: reported, never rendered.
         + _row(
             "Inference",
-            provider.base_url if provider.is_digitalocean else "Anthropic direct",
-            provider.detail,
+            provider_url if provider.is_digitalocean else "Anthropic direct",
+            provider_detail,
         )
+        # **This row reports the CONFIGURATION and must not state what any
+        # command does about it.** It used to end "Model calls refuse rather
+        # than falling back to the other provider", and that is false in one of
+        # the two unusable states: with a base URL set and no key, `usable` is
+        # False, this row renders — and `provider_is_unusable` answers None, so
+        # the decision loop runs and its calls go to Anthropic. Measured on both
+        # states rather than reasoned about.
+        #
+        # The guards are per entry point in `main.py` and differ on purpose — a
+        # cycle with no model call still reconciles the journal and runs
+        # `stop_watch`, which is worth more than the proposal — so a single
+        # sentence here cannot be true of all of them, and a page restating
+        # another module's control flow drifts the first time that flow changes.
+        # Same rule as the shelf card refusing to state `cycles_available`: name
+        # what is establishable from here and say where the rest lives.
         + (
             ""
             if provider.usable
             else _row(
                 "Provider state",
                 "UNUSABLE",
-                "Configured and wrong. Model calls refuse rather than falling "
-                "back to the other provider: answering from an endpoint the "
-                "operator did not choose is the silent downgrade this refuses.",
+                "Configured and wrong: these settings do not describe an "
+                "endpoint this process can talk to. What each command does "
+                "about that is decided in main.py and differs by entry point, "
+                "so the log line a command writes is where that shows and this "
+                "row does not guess at it. Read the sentence above for which "
+                "half of the configuration is wrong.",
             )
         )
         + '</dl><p class="source">Whether orders are actually placed is decided by '
@@ -7572,12 +7633,46 @@ def settings_page(
                 "model itself. The budget and the 240s timeout still apply."
             ),
         )
+        # The dream half of this is a decision made HERE and is true at either
+        # endpoint: nothing sends `cache_control` on a dream call, so a daily
+        # run cannot pay for a write it would always miss.
+        #
+        # The sentence about the LOOP is a claim about the far end, and it is
+        # only established for one of the two. Measured against DigitalOcean
+        # serverless with the real 4,791-token system block, sent twice eight
+        # seconds apart on two models: HTTP 200 both times, and
+        # `cache_creation_input_tokens`, `cache_read_input_tokens` and
+        # `ephemeral_1h_input_tokens` all nought, with `input_tokens` identical
+        # on the repeat. That is the `output_config` shape again — accepted and
+        # ignored — and it is the expensive direction, because the loop wakes 96
+        # times a day.
+        #
+        # **What is NOT claimed is that the endpoint does not cache.** A nought
+        # is equally what a proxy that caches and does not report it looks like,
+        # and only the billing dashboard separates those. Same rule as
+        # `calendar_degraded` and the tailnet `unknown` status: say the weaker
+        # true thing rather than the confident one.
         + _row(
             "Prompt cache",
             "off",
             "Deliberate. A 1h cache write bills at twice base input and this "
-            "runs daily, so it would miss every time and pay double. The "
-            "decision loop caches because it wakes every fifteen minutes.",
+            "runs daily, so it would miss every time and pay double. "
+            + (
+                "The decision loop ASKS for one because it wakes every fifteen "
+                "minutes, and whether this endpoint honours it is unestablished: "
+                "cache_control is not in DigitalOcean's published request "
+                "schema, it is accepted with a 200, and every reply measured so "
+                "far reported nought cached — read and written both. A nought "
+                "is not proof the endpoint did not cache, only that it reported "
+                "none, and the billing dashboard is what settles that. Until it "
+                "does, budget for the loop's system prompt being billed in full "
+                "on all 96 cycles a day; cached_tokens on the cycle_complete "
+                "line is the reading from here."
+                if provider.is_digitalocean
+                else "The decision loop caches because it wakes every fifteen "
+                "minutes, and Anthropic reports the hits: cached_tokens on the "
+                "cycle_complete line is what confirms it is working."
+            ),
         )
         + dream_cost_row
         + _row(
@@ -7594,7 +7689,7 @@ def settings_page(
         # and "which key" is the first thing they need.
         + _row(
             "Endpoint",
-            provider.base_url if provider.is_digitalocean else "Anthropic direct",
+            provider_url if provider.is_digitalocean else "Anthropic direct",
             "Where the dream call goes. The schema is enforced by this process "
             "rather than by the endpoint when that is DigitalOcean, so a reply "
             "carrying no tool call fails the run instead of half-filling it."
@@ -9254,6 +9349,21 @@ def _shelf_grading(dreams: Sequence[Dream], now: datetime) -> str:
         return ""
 
     settled = on_figure = on_person = no_symbol = unregistered = overdue = 0
+    # Conditions counted under `on_figure` that a person is ALSO being asked
+    # about, and the reason the four tiles are not a partition.
+    #
+    # `grade_conditions` settles a dual condition on its threshold, so the
+    # buckets below put it there — and `pending_observations` does NOT apply
+    # that precedence, so the same condition is on the operator's worklist, in
+    # `_awaiting_you` immediately above this card and in `electrum-bot
+    # observations`. Counting it once and then captioning the other tile
+    # "nothing here waits on you" made this card contradict the one above it
+    # about the same claim, which is worse than either answer on its own.
+    #
+    # So the bucket arithmetic is untouched — `total`, `stuck` and every note
+    # below still describe a partition — and the person tile reports the
+    # worklist, with the overlap named rather than hidden.
+    both = 0
     for dream in shelf:
         for cond in dream.conditions:
             # The order is `grade_conditions`', deliberately. A condition
@@ -9264,6 +9374,8 @@ def _shelf_grading(dreams: Sequence[Dream], now: datetime) -> str:
                 settled += 1
             elif cond.is_gradeable:
                 on_figure += 1
+                if cond.is_observable:
+                    both += 1
             elif cond.is_observable:
                 on_person += 1
                 if cond.state(now) is ConditionState.OVERDUE:
@@ -9304,11 +9416,26 @@ def _shelf_grading(dreams: Sequence[Dream], now: datetime) -> str:
     # why the sentence below names both explanations instead of choosing.
     cleared = [d for d in shelf if promotion_for(d).moves]
 
+    # A prophecy carrying NO condition at all can never be promoted by anything,
+    # and until now that was only visible when it was true of the whole shelf.
+    # One conditionless dream sitting beside settleable ones was counted nowhere
+    # — the buckets count conditions, and it has none — so the card reported
+    # patience over exactly the dream that is stuck hardest. That is the failure
+    # this card exists to catch, surviving in the mixed case.
+    conditionless = [d for d in shelf if not d.conditions]
+
+    oldest_meta = f"oldest {_e(_span(oldest_age))} on this shelf"
+    if conditionless:
+        oldest_meta += (
+            f", {len(conditionless)} carrying no condition at all"
+        )
+
     tiles = (
         stat(
             "Prophecies waiting",
             str(len(shelf)),
-            f"oldest {_e(_span(oldest_age))} on this shelf",
+            oldest_meta,
+            "alert" if conditionless else "",
         )
         + stat(
             "On a figure",
@@ -9320,12 +9447,25 @@ def _shelf_grading(dreams: Sequence[Dream], now: datetime) -> str:
             if on_figure
             else "nothing here waits on the market",
         )
+        # The count is what the OPERATOR is being asked, which is
+        # `pending_observations`' answer and not the bucket's — see `both`. A
+        # dual condition is on the worklist above whatever this card decides to
+        # file it under, so a tile reading nought beside a card listing it would
+        # be the page disagreeing with itself.
         + stat(
             "On a person",
-            str(on_person),
+            str(on_person + both),
             f"{overdue} past the review date"
             if overdue
-            else ("only you settle these" if on_person else "nothing here waits on you"),
+            else (
+                f"{both} of them code can settle too"
+                if both
+                else (
+                    "only you settle these"
+                    if on_person
+                    else "nothing here waits on you"
+                )
+            ),
             "alert" if overdue else "",
         )
         + stat(
@@ -9386,6 +9526,36 @@ def _shelf_grading(dreams: Sequence[Dream], now: datetime) -> str:
             "the market moved. A shelf waiting on the market and a shelf with "
             "nothing to grade against look identical from here, so this says "
             "which figure is missing rather than assuming the first.</p>"
+        )
+
+    # Said whenever there is a conditionless dream and the note above did not
+    # already cover the whole shelf. Kept out of the `if/elif` chain on purpose:
+    # this is a fact about DREAMS and every branch up there is about conditions,
+    # so a shelf can be in exactly one of those states and in this one as well.
+    if conditionless and total:
+        notes += (
+            f'<p class="note"><span class="alert">'
+            f'{_count(len(conditionless), "prophecy", "prophecies")} here '
+            f"{_word(len(conditionless), 'carries', 'carry')} no condition at "
+            "all.</span> The counts above are of CONDITIONS, so a dream "
+            "carrying none appears in none of them and reads as patience. "
+            "Nothing can carry "
+            f"{_word(len(conditionless), 'it', 'them')} to the vault: leaving "
+            "the workbench takes one pre-registered claim, and an absence of "
+            "conditions is not conditions satisfied.</p>"
+        )
+
+    if both:
+        notes += (
+            f'<p class="note">{_count(both, "condition")} above '
+            f"{_word(both, 'is', 'are')} counted under BOTH "
+            "<em>on a figure</em> and <em>on a person</em>: "
+            f"{_word(both, 'it names', 'they name')} a threshold code can "
+            "settle and an observation somebody has to go and look at, so "
+            f"{_word(both, 'it is', 'they are')} on the "
+            '<a href="#awaiting-you">Waiting on you</a> card as well. Either '
+            f"answer settles {_word(both, 'it', 'them')}. The tiles count who "
+            "COULD answer, which is not a partition when both could.</p>"
         )
 
     if no_symbol:

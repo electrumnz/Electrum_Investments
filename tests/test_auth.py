@@ -380,6 +380,46 @@ def test_the_budget_decays_so_a_mistyped_password_is_not_permanent():
     assert store.check_password("wrong") is False, "an expired budget must not refuse"
 
 
+def test_the_module_does_not_claim_a_spent_budget_stops_a_lucky_guess():
+    """The docstring said "past the budget every one is refused with a 429 and
+    none can ever produce a session", and that is false about the only guess
+    that matters.
+
+    `check_password` compares BEFORE it reads the budget, deliberately — that
+    is the whole fix for the Funnel lockout — so a correct candidate is
+    answered as correct however many wrong ones went before it. What is
+    therefore surrendered is the rate limit as a brute-force defence, entire:
+    guessing is bounded by request throughput and by nothing in this file.
+
+    That is a defensible trade and it is argued in place. It is not defensible
+    for the file to describe itself as still holding a bound it does not hold,
+    on the one surface where a wrong claim about a guarantee is the whole risk.
+    Pinned by inspection, in the same shape as
+    `test_password_comparison_is_constant_time`, because the property being
+    defended here is a SENTENCE.
+    """
+    import inspect
+
+    import bot.web.auth as auth_module
+
+    doc = inspect.getdoc(auth_module) or ""
+
+    assert "none can ever produce a session" not in doc
+    assert "brute-force defence" in doc
+
+    # And the behaviour the sentence now describes, so the two cannot drift.
+    store = SessionStore(password=PASSWORD)
+    for _ in range(MAX_ATTEMPTS * 3):
+        store.record_failure("127.0.0.1")
+
+    assert store.check_password(PASSWORD) is True, (
+        "a right answer past the budget is admitted; that is the trade, and it "
+        "is why the docstring may not claim otherwise"
+    )
+    with pytest.raises(HTTPException):
+        store.check_password("still wrong")
+
+
 # ------------------------------------------------- the loopback deployment
 
 
