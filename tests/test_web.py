@@ -2393,8 +2393,15 @@ def test_tokyo_is_shut_over_its_lunch_break():
     tokyo = next(f for f in CLOCKS if f.code == "TYO")
 
     def at_jst(hour: int, minute: int = 0) -> datetime:
-        # 2026-08-11 is a Tuesday. JST is UTC+9, no daylight saving.
-        return datetime(2026, 8, 11, hour - 9, minute, tzinfo=UTC)
+        # 2026-08-12 is a Wednesday, and it is a real TSE session.
+        #
+        # **This was 08-11, which is MOUNTAIN DAY — a Japanese national
+        # holiday.** The test passed only because `is_open` was weekday-shaped
+        # and could not see a holiday, so it was pinning a false claim about
+        # the exchange: the badge said Tokyo was trading on a day it is shut.
+        # Adding the real calendar turned that into a red build, which is the
+        # guard working rather than a regression.
+        return datetime(2026, 8, 12, hour - 9, minute, tzinfo=UTC)
 
     assert tokyo.is_open(at_jst(11, 0)) is True     # morning session
     assert tokyo.is_open(at_jst(12, 0)) is False    # lunch

@@ -18,6 +18,22 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Public-holiday rules for TSE, ASX and NZX, so the tape's exchange badges stop
+# rendering Boxing Day as an open ASX. OPTIONAL on purpose: this is a package on
+# the box that runs the trading loop, added to colour a badge for three markets
+# the bot does not trade, and `src/bot/exchange_hours.py` degrades to the old
+# weekday-shaped behaviour without it — `ClockFace.tracks_holidays` goes False
+# again and the badge's own tooltip says holidays are not tracked.
+#
+# It brings korean_lunar_calendar, pyluach, toolz and tzdata with it and needs
+# pandas, which alpaca-py already requires — so the marginal cost measured on
+# this venv is about 6 MB, not the 150 MB pandas and numpy would suggest.
+#
+# `deploy/bootstrap.sh` installs `-e .` and therefore does NOT pick this up. The
+# droplet keeps today's behaviour until that line becomes `-e ".[calendars]"`.
+calendars = [
+    "exchange_calendars>=4.5",
+]
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
@@ -25,6 +41,11 @@ dev = [
     "mypy>=1.10",
     "types-PyYAML",
     "httpx",
+    # So CI exercises the path where the rules ARE present. The absent path is
+    # exercised too, by a test that fails the import at the same boundary the
+    # real one would — both halves have to be checked, and a green suite that
+    # only ever saw one of them would be the weaker claim.
+    "exchange_calendars>=4.5",
 ]
 
 [project.scripts]
@@ -57,7 +78,11 @@ strict = true
 files = ["src", "tests", "deploy", "scripts"]
 
 [[tool.mypy.overrides]]
-module = ["alpaca.*", "mcp.*", "uvicorn.*"]
+# `exchange_calendars` ships no stubs, and it is an OPTIONAL dependency — so on
+# a checkout without it the import must type-check as missing rather than fail
+# the run. `exchange_hours.py` holds it behind `Any` and converts at the
+# boundary, so nothing untyped escapes into the rest of the codebase.
+module = ["alpaca.*", "mcp.*", "uvicorn.*", "exchange_calendars.*"]
 ignore_missing_imports = true
 
 # Tests stay readable without `-> None` on every function. The production code

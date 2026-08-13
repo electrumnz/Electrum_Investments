@@ -20,9 +20,17 @@ construction would hide the day they disagree. `bot_window_open` is derived
 from the same `windows_by_day` the gate reads, so the two cannot drift, but it
 is reported beside the market phase rather than substituted for it.
 
-**Holidays are not covered, exactly as in the gate.** Thanksgiving reads as a
-normal Thursday here. Closing that needs a calendar endpoint, which is a
-network call, and this module is deliberately pure.
+**Holidays are not covered in the SESSION PHASES, exactly as in the gate.**
+Thanksgiving reads as a normal Thursday to `_phase_at`. Closing that needs
+Alpaca's calendar endpoint, which is a network call, and the phase computation
+is deliberately pure — so `BrokerClock` and `session_calendar` report it beside
+the computed phase rather than inside it.
+
+The clock STRIP is a different matter and is holiday-aware now. `ClockFace`
+consults `exchange_hours` for Tokyo, Sydney and Auckland, which is offline
+rules from an optional package rather than a network call, and New York's
+answer still comes from Alpaca. Where nothing can answer, `tracks_holidays`
+goes False and the badge says so — the limit travels with the claim.
 """
 
 from __future__ import annotations
@@ -32,6 +40,8 @@ from datetime import UTC, date, datetime, time, timedelta
 from enum import StrEnum
 from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo
+
+from . import exchange_hours
 
 if TYPE_CHECKING:  # a cache built on this module; imported for typing only
     from .session_calendar import SessionCalendar
@@ -541,7 +551,25 @@ class ClockFace:
     #: through an hour it is shut. That is a plausible wrong figure on a strip
     #: whose whole job is orientation, which is the one thing this repository
     #: refuses to render.
+    #:
+    #: These are the FALLBACK once `calendar_code` is set: they are weekday
+    #: hours for an ordinary day, and `exchange_hours` supersedes them with the
+    #: real windows for the actual date whenever it can answer. They are kept
+    #: rather than deleted because the library is an optional dependency and
+    #: without them its absence would leave the badge with nothing to say.
+    #: `tests/test_market_clock.py` pins the two against each other on an
+    #: ordinary day, so a drift between the hand-written hours and the library's
+    #: is a red build rather than a badge quietly changing its mind.
     sessions: tuple[tuple[time, time], ...] = ()
+    #: The exchange's ISO 10383 MIC, where `exchange_hours` has holiday rules
+    #: for it. Empty means nobody here knows this exchange's calendar.
+    #:
+    #: **Empty for New York on purpose.** Alpaca's own trading calendar already
+    #: answers for it through `session_calendar`, and Alpaca is the broker this
+    #: bot actually trades through — so when the two disagree, its answer is the
+    #: one that matters. A second source for the same fact is a second fact that
+    #: can disagree with the first.
+    calendar_code: str = ""
 
     def at(self, now: datetime) -> datetime:
         return now.astimezone(ZoneInfo(self.zone))
@@ -550,12 +578,20 @@ class ClockFace:
     def tracks_holidays(self) -> bool:
         """Whether anything in this repository knows this exchange's calendar.
 
-        True for New York only, and via `session_calendar`, which is Alpaca's
-        US equity calendar. There is no feed here for TSE, ASX or NZX holidays,
-        and hardcoding three lists would go stale in silence — which is worse
-        than a limit that is stated, because a stale list still looks answered.
+        Two independent sources, and the limit still travels with the claim —
+        which is the whole reason the badge was honest while this was unbuilt.
+
+        New York is answered by `session_calendar`, which is Alpaca's US equity
+        calendar and also knows early closes. TSE, ASX and NZX are answered by
+        `exchange_calendars`, an OPTIONAL dependency: uninstalled, or without
+        rules for that exchange, this goes False again and the badge's tooltip
+        goes back to saying public holidays are not tracked. It must never
+        become a standing True that a missing package quietly falsifies.
+
+        Hardcoding three holiday lists instead remains the wrong repair. They go
+        stale in silence, and a stale list still looks answered.
         """
-        return self.is_market
+        return self.is_market or exchange_hours.is_available(self.calendar_code)
 
     def state(
         self,
@@ -594,18 +630,36 @@ class ClockFace:
     def is_open(self, now: datetime) -> bool | None:
         """Is that exchange in its regular session? `None` if there is none.
 
-        Weekday-shaped and holiday-blind, exactly like the gate's own check.
-        This is a clock on a display strip, not a gate, so being one public
-        holiday out is a cosmetic error rather than an order into a shut
-        market — and `session_calendar` covers the US case where it matters.
+        Holiday-aware where `exchange_hours` can answer, and weekday-shaped
+        where it cannot — which is where this started, and is degraded rather
+        than wrong. The three states are kept apart deliberately:
+
+        - windows for the date: the exchange's REAL session, so a half-day
+          closes at the hour it actually closes and a holiday returns no
+          windows at all and reads as shut.
+        - `None` from `exchange_hours`: could not ask — the optional dependency
+          is absent, or this exchange has no rules, or the date is outside the
+          ones shipped. Falls through to the weekday computation rather than
+          being read as a closure, because an unavailable check must not become
+          the pessimistic answer any more than the cheerful one.
+        - no `sessions` at all: there is no exchange in this zone, so there is
+          no session to have an opinion about, and that stays `None`.
+
+        This is a clock on a display strip and not a gate. Being one public
+        holiday out was always a cosmetic error rather than an order into a shut
+        market, which is why it was acceptable to leave — but the strip's only
+        job is orientation, so a wrong badge is the whole of what it does wrong.
         """
         if not self.sessions:
             return None
         local = self.at(now)
-        if local.weekday() >= 5:
-            return False
+        windows = exchange_hours.session_windows(self.calendar_code, local.date())
+        if windows is None:
+            if local.weekday() >= 5:
+                return False
+            windows = self.sessions
         clock = local.timetz().replace(tzinfo=None)
-        return any(start <= clock < end for start, end in self.sessions)
+        return any(start <= clock < end for start, end in windows)
 
 
 #: The four the operator asked for, ordered west-to-east from the market out.
@@ -621,14 +675,17 @@ CLOCKS: tuple[ClockFace, ...] = (
         # Two sessions, not one. The lunch break is 11:30-12:30 JST and is
         # real; the afternoon close moved to 15:30 in November 2024.
         sessions=((time(9, 0), time(11, 30)), (time(12, 30), time(15, 30))),
+        calendar_code="XTKS",
     ),
     ClockFace(
         "Sydney", "Australia/Sydney", code="SYD",
         exchange="ASX", sessions=((time(10, 0), time(16, 0)),),
+        calendar_code="XASX",
     ),
     ClockFace(
         "Auckland", "Pacific/Auckland", code="AKL",
         exchange="NZX", sessions=((time(10, 0), time(16, 45)),),
+        calendar_code="XNZE",
     ),
 )
 
