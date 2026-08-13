@@ -51,6 +51,7 @@ dev = [
 [project.scripts]
 electrum-bot = "bot.main:main"
 electrum-bot-mcp = "bot.mcp_server:main"
+electrum-bot-console = "bot.console_mcp:main"
 electrum-bot-web = "bot.web.app:main"
 
 [build-system]

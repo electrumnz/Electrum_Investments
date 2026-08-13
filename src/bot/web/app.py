@@ -45,6 +45,7 @@ from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 
 from .. import jobs, news_history
+from ..announce import announce_dashboard_auth, announce_inference, say
 from ..audit import AuditLog
 from ..config import DEFAULT_RULES_PATH, Env, Rules, load_rules
 from ..dreaming import (
@@ -1166,20 +1167,26 @@ def main() -> int:
     # or a Tailscale Funnel forwards to loopback, so from inside the process a
     # request from the internet and one from the same machine are identical.
     # The only moment anyone can be told is now.
-    if Env().dashboard_password:
-        print(
-            "Dashboard password is SET: every page requires a login, and "
-            "/chat needs DASHBOARD_CHAT_TOKEN on top of it."
-        )
-    else:
-        print(
-            "Dashboard password is NOT set: there is no login. That is correct "
-            "for 127.0.0.1 plus Tailscale, and wrong for anything reachable "
-            "from the internet. Set DASHBOARD_PASSWORD before exposing this."
-        )
+    #
+    # **Through `announce` rather than `print`, and that is not tidiness.** This
+    # was a plain `print()` to stdout followed by `uvicorn.run()`, which blocks
+    # forever — and systemd gives a service a pipe rather than a terminal, so
+    # Python block-buffers stdout and an 8 KiB buffer holding 200 bytes is never
+    # flushed by a process that does not exit. The journal showed it exactly: a
+    # restart at 06:54:25 with the newest banner stamped 06:41:04, which was the
+    # PREVIOUS process flushing on its way out. The line describing the running
+    # process was sitting in a buffer. See `announce.py`.
+    env = Env()
+    announce_dashboard_auth(env)
+
+    # **And this one did not exist at all.** `Env.inference_provider` had five
+    # tests and a docstring calling itself "the line a startup banner prints",
+    # and nothing outside `config.py` ever called it. A provider swap is
+    # invisible afterwards, so an unprinted banner is the whole feature missing.
+    announce_inference(env)
 
     if args.host not in ("127.0.0.1", "localhost", "::1"):
-        print(
+        say(
             f"WARNING: binding to {args.host} exposes this dashboard beyond the "
             f"local machine. Prefer 127.0.0.1 plus Tailscale, or a Funnel with "
             f"DASHBOARD_PASSWORD set."

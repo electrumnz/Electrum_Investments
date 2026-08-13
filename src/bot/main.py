@@ -16,6 +16,7 @@ from pathlib import Path
 import structlog
 
 from . import jobs, stop_watch
+from .announce import announce_inference
 from .audit import AuditLog, AuditView
 from .broker import AlpacaBroker, Broker, MockBroker
 from .config import Env, LiveTradingRefused, Rules
@@ -299,6 +300,13 @@ def cmd_loop(
     env: Env, rules: Rules, *, execute: bool = False, force_mock: bool = False
 ) -> int:
     """Decision loop. Proposals are always vetted; orders are placed only with --execute."""
+    # Which endpoint the model calls go to, said before the first one is made.
+    # A provider swap leaves no trace in a cycle line, so this is the only
+    # moment it can be established. `Env.inference_provider` had five tests and
+    # a docstring calling itself a startup banner, and nothing had ever printed
+    # it -- see `announce.py`.
+    announce_inference(env)
+
     audit = AuditLog()
     broker = build_broker(env, force_mock=force_mock)
     broker.connect()
@@ -1220,6 +1228,8 @@ def cmd_dream(env: Env, rules: Rules) -> int:
     """
     from .dreamer import Dreamer, promote_dreams
 
+    announce_inference(env)
+
     if not env.anthropic_api_key:
         log.error("dream_no_api_key", detail="ANTHROPIC_API_KEY is not set")
         return 1
@@ -1569,6 +1579,8 @@ def cmd_confer(env: Env, rules: Rules) -> int:
     how an operator learns to ignore `systemctl --failed`.
     """
     from .confer import ConferOutcome, run_conference
+
+    announce_inference(env)
 
     if not env.anthropic_api_key:
         log.error("confer_no_api_key", detail="ANTHROPIC_API_KEY is not set")
