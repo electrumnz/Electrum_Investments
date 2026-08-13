@@ -831,6 +831,43 @@ each was believed for a while:
   can move funds. `CLAUDE.md` already says `auth.py` is the file to replace
   rather than extend if that ever happens, and this is one of the reasons.
 
+  **Four things found while designing the hardening that was then stood down.**
+  Recorded because each would have to be rediscovered, and the first one is a
+  trap that turns the obvious repair into a worse bug than the one it fixes.
+
+  - **A delay cannot go in `auth.py` alone.** `POST /login` is `async def` —
+    it awaits `request.form()` — so it runs ON THE EVENT LOOP rather than in a
+    threadpool. A blocking `time.sleep` inside `check_password` would freeze
+    the whole process for its duration, every page and the `/live` SSE stream
+    with it, once per wrong guess. An attacker hammering the login would take
+    the deck down, which is strictly worse than the lockout the compare-first
+    fix removed. The call site has to move to `run_in_threadpool` (or the
+    pacing has to be `await asyncio.sleep`) BEFORE any delay is added.
+  - **A delay is a cost function and never a hard bound.** Even in the
+    threadpool it paces a sequential guesser at one per delay and does nothing
+    to a concurrent one: K connections buy K guesses per delay, capped by
+    AnyIO's 40 workers — which is the same pool every sync page route renders
+    in, so a wide attack trades guess rate for deck latency. Anything written
+    about this must state that ceiling rather than implying "five wrong
+    passwords" has been restored.
+  - **Recording refused attempts is safe now, and the reason not to has
+    expired.** `record_failure` skips attempts that were refused, on the
+    argument that a sustained attack would pin the budget shut for ever. That
+    argument was about the OPERATOR being locked out, and a correct password no
+    longer consults the budget — so the only thing the omission buys today is
+    letting the window decay under live attack, handing a guesser the cheap
+    tier back every five minutes. `test_the_budget_decays_so_a_mistyped_password_is_not_permanent`
+    states the old reasoning in its docstring and would need updating with it.
+  - **The weak-password banner is the half that stands on its own**, and it
+    survives the Tailscale decision because it is about the secret rather than
+    about the rate. `announce.py` is the only place the fact can be established
+    at all — a Funnel and a local `curl` both arrive on loopback — and a short
+    `DASHBOARD_PASSWORD` is what makes a guess rate matter in the first place.
+    A minimum length and a minimum count of distinct characters, said once at
+    startup, naming `openssl rand -hex 32` as `.env.example` already does for
+    the chat token, printing neither the password nor its length, and never
+    refusing to start.
+
 Clean on audit, recorded so it is not re-checked: `max_granted_symbols` has no
 bypass; `grants.py` returned `{}` for all eighteen malformed inputs tried;
 `evaluate` reads no file, network or clock; both migrations are additive,
