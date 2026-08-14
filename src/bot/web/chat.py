@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import shutil
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import structlog
@@ -79,6 +79,11 @@ DEFAULT_USER = "hermes"
 # failure we care about is a hang, not slowness.
 DEFAULT_TIMEOUT_SECONDS = 180.0
 
+# `sudo -n -l` consults a local policy file and runs nothing, so this is
+# generous rather than tight. It exists so a wedged sudo cannot hold a page
+# render, not because the check is expected to be slow.
+SUDO_PROBE_TIMEOUT_SECONDS = 5.0
+
 # How much conversation to replay. `hermes -z` is one-shot, so continuity is the
 # caller's job. Kept small on purpose — this is a question-and-answer surface,
 # not somewhere to hold a long argument, and every replayed turn is paid for.
@@ -103,6 +108,10 @@ class HermesBridge:
     binary: Path = DEFAULT_BINARY
     run_as: str = DEFAULT_USER
     timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS
+    # Filled on first use by `permitted`. Not a constructor argument: a caller
+    # that could preset it could assert an isolation nobody checked, which is
+    # the failure this property was added to end.
+    _permitted: bool | None = field(default=None, init=False, repr=False)
 
     @property
     def available(self) -> bool:
@@ -133,6 +142,66 @@ class HermesBridge:
             return self.binary.exists()
         except OSError:
             return True
+
+    @property
+    def permitted(self) -> bool:
+        """Whether sudo will ACTUALLY run this wrapper — asked, not assumed.
+
+        **`available` answers a different question, and the gap between them
+        was live.** It asks whether the wrapper FILE is there; this asks
+        whether this process may run it. `deploy/run-dream.sh` ships and is
+        made executable by `bootstrap.sh` on every box, whether or not the
+        second Hermes instance was ever set up — the file's own comment says it
+        is "inert without one: nothing invokes it unless a sudoers rule names
+        it". So `available` was True on a droplet with no
+        `/etc/sudoers.d/mudhorn-dream` and no `/home/hermes/dreamer`, and two
+        things followed:
+
+        - Grogu was routed to an instance sudo refuses, so the Dreaming panel
+          answered `sudo: a password is required` instead of falling back to
+          the shared instance the way the module docstring promises.
+        - The page rendered `isolated=True`, **claiming an isolation that did
+          not exist.** That is the one thing this arrangement must never do,
+          and `tests/test_web.py` already pins the wording of the banner that
+          says so.
+
+        `sudo -n -l` asks the policy and runs nothing. Local, no network, and
+        the honest question: not "is there a file" but "may I execute it".
+
+        **Any failure to establish permission answers False**, which is the
+        under-claiming direction: the caller falls back to the shared instance
+        and the page reports the weaker arrangement. The same rule as
+        `calendar_degraded` and the tailnet status — report the weaker fact
+        rather than imply the stronger one. Note this is the OPPOSITE default
+        from `available`, which answers an EACCES optimistically; that is
+        correct there, because the cost of being wrong is a page saying chat is
+        unavailable when it works, and here the cost of being wrong is a false
+        claim of isolation.
+
+        Cached for the life of the process. The grant changes only when
+        somebody installs a sudoers rule, and the scripts that do that
+        (`enable-chat.sh`, and an `enable-dream.sh` when one exists) restart
+        `mudhorn-web` as their last step — so a stale answer cannot outlive the
+        act that changed it.
+        """
+        if self._permitted is None:
+            self._permitted = self._ask_sudo()
+        return self._permitted
+
+    def _ask_sudo(self) -> bool:
+        if shutil.which("sudo") is None:
+            return False
+        try:
+            probe = subprocess.run(
+                ["sudo", "-n", "-l", "-u", self.run_as, "--", str(self.binary)],
+                capture_output=True,
+                text=True,
+                timeout=SUDO_PROBE_TIMEOUT_SECONDS,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return False
+        return probe.returncode == 0
 
     def ask(
         self,

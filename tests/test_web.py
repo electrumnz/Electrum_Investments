@@ -1389,8 +1389,11 @@ def test_the_dreamer_uses_its_own_instance_when_one_is_installed(journal, dreams
         return chat_mod.ChatReply(text="ok")
 
     monkeypatch.setattr(chat_mod.HermesBridge, "ask", _ask)
-    # Both instances present: the dreamer gets its own.
-    monkeypatch.setattr(chat_mod.HermesBridge, "available", property(lambda self: True))
+    # Both instances usable: the dreamer gets its own. `permitted`, not
+    # `available` — "installed" means sudo will run it, not that the file is
+    # on disk. See the regression test below for why that distinction is the
+    # whole point.
+    monkeypatch.setattr(chat_mod.HermesBridge, "permitted", property(lambda self: True))
 
     app = build_app(
         journal=journal, rules=load_rules(), env=env,
@@ -1402,6 +1405,57 @@ def test_the_dreamer_uses_its_own_instance_when_one_is_installed(journal, dreams
 
     assert asked[0].endswith("run-dream.sh")
     assert asked[1].endswith("run-chat.sh")
+
+
+def test_a_wrapper_that_exists_but_sudo_refuses_falls_back_and_admits_it(
+    journal, dreams, monkeypatch
+):
+    """The live failure, reproduced. Observed on the droplet 14 Aug 2026.
+
+    `bootstrap.sh` ships `run-dream.sh` and makes it executable on EVERY box,
+    whether or not the second Hermes instance was ever set up — its own comment
+    says it is "inert without one". So the file existed, `available` was True,
+    and with no `/etc/sudoers.d/mudhorn-dream` and no `/home/hermes/dreamer`
+    two things went wrong at once:
+
+    - Grogu was routed to an instance sudo refuses, and the panel answered
+      `sudo: a password is required` rather than falling back.
+    - The page rendered `isolated=True`, claiming an isolation that did not
+      exist — the one thing this arrangement must never do.
+
+    So the file being present is deliberately NOT enough here: the test asserts
+    the fallback fires and the page under-claims, with `available` True
+    throughout.
+    """
+    from bot.web import chat as chat_mod
+
+    env = Env(_env_file=None)  # type: ignore[call-arg]
+    env.dashboard_chat_token = "tok"
+
+    asked: list[str] = []
+
+    def _ask(self, message, history=None, soul=None, operator="", briefing=""):
+        asked.append(str(self.binary))
+        return chat_mod.ChatReply(text="ok")
+
+    monkeypatch.setattr(chat_mod.HermesBridge, "ask", _ask)
+    # The wrapper is on disk — which is what the old check looked at — and
+    # sudo will not run it, which is what actually decides.
+    monkeypatch.setattr(chat_mod.HermesBridge, "available", property(lambda self: True))
+    monkeypatch.setattr(chat_mod.HermesBridge, "permitted", property(lambda self: False))
+
+    app = build_app(
+        journal=journal, rules=load_rules(), env=env, dreams=dreams, force_mock=True
+    )
+    client = TestClient(app)
+    client.post("/chat", json={"token": "tok", "message": "hi", "soul": "grogu"})
+
+    # Fell back to the instance that works, rather than erroring.
+    assert asked == ["/opt/mudhorn/deploy/run-chat.sh"]
+
+    # And the page does not claim the isolation it does not have.
+    body = client.get("/dreaming").text
+    assert "no route to the broker" not in body
 
 
 def test_the_dreamer_falls_back_rather_than_refusing(journal, dreams, monkeypatch):

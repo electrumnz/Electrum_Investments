@@ -773,7 +773,15 @@ def build_app(
                 # if either is. Which one, and what that means for its reach, is
                 # rendered explicitly rather than left to be assumed.
                 hermes_available=dreamer.available or bridge.available,
-                isolated=dreamer.available,
+                # **`permitted`, not `available`.** The wrapper file ships and
+                # is made executable on every box whether or not the second
+                # instance was ever set up, so `available` was True on a
+                # droplet with no sudoers rule and no `/home/hermes/dreamer` —
+                # and this line then told the operator the dreamer was
+                # isolated when it could not run at all. Claiming an isolation
+                # that does not exist is the one thing this banner must never
+                # do; `permitted` asks sudo instead of asking the filesystem.
+                isolated=dreamer.permitted,
                 soul_found=load_soul(GROGU).found,
                 titles=titles,
                 fused_into=children,
@@ -1059,7 +1067,12 @@ def build_app(
         # its soul — `config/` is root-owned so the service account cannot edit
         # its own limits, and the only thing this surface writes is a request in
         # a different database.
-        answering = dreamer if (soul.name == GROGU and dreamer.available) else bridge
+        # `permitted` rather than `available`, for the reason given where
+        # `isolated` is rendered: the wrapper existing says nothing about
+        # whether sudo will run it. Routing on the file's presence sent Grogu
+        # to an instance that answered `sudo: a password is required`, instead
+        # of falling back here the way this module's docstring promises.
+        answering = dreamer if (soul.name == GROGU and dreamer.permitted) else bridge
 
         # The limit table, as FIGURES the agent must not derive. Only the
         # Armorer gets it: handing the account agent a table of caps it has no
