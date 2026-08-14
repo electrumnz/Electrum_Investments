@@ -314,6 +314,12 @@ def test_a_funnel_pointed_at_the_wrong_port_is_a_positive_finding():
     assert "9090" in headline
     assert "8787" in headline
     assert tailnet.SERVE_STATUS_COMMAND in headline
+    # The FULL remedy, not an intention the reader has to translate. The
+    # obvious translation is `tailscale serve`, which removes the Funnel and
+    # takes the whole public hostname offline — measured while fixing exactly
+    # this fault, and it cut the ops MCP endpoint with it.
+    assert tailnet.REPOINT_COMMAND in headline
+    assert "funnel" in headline and "NOT `serve`" in headline
 
 
 def test_a_correctly_pointed_funnel_says_nothing_about_it():
