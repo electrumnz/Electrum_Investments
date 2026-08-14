@@ -2194,6 +2194,42 @@ it does not quietly claim an isolation it does not have. Same rule as
 `calendar_degraded` and the tailnet status: report the weaker fact rather than
 imply the stronger one.
 
+**"Absent" means sudo will not run it, NOT that the file is missing, and
+getting that wrong broke both halves at once.** Observed on the droplet 14 Aug
+2026: `bootstrap.sh` ships `run-dream.sh` and chmods it on every box whether or
+not the second instance exists — it is inert without a sudoers rule naming it —
+so `HermesBridge.available`, which is `binary.exists()`, was True on a box with
+no `/etc/sudoers.d/mudhorn-dream` and no `/home/hermes/dreamer`. Grogu was
+routed to an instance sudo refuses and the panel answered `sudo: a password is
+required` instead of falling back; and the page rendered `isolated=True`,
+claiming the isolation this paragraph promises it never claims falsely.
+
+`HermesBridge.permitted` asks `sudo -n -l` — the policy, not the filesystem —
+and both the routing and the `isolated` flag read it. Three properties:
+
+- **Any failure to establish permission answers False**, which under-claims:
+  the caller falls back and the page reports the weaker arrangement. That is
+  the OPPOSITE default from `available`, which answers an EACCES
+  optimistically — correct there, because being wrong costs a page saying chat
+  is unavailable when it works, and being wrong here costs a false claim of
+  isolation.
+- **It is cached for the life of the process**, which is safe only because the
+  scripts that change a grant restart `mudhorn-web` as their last step.
+- **`available` is deliberately left alone.** "Can we chat at all" and "may I
+  run this particular wrapper" are different questions, and making the
+  optimistic one strict would break the working chat panel on a flaky probe.
+
+`deploy/enable-dream.sh` is the deliberate act that makes the isolated
+arrangement real — the same shape as `enable-chat.sh` and `enable-forge.sh`.
+It creates the home (which the sudo grant alone would not have fixed, since
+the wrapper does `cd "$HERMES_HOME"`), installs `grogu.md` as its `SOUL.md`,
+validates the sudoers rule with `visudo -c` before installing it, refuses a
+home whose config registers the MCP server, and proves the result through the
+RUNNING SERVICE rather than from the console's own namespace. Its sudoers file
+is separate from `mudhorn-chat` on purpose: `enable-chat.sh --off` removes that
+one, and the dreamer's grant has no business disappearing because somebody
+toggled the chat panel.
+
 This was a real overclaim, caught after shipping. The banner originally read
 "no route to the broker", which is true of the dream *records* and was false of
 the chat panel on the same page. `tests/test_web.py` now pins both wordings.
