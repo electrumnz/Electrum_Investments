@@ -1476,6 +1476,26 @@ Three things about it:
   nothing. `Dream.is_offerable` in a second place: defined, never called, and
   the feature inert behind it.
 
+**Two things about the tailscale CLI, both measured while fixing this and both
+now named in the banner.** They matter because the remedy for this warning is
+typed at a root shell by somebody who is already dealing with an outage.
+
+- **`tailscale serve` REMOVES the Funnel; `tailscale funnel` keeps it.** Adding
+  a handler with `serve` printed "Removing Funnel for
+  mudhorn.tailc04415.ts.net:443" and took the whole public hostname offline —
+  including the ops MCP endpoint the deploy tooling reaches the box through.
+  The handler it added was correct; public reachability went as a side effect.
+  So `REPOINT_COMMAND` is the full command rather than "re-point it at 8787": a
+  remedy stated as an intention is one the reader translates, and the obvious
+  translation causes a second outage during the first.
+- **`--set-path` STRIPS the prefix.** `/mcp` went from `401` to `404` when an
+  explicit handler took precedence, because the backend was receiving `/`. The
+  target has to carry the path: `--set-path=/mcp http://127.0.0.1:8788/mcp`.
+
+The public hostname serves ONE `/` handler, so the dashboard and the ops MCP
+server cannot both have it. They are split by path, and the dashboard owns `/`
+because its internal links are absolute and it cannot live under a prefix.
+
 ### A feed writes into the model's document, so `.strip()` is not enough
 
 `context.py` renders each headline as `f"- {h}"` into a **markdown document**

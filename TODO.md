@@ -2230,13 +2230,40 @@ said which hosts had the Funnel switched ON, which a Funnel pointed at the
 wrong port satisfies perfectly — and nothing read it. `Dream.is_offerable`
 again.
 
-**What still needs a shell**, because nothing here can re-point a Funnel:
+**RESOLVED on the box, 14 Aug 2026.** The Funnel was pointed at
+`http://127.0.0.1:8788` — the ops MCP server — and now serves:
 
-    tailscale serve status                 # see what it is actually serving
-    tailscale funnel --bg 8787             # re-point it at the dashboard
-    systemctl start mudhorn-tailnet.service   # clear the banner
+    https://mudhorn.tailc04415.ts.net/       -> http://127.0.0.1:8787
+    https://mudhorn.tailc04415.ts.net/mcp    -> http://127.0.0.1:8788/mcp
 
-Until that is run, the public URL keeps serving the MCP endpoint.
+Verified from outside the tailnet: `/login` 200 with the real sign-in page,
+`/healthz` 200, `/` 401 behind the password gate, `POST /mcp` 401 from the MCP
+server. The tailnet reading now records the 8787 target, so
+`serves_the_dashboard` is True and the banner is absent.
+
+### Two things learned doing it, and both are now in the code
+
+- **`tailscale serve` REMOVES the Funnel; `tailscale funnel` keeps it.**
+  `tailscale serve --bg --set-path=/mcp 8788` printed *"Removing Funnel for
+  mudhorn.tailc04415.ts.net:443"* and took the entire public hostname offline,
+  including the ops MCP endpoint the deploy tooling reaches this box through.
+  The handler it added was correct; the subcommand withdrew public
+  reachability as a side effect. The banner used to say "re-point it at
+  127.0.0.1:8787", which is an INTENTION the reader has to translate — and the
+  obvious translation is the one that causes a second outage while they are
+  fixing the first. It names `REPOINT_COMMAND` in full now, and says which
+  subcommand not to use.
+- **`--set-path` STRIPS the prefix.** Measured rather than assumed: `/mcp`
+  went from `401 unauthorized` to `404 Not Found` when the explicit handler
+  took precedence, because the MCP server was receiving `/`. The target has to
+  carry the path — `--set-path=/mcp http://127.0.0.1:8788/mcp` — after which
+  the 401 came back.
+
+Both were found by making the change and reading what came back, not by
+reading the documentation first. The sequence was also run one command at a
+time with a check between each, which is the only reason the funnel removal
+was noticed immediately rather than being discovered later as "the dashboard
+is down again".
 
 The plumbing for the new check was already there and is verified:
 `deploy/check-tailscale.sh` runs `tailscale serve status --json` and passes it

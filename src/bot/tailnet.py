@@ -97,6 +97,20 @@ DASHBOARD_PORT = 8787
 # remedy the reader has to go and look up is a warning they postpone.
 SERVE_STATUS_COMMAND = "tailscale serve status"
 
+# **`funnel`, never `serve`, and that distinction cost the public URL.**
+# Measured 14 Aug 2026 while fixing exactly the fault this module now detects:
+# `tailscale serve --bg --set-path=/mcp 8788` printed "Removing Funnel for
+# mudhorn.tailc04415.ts.net:443" and took the whole public hostname off the
+# internet — including the ops MCP endpoint the deploy tooling reaches the box
+# through. The handler it added was correct; the subcommand silently withdrew
+# public reachability as a side effect.
+#
+# So the banner names the FULL command rather than saying "re-point it". A
+# remedy stated as an intention is one the reader has to translate, and the
+# obvious translation here is the one that causes a second outage while they
+# are already fixing the first.
+REPOINT_COMMAND = "tailscale funnel --bg 8787"
+
 
 @dataclass(frozen=True)
 class TailnetStatus:
@@ -223,9 +237,11 @@ class TailnetStatus:
                 "The public URL is NOT this dashboard. The Funnel is up and "
                 f"pointed elsewhere ({served}), while this dashboard is on port "
                 f"{DASHBOARD_PORT}. Every page there answers 404 while the bot "
-                f"trades normally. Run `{SERVE_STATUS_COMMAND}` on the droplet "
-                "to see what is being served, re-point it at "
-                f"127.0.0.1:{DASHBOARD_PORT}, then `{RECHECK_COMMAND}`."
+                f"trades normally. Run `{SERVE_STATUS_COMMAND}` to see what is "
+                f"being served, then `{REPOINT_COMMAND}` to put the dashboard "
+                f"back on `/`, then `{RECHECK_COMMAND}` to clear this. Use "
+                "`funnel`, NOT `serve` — the `serve` subcommand removes the "
+                "Funnel and takes the whole public hostname offline."
             )
 
         days = self.days_remaining(now=now)
