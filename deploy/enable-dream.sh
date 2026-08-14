@@ -129,7 +129,75 @@ else
   say "WARNING: $SOUL_SRC not found; the dreamer will run voiceless"
 fi
 
-# 3. The sudoers rule, validated before it is anywhere sudo will read it.
+# 3. The credential and the model, copied from the account agent's home.
+#
+# **Without this the grant makes things WORSE, and it did.** Observed on the
+# droplet the first time this script ran: the home, the soul and the sudoers
+# rule all installed cleanly, the dashboard duly started routing Grogu to the
+# isolated instance — and that instance had no inference credential, so it
+# answered "No inference provider configured". Before the grant Grogu worked
+# through the fallback; after it he did not. A permission to reach something
+# unfinished is worth less than no permission at all.
+#
+# The same DigitalOcean key as the account agent, deliberately. A second key
+# would be a second thing to rotate and a second balance to keep topped up, and
+# the isolation this buys is about TOOLS — no MCP server, so no `place_order` —
+# not about billing. `run-dream.sh` reads its own home's file, so pointing the
+# dreamer at a different model later is a one-line edit here and no code change.
+SHARED_ENV=/home/hermes/inference.env
+DREAM_ENV="$DREAM_HOME/inference.env"
+
+if [[ -f "$DREAM_ENV" ]]; then
+  say "inference.env already present, leaving it"
+elif [[ -f "$SHARED_ENV" ]]; then
+  install -m 600 -o hermes -g hermes "$SHARED_ENV" "$DREAM_ENV"
+  say "copied inference.env from the account agent"
+else
+  say "WARNING: $SHARED_ENV not found, so the dreamer has no credential."
+  say "         It will report 'No inference provider configured'."
+fi
+
+# The model, which Hermes reads from its OWN config and not from the
+# environment — measured on the chat instance, where the banner named one model
+# while Hermes asked for another. `run-dream.sh` refuses to run rather than
+# announce a model it has not checked, so a home with a credential and no
+# config is still a home that cannot answer.
+#
+# Written directly rather than by running `hermes model`, which is interactive
+# and cannot be driven from a provisioning script. Minimal on purpose: the
+# model, the approval mode, and NO `mcp_servers` key — that absence is the
+# whole point of this instance and is asserted below.
+DREAM_CONFIG_DIR="$DREAM_HOME/.hermes"
+DREAM_CONFIG="$DREAM_CONFIG_DIR/config.yaml"
+model=""
+[[ -f "$DREAM_ENV" ]] && model="$(grep -oP '^DO_INFERENCE_MODEL=\K.*' "$DREAM_ENV" 2>/dev/null || true)"
+
+if [[ -f "$DREAM_CONFIG" ]]; then
+  say "config.yaml already present, leaving it"
+elif [[ -n "$model" ]]; then
+  install -d -m 700 -o hermes -g hermes "$DREAM_CONFIG_DIR"
+  tmp_cfg="$(mktemp)"
+  cat >"$tmp_cfg" <<YAML
+# Written by deploy/enable-dream.sh. The dreamer's own instance.
+#
+# There is deliberately NO mcp_servers key. This agent speculates; it must not
+# be able to reach the broker, and that is a property of the process rather
+# than of a sentence in its soul file.
+model:
+  default: $model
+approvals:
+  mode: manual
+  cron_mode: deny
+YAML
+  install -m 600 -o hermes -g hermes "$tmp_cfg" "$DREAM_CONFIG"
+  rm -f "$tmp_cfg"
+  say "wrote $DREAM_CONFIG with model.default=$model"
+else
+  say "WARNING: no DO_INFERENCE_MODEL to write into a config; the dreamer"
+  say "         cannot answer until one is set in $DREAM_ENV."
+fi
+
+# 4. The sudoers rule, validated before it is anywhere sudo will read it.
 if [[ -f "$SUDOERS" ]] && grep -qF "$RULE" "$SUDOERS"; then
   say "sudoers rule already present"
 else
@@ -142,7 +210,7 @@ else
 fi
 visudo -c >/dev/null || die "sudoers is now invalid — remove $SUDOERS immediately"
 
-# 4. The quarantine, checked rather than trusted. This is the entire argument
+# 5. The quarantine, checked rather than trusted. This is the entire argument
 #    for a second instance, so it is verified here as well as by the wrapper
 #    at run time: a home whose config registers the MCP server is a dreamer
 #    with `place_order`, which is worse than no second instance at all because
@@ -156,7 +224,21 @@ fi
 systemctl restart mudhorn-web
 say "restarted mudhorn-web"
 
-sleep 2
+# **Waits for the port rather than sleeping a fixed two seconds**, and the
+# first run of this script is why. `mudhorn-web` serves Server-Sent Events on
+# `/live`, an SSE connection never closes on its own, and uvicorn's graceful
+# shutdown waited for one — so `systemctl restart` sat in `deactivating` for
+# the full systemd stop timeout. After two seconds nothing was listening, both
+# verification curls failed with "Couldn't connect", and the script reported a
+# WARNING about a grant that had in fact installed perfectly.
+#
+# A check that cries wolf about its own impatience is worse than no check: it
+# teaches the reader to disregard the one time it is right.
+say "waiting for mudhorn-web to accept connections"
+for _ in $(seq 1 60); do
+  curl -sS --max-time 2 -o /dev/null http://127.0.0.1:8787/healthz 2>/dev/null && break
+  sleep 2
+done
 
 # Proof rather than hope, and asked of the RUNNING SERVICE rather than from
 # this shell — a `sudo -u mudhorn sudo -u hermes` here runs in the console's
@@ -179,7 +261,7 @@ fi
 code="$(curl -sS --max-time 200 -b "$jar" -o "$body" -w '%{http_code}' \
   -X POST -H 'content-type: application/json' \
   -d "{\"token\":\"$chat_token\",\"soul\":\"grogu\",\"message\":\"Reply with the single word: READY\"}" \
-  http://127.0.0.1:8787/chat || echo 000)"
+  http://127.0.0.1:8787/chat)" || code=000
 
 if [[ "$code" != "200" ]]; then
   say "WARNING: POST /chat returned $code rather than 200."

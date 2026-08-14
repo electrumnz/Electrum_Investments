@@ -1912,6 +1912,28 @@ served — one page-load old and honest about it — rather than an empty box.
 driving the thing in a browser. Same shape as the `.gitignore` finding above: a
 green local suite says nothing about what actually happens.
 
+### A graceful shutdown that waits for a stream waits forever
+
+`/live` is Server-Sent Events, and an SSE connection is long-lived BY DESIGN —
+it never closes on its own. Uvicorn's default graceful shutdown waits for open
+connections, so `systemctl restart mudhorn-web` sat in `deactivating
+(stop-sigterm)` for the full systemd stop timeout with one browser on the deck.
+Measured 14 Aug 2026: a deploy timed out on it, and `enable-dream.sh` reported
+a false WARNING because it curled the port two seconds after asking for a
+restart that had not finished.
+
+`timeout_graceful_shutdown=SHUTDOWN_GRACE_SECONDS` bounds the wait. Dropping
+the stream costs nothing: the browser's native `EventSource` reconnects by
+itself, which is why SSE was chosen over a bespoke socket in the first place.
+Bounded rather than zero, so an ordinary in-flight render still completes, and
+systemd's own `TimeoutStopSec` stays the backstop underneath it.
+
+**Anything that restarts this unit must wait for the PORT, not sleep.** A fixed
+`sleep 2` before a verification curl is how a script comes to report a failure
+about work that succeeded — and a check that cries wolf about its own
+impatience is worse than no check, because it teaches the reader to disregard
+the one time it is right.
+
 ### A visit is a sitting, and the marker never advances to now
 
 `src/bot/web/seen.py` answers "what changed since I last looked?", which is the
@@ -2218,6 +2240,20 @@ and both the routing and the `isolated` flag read it. Three properties:
 - **`available` is deliberately left alone.** "Can we chat at all" and "may I
   run this particular wrapper" are different questions, and making the
   optimistic one strict would break the working chat panel on a flaky probe.
+
+**A grant to something unfinished is worth LESS than no grant**, and that was
+measured the first time `enable-dream.sh` ran. The home, the soul and the
+sudoers rule all installed cleanly, so `permitted` went True and the dashboard
+duly routed Grogu to the isolated instance — which had no `inference.env` and
+no `.hermes/config.yaml`, and answered "No inference provider configured".
+Before the grant Grogu worked through the fallback; after it he did not. The
+script now copies the account agent's credential and writes a minimal config
+naming the model, because Hermes reads its model from its own home and not
+from the environment.
+
+The same DigitalOcean key as the account agent, deliberately: a second key is
+a second thing to rotate and a second balance to top up, and the isolation
+this buys is about TOOLS — no MCP server, so no `place_order` — not billing.
 
 `deploy/enable-dream.sh` is the deliberate act that makes the isolated
 arrangement real — the same shape as `enable-chat.sh` and `enable-forge.sh`.

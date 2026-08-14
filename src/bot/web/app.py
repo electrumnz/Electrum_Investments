@@ -115,6 +115,11 @@ CONFERENCE_FEED_ROWS = 30
 #: wrong.
 LOOP_WINDOW_HOURS = 24.0
 
+# How long uvicorn may wait for open connections before shutting down anyway.
+# `/live` is a Server-Sent Events stream and never closes on its own, so an
+# unbounded graceful shutdown waits forever — see `main()` for the measurement.
+SHUTDOWN_GRACE_SECONDS = 10
+
 
 def build_app(
     *,
@@ -1205,7 +1210,29 @@ def main() -> int:
             f"DASHBOARD_PASSWORD set."
         )
 
-    uvicorn.run(build_app(force_mock=args.mock), host=args.host, port=args.port)
+    # **A graceful shutdown that waits for an SSE stream waits forever.**
+    # Measured on the droplet 14 Aug 2026: a deploy's `systemctl restart` hung
+    # in `deactivating (stop-sigterm)` for the full systemd stop timeout,
+    # logging "Waiting for connections to close", because `/live` is a
+    # Server-Sent Events stream and an SSE connection is long-lived BY DESIGN —
+    # it never closes on its own. One browser with the dashboard open is enough,
+    # and the deploy tooling timed out waiting.
+    #
+    # Uvicorn's default is to wait indefinitely, which is the right default for
+    # a request/response server and exactly wrong for one whose main feature is
+    # a stream. Dropping the stream costs nothing here: the browser's native
+    # `EventSource` reconnects by itself — that is why SSE was chosen over a
+    # bespoke socket in the first place — so a client sees a blip and resumes.
+    #
+    # A bounded wait rather than zero, so an ordinary in-flight page render
+    # still completes. This is a clean shutdown that stops WAITING, not a
+    # SIGKILL: systemd's `TimeoutStopSec` remains the backstop underneath it.
+    uvicorn.run(
+        build_app(force_mock=args.mock),
+        host=args.host,
+        port=args.port,
+        timeout_graceful_shutdown=SHUTDOWN_GRACE_SECONDS,
+    )
     return 0
 
 
