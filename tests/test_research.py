@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import ClassVar
 
 from bot.dreaming import Dream
+from bot.hermes import HermesResult
 from bot.models import OrderProposal
 from bot.research import (
     MAX_CITATIONS_PER_QUESTION,
@@ -452,3 +453,196 @@ class _FrozenClock:
 
     def __getattr__(self, name: str) -> object:
         return getattr(datetime, name)
+
+
+# ------------------------------------------------------------ the reply parser
+
+
+def _at() -> datetime:
+    return datetime(2026, 8, 16, 9, 0, tzinfo=UTC)
+
+
+def test_a_citation_line_becomes_a_citation() -> None:
+    from bot.research import parse_reply
+
+    answer = parse_reply(
+        "Who supplies optical fibre?",
+        "CITE | Corning is the largest producer of optical fibre | Example Wire "
+        "| https://example.com/fibre",
+        now=_at(),
+    )
+
+    assert answer.was_answered
+    assert len(answer.citations) == 1
+    cite = answer.citations[0]
+    assert cite.quote == "Corning is the largest producer of optical fibre"
+    assert cite.publisher == "Example Wire"
+    assert cite.url == "https://example.com/fibre"
+    assert cite.retrieved_at == _at()
+
+
+def test_the_retrieval_time_is_stamped_here_and_never_read_from_the_reply() -> None:
+    """A model asked for a timestamp will produce one.
+
+    A fabricated retrieval time sitting on a real quote is a plausible wrong
+    figure of exactly the kind this repository refuses, and it is worse than
+    most because it lends the quote an air of having been checked at a
+    particular moment. What we can honestly say is when WE asked, so that is
+    what is recorded — even when the reply offers a date of its own.
+    """
+    from bot.research import parse_reply
+
+    answer = parse_reply(
+        "q",
+        "CITE | words | Pub | https://example.com/a | 1999-01-01T00:00:00Z",
+        now=_at(),
+    )
+
+    assert len(answer.citations) == 1
+    assert answer.citations[0].retrieved_at == _at()
+
+
+def test_an_unparseable_line_is_counted_and_never_salvaged() -> None:
+    """A citation must not be CONSTRUCTED here, only transcribed.
+
+    Its whole value is that somebody else wrote it and a reader can go and
+    check, so a line that does not carry a URL cannot be rescued into one with
+    a guess. It is dropped and counted — the no-silent-caps rule — because
+    "two quotes" and "two quotes out of five" are different statements about
+    how well a look-up went.
+    """
+    from bot.research import parse_reply
+
+    answer = parse_reply(
+        "q",
+        "\n".join(
+            [
+                "Here is what I found:",
+                "CITE | a real quote | Pub | https://example.com/a",
+                "CITE | missing its url | Pub",
+                "- some bullet the model felt like adding",
+            ]
+        ),
+        now=_at(),
+    )
+
+    assert [c.quote for c in answer.citations] == ["a real quote"]
+    assert answer.dropped_unattributable == 3
+    assert answer.was_answered
+
+
+def test_nothing_found_is_an_answer_and_not_an_error() -> None:
+    """The distinction `found_nothing` exists for, all the way through.
+
+    A question that was put and came back empty says something about the
+    world. A question that was never put because no researcher is installed
+    says nothing about it at all, and the two must not render the same.
+    """
+    from bot.research import parse_reply
+
+    answer = parse_reply(
+        "q", "NOTHING | no filings covering 2026 volumes are published yet", now=_at()
+    )
+
+    assert answer.was_answered
+    assert answer.found_nothing
+    assert not answer.error
+    assert "no filings" in answer.not_found
+    assert "not evidence of absence" in answer.render()
+
+
+def test_a_reply_with_a_conclusion_in_it_contributes_no_conclusion() -> None:
+    """A summary launders provenance, so there is nowhere to put one.
+
+    The rail is the SHAPE rather than a sentence in the soul file: even when
+    the researcher ignores its instructions and editorialises, the prose lands
+    on an unparseable line and is dropped. `Citation` has no field a conclusion
+    could survive in.
+    """
+    from bot.research import parse_reply
+
+    answer = parse_reply(
+        "q",
+        "\n".join(
+            [
+                "This strongly suggests Corning will capture the shortfall.",
+                "CITE | Corning reported record fibre volumes | Pub | https://example.com/a",
+                "Implication: buy GLW.",
+            ]
+        ),
+        now=_at(),
+    )
+
+    rendered = answer.render()
+    assert "strongly suggests" not in rendered
+    assert "buy GLW" not in rendered
+    assert "Corning reported record fibre volumes" in rendered
+
+
+# ------------------------------------------------------------------ the bridge
+
+
+class _Runner:
+    """A double for `HermesRunner`, standing in for the third instance."""
+
+    def __init__(self, *, permitted: bool = True, reply: str = "", error: str = "") -> None:
+        self.permitted = permitted
+        self.available = True
+        self._reply = reply
+        self._error = error
+        self.prompts: list[str] = []
+
+    def run(self, prompt: str) -> HermesResult:
+        self.prompts.append(prompt)
+        if self._error:
+            return HermesResult.failed(self._error)
+        return HermesResult(text=self._reply)
+
+
+def test_no_permitted_wrapper_is_an_error_and_not_an_empty_answer() -> None:
+    """"Nobody looked" and "we looked and found nothing" are opposite findings.
+
+    This is the `permitted`-versus-`available` gap that was live on the droplet
+    for the dreamer: the wrapper file ships on every box, so reading the weaker
+    question would send questions at a sudo that refuses them and file the
+    refusals as research failures. A caller must be able to tell that no
+    look-up happened at all.
+    """
+    from bot.research import Researcher
+
+    answer = Researcher(runner=_Runner(permitted=False)).ask("anything")  # type: ignore[arg-type]
+
+    assert not answer.was_answered
+    assert not answer.found_nothing
+    assert "enable-research.sh" in answer.error
+    assert "NOT a finding" in answer.render()
+
+
+def test_a_failed_turn_never_raises_into_the_scheduled_job() -> None:
+    from bot.research import Researcher
+
+    answer = Researcher(runner=_Runner(error="Hermes exited 127")).ask("q")  # type: ignore[arg-type]
+
+    assert not answer.was_answered
+    assert "127" in answer.error
+
+
+def test_the_question_reaches_the_wrapper_with_the_no_conclusions_rule() -> None:
+    """The prose rail travels with every single question, not once at setup.
+
+    `souls/kuiil.md` carries the character and this carries the instruction,
+    deliberately both: a soul file is read from disk at call time and can be
+    edited on the box, and the whole argument for the researcher is that a
+    conclusion must not come back.
+    """
+    from bot.research import Researcher
+
+    runner = _Runner(reply="NOTHING | nothing found")
+    Researcher(runner=runner).ask("who supplies fibre?")  # type: ignore[arg-type]
+
+    assert len(runner.prompts) == 1
+    sent = runner.prompts[0]
+    assert "who supplies fibre?" in sent
+    assert "QUOTATIONS ONLY" in sent
+    assert "do not summarise" in sent.lower()
+    assert "empty answer is a real answer" in sent.lower()

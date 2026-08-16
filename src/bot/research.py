@@ -76,17 +76,18 @@ reach than intended, which is invisible.
 from __future__ import annotations
 
 import re
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
+
+from .hermes import DEFAULT_USER, HermesRunner
 
 # The wrapper, and it is a DIFFERENT file from `run-chat.sh` and
 # `run-dream.sh` for the reason those two are different from each other: the
 # sudoers rule names a path with no arguments, so the only way to select an
 # instance is to name a different file.
 DEFAULT_BINARY = Path("/opt/mudhorn/deploy/run-research.sh")
-DEFAULT_USER = "hermes"
 
 # ---------------------------------------------------------------- the caps
 #
@@ -360,3 +361,164 @@ def utc_now() -> datetime:
     which has already cost this repository a live permission bug in
     `grants.py`."""
     return datetime.now(UTC)
+
+
+# ------------------------------------------------------- asking the researcher
+#
+# Everything above is pure. Everything below runs a SUBPROCESS — and it is
+# still not a network call from here: the fetching happens in another process,
+# as another user, in a home with no MCP server. That is what keeps this module
+# importable from a render path and out of every gating path.
+
+
+#: What the researcher is told to return, and the shape it must return it in.
+#:
+#: **A strict, boring format rather than free prose**, for the reason
+#: `model_client` forces a tool call rather than parsing prose: a reply that
+#: has to be interpreted is a reply where the interpreting is done by whatever
+#: is most convenient, and here the convenient reading of an unsourced sentence
+#: is that it came from somewhere.
+#:
+#: One citation per line, pipe-separated, because a fenced JSON block is a
+#: second thing that can be malformed and a quote is exactly the kind of text
+#: that carries a quotation mark. A pipe cannot appear in a URL and is rare in
+#: prose; where it does appear in a quote it costs that one field, not the
+#: parse. Anything unparseable is COUNTED, never guessed at.
+ASK_TEMPLATE = """\
+Question: {question}
+
+Search the web and answer with QUOTATIONS ONLY.
+
+Return one line per source, in exactly this format, and nothing else:
+
+CITE | <the exact words as published> | <publisher> | <https://full-url>
+
+Rules:
+- The quote must be words you actually read on the page at that URL. Do not
+  paraphrase, do not summarise, do not join two sentences into one.
+- Do not tell me what any of it means, what it implies, or what it is
+  evidence for. That is not your job and a conclusion here is worse than
+  nothing, because it arrives wearing a URL.
+- If you found nothing usable, return exactly one line:
+  NOTHING | <one sentence on what you looked for and did not find>
+- An empty answer is a real answer. Do not fill the gap with a plausible
+  sentence.
+"""
+
+_CITE = "CITE"
+_NOTHING = "NOTHING"
+
+
+@dataclass
+class Researcher:
+    """Puts questions to the third Hermes instance and returns other people's words.
+
+    **Off unless the wrapper is permitted, and it SAYS which.** `available`
+    asks whether the file is there, `permitted` asks whether sudo will run it,
+    and the gap between those two was a live fault on this box: the dreamer was
+    routed to an instance sudo refuses and a surface claimed an isolation that
+    did not exist. `bot.hermes.HermesRunner` holds both questions and this
+    reads the strict one, so a box without the sudoers rule gets no research
+    and an honest `error` rather than a silent empty answer.
+    """
+
+    runner: HermesRunner = field(
+        default_factory=lambda: HermesRunner(
+            binary=DEFAULT_BINARY,
+            run_as=DEFAULT_USER,
+            timeout_seconds=DEFAULT_TIMEOUT_SECONDS,
+        )
+    )
+    now: Callable[[], datetime] = utc_now
+
+    @property
+    def enabled(self) -> bool:
+        """Whether a question put now would reach anything.
+
+        `permitted` rather than `available`, and that is the whole point of
+        there being two: the researcher's wrapper ships on every box and is
+        chmod'ed by `bootstrap.sh` whether or not the instance behind it was
+        ever created. Reading the weaker question would route questions at a
+        sudo that refuses them and report the refusal as a research failure.
+        """
+        return self.runner.permitted
+
+    def ask(self, question: str) -> ResearchAnswer:
+        """One question, one answer. Never raises.
+
+        A failure is an `error` on the answer rather than an exception, because
+        the caller is a scheduled job that must not die of a look-up: the same
+        reason `fetch_market_ticks` catches broadly. And an `error` is not an
+        empty result — `was_answered` and `found_nothing` are separate
+        questions for exactly this.
+        """
+        text = question.strip()
+        if not text:
+            return ResearchAnswer(question=question, error="empty question")
+        if not self.enabled:
+            return ResearchAnswer(
+                question=text,
+                error=(
+                    "no researcher instance is permitted here "
+                    f"({DEFAULT_BINARY}); see deploy/enable-research.sh"
+                ),
+            )
+
+        result = self.runner.run(ASK_TEMPLATE.format(question=text))
+        if not result.ok:
+            return ResearchAnswer(question=text, error=result.error)
+        return parse_reply(text, result.text, now=self.now())
+
+
+def parse_reply(question: str, reply: str, *, now: datetime) -> ResearchAnswer:
+    """Turn the researcher's lines into citations, counting what did not parse.
+
+    Tolerant in one direction only. An unrecognised line is DROPPED and
+    counted, never salvaged into a citation with a guessed URL — a citation is
+    the one thing here that must not be constructed locally, because its whole
+    value is that somebody else wrote it and a reader can go and check.
+
+    `retrieved_at` is stamped HERE rather than read from the reply. A model
+    asked for a timestamp will produce one, and a fabricated retrieval time on
+    a real quote is the kind of plausible wrong figure this repository exists
+    to refuse. What we can honestly say is when we asked.
+    """
+    raw: list[Citation] = []
+    not_found = ""
+    unparsed = 0
+
+    for line in reply.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        head, _, rest = stripped.partition("|")
+        label = head.strip().upper()
+        if label == _NOTHING:
+            # First one wins. A researcher that says NOTHING twice has said it
+            # once as far as a reader is concerned, and concatenating them
+            # would build a paragraph out of two attempts at one sentence.
+            not_found = not_found or _one_line(rest)
+            continue
+        if label != _CITE:
+            unparsed += 1
+            continue
+        parts = [p.strip() for p in rest.split("|")]
+        if len(parts) < 3:
+            unparsed += 1
+            continue
+        quote, publisher, url = parts[0], parts[1], parts[2]
+        raw.append(Citation(quote=quote, url=url, retrieved_at=now, publisher=publisher))
+
+    kept, unattributable, over = clean_citations(raw)
+    return ResearchAnswer(
+        question=question,
+        citations=kept,
+        not_found=not_found,
+        # An unparseable line and an unattributable one are the same kind of
+        # loss to a reader — something came back and could not be used — and
+        # they are reported together rather than as a third counter nobody
+        # reads. The distinction that matters is kept/dropped, and both sides
+        # of it are stated.
+        dropped_unattributable=unattributable + unparsed,
+        dropped_over_cap=over,
+    )
