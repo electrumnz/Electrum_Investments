@@ -16,6 +16,7 @@ import pytest
 from bot import news_history
 from bot.audit import AuditLog
 from bot.config import Env, Rules
+from bot.data.news import Sourced
 from bot.dreamer import (
     CARRY_FORWARD,
     SCOPE,
@@ -652,7 +653,21 @@ def test_the_dream_command_feeds_it_headlines_and_posts(tmp_path, monkeypatch):
         is_degraded = False
 
         def recent_headlines(self, symbols):
-            return ["Crop insurers raise premiums across the Midwest"]
+            return [h.line for h in self.recent_attributed(symbols)]  # type: ignore[no-untyped-call]
+
+        def recent_attributed(self, symbols):
+            # A double that answers only the loop's method would let a change
+            # to the DREAMER's feed path pass unnoticed, which is the trap
+            # `Broker.orders_degraded` already recorded: a stub that fails
+            # differently from the thing it doubles pins a path production
+            # never takes. `cmd_dream` reads this one.
+            return [
+                Sourced(
+                    line="Crop insurers raise premiums across the Midwest",
+                    url="https://example.com/crop-insurers",
+                    publisher="Example Wire",
+                )
+            ]
 
         def recent_posts(self):
             return []
@@ -680,7 +695,15 @@ def test_the_dream_command_feeds_it_headlines_and_posts(tmp_path, monkeypatch):
     env = _env()
     rc = main_mod.cmd_dream(env, Rules.load(Path("config/rules.yaml")))
 
-    assert seen["headlines"] == ["Crop insurers raise premiums across the Midwest"]
+    # WITH the attribution, which is the whole difference between this feed
+    # path and the decision loop's. A dreamer marks a hop `checked` only when it
+    # can name a source; a headline stripped of its publisher and URL is a story
+    # it can reason from and cannot cite, and that is how a live chain came to
+    # open with an unchecked hop about a story we had fetched ourselves.
+    assert seen["headlines"] == [
+        "Crop insurers raise premiums across the Midwest "
+        "— Example Wire https://example.com/crop-insurers"
+    ]
     assert seen["posts"] == []
     # A failed call exits non-zero so a timer unit surfaces it in
     # `systemctl --failed` rather than logging into the void.
@@ -2282,6 +2305,9 @@ def test_the_dream_line_states_the_consideration_count_and_the_fusion(
         def recent_headlines(self, symbols):
             return []
 
+        def recent_attributed(self, symbols):
+            return []
+
         def recent_posts(self):
             return []
 
@@ -2353,6 +2379,9 @@ def test_a_run_that_could_not_look_logs_none_rather_than_zero(tmp_path, monkeypa
         is_degraded = False
 
         def recent_headlines(self, symbols):
+            return []
+
+        def recent_attributed(self, symbols):
             return []
 
         def recent_posts(self):

@@ -976,13 +976,30 @@ def build_prompt(
 
     out.extend(render_class_fence(rules))
 
+    # The caller renders these WITH their publisher and URL where the feed gave
+    # us one — `data/news.py` explains why the decision loop's copy does not.
+    # The sentence below is the point of that: an item here that carries a link
+    # is a thing a hop may cite, and one that does not is not. Without it the
+    # dreamer had no way to tell that some of what it was reading was citable,
+    # and marked every hop unchecked including the ones sparked by a real story.
     if headlines:
         out.append("Recent headlines:")
+        out.append(
+            "  Where a line ends in a publisher and a link, that link is a real "
+            "source you may name in a hop's `source` and mark it checked. Where "
+            "it does not, you were shown the words and not where they came from, "
+            "and the hop stays unchecked."
+        )
         out.extend(f"  - {h}" for h in headlines)
         out.append("")
 
     if posts:
         out.append("Recent posts from watched accounts:")
+        out.append(
+            "  Same rule: a permalink is a citable source, its absence is not. A "
+            "post is somebody's claim rather than a verified fact, so citing one "
+            "establishes THAT IT WAS SAID and never that it is true."
+        )
         out.extend(f"  - {p}" for p in posts)
         out.append("")
 

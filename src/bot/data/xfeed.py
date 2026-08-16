@@ -68,6 +68,7 @@ from typing import Any
 import structlog
 
 from ._http import DEFAULT_TIMEOUT_SECONDS, JsonGetter, TtlCache, fetch_json, httpx_getter
+from .news import Sourced
 
 log = structlog.get_logger(__name__)
 
@@ -148,6 +149,10 @@ class Post:
         URL on every post would be output tokens spent on something unreadable
         — and a model handed a link it cannot follow is being invited to
         pretend it did. `url` is there for surfaces that can render an anchor.
+
+        **That reasoning is exactly right for the decision loop and stops being
+        right for the dreamer**, which is why `as_sourced` exists beside it
+        rather than replacing it. See `data/news.py`.
         """
         when = (
             self.created_at.astimezone(UTC).strftime("%H:%M")
@@ -155,6 +160,28 @@ class Post:
             else "time unknown"
         )
         return f"[@{self.account} {when}] {self.text}"
+
+    def as_sourced(self) -> Sourced:
+        """The same line with its permalink, for a reader that can follow one.
+
+        The dreamer marks a hop `checked` only when it can name a source, and a
+        post it was shown but cannot point at is not a source. `url` is `None`
+        when the payload carried no id, and that stays `""` here rather than
+        becoming a constructed guess — `Sourced.is_attributable` then answers
+        False and the dreamer is short an item rather than holding a broken
+        link, which is the direction this repository errs in everywhere else.
+
+        The handle is ours and the id is X's, so neither is supposed to be able
+        to carry a newline into the bullet. `split()`/`join` is applied anyway,
+        because "cannot" there rests on an upstream schema, and the whole lesson
+        of the title fix was that the *accidentally* safe field is the one that
+        quietly stops being safe.
+        """
+        return Sourced(
+            line=self.render(),
+            url=" ".join((self.url or "").split()),
+            publisher=f"@{self.account}",
+        )
 
 
 @dataclass
