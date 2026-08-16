@@ -22,7 +22,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import ClassVar
 
-from bot.dreaming import Dream, DreamStore
+from bot.dreaming import Dream, DreamMessage, DreamStore
 from bot.hermes import HermesResult
 from bot.models import OrderProposal
 from bot.research import (
@@ -828,3 +828,187 @@ def test_no_researcher_at_all_is_not_the_same_as_one_that_found_nothing() -> Non
     from bot.dreaming import Dream
 
     assert DreamerResult(dream=Dream(title="t", seed="s"), usage=None, advanced=False).research is None
+
+
+# ------------------------------------------------------------- on the page
+
+
+def _msg(kind: str, text: str, speaker: str = "researcher") -> DreamMessage:
+    return DreamMessage(
+        dream_id=1,
+        at=datetime(2026, 8, 16, 9, 0, tzinfo=UTC),
+        speaker=speaker,
+        text=text,
+        kind=kind,
+    )
+
+
+def test_citations_get_their_own_section_and_not_the_negotiation_transcript() -> None:
+    """Grouping by what a thing IS makes the missing member visible.
+
+    The Board's protective-orders lesson in a new place. A citation filed under
+    "What was said about it" beside two agents negotiating reads as one more
+    opinion, and the entire value of a citation is that it is not one. The
+    transcript is also collapsed and labelled as conversation, so the evidence
+    for an unchecked hop would sit behind a triangle that says it is chatter.
+    """
+    from bot.web.render import _lookups, _transcript
+
+    messages = [
+        _msg("offer", "Have a look at this one", speaker="dreamer"),
+        _msg("citation", 'Asked: "CommScope debt"\n- "net debt of $9.5bn" — https://x.test/d'),
+    ]
+
+    talk = _transcript(messages)
+    found = _lookups(messages)
+
+    assert "net debt" not in talk
+    assert "1 turn" in talk
+    assert "net debt of $9.5bn" in found
+    assert "https://x.test/d" in found
+    assert "Have a look at this one" not in found
+
+
+def test_the_caveat_is_on_the_same_element_as_the_quotations() -> None:
+    """An unqualified quotation in a document reads as established fact.
+
+    That is the reason `Hop.checked` and the `Verification` badge exist at all,
+    and these come from pages nobody here vetted — a weaker provenance than
+    anything else on the card. The heading has to say what they are AND what
+    they are not, above the quotes rather than anywhere else on the page.
+    """
+    from bot.web.render import _lookups
+
+    html = _lookups([_msg("citation", 'quoted words — https://x.test/a')])
+
+    assert "nobody here has vetted" in html
+    assert "does not make a hop checked" in html
+    assert html.index("does not make a hop checked") < html.index("quoted words")
+
+
+def test_a_dream_with_no_lookups_gets_no_section_at_all() -> None:
+    """Absent rather than empty, like the "Waiting on you" card.
+
+    Every dream recorded before the researcher existed has no look-ups, and a
+    panel announcing zero on all of them teaches a reader to stop seeing the
+    section.
+    """
+    from bot.web.render import _lookups
+
+    assert _lookups([]) == ""
+    assert _lookups([_msg("offer", "something", speaker="dreamer")]) == ""
+
+
+def test_the_dream_unit_blocks_sudo_and_the_dropin_is_what_unblocks_it() -> None:
+    """The researcher is INERT on a stock box, and this pins why.
+
+    `mudhorn-dream.service` sets NoNewPrivileges, RestrictSUIDSGID and
+    ProtectHome. All three block `sudo` — the second by IMPLYING the first,
+    which is the one people miss — so the look-up cannot run from the dream
+    timer as shipped. It fails safe rather than silently, because
+    `Researcher.enabled` asks the policy and gets a refusal.
+
+    Two halves are asserted together on purpose. If somebody relaxes the base
+    unit, the drop-in becomes pointless and this fails; if somebody drops the
+    drop-in, the feature becomes inert and this fails. A comment saying so
+    would not.
+    """
+    root = Path(__file__).resolve().parents[1]
+    unit = (root / "deploy/systemd/mudhorn-dream.service").read_text()
+    dropin = (root / "deploy/systemd/mudhorn-dream-research.conf").read_text()
+
+    for setting in ("NoNewPrivileges", "RestrictSUIDSGID", "ProtectHome"):
+        assert f"{setting}=true" in unit, f"{setting} left the base unit"
+        assert f"{setting}=false" in dropin, f"{setting} not relaxed by the drop-in"
+
+    # The drop-in relaxes those three and NOTHING else. A drop-in only
+    # overrides what it names, so an extra key here is a sandbox setting
+    # silently switched off on a unit that never asked for it.
+    relaxed = {
+        line.split("=")[0]
+        for line in dropin.splitlines()
+        if "=" in line and not line.strip().startswith("#")
+    }
+    assert relaxed == {"NoNewPrivileges", "RestrictSUIDSGID", "ProtectHome"}
+
+
+def test_enable_research_installs_the_dropin_and_removes_it_again() -> None:
+    """A grant with a blocked sudo is inert; a relaxed sandbox with no grant is
+    the cost without the benefit. Both halves have to move together."""
+    script = (Path(__file__).resolve().parents[1] / "deploy/enable-research.sh").read_text()
+
+    assert "mudhorn-dream.service.d" in script
+    assert 'install -m 644 -o root -g root "$DROPIN_SRC" "$DROPIN"' in script
+    # --off removes it. Checked as a string rather than by running the script,
+    # because running it would need root and a systemd.
+    off = script.split('if [[ "$mode" == "--off" ]]')[1].split('[[ "$mode" == "on" ]]')[0]
+    assert 'rm -f "$DROPIN"' in off
+    assert "daemon-reload" in off
+
+
+def test_the_researcher_config_is_an_allowlist_with_no_mcp_server() -> None:
+    """The quarantine is a property of the process, not of the soul file.
+
+    An allowlist rather than the denylist the other two homes use, and that is
+    the opposite choice on purpose: a denylist admits whatever the next Hermes
+    release adds, and here that is a web-reading process gaining a capability
+    nobody chose, on a timer, unattended. Getting an allowlist wrong yields an
+    agent with almost no tools, which is visible and safe.
+    """
+    root = Path(__file__).resolve().parents[1]
+    config = (root / "deploy/hermes-research-config.yaml").read_text()
+
+    # Comments stripped, because the header's own sentence explaining that
+    # there is no `mcp_servers:` key would otherwise match a naive search. The
+    # enable script had exactly that bug and it would have killed the install
+    # over the comment documenting that the instance is safe.
+    live = "\n".join(line.split("#")[0] for line in config.splitlines())
+    assert "mcp_servers" not in live
+    assert "run-mcp.sh" not in live
+    assert "toolsets:" in live
+
+    # And the script strips them too, or a correct config fails to install.
+    # Both places that check the quarantine — `--status` and the `on` path —
+    # so a fix applied to one of them does not leave the other broken.
+    script = (root / "deploy/enable-research.sh").read_text()
+    checks = script.count("run-mcp\\.sh|electrum-bot|mcp_servers")
+    assert checks == 2, checks
+    assert script.count("sed 's/#.*//'") == checks
+
+
+def test_an_index_pinned_weakest_hop_is_not_reported_as_unnamed() -> None:
+    """Two elements on one card said opposite things about one fact.
+
+    With `weakest_hop_index` set and no sentence, the chain diagram rings that
+    hop and labels it THE WEAKEST LINK, while the banner read "Not named. A
+    chain without a stated weakest link has not been attacked yet." That state
+    is legal and reachable — `_weakest_hop_refusal` accepts an index with no
+    prose, so such a dream can promote — which left the banner as the one
+    element on the page claiming the dream had not been attacked while every
+    other part treated it as pinned.
+
+    A heading is a claim, and this one was wrong in the direction that hides
+    work already done. Found by looking at the rendered page, which is where
+    this class of fault keeps being found.
+    """
+    from bot.dreaming import Hop
+    from bot.web.render import _dream
+
+    dream = Dream(
+        id=1,
+        title="t",
+        seed="s",
+        chain=[Hop(claim="one"), Hop(claim="two"), Hop(claim="three")],
+        weakest_hop_index=3,
+    )
+
+    html = _dream(dream)
+
+    assert "Not named" not in html
+    assert "named by number only" in html
+    assert "hop 3" in html
+
+    # And a chain with NEITHER still says so — the fix must not make every
+    # dream look attacked.
+    bare = _dream(Dream(id=2, title="t", seed="s", chain=[Hop(claim="one")]))
+    assert "Not named" in bare
