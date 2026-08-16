@@ -343,16 +343,35 @@ def render_for_dreamer(answers: Sequence[ResearchAnswer]) -> str:
     mark it checked with a URL behind it. The meaning is the dreamer's, in the
     dreamer's own chain, where every link is attackable one at a time.
     """
-    if not answers:
-        return ""
-    body = "\n\n".join(a.render() for a in answers)
-    return (
-        "## What the researcher found\n"
-        "Quotations from pages, with their sources. Nobody here has checked "
-        "that any of them is true, or that the page still says it. A quote is "
-        "a thing to build a hop on and cite; it is not a hop, and it is not a "
-        "reason to name a symbol.\n\n" + body
-    )
+    return render_lookups(a.render() for a in answers)
+
+
+#: The heading and the caveat that must travel with every quotation.
+#:
+#: **The caveat is not decoration.** An unqualified quotation in a prompt reads
+#: as established fact, for exactly the reason `Hop.checked` and the
+#: `Verification` badge exist — and these come from pages nobody here vetted,
+#: which is a weaker provenance than anything else in the dreamer's context.
+CITATION_PREAMBLE = (
+    "## What the researcher found\n"
+    "Quotations from pages, with their sources. Nobody here has checked that "
+    "any of them is true, or that the page still says it. A quote is a thing "
+    "to build a hop on and cite; it is not a hop, and it is not a reason to "
+    "name a symbol.\n\n"
+)
+
+
+def render_lookups(blocks: Iterable[str]) -> str:
+    """The citation section, from blocks already rendered.
+
+    Separate from `render_for_dreamer` because the answers reach the prompt one
+    RUN LATER than they were fetched — stored as messages on the dream, read
+    back on the next step — so by then they are text rather than
+    `ResearchAnswer`s. One preamble either way, because two copies of the
+    caveat is two places for one of them to lose it.
+    """
+    body = "\n\n".join(b for b in blocks if b.strip())
+    return CITATION_PREAMBLE + body if body else ""
 
 
 def utc_now() -> datetime:

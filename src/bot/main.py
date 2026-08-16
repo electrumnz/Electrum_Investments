@@ -1683,6 +1683,7 @@ def cmd_dream(env: Env, rules: Rules) -> int:
     worth noticing rather than logging into the void.
     """
     from .dreamer import Dreamer, promote_dreams
+    from .research import Researcher
 
     announce_inference(env)
 
@@ -1723,7 +1724,13 @@ def cmd_dream(env: Env, rules: Rules) -> int:
     # grading below reads the figures the decision loop recorded. Both are reads
     # of the same append-only file, and neither is authoritative over anything.
     audit = AuditLog()
-    dreamer = Dreamer(env, rules, store, journal, audit=audit)
+    # The researcher is constructed unconditionally and answers honestly when
+    # it is not installed. `Researcher.enabled` reads `permitted` — will sudo
+    # run this wrapper — rather than `available`, which only asks whether the
+    # file exists and is true on every box because `bootstrap.sh` ships all
+    # three wrappers. Getting that backwards is what routed the dreamer at an
+    # instance sudo refuses and had a page claim an isolation it did not have.
+    dreamer = Dreamer(env, rules, store, journal, audit=audit, researcher=Researcher())
     result = dreamer.run_once(headlines=headlines, posts=posts)
 
     if result is None:

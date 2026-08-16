@@ -22,7 +22,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import ClassVar
 
-from bot.dreaming import Dream
+from bot.dreaming import Dream, DreamStore
 from bot.hermes import HermesResult
 from bot.models import OrderProposal
 from bot.research import (
@@ -646,3 +646,185 @@ def test_the_question_reaches_the_wrapper_with_the_no_conclusions_rule() -> None
     assert "QUOTATIONS ONLY" in sent
     assert "do not summarise" in sent.lower()
     assert "empty answer is a real answer" in sent.lower()
+
+
+# ------------------------------------------------- the wiring into a dream run
+
+
+def _dream_with_unchecked_hops(
+    tmp_path: Path, *, weakest_hop_index: int | None = None
+) -> tuple[DreamStore, Dream]:
+    from bot.dreaming import Hop
+
+    store = DreamStore(tmp_path / "dreams.db")
+    dream = Dream(
+        title="Cisco's supercycle strains the fibre chain",
+        seed="Cisco calls a networking supercycle.",
+        chain=[
+            Hop(claim="Cisco claims a supercycle", checked=False),
+            Hop(claim="The fibre market is concentrated", checked=True, source="public record"),
+            Hop(claim="CommScope carries heavy debt", checked=False),
+            Hop(claim="Corning captures the shortfall", checked=False),
+        ],
+        weakest_hop_index=weakest_hop_index,
+    )
+    saved = store.get(store.save(dream))
+    assert saved is not None
+    return store, saved
+
+
+def test_only_unchecked_hops_are_looked_up_and_the_weakest_goes_first(tmp_path) -> None:
+    """A look-up budget of three spent on incidental hops leaves the dream stuck.
+
+    `promotion_for` refuses a chain whose weakest link is unpinned, so the hop
+    the dream turns on is the one worth a question. Re-sourcing an already
+    checked hop would spend the budget learning nothing.
+    """
+    from bot.dreamer import questions_for_dream
+
+    _, dream = _dream_with_unchecked_hops(tmp_path, weakest_hop_index=3)
+
+    questions, dropped = questions_for_dream(dream)
+
+    assert questions == [
+        "CommScope carries heavy debt",
+        "Cisco claims a supercycle",
+        "Corning captures the shortfall",
+    ]
+    assert dropped == 0
+    assert "The fibre market is concentrated" not in questions
+
+
+def test_a_chain_with_nothing_unchecked_asks_nothing(tmp_path) -> None:
+    from bot.dreamer import questions_for_dream
+    from bot.dreaming import Dream, Hop
+
+    dream = Dream(
+        title="t",
+        seed="s",
+        chain=[Hop(claim="a", checked=True, source="https://example.com/a")],
+    )
+
+    assert questions_for_dream(dream) == ([], 0)
+
+
+def test_research_records_the_citations_and_marks_no_hop_checked(tmp_path) -> None:
+    """**The load-bearing one.** Code stores evidence; the MODEL decides.
+
+    Having `research_dream` match a quotation to a hop and set `checked` would
+    be a judgement made by a string comparison nobody can audit — precisely the
+    laundering `Citation` is shaped to prevent, arriving in the chain as a
+    source. So the citations are stored as messages, the next step shows them
+    to the dreamer, and the chain is untouched by this pass.
+    """
+    from bot.dreamer import research_dream
+    from bot.dreaming import RESEARCHER
+
+    store, dream = _dream_with_unchecked_hops(tmp_path, weakest_hop_index=3)
+    before = [(h.claim, h.checked, h.source) for h in dream.chain]
+
+    runner = _Runner(
+        reply="CITE | CommScope reported $9.5bn of net debt | Example Wire "
+        "| https://example.com/debt"
+    )
+    from bot.research import Researcher
+
+    answers = research_dream(dream, store, Researcher(runner=runner))  # type: ignore[arg-type]
+
+    assert len(answers) == 3
+    reloaded = store.get(int(dream.id or 0))
+    assert reloaded is not None
+    assert [(h.claim, h.checked, h.source) for h in reloaded.chain] == before
+    assert reloaded.verification == dream.verification
+
+    messages = store.messages(int(dream.id or 0))
+    citations = [m for m in messages if m.kind == "citation"]
+    assert len(citations) == 3
+    assert all(m.speaker == RESEARCHER for m in citations)
+    assert "CommScope reported $9.5bn of net debt" in citations[0].text
+    assert "https://example.com/debt" in citations[0].text
+
+
+def test_a_failed_lookup_is_recorded_rather_than_losing_the_run(tmp_path) -> None:
+    """A look-up is an extra and must never cost a step.
+
+    It runs after the save for that reason, and the failure lands as an
+    `error` on the answer — which renders as "nothing was looked up, which is
+    NOT a finding that there is nothing to find". A researcher that is not
+    installed must not leave a trail that reads like a sourced-and-empty hop.
+    """
+    from bot.dreamer import research_dream
+    from bot.research import Researcher
+
+    store, dream = _dream_with_unchecked_hops(tmp_path)
+
+    answers = research_dream(
+        dream,
+        store,
+        Researcher(runner=_Runner(permitted=False)),  # type: ignore[arg-type]
+    )
+
+    assert answers and all(not a.was_answered for a in answers)
+    assert all(not a.found_nothing for a in answers)
+    stored = [m.text for m in store.messages(int(dream.id or 0)) if m.kind == "citation"]
+    assert stored and all("NOT a finding" in t for t in stored)
+
+
+def test_the_next_prompt_carries_the_citations_and_says_what_they_are_for(tmp_path) -> None:
+    """One run behind, read back from the store so a restart does not lose it.
+
+    The prompt has to say what a quotation may be used for, or a model reading
+    an unqualified quotation next to a hop will treat adjacency as evidence —
+    which is how an invented hop gets a URL attached to it.
+    """
+    from bot.config import Rules
+    from bot.dreamer import build_prompt
+    from bot.journal import Journal
+    from bot.research import CITATION_PREAMBLE
+
+    store, dream = _dream_with_unchecked_hops(tmp_path)
+    store.add_message(
+        int(dream.id or 0),
+        speaker="researcher",
+        kind="citation",
+        text='Asked: "CommScope carries heavy debt"\n- "net debt of $9.5bn" '
+        "— Example Wire https://example.com/debt",
+    )
+
+    reloaded = store.get(int(dream.id or 0))
+    assert reloaded is not None
+    lookups = [
+        "On dream {} ({}):\n{}".format(
+            reloaded.id,
+            reloaded.title,
+            "\n\n".join(
+                m.text for m in store.messages(int(dream.id or 0)) if m.kind == "citation"
+            ),
+        )
+    ]
+
+    prompt = build_prompt(
+        Rules.load(Path("config/rules.yaml")),
+        Journal(tmp_path / "journal.db"),
+        [reloaded],
+        lookups=lookups,
+    )
+
+    assert CITATION_PREAMBLE.split("\n")[0] in prompt
+    assert "https://example.com/debt" in prompt
+    assert "merely ADJACENT to a hop is not" in prompt
+    # The caveat must never be separated from the quotations it qualifies.
+    assert prompt.index("Nobody here has checked") < prompt.index("https://example.com/debt")
+
+
+def test_no_researcher_at_all_is_not_the_same_as_one_that_found_nothing() -> None:
+    """`DreamerResult.research` is `None` versus `[]`, the `has_cycles` rule.
+
+    A dreamer with no researcher wired in and a dreamer whose every question
+    came back empty are opposite findings about how sourceable the chain is,
+    and a surface handed only an empty list reaches for the wrong reading.
+    """
+    from bot.dreamer import DreamerResult
+    from bot.dreaming import Dream
+
+    assert DreamerResult(dream=Dream(title="t", seed="s"), usage=None, advanced=False).research is None

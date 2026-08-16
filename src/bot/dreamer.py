@@ -79,7 +79,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 import anthropic
 import structlog
@@ -91,6 +91,7 @@ from .dreaming import (
     DREAMER,
     MAX_FUSION_PARENTS,
     MIN_FUSION_PARENTS,
+    RESEARCHER,
     Dream,
     DreamCondition,
     DreamStage,
@@ -115,6 +116,12 @@ from .news_history import (
     ConsiderationRecall,
     describe_age,
     recall_considerations,
+)
+from .research import (
+    MAX_QUESTIONS_PER_RUN,
+    ResearchAnswer,
+    questions_for_run,
+    render_lookups,
 )
 from .souls import GROGU, load_soul
 from .triggers import CycleReadings
@@ -959,6 +966,7 @@ def build_prompt(
     posts: list[str] | None = None,
     fusions: Sequence[FusionCandidate] = (),
     considerations: ConsiderationRecall | None = None,
+    lookups: Sequence[str] = (),
     now: datetime | None = None,
 ) -> str:
     """Everything the dreamer is shown, and nothing else.
@@ -1076,6 +1084,31 @@ def build_prompt(
                 )
                 out.append(f"      condition ({mark}): {condition.text}{shape} [{pins}]")
         out.append("")
+
+    # Immediately after the chains, because every quotation here was fetched
+    # ABOUT one of the hops just listed and is unreadable apart from it. The
+    # `build_market_context` ordering rule in a new place: last cycle's watches
+    # go after the indicators they are checked against.
+    #
+    # It sits after the open dreams rather than up with the headlines for a
+    # second reason. A quotation is the highest-provenance text in this
+    # document and also the only text in it written by somebody outside this
+    # system; placed among the feeds it would read as one more input, where
+    # placed under the chains it reads as evidence offered against a specific
+    # claim, which is the only thing it may be used as.
+    if lookups:
+        block = render_lookups(lookups)
+        if block:
+            out.append(block)
+            out.append(
+                "These were fetched for the UNCHECKED hops above, one look-up "
+                "per hop. A quotation that establishes a hop is a source: name "
+                "it in that hop's `source` and set `checked`. A quotation that "
+                "is merely ADJACENT to a hop is not — leave the hop unchecked "
+                "and say so. Nothing was found for a hop is a real answer and "
+                "changes nothing about it."
+            )
+            out.append("")
 
     # AFTER the open dreams, so a shared hop is read against the chains it was
     # found in rather than from a list of ids with no context — the same
@@ -1374,6 +1407,130 @@ class DreamerResult:
     # `has_cycles` rule, arriving on a result object.
     considerations: ConsiderationRecall | None = None
 
+    # What the researcher was asked and what came back, or `None` when it was
+    # never asked — no researcher wired in at all.
+    #
+    # `None` versus an empty list is the distinction that matters and it is the
+    # `has_cycles` rule again: a run with no researcher and a run whose
+    # questions all came back empty are opposite findings about how well the
+    # chain is sourced. An answer carrying an `error` is a THIRD state and
+    # lives on the answer itself, because "the wrapper is not permitted here"
+    # and "nothing is published about this yet" must not render alike.
+    research: list[ResearchAnswer] | None = None
+
+
+# ---------------------------------------------------------- asking the researcher
+#
+# The dreamer reasons with no way to look anything up, so every hop it writes
+# is reference knowledge it already had or an invention — and `Hop.checked`
+# exists because some of them were inventions. This is the half that goes and
+# looks, and every rule below is about it not becoming a way to launder a
+# conclusion into a chain.
+
+
+def questions_for_dream(dream: Dream) -> tuple[list[str], int]:
+    """What to go and look up about this dream, weakest hop first.
+
+    **Derived from the hop's own claim rather than asked of the model**, and
+    that is a trade rather than an oversight. A `research_question` field on
+    `DreamHop` would let the dreamer phrase its own look-up, which is the
+    better question — and `EVERY_FIELD_REQUIRED` puts every property into the
+    schema's `required` list, so a field per hop multiplies the grammar the API
+    has to compile on a schema that was ALREADY over the line: the dreamer
+    could not make its call, which is why `DreamHop` is as small as it is.
+    Paying that to improve the phrasing of a search is the wrong trade.
+
+    Weakest first because that is the hop the dream turns on. `promotion_for`
+    already refuses a chain whose weakest link is unpinned, and a look-up
+    budget of three spent on the incidental hops would leave the one that could
+    kill the dream unsourced.
+
+    Only UNCHECKED hops, so a run does not spend its budget re-sourcing what is
+    already sourced. Returns the dropped count for the no-silent-caps rule.
+    """
+    unchecked = [(i, hop) for i, hop in enumerate(dream.chain, 1) if not hop.checked]
+    weakest = dream.resolved_weakest_hop
+    unchecked.sort(key=lambda pair: (pair[0] != weakest, pair[0]))
+    return questions_for_run([hop.claim for _, hop in unchecked])
+
+
+class _Asker(Protocol):
+    """What `research_dream` needs, so a test can stand in for a subprocess."""
+
+    @property
+    def enabled(self) -> bool: ...
+
+    def ask(self, question: str) -> ResearchAnswer: ...
+
+
+def research_dream(
+    dream: Dream,
+    store: DreamStore,
+    researcher: _Asker,
+    *,
+    now: datetime | None = None,
+) -> list[ResearchAnswer]:
+    """Look up this dream's unchecked hops and record what came back.
+
+    **Nothing here marks a hop checked, and nothing here may.** The citations
+    are stored as messages and the NEXT step shows them to the dreamer, which
+    decides whether a given quotation establishes a given claim. Having code
+    assert "this quote proves this hop" would be precisely the laundering
+    `research.Citation` is shaped to prevent — a matched pair chosen by a
+    string similarity nobody can audit, arriving in the chain as a source.
+
+    So this converges over a dream's life rather than in one run, which is the
+    honest speed for it: a dream gets many steps, and each one sees the
+    previous one's evidence.
+
+    Every failure is contained. A researcher that is not permitted, times out
+    or exits non-zero yields answers carrying an `error`, they are stored like
+    any other, and the step that produced them is untouched. A run must not
+    lose its dream because a look-up failed.
+    """
+    if not dream.id:
+        return []
+    questions, dropped = questions_for_dream(dream)
+    if not questions:
+        return []
+    if dropped:
+        # Said out loud rather than left to the reader to infer from a count of
+        # three. A run that answered three of eight and a run that was asked
+        # three are different facts about how well the chain is covered.
+        log.info(
+            "research_questions_capped",
+            dream_id=dream.id,
+            asked=len(questions),
+            dropped=dropped,
+            cap=MAX_QUESTIONS_PER_RUN,
+        )
+
+    answers = [researcher.ask(question) for question in questions]
+    for answer in answers:
+        # Stored EVEN WHEN it failed or found nothing, and stored as `citation`
+        # rather than `note` so a surface can render it as somebody else's
+        # words with a source instead of as a sentence an agent wrote. An
+        # unanswerable question is a fact about the chain worth keeping: it is
+        # the difference between a hop nobody has looked at and a hop nobody
+        # can source.
+        store.add_message(
+            int(dream.id),
+            speaker=RESEARCHER,
+            kind="citation",
+            text=answer.render(),
+            at=now,
+        )
+
+    log.info(
+        "research_step",
+        dream_id=dream.id,
+        asked=len(answers),
+        answered=sum(1 for a in answers if a.was_answered),
+        cited=sum(len(a.citations) for a in answers),
+        empty=sum(1 for a in answers if a.found_nothing),
+    )
+    return answers
+
 
 # Where the timer unit lives once bootstrap has installed it, and the repo copy
 # it was installed from.
@@ -1469,6 +1626,14 @@ def estimated_cost_usd(spec: ModelSpec) -> tuple[float, float] | None:
     return per_run, per_run * 365
 
 
+#: Citation blocks carried into the prompt per dream. One run's worth of
+#: look-ups plus a little history, so a hop the researcher failed to source
+#: twice is visibly unsourceable rather than looking freshly unattempted — and
+#: bounded, because a dream that runs for a month would otherwise carry a month
+#: of quotations into every prompt at a cost that grows without limit.
+LOOKUPS_PER_DREAM = MAX_QUESTIONS_PER_RUN * 2
+
+
 class Dreamer:
     """One dream step per call.
 
@@ -1485,10 +1650,17 @@ class Dreamer:
         *,
         client: Any | None = None,
         audit: AuditLog | None = None,
+        researcher: _Asker | None = None,
     ) -> None:
         self._rules = rules
         self._store = store
         self._journal = journal
+        # `None` means no look-ups at all, and that is a different state from a
+        # researcher that is installed and answering nothing — `DreamerResult.
+        # research` keeps them apart. Injected with no default for the reason
+        # every store here is: a default would put a subprocess call in the
+        # constructor of anything that builds a `Dreamer`, tests included.
+        self._researcher = researcher
         # Both directions of the consideration path, or neither. The log is
         # where a chat agent's note is read FROM and where "this run was shown
         # it" is written TO, so a dreamer holding one and not the other could
@@ -1542,14 +1714,16 @@ class Dreamer:
         existing = [d for d in pool if d.is_open][: CARRY_FORWARD * 3]
         candidates = fusion_candidates(pool, limit=FUSION_OFFERS)
         considerations = self._recall_considerations(moment)
+        carried = existing[:CARRY_FORWARD]
         prompt = build_prompt(
             self._rules,
             self._journal,
-            existing[:CARRY_FORWARD],
+            carried,
             headlines=headlines,
             posts=posts,
             fusions=candidates,
             considerations=considerations,
+            lookups=self._stored_lookups(carried),
             now=moment,
         )
 
@@ -1583,6 +1757,17 @@ class Dreamer:
 
         dream, advanced, scope = self._apply(step, existing, now=now)
         self._store.save(dream)
+
+        # AFTER the save, and never before it. The step is the run's product;
+        # a look-up is an extra that must not be able to cost one. If the
+        # researcher hangs, exits non-zero or is not installed, the dream is
+        # already on the shelf and `research_dream` contains the failure in an
+        # `error` on the answer.
+        research = (
+            research_dream(dream, self._store, self._researcher, now=moment)
+            if self._researcher is not None
+            else None
+        )
 
         if scope.dropped:
             # Three records, and each is for a different reader. The log line is
@@ -1618,7 +1803,39 @@ class Dreamer:
             # Only ever a refusal here: a fusion that succeeded returned above.
             fusion=refusal,
             considerations=considerations,
+            research=research,
         )
+
+    def _stored_lookups(self, dreams: Sequence[Dream]) -> list[str]:
+        """Citations already fetched for the dreams being carried forward.
+
+        **One run behind, by design.** The look-up happens after a step, so its
+        answers reach the model on the NEXT step. That is what keeps a
+        quotation from being matched to a hop by code: the dreamer reads the
+        evidence and decides whether it establishes the claim, which is a
+        judgement, and a judgement made by a string comparison nobody can audit
+        is the laundering `research.Citation` is shaped to prevent.
+
+        Read from the store rather than threaded through the process, so a
+        restart between two runs does not throw the evidence away.
+
+        Failures are swallowed to an empty list. The store is SQLite on the
+        same box and a read that fails is a bad day rather than a reason to
+        lose the whole run — the same direction as `_recall_considerations`.
+        """
+        blocks: list[str] = []
+        for dream in dreams:
+            if not dream.id:
+                continue
+            try:
+                messages = self._store.messages(int(dream.id))
+            except Exception as exc:  # pragma: no cover - defensive
+                log.warning("research_recall_failed", dream_id=dream.id, error=repr(exc))
+                continue
+            recent = [m.text for m in messages if m.kind == "citation"][-LOOKUPS_PER_DREAM:]
+            if recent:
+                blocks.append(f"On dream {dream.id} ({dream.title}):\n" + "\n\n".join(recent))
+        return blocks
 
     def _recall_considerations(self, now: datetime) -> ConsiderationRecall | None:
         """What the chat surface has put up that no run has been shown yet.
