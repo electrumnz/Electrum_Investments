@@ -185,7 +185,7 @@ chmod 755 "$APP_DIR/deploy/backup-journal.sh" "$APP_DIR/deploy/check-tailscale.s
           "$APP_DIR/deploy/run-dream.sh" "$APP_DIR/deploy/apply-settings.sh" \
           "$APP_DIR/deploy/enable-forge.sh" "$APP_DIR/deploy/update.sh" \
           "$APP_DIR/deploy/enable-dream.sh" "$APP_DIR/deploy/run-research.sh" \
-          "$APP_DIR/deploy/enable-console.sh"
+          "$APP_DIR/deploy/enable-research.sh" "$APP_DIR/deploy/enable-console.sh"
 systemctl daemon-reload
 systemctl enable --quiet mudhorn-bot.service mudhorn-web.service
 echo "    enabled at boot, not started"

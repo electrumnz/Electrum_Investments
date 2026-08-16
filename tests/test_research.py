@@ -22,7 +22,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import ClassVar
 
-from bot.dreaming import Dream
+from bot.dreaming import Dream, DreamMessage, DreamStore
+from bot.hermes import HermesResult
 from bot.models import OrderProposal
 from bot.research import (
     MAX_CITATIONS_PER_QUESTION,
@@ -452,3 +453,562 @@ class _FrozenClock:
 
     def __getattr__(self, name: str) -> object:
         return getattr(datetime, name)
+
+
+# ------------------------------------------------------------ the reply parser
+
+
+def _at() -> datetime:
+    return datetime(2026, 8, 16, 9, 0, tzinfo=UTC)
+
+
+def test_a_citation_line_becomes_a_citation() -> None:
+    from bot.research import parse_reply
+
+    answer = parse_reply(
+        "Who supplies optical fibre?",
+        "CITE | Corning is the largest producer of optical fibre | Example Wire "
+        "| https://example.com/fibre",
+        now=_at(),
+    )
+
+    assert answer.was_answered
+    assert len(answer.citations) == 1
+    cite = answer.citations[0]
+    assert cite.quote == "Corning is the largest producer of optical fibre"
+    assert cite.publisher == "Example Wire"
+    assert cite.url == "https://example.com/fibre"
+    assert cite.retrieved_at == _at()
+
+
+def test_the_retrieval_time_is_stamped_here_and_never_read_from_the_reply() -> None:
+    """A model asked for a timestamp will produce one.
+
+    A fabricated retrieval time sitting on a real quote is a plausible wrong
+    figure of exactly the kind this repository refuses, and it is worse than
+    most because it lends the quote an air of having been checked at a
+    particular moment. What we can honestly say is when WE asked, so that is
+    what is recorded — even when the reply offers a date of its own.
+    """
+    from bot.research import parse_reply
+
+    answer = parse_reply(
+        "q",
+        "CITE | words | Pub | https://example.com/a | 1999-01-01T00:00:00Z",
+        now=_at(),
+    )
+
+    assert len(answer.citations) == 1
+    assert answer.citations[0].retrieved_at == _at()
+
+
+def test_an_unparseable_line_is_counted_and_never_salvaged() -> None:
+    """A citation must not be CONSTRUCTED here, only transcribed.
+
+    Its whole value is that somebody else wrote it and a reader can go and
+    check, so a line that does not carry a URL cannot be rescued into one with
+    a guess. It is dropped and counted — the no-silent-caps rule — because
+    "two quotes" and "two quotes out of five" are different statements about
+    how well a look-up went.
+    """
+    from bot.research import parse_reply
+
+    answer = parse_reply(
+        "q",
+        "\n".join(
+            [
+                "Here is what I found:",
+                "CITE | a real quote | Pub | https://example.com/a",
+                "CITE | missing its url | Pub",
+                "- some bullet the model felt like adding",
+            ]
+        ),
+        now=_at(),
+    )
+
+    assert [c.quote for c in answer.citations] == ["a real quote"]
+    assert answer.dropped_unattributable == 3
+    assert answer.was_answered
+
+
+def test_nothing_found_is_an_answer_and_not_an_error() -> None:
+    """The distinction `found_nothing` exists for, all the way through.
+
+    A question that was put and came back empty says something about the
+    world. A question that was never put because no researcher is installed
+    says nothing about it at all, and the two must not render the same.
+    """
+    from bot.research import parse_reply
+
+    answer = parse_reply(
+        "q", "NOTHING | no filings covering 2026 volumes are published yet", now=_at()
+    )
+
+    assert answer.was_answered
+    assert answer.found_nothing
+    assert not answer.error
+    assert "no filings" in answer.not_found
+    assert "not evidence of absence" in answer.render()
+
+
+def test_a_reply_with_a_conclusion_in_it_contributes_no_conclusion() -> None:
+    """A summary launders provenance, so there is nowhere to put one.
+
+    The rail is the SHAPE rather than a sentence in the soul file: even when
+    the researcher ignores its instructions and editorialises, the prose lands
+    on an unparseable line and is dropped. `Citation` has no field a conclusion
+    could survive in.
+    """
+    from bot.research import parse_reply
+
+    answer = parse_reply(
+        "q",
+        "\n".join(
+            [
+                "This strongly suggests Corning will capture the shortfall.",
+                "CITE | Corning reported record fibre volumes | Pub | https://example.com/a",
+                "Implication: buy GLW.",
+            ]
+        ),
+        now=_at(),
+    )
+
+    rendered = answer.render()
+    assert "strongly suggests" not in rendered
+    assert "buy GLW" not in rendered
+    assert "Corning reported record fibre volumes" in rendered
+
+
+# ------------------------------------------------------------------ the bridge
+
+
+class _Runner:
+    """A double for `HermesRunner`, standing in for the third instance."""
+
+    def __init__(self, *, permitted: bool = True, reply: str = "", error: str = "") -> None:
+        self.permitted = permitted
+        self.available = True
+        self._reply = reply
+        self._error = error
+        self.prompts: list[str] = []
+
+    def run(self, prompt: str) -> HermesResult:
+        self.prompts.append(prompt)
+        if self._error:
+            return HermesResult.failed(self._error)
+        return HermesResult(text=self._reply)
+
+
+def test_no_permitted_wrapper_is_an_error_and_not_an_empty_answer() -> None:
+    """"Nobody looked" and "we looked and found nothing" are opposite findings.
+
+    This is the `permitted`-versus-`available` gap that was live on the droplet
+    for the dreamer: the wrapper file ships on every box, so reading the weaker
+    question would send questions at a sudo that refuses them and file the
+    refusals as research failures. A caller must be able to tell that no
+    look-up happened at all.
+    """
+    from bot.research import Researcher
+
+    answer = Researcher(runner=_Runner(permitted=False)).ask("anything")  # type: ignore[arg-type]
+
+    assert not answer.was_answered
+    assert not answer.found_nothing
+    assert "enable-research.sh" in answer.error
+    assert "NOT a finding" in answer.render()
+
+
+def test_a_failed_turn_never_raises_into_the_scheduled_job() -> None:
+    from bot.research import Researcher
+
+    answer = Researcher(runner=_Runner(error="Hermes exited 127")).ask("q")  # type: ignore[arg-type]
+
+    assert not answer.was_answered
+    assert "127" in answer.error
+
+
+def test_the_question_reaches_the_wrapper_with_the_no_conclusions_rule() -> None:
+    """The prose rail travels with every single question, not once at setup.
+
+    `souls/kuiil.md` carries the character and this carries the instruction,
+    deliberately both: a soul file is read from disk at call time and can be
+    edited on the box, and the whole argument for the researcher is that a
+    conclusion must not come back.
+    """
+    from bot.research import Researcher
+
+    runner = _Runner(reply="NOTHING | nothing found")
+    Researcher(runner=runner).ask("who supplies fibre?")  # type: ignore[arg-type]
+
+    assert len(runner.prompts) == 1
+    sent = runner.prompts[0]
+    assert "who supplies fibre?" in sent
+    assert "QUOTATIONS ONLY" in sent
+    assert "do not summarise" in sent.lower()
+    assert "empty answer is a real answer" in sent.lower()
+
+
+# ------------------------------------------------- the wiring into a dream run
+
+
+def _dream_with_unchecked_hops(
+    tmp_path: Path, *, weakest_hop_index: int | None = None
+) -> tuple[DreamStore, Dream]:
+    from bot.dreaming import Hop
+
+    store = DreamStore(tmp_path / "dreams.db")
+    dream = Dream(
+        title="Cisco's supercycle strains the fibre chain",
+        seed="Cisco calls a networking supercycle.",
+        chain=[
+            Hop(claim="Cisco claims a supercycle", checked=False),
+            Hop(claim="The fibre market is concentrated", checked=True, source="public record"),
+            Hop(claim="CommScope carries heavy debt", checked=False),
+            Hop(claim="Corning captures the shortfall", checked=False),
+        ],
+        weakest_hop_index=weakest_hop_index,
+    )
+    saved = store.get(store.save(dream))
+    assert saved is not None
+    return store, saved
+
+
+def test_only_unchecked_hops_are_looked_up_and_the_weakest_goes_first(tmp_path) -> None:
+    """A look-up budget of three spent on incidental hops leaves the dream stuck.
+
+    `promotion_for` refuses a chain whose weakest link is unpinned, so the hop
+    the dream turns on is the one worth a question. Re-sourcing an already
+    checked hop would spend the budget learning nothing.
+    """
+    from bot.dreamer import questions_for_dream
+
+    _, dream = _dream_with_unchecked_hops(tmp_path, weakest_hop_index=3)
+
+    questions, dropped = questions_for_dream(dream)
+
+    assert questions == [
+        "CommScope carries heavy debt",
+        "Cisco claims a supercycle",
+        "Corning captures the shortfall",
+    ]
+    assert dropped == 0
+    assert "The fibre market is concentrated" not in questions
+
+
+def test_a_chain_with_nothing_unchecked_asks_nothing(tmp_path) -> None:
+    from bot.dreamer import questions_for_dream
+    from bot.dreaming import Dream, Hop
+
+    dream = Dream(
+        title="t",
+        seed="s",
+        chain=[Hop(claim="a", checked=True, source="https://example.com/a")],
+    )
+
+    assert questions_for_dream(dream) == ([], 0)
+
+
+def test_research_records_the_citations_and_marks_no_hop_checked(tmp_path) -> None:
+    """**The load-bearing one.** Code stores evidence; the MODEL decides.
+
+    Having `research_dream` match a quotation to a hop and set `checked` would
+    be a judgement made by a string comparison nobody can audit — precisely the
+    laundering `Citation` is shaped to prevent, arriving in the chain as a
+    source. So the citations are stored as messages, the next step shows them
+    to the dreamer, and the chain is untouched by this pass.
+    """
+    from bot.dreamer import research_dream
+    from bot.dreaming import RESEARCHER
+
+    store, dream = _dream_with_unchecked_hops(tmp_path, weakest_hop_index=3)
+    before = [(h.claim, h.checked, h.source) for h in dream.chain]
+
+    runner = _Runner(
+        reply="CITE | CommScope reported $9.5bn of net debt | Example Wire "
+        "| https://example.com/debt"
+    )
+    from bot.research import Researcher
+
+    answers = research_dream(dream, store, Researcher(runner=runner))  # type: ignore[arg-type]
+
+    assert len(answers) == 3
+    reloaded = store.get(int(dream.id or 0))
+    assert reloaded is not None
+    assert [(h.claim, h.checked, h.source) for h in reloaded.chain] == before
+    assert reloaded.verification == dream.verification
+
+    messages = store.messages(int(dream.id or 0))
+    citations = [m for m in messages if m.kind == "citation"]
+    assert len(citations) == 3
+    assert all(m.speaker == RESEARCHER for m in citations)
+    assert "CommScope reported $9.5bn of net debt" in citations[0].text
+    assert "https://example.com/debt" in citations[0].text
+
+
+def test_a_failed_lookup_is_recorded_rather_than_losing_the_run(tmp_path) -> None:
+    """A look-up is an extra and must never cost a step.
+
+    It runs after the save for that reason, and the failure lands as an
+    `error` on the answer — which renders as "nothing was looked up, which is
+    NOT a finding that there is nothing to find". A researcher that is not
+    installed must not leave a trail that reads like a sourced-and-empty hop.
+    """
+    from bot.dreamer import research_dream
+    from bot.research import Researcher
+
+    store, dream = _dream_with_unchecked_hops(tmp_path)
+
+    answers = research_dream(
+        dream,
+        store,
+        Researcher(runner=_Runner(permitted=False)),  # type: ignore[arg-type]
+    )
+
+    assert answers and all(not a.was_answered for a in answers)
+    assert all(not a.found_nothing for a in answers)
+    stored = [m.text for m in store.messages(int(dream.id or 0)) if m.kind == "citation"]
+    assert stored and all("NOT a finding" in t for t in stored)
+
+
+def test_the_next_prompt_carries_the_citations_and_says_what_they_are_for(tmp_path) -> None:
+    """One run behind, read back from the store so a restart does not lose it.
+
+    The prompt has to say what a quotation may be used for, or a model reading
+    an unqualified quotation next to a hop will treat adjacency as evidence —
+    which is how an invented hop gets a URL attached to it.
+    """
+    from bot.config import Rules
+    from bot.dreamer import build_prompt
+    from bot.journal import Journal
+    from bot.research import CITATION_PREAMBLE
+
+    store, dream = _dream_with_unchecked_hops(tmp_path)
+    store.add_message(
+        int(dream.id or 0),
+        speaker="researcher",
+        kind="citation",
+        text='Asked: "CommScope carries heavy debt"\n- "net debt of $9.5bn" '
+        "— Example Wire https://example.com/debt",
+    )
+
+    reloaded = store.get(int(dream.id or 0))
+    assert reloaded is not None
+    lookups = [
+        "On dream {} ({}):\n{}".format(
+            reloaded.id,
+            reloaded.title,
+            "\n\n".join(
+                m.text for m in store.messages(int(dream.id or 0)) if m.kind == "citation"
+            ),
+        )
+    ]
+
+    prompt = build_prompt(
+        Rules.load(Path("config/rules.yaml")),
+        Journal(tmp_path / "journal.db"),
+        [reloaded],
+        lookups=lookups,
+    )
+
+    assert CITATION_PREAMBLE.split("\n")[0] in prompt
+    assert "https://example.com/debt" in prompt
+    assert "merely ADJACENT to a hop is not" in prompt
+    # The caveat must never be separated from the quotations it qualifies.
+    assert prompt.index("Nobody here has checked") < prompt.index("https://example.com/debt")
+
+
+def test_no_researcher_at_all_is_not_the_same_as_one_that_found_nothing() -> None:
+    """`DreamerResult.research` is `None` versus `[]`, the `has_cycles` rule.
+
+    A dreamer with no researcher wired in and a dreamer whose every question
+    came back empty are opposite findings about how sourceable the chain is,
+    and a surface handed only an empty list reaches for the wrong reading.
+    """
+    from bot.dreamer import DreamerResult
+    from bot.dreaming import Dream
+
+    assert DreamerResult(dream=Dream(title="t", seed="s"), usage=None, advanced=False).research is None
+
+
+# ------------------------------------------------------------- on the page
+
+
+def _msg(kind: str, text: str, speaker: str = "researcher") -> DreamMessage:
+    return DreamMessage(
+        dream_id=1,
+        at=datetime(2026, 8, 16, 9, 0, tzinfo=UTC),
+        speaker=speaker,
+        text=text,
+        kind=kind,
+    )
+
+
+def test_citations_get_their_own_section_and_not_the_negotiation_transcript() -> None:
+    """Grouping by what a thing IS makes the missing member visible.
+
+    The Board's protective-orders lesson in a new place. A citation filed under
+    "What was said about it" beside two agents negotiating reads as one more
+    opinion, and the entire value of a citation is that it is not one. The
+    transcript is also collapsed and labelled as conversation, so the evidence
+    for an unchecked hop would sit behind a triangle that says it is chatter.
+    """
+    from bot.web.render import _lookups, _transcript
+
+    messages = [
+        _msg("offer", "Have a look at this one", speaker="dreamer"),
+        _msg("citation", 'Asked: "CommScope debt"\n- "net debt of $9.5bn" — https://x.test/d'),
+    ]
+
+    talk = _transcript(messages)
+    found = _lookups(messages)
+
+    assert "net debt" not in talk
+    assert "1 turn" in talk
+    assert "net debt of $9.5bn" in found
+    assert "https://x.test/d" in found
+    assert "Have a look at this one" not in found
+
+
+def test_the_caveat_is_on_the_same_element_as_the_quotations() -> None:
+    """An unqualified quotation in a document reads as established fact.
+
+    That is the reason `Hop.checked` and the `Verification` badge exist at all,
+    and these come from pages nobody here vetted — a weaker provenance than
+    anything else on the card. The heading has to say what they are AND what
+    they are not, above the quotes rather than anywhere else on the page.
+    """
+    from bot.web.render import _lookups
+
+    html = _lookups([_msg("citation", 'quoted words — https://x.test/a')])
+
+    assert "nobody here has vetted" in html
+    assert "does not make a hop checked" in html
+    assert html.index("does not make a hop checked") < html.index("quoted words")
+
+
+def test_a_dream_with_no_lookups_gets_no_section_at_all() -> None:
+    """Absent rather than empty, like the "Waiting on you" card.
+
+    Every dream recorded before the researcher existed has no look-ups, and a
+    panel announcing zero on all of them teaches a reader to stop seeing the
+    section.
+    """
+    from bot.web.render import _lookups
+
+    assert _lookups([]) == ""
+    assert _lookups([_msg("offer", "something", speaker="dreamer")]) == ""
+
+
+def test_the_dream_unit_blocks_sudo_and_the_dropin_is_what_unblocks_it() -> None:
+    """The researcher is INERT on a stock box, and this pins why.
+
+    `mudhorn-dream.service` sets NoNewPrivileges, RestrictSUIDSGID and
+    ProtectHome. All three block `sudo` — the second by IMPLYING the first,
+    which is the one people miss — so the look-up cannot run from the dream
+    timer as shipped. It fails safe rather than silently, because
+    `Researcher.enabled` asks the policy and gets a refusal.
+
+    Two halves are asserted together on purpose. If somebody relaxes the base
+    unit, the drop-in becomes pointless and this fails; if somebody drops the
+    drop-in, the feature becomes inert and this fails. A comment saying so
+    would not.
+    """
+    root = Path(__file__).resolve().parents[1]
+    unit = (root / "deploy/systemd/mudhorn-dream.service").read_text()
+    dropin = (root / "deploy/systemd/mudhorn-dream-research.conf").read_text()
+
+    for setting in ("NoNewPrivileges", "RestrictSUIDSGID", "ProtectHome"):
+        assert f"{setting}=true" in unit, f"{setting} left the base unit"
+        assert f"{setting}=false" in dropin, f"{setting} not relaxed by the drop-in"
+
+    # The drop-in relaxes those three and NOTHING else. A drop-in only
+    # overrides what it names, so an extra key here is a sandbox setting
+    # silently switched off on a unit that never asked for it.
+    relaxed = {
+        line.split("=")[0]
+        for line in dropin.splitlines()
+        if "=" in line and not line.strip().startswith("#")
+    }
+    assert relaxed == {"NoNewPrivileges", "RestrictSUIDSGID", "ProtectHome"}
+
+
+def test_enable_research_installs_the_dropin_and_removes_it_again() -> None:
+    """A grant with a blocked sudo is inert; a relaxed sandbox with no grant is
+    the cost without the benefit. Both halves have to move together."""
+    script = (Path(__file__).resolve().parents[1] / "deploy/enable-research.sh").read_text()
+
+    assert "mudhorn-dream.service.d" in script
+    assert 'install -m 644 -o root -g root "$DROPIN_SRC" "$DROPIN"' in script
+    # --off removes it. Checked as a string rather than by running the script,
+    # because running it would need root and a systemd.
+    off = script.split('if [[ "$mode" == "--off" ]]')[1].split('[[ "$mode" == "on" ]]')[0]
+    assert 'rm -f "$DROPIN"' in off
+    assert "daemon-reload" in off
+
+
+def test_the_researcher_config_is_an_allowlist_with_no_mcp_server() -> None:
+    """The quarantine is a property of the process, not of the soul file.
+
+    An allowlist rather than the denylist the other two homes use, and that is
+    the opposite choice on purpose: a denylist admits whatever the next Hermes
+    release adds, and here that is a web-reading process gaining a capability
+    nobody chose, on a timer, unattended. Getting an allowlist wrong yields an
+    agent with almost no tools, which is visible and safe.
+    """
+    root = Path(__file__).resolve().parents[1]
+    config = (root / "deploy/hermes-research-config.yaml").read_text()
+
+    # Comments stripped, because the header's own sentence explaining that
+    # there is no `mcp_servers:` key would otherwise match a naive search. The
+    # enable script had exactly that bug and it would have killed the install
+    # over the comment documenting that the instance is safe.
+    live = "\n".join(line.split("#")[0] for line in config.splitlines())
+    assert "mcp_servers" not in live
+    assert "run-mcp.sh" not in live
+    assert "toolsets:" in live
+
+    # And the script strips them too, or a correct config fails to install.
+    # Both places that check the quarantine — `--status` and the `on` path —
+    # so a fix applied to one of them does not leave the other broken.
+    script = (root / "deploy/enable-research.sh").read_text()
+    checks = script.count("run-mcp\\.sh|electrum-bot|mcp_servers")
+    assert checks == 2, checks
+    assert script.count("sed 's/#.*//'") == checks
+
+
+def test_an_index_pinned_weakest_hop_is_not_reported_as_unnamed() -> None:
+    """Two elements on one card said opposite things about one fact.
+
+    With `weakest_hop_index` set and no sentence, the chain diagram rings that
+    hop and labels it THE WEAKEST LINK, while the banner read "Not named. A
+    chain without a stated weakest link has not been attacked yet." That state
+    is legal and reachable — `_weakest_hop_refusal` accepts an index with no
+    prose, so such a dream can promote — which left the banner as the one
+    element on the page claiming the dream had not been attacked while every
+    other part treated it as pinned.
+
+    A heading is a claim, and this one was wrong in the direction that hides
+    work already done. Found by looking at the rendered page, which is where
+    this class of fault keeps being found.
+    """
+    from bot.dreaming import Hop
+    from bot.web.render import _dream
+
+    dream = Dream(
+        id=1,
+        title="t",
+        seed="s",
+        chain=[Hop(claim="one"), Hop(claim="two"), Hop(claim="three")],
+        weakest_hop_index=3,
+    )
+
+    html = _dream(dream)
+
+    assert "Not named" not in html
+    assert "named by number only" in html
+    assert "hop 3" in html
+
+    # And a chain with NEITHER still says so — the fix must not make every
+    # dream look attacked.
+    bare = _dream(Dream(id=2, title="t", seed="s", chain=[Hop(claim="one")]))
+    assert "Not named" in bare

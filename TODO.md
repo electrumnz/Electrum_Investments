@@ -2112,10 +2112,12 @@ Staged so nothing that can lose money moves first:
 
 ---
 
-## 26. BUILT — a researcher that can reach the web and nothing else
+## 26. BUILT AND WIRED — a researcher that can reach the web and nothing else
 
-**Shipped, and deliberately with no caller yet.** The containment had to be
-right before the wiring, the same order the grant path was built in.
+**Shipped with the containment first and wired up second**, which is the
+order the grant path was built in too. The caller landed 16 Aug 2026; see
+"WIRED UP" below for what the dreamer is allowed to ask and why it does not
+get to choose.
 
 The dreamer reasons about cicada broods and smelter restarts with no way to
 look anything up, so every hop it writes is reference knowledge it already had
@@ -2181,12 +2183,82 @@ which renders the unfiltered catalogue and misleads in both directions.
 The original item follows: it argued the case for a separate process
 before one existed, and the argument is what the build was checked against.
 
-### Still to build
+### WIRED UP — 16 Aug 2026, and the caller is `electrum-bot dream`
 
-Nothing calls it. A caller means deciding what the dreamer is allowed to ASK —
-a question is where a research budget is spent, and letting the dreamer write
-its own is how three questions a day becomes a crawler pointed at whatever it
-was last thinking about. That is its own commit.
+The operator's instruction: *"should be no steps by the dreamer that need
+human input"*. Looking at the live shelf, the one workbench dream had **one
+sourced hop out of six** and four observations queued for a person.
+
+**What the dreamer is allowed to ASK is settled, and it is not the dreamer's
+choice.** `questions_for_dream` derives each question from the hop's own
+claim, weakest hop first, unchecked hops only, capped at three. That is what
+stops three questions a day becoming a crawler pointed at whatever it was
+last thinking about: the budget is spent on the links the dream turns on, and
+the dreamer cannot widen it by phrasing.
+
+Letting the model write its own question would read better and was refused on
+a second ground too. `EVERY_FIELD_REQUIRED` puts every property into the
+schema's `required` list, and `DreamHop` is as small as it is because that
+schema was ALREADY over the line once — the dreamer could not make its call.
+Paying that to improve the phrasing of a search is the wrong trade.
+
+**Code stores evidence; the MODEL decides.** `research_dream` marks no hop
+checked and may not. Matching a quotation to a claim is a judgement, and a
+judgement made by a string comparison nobody can audit is the laundering
+`Citation` is shaped to prevent, arriving in the chain as a source with a URL
+on it. Citations are stored as `citation` messages, the NEXT step shows them
+under a preamble saying what they are and are not, and the dreamer either
+names one in a hop's `source` or leaves the hop unchecked. A dream converges
+over its life rather than in one run.
+
+The look-up runs AFTER the save and cannot cost a step. Not installed, timed
+out, non-zero exit — all land as an `error` on the answer and render as
+"nothing was looked up, which is NOT a finding that there is nothing to
+find". `DreamerResult.research` is `None` when no researcher is wired in at
+all, which is a different fact from every question coming back empty.
+
+### The blocker that had nothing to do with the code
+
+**`mudhorn-dream.service` blocks `sudo` three ways** — NoNewPrivileges,
+RestrictSUIDSGID (which IMPLIES the first, and is the one people miss) and
+ProtectHome, whose mount namespace every descendant inherits so the wrapper's
+`cd "$HERMES_HOME"` fails. The researcher could not have run from the dream
+timer whatever the grant said. That is `enable-dream.sh`'s lesson exactly: a
+permission to reach something unfinished is worth less than no permission.
+
+`deploy/enable-research.sh` installs a drop-in relaxing those three and
+nothing else, and `--off` removes it with the sudoers rule — a relaxed
+sandbox with no grant is the cost without the benefit. A drop-in rather than
+an edit, because `bootstrap.sh` rewrites the unit files.
+
+### The other half: the attribution was being thrown away before it arrived
+
+Found by reading the live dream rather than the code. Its opening hop was
+"Cisco's AI networking supercycle claim, made today" — sparked by a headline
+the loop had fetched that morning, from a named publisher with a working URL,
+both present in the Marketaux payload and both discarded by `_parse`. The one
+hop in the chain with a real source behind it could not be sourced.
+
+`data.news.Sourced` keeps them, and there are two renderings on purpose: the
+decision loop keeps the lean line, because its model cannot open a link and a
+model handed one it cannot follow is being invited to pretend it did; the
+dreamer gets the attributed one. `Post.render` already said exactly that
+about permalinks and was right — the reasoning stops holding the moment a
+reader exists that CAN open a link.
+
+### Still unverified on the box
+
+- **That `web` is the exact toolset key.** Unchanged. Confirm by asking the
+  agent to look something up, never by reading `/tools`.
+- **Whether `web_search` needs a Nous Portal subscription or its own
+  credential.** Unchanged.
+- **Whether relaxing the dream unit's sandbox is acceptable to the operator.**
+  It is the same trade `mudhorn-web.service` already makes for the chat panel,
+  bounded the same three ways — a root-owned wrapper with no arguments, the
+  question on stdin, and sudo running DOWNWARD into a home with no MCP server.
+  The real difference is that this unit is UNATTENDED, firing at 07:00
+  Pacific/Auckland with nobody watching, and that is why the researcher's
+  config is an allowlist rather than a denylist.
 
 ---
 

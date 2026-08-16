@@ -14,12 +14,14 @@ cache TTL below is a hard requirement rather than tuning. See `_http.TtlCache`.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
 import structlog
 
 from ._http import DEFAULT_TIMEOUT_SECONDS, JsonGetter, TtlCache, fetch_json, httpx_getter
+from .news import Sourced
 
 log = structlog.get_logger(__name__)
 
@@ -46,6 +48,10 @@ class MarketauxNews:
         self._cache = TtlCache(ttl_seconds=self.cache_ttl_seconds)
 
     def recent_headlines(self, symbols: list[str], *, limit: int = 10) -> list[str]:
+        """Plain lines, for the decision loop. See `data/news.py` for why two."""
+        return [item.line for item in self.recent_attributed(symbols, limit=limit)]
+
+    def recent_attributed(self, symbols: list[str], *, limit: int = 10) -> list[Sourced]:
         if not symbols:
             return []
 
@@ -78,11 +84,21 @@ class MarketauxNews:
         return headlines[:limit]
 
 
-def _parse(payload: Any) -> list[str]:
-    """Turn a Marketaux response into one plain line per story.
+def _parse(payload: Any) -> list[Sourced]:
+    """Turn a Marketaux response into one line per story, WITH its attribution.
 
     Tolerant on purpose. A feed that changes shape should cost us headlines, not
     raise inside the trading loop, so anything unrecognised is skipped.
+
+    **This used to return bare strings and drop `url` and `source` on the
+    floor**, which cost the dreamer the ability to cite the very stories it was
+    reasoning from. Observed on a live dream: the chain's opening hop was
+    "Cisco's AI networking supercycle claim, made today" — sparked by a headline
+    this parser had fetched, from a publisher with a live URL — and it was
+    stored UNCHECKED, because by the time it reached the prompt there was
+    nothing to put in `Hop.source`. The attribution was in the payload and this
+    function discarded it, which is `research.Citation`'s laundering rule broken
+    one layer below where that rule is written down.
     """
     if not isinstance(payload, dict):
         return []
@@ -90,7 +106,7 @@ def _parse(payload: Any) -> list[str]:
     if not isinstance(articles, list):
         return []
 
-    lines: list[str] = []
+    lines: list[Sourced] = []
     for article in articles:
         if not isinstance(article, dict):
             continue
@@ -143,8 +159,46 @@ def _parse(payload: Any) -> list[str]:
         )
         published = " ".join(str(article.get("published_at") or "").split())[:16]
 
+        # The attribution gets EXACTLY the same treatment as the title, the
+        # tickers and the stamp, and for exactly the same reason. These are
+        # feed-controlled strings landing in a markdown bullet, and a newline in
+        # a publisher name closes that bullet just as effectively as one in a
+        # headline does. It is easy to think of a URL as structurally inert
+        # because it cannot contain a space; it can contain a newline, and the
+        # `source` field is free text with no such excuse at all.
+        #
+        # `_looks_like_a_url` is the second half: a `source` field carrying
+        # `javascript:` or a bare word is not something a reader can open, and
+        # `Sourced.is_attributable` is what the dreamer checks before citing.
+        url = " ".join(str(article.get("url") or "").split())
+        publisher = " ".join(str(article.get("source") or "").split())
+
         prefix = f"[{', '.join(tickers)}] " if tickers else ""
         suffix = f" ({published})" if published else ""
-        lines.append(f"{prefix}{title}{suffix}")
+        lines.append(
+            Sourced(
+                line=f"{prefix}{title}{suffix}",
+                url=url if _looks_like_a_url(url) else "",
+                publisher=publisher,
+            )
+        )
 
     return lines
+
+
+_URL = re.compile(r"^https?://[^\s<>\"']+$", re.IGNORECASE)
+
+
+def _looks_like_a_url(url: str) -> bool:
+    """Syntactic only, and deliberately the same rule `research.py` applies.
+
+    Nothing here fetches the URL to confirm it resolves. What this establishes
+    is that the field holds something a person can paste into a browser, so a
+    `source` naming a scheme nobody can open is dropped rather than rendered as
+    a citable link. Two copies of one regex would be two rules to drift apart,
+    but importing `research` here would put a web-facing module in the trading
+    loop's import graph — which is precisely what that module's AST test exists
+    to prevent. Duplicated deliberately, and pinned by a test that compares
+    the two.
+    """
+    return bool(_URL.match(url.strip()))

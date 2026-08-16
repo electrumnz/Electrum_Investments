@@ -39,6 +39,7 @@ from ..data.xfeed import FeedState
 from ..dreamer import estimated_cost_usd, read_schedule
 from ..dreaming import (
     FUSION,
+    RESEARCHER,
     THIN_LEDGER_THRESHOLD,
     Adoption,
     ConditionState,
@@ -1525,6 +1526,23 @@ article.fused{border-color:var(--patina)}
 .talk .said[data-who=fusion]{border-left-color:var(--amber);
   border-left-style:dashed}
 .talk .said[data-who=fusion] .hdr .name{color:var(--amber)}
+
+/* The researcher's look-ups. Their own list rather than a `.said` variant,
+   because a citation is not a turn of the conversation — see `_lookups`. The
+   quote is left-aligned monospace so a URL is legible and a pasted line stays
+   selectable, and it wraps rather than scrolling: a truncated URL is a URL
+   nobody can open, which defeats the only thing a citation is for. */
+.talk.lookups .note{margin:.5rem 0 0;font-size:.75rem;color:var(--pewter)}
+.talk .cite{padding:.5rem 0 .5rem .9rem;border-left:2px dotted var(--patina);
+  margin-bottom:.5rem}
+.talk .cite:last-child{margin-bottom:0}
+.talk .cite .hdr{display:flex;gap:.5rem;align-items:baseline;flex-wrap:wrap;
+  font-family:var(--mono);font-size:.625rem;letter-spacing:.12em;
+  text-transform:uppercase;color:var(--pewter);margin-bottom:.2rem}
+.talk .cite .hdr .name{color:var(--patina)}
+.talk .cite .hdr .at{margin-left:auto}
+.talk .cite p{margin:0;font-family:var(--mono);font-size:.75rem;
+  color:var(--bone);white-space:pre-wrap;overflow-wrap:anywhere}
 
 /* ============================================ what the two agents settled on ==
    The verdict one exchange reached, on the card of the dream it was about. The
@@ -8404,6 +8422,7 @@ SPEAKER_NAMES = {
     "dreamer": "Grogu",
     "trader": "The trading agent",
     "operator": "You",
+    RESEARCHER: "Kuiil",
     FUSION: "The store",
 }
 
@@ -8419,11 +8438,12 @@ def _transcript(messages: Sequence[DreamMessage]) -> str:
     `speaker` and `kind` are open strings by design, so an unfamiliar one costs
     a badge rather than a turn — the name falls back to the raw word.
     """
-    if not messages:
+    said = [m for m in messages if m.kind != "citation"]
+    if not said:
         return ""
 
     rows = ""
-    for m in messages:
+    for m in said:
         who = m.speaker.lower()
         name = SPEAKER_NAMES.get(who, m.speaker or "unattributed")
         rows += (
@@ -8435,7 +8455,50 @@ def _transcript(messages: Sequence[DreamMessage]) -> str:
         )
     return (
         '<details class="talk"><summary>What was said about it, '
-        f"{_count(len(messages), 'turn')}</summary><ol>{rows}</ol></details>"
+        f"{_count(len(said), 'turn')}</summary><ol>{rows}</ol></details>"
+    )
+
+
+def _lookups(messages: Sequence[DreamMessage]) -> str:
+    """What the researcher found, in its own section rather than the transcript.
+
+    **Split out because grouping by what a thing IS makes the missing member
+    visible, and a mixed list hides it.** That is the Board's protective-orders
+    lesson arriving here: a citation filed under "What was said about it"
+    alongside two agents negotiating reads as one more opinion, and the whole
+    value of a citation is that it is not one. Worse, the transcript is
+    collapsed by default, so the evidence for an unchecked hop would sit behind
+    a disclosure triangle labelled as conversation.
+
+    The heading states what these are AND what they are not, on the same
+    element. An unqualified quotation reads as established fact, which is the
+    reason `Hop.checked` and the `Verification` badge exist at all — and these
+    come from pages nobody here vetted, a weaker provenance than anything else
+    on the card.
+
+    **Absent rather than empty**, like the "Waiting on you" card: a panel
+    announcing zero look-ups on every dream that predates the researcher trains
+    a reader to stop seeing the section.
+    """
+    found = [m for m in messages if m.kind == "citation"]
+    if not found:
+        return ""
+
+    rows = ""
+    for m in found:
+        rows += (
+            f'<li class="cite"><div class="hdr">'
+            f'<span class="name">{_e(SPEAKER_NAMES.get(RESEARCHER, "Kuiil"))}</span>'
+            f'<span class="at">{_e(_when(m.at))}</span></div>'
+            f"<p>{_e(m.text)}</p></li>"
+        )
+    return (
+        '<details class="talk lookups"><summary>What the researcher found, '
+        f"{_count(len(found), 'look-up')}</summary>"
+        '<p class="note">Quotations from pages nobody here has vetted. A quote '
+        "is not a verified fact and does not make a hop checked — only the "
+        "dreamer naming one as a hop\u2019s source does that, on a later step."
+        f"</p><ol>{rows}</ol></details>"
     )
 
 
@@ -9008,7 +9071,19 @@ def _dream(
     # The weakest hop leads the commentary because confidence in a chain is the
     # minimum across its links rather than the average, and a reader given one
     # sentence should be given the one that could kill it.
-    if dream.weakest_hop:
+    # **The PROSE or the INDEX, not the prose alone.** Reading only
+    # `weakest_hop` put two elements on one card contradicting each other about
+    # one fact: with an index pinned and no sentence, the chain diagram rings
+    # hop 3 and labels it THE WEAKEST LINK while this banner said "Not named. A
+    # chain without a stated weakest link has not been attacked yet."
+    #
+    # That state is reachable and legal — `_weakest_hop_refusal` accepts an
+    # index with no sentence, so such a dream can promote — which made the
+    # banner the one element on the card asserting the dream had not been
+    # attacked while the machinery treated it as pinned. A heading is a claim,
+    # and this one was wrong in the direction that hides work already done.
+    # Found by looking at the page.
+    if dream.weakest_hop or dream.resolved_weakest_hop is not None:
         # Which hop the sentence NAMES, when it names one. `None` on a chain
         # that has hops is "could not establish which", not "there is no weak
         # link" — the missing-versus-absent rule, and it is exactly the state
@@ -9021,9 +9096,15 @@ def _dream(
             "established: the sentence matches no claim in the chain and no "
             "usable hop number was given, so nothing can be pinned to it.</span>"
         )
-        out += (
-            f'<p class="weak"><b>Weakest hop</b>{_e(dream.weakest_hop)}{unplaced}</p>'
+        # A pinned index with no sentence says WHICH hop and not why, so the
+        # page says exactly that rather than rendering an empty claim. "Hop 3,
+        # named by number only" is a true and useful reading; a blank after the
+        # heading is neither.
+        named = _e(dream.weakest_hop) if dream.weakest_hop else (
+            f" hop {dream.resolved_weakest_hop}, named by number only — no "
+            "sentence was given for why it is the weakest."
         )
+        out += f'<p class="weak"><b>Weakest hop</b>{named}{unplaced}</p>'
     elif dream.is_fusion:
         # Deliberately a different sentence from the one below. A fusion is
         # BORN without a weakest hop and without a verdict — `fuse` refuses to
@@ -9099,6 +9180,11 @@ def _dream(
         )
 
     out += _conference(dream, decision, readable=decision_readable)
+    # Look-ups BEFORE the negotiation, because they are evidence about the
+    # chain above and the transcript is a conversation about what to do with
+    # it. A reader scanning for "why is hop 3 still unchecked" should reach the
+    # answer before the argument.
+    out += _lookups(transcript)
     out += _transcript(transcript)
 
     return out + "</div></article>"

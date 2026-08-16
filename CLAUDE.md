@@ -691,9 +691,11 @@ COST, because that is the figure a substitution makes wrong.
 ### A fourth agent that can reach the web, and nothing else
 
 `souls/kuiil.md` and `deploy/run-research.sh`. The dreamer reasons about
-cicada broods with no way to look anything up, so every hop it writes is
-reference knowledge it already had or an invention. The researcher goes and
-looks.
+cicada broods and has no way of its own to look anything up, so left alone
+every hop it writes is reference knowledge it already had or an invention.
+The researcher goes and looks — and note the shape of that sentence: the
+dreamer still cannot fetch anything, in its own process or otherwise. It is
+handed quotations by a separate agent and decides what they establish.
 
 **It returns quotes and URLs and never conclusions, because a summary launders
 provenance.** The distilled sentence has no author and no date; the paragraph
@@ -731,6 +733,93 @@ fourth character must not arrive carrying none of them.
 is not a negotiation, and moving the marker would silence the change it just
 created. It IS a new voice to `has_something_changed`, which is right: a
 published source under the weakest hop changes what adopting the dream means.
+
+### The researcher is CALLED now, and code never says a quote proves a hop
+
+`electrum-bot dream` puts up to three questions after each step. The operator
+asked for a dreamer with no human in its own loop, and the live shelf was the
+argument: one sourced hop out of six.
+
+**What it may ASK is settled by code, not chosen by the model.**
+`dreamer.questions_for_dream` derives each question from the hop's own claim —
+weakest hop first, unchecked hops only, capped at three. That is what stops a
+research budget becoming a crawler pointed at whatever the dreamer was last
+thinking about, and it is why there is no `research_question` field on
+`DreamHop`: `EVERY_FIELD_REQUIRED` puts every property into the schema's
+`required` list, and that schema was ALREADY over the line once, to the point
+where the dreamer could not make its call.
+
+**The pass records evidence and marks nothing.** `research_dream` does not set
+`checked` and must not be "improved" into doing so. Matching a quotation to a
+claim is a judgement, and a judgement made by a string comparison nobody can
+audit is exactly the laundering `Citation` is shaped against, arriving in the
+chain as a source with a URL on it. Citations are stored as `citation`
+messages; the NEXT step shows them under a preamble stating what they are and
+are not; the dreamer either names one in a hop's `source` or leaves the hop
+unchecked. So a dream converges over its life rather than in one run, which is
+the honest speed for it.
+
+The look-up runs AFTER the save and cannot cost a step. A researcher that is
+absent, refused, timed out or non-zero yields an `error` on the answer, stored
+like any other — and an error is not an empty result. `DreamerResult.research`
+is `None` when none is wired in at all, which is the `has_cycles` rule once
+more: "nobody looked" and "we looked and found nothing" are opposite findings.
+
+**The unit blocked all of this and no amount of granting would have helped.**
+`mudhorn-dream.service` sets `NoNewPrivileges`, `RestrictSUIDSGID` and
+`ProtectHome`. All three block `sudo` — the second by IMPLYING the first,
+which is the one people miss, and the third because systemd sandboxing is a
+mount namespace every descendant inherits, so the wrapper's `cd "$HERMES_HOME"`
+dies. `deploy/enable-research.sh` installs a drop-in relaxing exactly those
+three, and `--off` removes it alongside the sudoers rule, because a relaxed
+sandbox with no grant is the cost without the benefit. A drop-in and not an
+edit, for `mudhorn-bot-execute.conf`'s reason: `bootstrap.sh` rewrites units.
+
+Without it the feature fails SAFE rather than silently — `Researcher.enabled`
+reads `permitted`, never `available`, so an ungranted box answers every
+look-up with an error and every hop stays honestly unchecked.
+
+**The quarantine check had a bug the test found before the box did.** The
+script grepped the written config for `mcp_servers`, and the shipped config's
+own header explains that there is no such key — so a correct install would
+have died over the comment documenting that it is safe. Comments are stripped
+first, in both places that check.
+
+### A feed's attribution is the cheapest source there is, and it was discarded
+
+The other half of the same finding, and it was found by reading a rendered
+dream rather than any code. The chain's opening hop was *"Cisco's AI
+networking supercycle claim, made today"*, stored UNCHECKED — sparked by a
+headline the loop had fetched that morning, from a named publisher with a
+working URL, both sitting in the Marketaux payload and both dropped by
+`_parse`. The one hop in the chain with a real source behind it could not be
+sourced, because our own parser had laundered the provenance one layer below
+where that rule is written down.
+
+`data.news.Sourced` carries the line with its publisher and URL, and **there
+are two renderings on purpose**:
+
+- `recent_headlines` stays lean and is what the DECISION LOOP reads. Its model
+  cannot open a link, so a URL on every headline is input tokens spent on
+  something unreadable ninety-six times a day — and a model handed a link it
+  cannot follow is being invited to pretend it did. `xfeed.Post.render` says
+  exactly that about permalinks and is right.
+- `recent_attributed` / `Post.as_sourced` carry the source and are what the
+  DREAMER reads. That reasoning stops holding the moment a reader exists that
+  CAN open a link, and the dreamer may only mark a hop checked when it can
+  name a source.
+
+The prompt says which is which, so an item ending in a link is known to be
+citable and one that does not is known not to be.
+
+Keeping the attribution puts two more wire-controlled strings into a markdown
+bullet, so both get the same `" ".join(split())` collapse as the title, the
+tickers and the stamp. **A URL feels structurally inert because it cannot hold
+a space; it can hold a newline**, and `source` is free text with no such
+excuse. A `javascript:` or otherwise unopenable source is dropped rather than
+rendered as a citable link — `Sourced.is_attributable` is what the dreamer
+checks — and the headline is still shown, because losing the link costs a
+citation where dropping the story costs the spark as well.
 
 ### The journal records the PROPOSAL, and a fill is not atomic
 
@@ -3216,7 +3305,10 @@ src/bot/
   context.py            Renders market state for Claude.
   strategy.py           Base strategies. Placeholders with a shape, not an edge.
                         `requires` names what each one still cannot see.
-  data/                 External feeds. marketaux.py = headlines (context only);
+  data/                 External feeds. news.py holds `Sourced` and the TWO
+                        renderings — lean for the loop, attributed for the
+                        dreamer, because only one of the two readers can open
+                        a link. marketaux.py = headlines (context only);
                         finnhub.py = earnings calendar (feeds the blackout gate);
                         xfeed.py = posts from watched accounts (context only).
   audit.py              Append-only JSONL decision log, and the reader the
@@ -3251,13 +3343,29 @@ src/bot/
                         when the check itself has stopped.
   souls.py              Loads the character files in souls/. Degrades to a
                         voiceless prompt rather than taking a page down.
+  hermes.py             Running one Hermes turn as another user, and asking
+                        sudo FIRST. One implementation for all three instances,
+                        because `permitted` was a live fault and a second copy
+                        is a second place for it to come back. `available` and
+                        `permitted` answer different questions and default in
+                        OPPOSITE directions — see the module docstring.
+  research.py           The fourth agent: quotes and URLs, never conclusions.
+                        `Researcher.ask` puts one question to the third Hermes
+                        home; `Citation` has nowhere to put a conclusion, which
+                        is the rail. Makes no network call itself — the fetch
+                        happens in another process, in another home, with no
+                        MCP server — so this stays importable from anywhere and
+                        out of every gating path.
   dreaming.py           Second-order hypotheses: Dream, Hop, the stage machine
                         and the store. Carries NO order fields, which is the
                         whole reason it may sit beside an order path.
   dreamer.py            The thing that fills it. One Claude call per run,
                         driven by `electrum-bot dream`, never by the loop.
                         Shown headlines, posts and what CLOSED; never shown
-                        profit and loss.
+                        profit and loss. Also asks the researcher about its
+                        UNCHECKED hops, weakest first — and stores what comes
+                        back without ever marking a hop checked, because that
+                        judgement is the model's.
   web/                  Operator command centre: Board, Decisions, Trades,
                         Analytics, Chat, Dreaming, Settings. Binds 127.0.0.1, and sits
                         behind auth.py's shared password so it MAY be exposed.
@@ -3301,6 +3409,10 @@ deploy/                 VPS provisioning: bootstrap.sh + systemd units. The unit
                         check-tailscale.sh + mudhorn-tailnet.timer watch the key
                         expiry that would otherwise take the dashboard away
                         silently.
+                        enable-research.sh turns the researcher on, and has to
+                        install a systemd drop-in as well as a sudoers rule:
+                        mudhorn-dream.service blocks sudo three ways, so the
+                        grant alone would be inert.
 audit/                  Append-only JSONL. Gitignored.
 data/journal.db         SQLite journal. Gitignored.
 reference/              Third-party projects we borrow from. See reference/STATUS.md.

@@ -29,13 +29,12 @@ and `hermes` gains nothing it did not already have.
 
 from __future__ import annotations
 
-import shutil
-import subprocess
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 import structlog
 
+from ..hermes import DEFAULT_TIMEOUT_SECONDS, DEFAULT_USER, HermesRunner
 from ..souls import Soul
 
 log = structlog.get_logger(__name__)
@@ -73,16 +72,10 @@ DEFAULT_BINARY = Path("/opt/mudhorn/deploy/run-chat.sh")
 # rather than imply the stronger one.
 DREAMER_BINARY = Path("/opt/mudhorn/deploy/run-dream.sh")
 
-DEFAULT_USER = "hermes"
-
-# Generous: a question that fans out across MCP tools takes a while, and the
-# failure we care about is a hang, not slowness.
-DEFAULT_TIMEOUT_SECONDS = 180.0
-
-# `sudo -n -l` consults a local policy file and runs nothing, so this is
-# generous rather than tight. It exists so a wedged sudo cannot hold a page
-# render, not because the check is expected to be slow.
-SUDO_PROBE_TIMEOUT_SECONDS = 5.0
+# Re-exported so existing callers and tests keep one import site. The
+# mechanics live in `bot.hermes` because THREE instances share them and the
+# `permitted` check is not something to have two copies of.
+__all__ = ["DEFAULT_BINARY", "DREAMER_BINARY", "HISTORY_TURNS", "ChatReply", "HermesBridge"]
 
 # How much conversation to replay. `hermes -z` is one-shot, so continuity is the
 # caller's job. Kept small on purpose — this is a question-and-answer surface,
@@ -102,106 +95,22 @@ class ChatReply:
 
 
 @dataclass
-class HermesBridge:
-    """Runs one Hermes turn per call."""
+class HermesBridge(HermesRunner):
+    """Runs one Hermes turn per call, in character.
+
+    The process mechanics — `available`, `permitted`, and running the wrapper
+    with the prompt on stdin — live in `bot.hermes.HermesRunner`, because three
+    instances share them and `permitted` is not a check to have two copies of.
+    See that module for why the two availability questions default in opposite
+    directions.
+
+    What this adds is the CONVERSATION: a soul, replayed history, and a
+    briefing of figures the agent must not derive.
+    """
 
     binary: Path = DEFAULT_BINARY
     run_as: str = DEFAULT_USER
     timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS
-    # Filled on first use by `permitted`. Not a constructor argument: a caller
-    # that could preset it could assert an isolation nobody checked, which is
-    # the failure this property was added to end.
-    _permitted: bool | None = field(default=None, init=False, repr=False)
-
-    @property
-    def available(self) -> bool:
-        """Whether Hermes looks runnable from here. Never raises.
-
-        `Path.exists()` does NOT return False when a parent directory refuses
-        traversal — it raises `PermissionError`, and that took the whole Chat
-        page down with a 500. `/home/hermes` is 0700 and owned by `hermes`,
-        while this process runs as `mudhorn`, which is the user split working
-        exactly as intended.
-
-        **A permission error is answered optimistically, and that is the
-        deliberate part.** It says something about this process's reach and
-        nothing about whether Hermes is installed — and reach is not what
-        matters here, because the binary is never executed directly. It is
-        invoked through `sudo -u hermes`, which can stat and run a file this
-        process cannot even see. Reporting "not installed" on an EACCES would
-        put a confidently wrong message on the page about a working
-        installation.
-
-        So: a definite "no such file" is absent, a missing `sudo` is absent,
-        and anything we cannot determine is left to the attempt itself, which
-        reports the real error rather than a guess at it.
-        """
-        if shutil.which("sudo") is None:
-            return False
-        try:
-            return self.binary.exists()
-        except OSError:
-            return True
-
-    @property
-    def permitted(self) -> bool:
-        """Whether sudo will ACTUALLY run this wrapper — asked, not assumed.
-
-        **`available` answers a different question, and the gap between them
-        was live.** It asks whether the wrapper FILE is there; this asks
-        whether this process may run it. `deploy/run-dream.sh` ships and is
-        made executable by `bootstrap.sh` on every box, whether or not the
-        second Hermes instance was ever set up — the file's own comment says it
-        is "inert without one: nothing invokes it unless a sudoers rule names
-        it". So `available` was True on a droplet with no
-        `/etc/sudoers.d/mudhorn-dream` and no `/home/hermes/dreamer`, and two
-        things followed:
-
-        - Grogu was routed to an instance sudo refuses, so the Dreaming panel
-          answered `sudo: a password is required` instead of falling back to
-          the shared instance the way the module docstring promises.
-        - The page rendered `isolated=True`, **claiming an isolation that did
-          not exist.** That is the one thing this arrangement must never do,
-          and `tests/test_web.py` already pins the wording of the banner that
-          says so.
-
-        `sudo -n -l` asks the policy and runs nothing. Local, no network, and
-        the honest question: not "is there a file" but "may I execute it".
-
-        **Any failure to establish permission answers False**, which is the
-        under-claiming direction: the caller falls back to the shared instance
-        and the page reports the weaker arrangement. The same rule as
-        `calendar_degraded` and the tailnet status — report the weaker fact
-        rather than imply the stronger one. Note this is the OPPOSITE default
-        from `available`, which answers an EACCES optimistically; that is
-        correct there, because the cost of being wrong is a page saying chat is
-        unavailable when it works, and here the cost of being wrong is a false
-        claim of isolation.
-
-        Cached for the life of the process. The grant changes only when
-        somebody installs a sudoers rule, and the scripts that do that
-        (`enable-chat.sh`, and an `enable-dream.sh` when one exists) restart
-        `mudhorn-web` as their last step — so a stale answer cannot outlive the
-        act that changed it.
-        """
-        if self._permitted is None:
-            self._permitted = self._ask_sudo()
-        return self._permitted
-
-    def _ask_sudo(self) -> bool:
-        if shutil.which("sudo") is None:
-            return False
-        try:
-            probe = subprocess.run(
-                ["sudo", "-n", "-l", "-u", self.run_as, "--", str(self.binary)],
-                capture_output=True,
-                text=True,
-                timeout=SUDO_PROBE_TIMEOUT_SECONDS,
-                check=False,
-            )
-        except (OSError, subprocess.SubprocessError):
-            return False
-        return probe.returncode == 0
 
     def ask(
         self,
@@ -248,40 +157,14 @@ class HermesBridge:
         if soul is not None and soul.found:
             prompt = f"{soul.prompt_prefix(operator)}\n{prompt}"
 
-        # argv list, never a shell string: the message is untrusted input and
-        # this process holds the broker credentials. No shell means no quoting
-        # bug can turn a question into a command.
-        #
-        # And the prompt is not in argv at all — it goes down stdin. The
+        # The prompt is not in argv at all — it goes down stdin, and the
         # sudoers rule permits this wrapper with no arguments, so there is
-        # nothing for a crafted question to be mistaken for. See run-chat.sh.
-        argv = ["sudo", "-n", "-u", self.run_as, "--", str(self.binary)]
-
-        try:
-            completed = subprocess.run(
-                argv,
-                input=prompt,
-                capture_output=True,
-                text=True,
-                timeout=self.timeout_seconds,
-                check=False,
-            )
-        except subprocess.TimeoutExpired:
-            log.warning("hermes_timeout", timeout=self.timeout_seconds)
-            return ChatReply.failed(
-                f"Hermes did not answer within {self.timeout_seconds:.0f}s. "
-                "It may be waiting on an approval prompt it cannot show here."
-            )
-        except OSError as exc:
-            log.warning("hermes_spawn_failed", error=str(exc))
-            return ChatReply.failed(f"Could not start Hermes: {exc}")
-
-        if completed.returncode != 0:
-            detail = (completed.stderr or completed.stdout or "").strip()
-            log.warning("hermes_nonzero_exit", code=completed.returncode, detail=detail[:500])
-            return ChatReply.failed(detail[:1000] or f"Hermes exited {completed.returncode}")
-
-        return ChatReply(text=completed.stdout.strip())
+        # nothing for a crafted question to be mistaken for. `HermesRunner.run`
+        # holds that and the no-shell rule; see `bot/hermes.py`.
+        result = self.run(prompt)
+        if not result.ok:
+            return ChatReply.failed(result.error)
+        return ChatReply(text=result.text)
 
 
 def _with_history(message: str, history: list[tuple[str, str]]) -> str:
