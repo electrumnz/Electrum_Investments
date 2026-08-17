@@ -6927,3 +6927,52 @@ def test_the_nav_links_clear_the_touch_target_minimum_on_a_phone():
     # And NOT outside it: the desktop bar lays the links out in one row beside
     # the wordmark and a 44px link there would grow the header for nothing.
     assert "nav a{min-height:44px" not in css[:start]
+
+
+def test_the_two_speakers_in_a_chat_are_separable_by_side_and_shape():
+    """*"make it clearer who is talking, put user text right aligned"*.
+
+    Both turns used to render identically — same column, same alignment, the
+    agent's only distinction a thin left rule — so a long exchange read as one
+    continuous block and the operator had to parse a tiny uppercase label to
+    find where their own question ended.
+
+    Deliberately not two matching bubbles facing each other. The agent keeps
+    the deck's left-rule idiom and the operator gets a filled bubble on the
+    right, because two different SHAPES separate at a glance in a way two
+    tinted rectangles do not.
+    """
+    from bot.web.render import STYLES
+
+    # The operator's turn is mirrored, and `align-self` is the one that moves
+    # it: `.log` is a flex column, so `align-items` alone would only move the
+    # contents inside a still-full-width row.
+    assert ".turn.user{align-items:flex-end;align-self:flex-end" in STYLES
+    # Bounded, or the bubble is full width and indistinguishable from a block.
+    assert "max-width:82%" in STYLES
+    # And it carries a surface of its own, which is the other half of the ask.
+    assert ".turn.user .msg{background:var(--slate)" in STYLES
+    # The agent keeps its existing treatment rather than becoming a bubble too.
+    assert ".turn.agent .msg{border-left:2px solid var(--patina)" in STYLES
+
+
+def test_a_failed_reply_stays_on_the_agents_side_of_the_log():
+    """The two-class precedence trap, for the fourth time — pinned, not guessed.
+
+    `.turn.user` and `.turn.err` are both two-class selectors, so they have
+    EQUAL specificity and the winner is decided by declaration order, which is
+    exactly how `.note.alert`, `.pill.seed` and `.rung.gate` each went wrong.
+
+    Here the outcome that must win is `err`: an error is the agent failing to
+    answer, and mirroring it to the right would attribute the failure to
+    whoever typed. The JS sets `className = 'turn err'` so the two do not
+    co-occur today — this pins the ordering anyway, because "they cannot both
+    apply" is a property of one line of JavaScript rather than of the CSS.
+    """
+    from bot.web.render import STYLES
+
+    assert STYLES.index(".turn.user{") < STYLES.index(".turn.err{"), (
+        "`.turn.err` must be declared after `.turn.user` — equal specificity "
+        "means the later rule wins, and the error belongs on the left"
+    )
+    assert ".turn.err{align-items:flex-start;align-self:flex-start" in STYLES

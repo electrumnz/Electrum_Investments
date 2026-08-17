@@ -963,11 +963,33 @@ details.step summary:hover{color:var(--bone)}
 .log{border:1px solid var(--slate);border-radius:2px;background:var(--graphite);
   padding:1.125rem;min-height:340px;max-height:60vh;overflow-y:auto;
   display:flex;flex-direction:column;gap:1rem}
-.turn{display:flex;flex-direction:column;gap:.3rem}
+/* Who is speaking is carried by SIDE and by SHAPE, not by colour alone.
+   The panel used to render both turns identically — same column, same
+   alignment, the agent's only distinction a thin left rule — so a long
+   exchange read as one continuous block of text and the operator had to
+   parse the tiny uppercase label to find where their own question ended.
+
+   Deliberately NOT two matching bubbles facing each other. The agent keeps
+   the deck's existing left-rule idiom, the operator gets a filled bubble on
+   the right, and two different SHAPES are separable at a glance in a way two
+   tinted rectangles are not. It also keeps the agent's text flush with every
+   other block on the page, which is where the reading happens. */
+.turn{display:flex;flex-direction:column;gap:.3rem;align-items:flex-start}
 .turn .who{font-family:var(--mono);font-size:.625rem;letter-spacing:.14em;
   text-transform:uppercase;color:var(--pewter)}
 .turn .msg{white-space:pre-wrap;font-size:.9375rem}
 .turn.agent .msg{border-left:2px solid var(--patina);padding-left:.875rem}
+/* The operator's own turn, mirrored. `max-width` matters more than it looks:
+   a full-width bubble is indistinguishable from a full-width block, so the
+   right edge alone would carry the whole distinction and a short question
+   would lose it entirely. */
+.turn.user{align-items:flex-end;align-self:flex-end;max-width:82%}
+.turn.user .who{color:var(--patina)}
+.turn.user .msg{background:var(--slate);color:var(--bone);
+  border-radius:10px 10px 2px 10px;padding:.6rem .875rem;text-align:left}
+/* An error is the AGENT failing to answer, so it stays on the agent's side.
+   Mirroring it right would attribute the failure to whoever typed. */
+.turn.err{align-items:flex-start;align-self:flex-start;max-width:100%}
 /* Three bouncing dots for the pending turn. Built from elements rather than
    an animated `content`, which is not reliable across browsers, and driven by
    CSS rather than a JS timer so nothing has to be torn down when the reply
