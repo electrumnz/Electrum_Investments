@@ -132,6 +132,42 @@ news_blackout_minutes_after: 15
 #
 # Reading timelines needs a paid X tier and X_BEARER_TOKEN in .env. Without the
 # token this block is inert, whatever it says here.
+# ---------------------------------------------------------------- research
+#
+# Where the dreamer's researcher looks when it needs a source for a hop.
+#
+# **Keyless by construction, because the alternative costs money the operator
+# has not chosen to spend.** Hermes' own `web` toolset needs a Nous Portal
+# subscription and resolves to nothing without one — measured on this droplet,
+# 17 Aug 2026 — so `lookup.py` reads these directly instead. SEC EDGAR and
+# Wikipedia are not listed here: neither needs configuring and neither has an
+# alternative worth choosing between.
+#
+# What this CANNOT do is open-web search. RSS covers the outlets named below
+# and only their recent items, so a claim nobody here published stays
+# unsourced and its hop stays unchecked. That is the honest state and the
+# researcher says so on every empty answer.
+#
+# Feeds are read at most once every fifteen minutes and only when the dreamer
+# runs, which is once a day. Adding more costs a fetch each; keeping the list
+# broad rather than deep is the point, since the dreamer's subjects range
+# further than any one outlet.
+research:
+  feeds:
+    # Outlets whose ARTICLE PAGES can actually be read. The feed listing an
+    # item is not enough — a citation needs a sentence out of the page, and a
+    # paywall returns 403 to the fetch that would get one.
+    #
+    # Measured 17 Aug 2026: the NYT and WSJ feeds list fine and their articles
+    # answer 403 and 401. They were dropped rather than left in, because a
+    # feed that always fails costs a round trip per question and fills the log
+    # with warnings that mean nothing is wrong.
+    - https://feeds.bbci.co.uk/news/business/rss.xml
+    - https://feeds.bbci.co.uk/news/technology/rss.xml
+    - https://www.aljazeera.com/xml/rss/all.xml
+    - https://moxie.foxbusiness.com/google-publisher/markets.xml
+    - https://www.cnbc.com/id/10001147/device/rss/rss.html
+
 social:
   enabled: false
 

@@ -77,6 +77,65 @@ def httpx_getter(
     return _get
 
 
+class TextGetter(Protocol):
+    """Fetch a document as TEXT, for feeds that are not JSON.
+
+    RSS is XML, a filing is HTML, a news page is HTML. `JsonGetter` cannot
+    carry them, and the difference is not only the parse: a 10-Q runs to
+    megabytes, so this contract includes a byte cap where the JSON one does
+    not.
+    """
+
+    def __call__(self, url: str, params: dict[str, str]) -> str: ...
+
+
+#: How much of any one document is read. A 10-Q can be tens of megabytes and
+#: this box has 1.9 GB of RAM shared with the trading loop, so an uncapped read
+#: is one bad URL away from an OOM kill that lands on `mudhorn-bot` rather than
+#: on the reader. Generous enough that the interesting part of a filing is
+#: inside it, and the truncation is REPORTED rather than silent — a quote
+#: extracted from a document we only half read is still honest, but "we read
+#: all of it and found nothing" is a different claim.
+MAX_DOCUMENT_BYTES = 4_000_000
+
+
+def httpx_text_getter(
+    timeout: float = DEFAULT_TIMEOUT_SECONDS,
+    headers: dict[str, str] | None = None,
+    max_bytes: int = MAX_DOCUMENT_BYTES,
+) -> TextGetter:
+    """The real text implementation, built lazily as `httpx_getter` is.
+
+    Streams and stops at `max_bytes` rather than reading whatever arrives. A
+    `Content-Length` cannot be trusted — it is absent on chunked responses and
+    it is a claim by the server either way — so the cap is applied to what has
+    actually been read.
+    """
+
+    def _get(url: str, params: dict[str, str]) -> str:
+        import httpx
+
+        chunks: list[bytes] = []
+        size = 0
+        with httpx.stream(
+            "GET",
+            url,
+            params=params,
+            timeout=timeout,
+            headers=headers or {},
+            follow_redirects=True,
+        ) as response:
+            response.raise_for_status()
+            for chunk in response.iter_bytes():
+                chunks.append(chunk)
+                size += len(chunk)
+                if size >= max_bytes:
+                    break
+        return b"".join(chunks).decode("utf-8", errors="replace")
+
+    return _get
+
+
 @dataclass
 class TtlCache:
     """A single-slot cache. Each feed makes one kind of call, so one slot is enough."""

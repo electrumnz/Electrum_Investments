@@ -1436,6 +1436,33 @@ class DreamingRules(BaseModel):
         )
 
 
+class ResearchRules(BaseModel):
+    """Where the dreamer's researcher may look, when it has no search engine.
+
+    RSS only, and keyless by construction. These are fetched by
+    `lookup.Sources.news` to source hops about current events; a filing goes to
+    EDGAR and a reference claim to Wikipedia, neither of which is configurable
+    because neither has an alternative worth choosing between.
+
+    Empty is the honest default and is NOT a broken configuration. With no
+    feeds the news source reports that it never looked — a third state beside
+    success and failure — rather than reporting that it looked and found
+    nothing, which would be a claim about the world made from an empty list.
+    """
+
+    feeds: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _feeds_are_absolute_urls(self) -> ResearchRules:
+        # A relative or scheme-less feed fails at fetch time, once a day, in a
+        # log nobody reads. Refusing at load is the one moment somebody is
+        # looking at this file.
+        bad = [f for f in self.feeds if not f.startswith(("http://", "https://"))]
+        if bad:
+            raise ValueError(f"research.feeds must be absolute URLs; got {bad}")
+        return self
+
+
 class Rules(BaseModel):
     account: AccountRules
     frequency: FrequencyRules
@@ -1446,6 +1473,8 @@ class Rules(BaseModel):
     news_blackout_minutes_after: int = Field(ge=0)
 
     social: SocialRules = Field(default_factory=SocialRules)
+    # Feeds the dreamer's researcher may read. Nothing here reaches the gate.
+    research: ResearchRules = Field(default_factory=ResearchRules)
     loop: LoopRules = Field(default_factory=LoopRules)
     watchlist: WatchlistRules = Field(default_factory=WatchlistRules)
 

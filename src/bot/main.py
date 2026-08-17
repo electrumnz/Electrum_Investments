@@ -1666,6 +1666,22 @@ def _describe_fusion(fusion: FusionResult | None) -> str | None:
     return f"refused {parents}: {', '.join(str(r) for r in fusion.refusals) or 'no reason given'}"
 
 
+#: Whether to route the dreamer's look-ups at the Hermes researcher instead of
+#: the keyless one.
+#:
+#: **Off, and the reason is a measurement rather than a preference.** The
+#: Hermes instance is installed and correct and holds no web tools: they come
+#: through the Nous Portal Tool Gateway, a paid subscription this account does
+#: not have. Routing to it would answer every look-up with an error.
+#:
+#: A constant rather than an env var, deliberately. An env var invites somebody
+#: to flip it on a hunch, and the honest way to turn this on is to subscribe
+#: and then change this line in a commit that says so — with the tool list
+#: re-measured, not assumed. `enable-research.sh --status` shows the grant;
+#: only asking the agent shows the tools.
+PREFER_HERMES_RESEARCH = False
+
+
 def cmd_dream(env: Env, rules: Rules) -> int:
     """One dream step.
 
@@ -1683,6 +1699,7 @@ def cmd_dream(env: Env, rules: Rules) -> int:
     worth noticing rather than logging into the void.
     """
     from .dreamer import Dreamer, promote_dreams
+    from .lookup import LocalResearcher, Sources
     from .research import Researcher
 
     announce_inference(env)
@@ -1724,13 +1741,37 @@ def cmd_dream(env: Env, rules: Rules) -> int:
     # grading below reads the figures the decision loop recorded. Both are reads
     # of the same append-only file, and neither is authoritative over anything.
     audit = AuditLog()
-    # The researcher is constructed unconditionally and answers honestly when
-    # it is not installed. `Researcher.enabled` reads `permitted` — will sudo
-    # run this wrapper — rather than `available`, which only asks whether the
-    # file exists and is true on every box because `bootstrap.sh` ships all
-    # three wrappers. Getting that backwards is what routed the dreamer at an
-    # instance sudo refuses and had a page claim an isolation it did not have.
-    dreamer = Dreamer(env, rules, store, journal, audit=audit, researcher=Researcher())
+    # **Two researchers, and the keyless one is preferred.**
+    #
+    # `research.Researcher` puts questions to the quarantined Hermes instance.
+    # It is correct, verified end to end on the droplet, and INERT: Hermes' web
+    # tools come through the Nous Portal Tool Gateway, which is a paid
+    # subscription this account does not have. Measured 17 Aug 2026 — the
+    # instance answers and holds no web tools at all.
+    #
+    # `lookup.LocalResearcher` needs no key, no grant and no subscription. It
+    # reads SEC filings, the configured news feeds and Wikipedia directly, and
+    # its quotes are literal substrings of the documents they cite rather than
+    # sentences a model produced — which is a STRONGER guarantee than the
+    # Hermes path offers, not a weaker substitute for it.
+    #
+    # Hermes is used only when it is both permitted AND would add something,
+    # and today it never adds anything, so this is written to prefer the one
+    # that works while leaving the other reachable the day a subscription
+    # exists. Neither can mark a hop checked; that stays the dreamer's.
+    hermes_researcher = Researcher()
+    researcher = (
+        hermes_researcher
+        if hermes_researcher.enabled and PREFER_HERMES_RESEARCH
+        else LocalResearcher(sources=Sources(feeds=rules.research.feeds))
+    )
+    log.info(
+        "researcher_selected",
+        kind=type(researcher).__name__,
+        hermes_permitted=hermes_researcher.enabled,
+        feeds=len(rules.research.feeds),
+    )
+    dreamer = Dreamer(env, rules, store, journal, audit=audit, researcher=researcher)
     result = dreamer.run_once(headlines=headlines, posts=posts)
 
     if result is None:
