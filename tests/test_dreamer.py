@@ -2597,3 +2597,70 @@ def test_a_refused_fusion_is_named_on_the_line_rather_than_reading_as_none():
 
     assert _describe_fusion(None) is None
     assert _describe_fusion(refused) == "refused 4+5: full"
+
+
+def test_a_hop_claimed_checked_with_no_source_is_counted_not_only_dropped(
+    rules, store, journal, capsys
+):
+    """**The silent downgrade, made visible.**
+
+    `_hop` resolves `checked=True` with an empty `source` DOWNWARDS, which is
+    right and load-bearing: a flag with nothing behind it is exactly the
+    generous self-rating the verification badge exists to refuse.
+
+    What was missing is any trace that it happened. Measured on the droplet:
+    five passes over one dream, ~31 citations fetched, `unchecked` stuck at 2
+    every pass, and no way to tell whether the dreamer was failing to SOURCE
+    its hops or failing to SAY where. Those need completely different fixes —
+    a researcher problem versus a prompt problem — and the log could not
+    distinguish them.
+
+    Two counters, never one: the `stops_unchecked` / `stops_unmeasured` rule
+    arriving at the chain.
+    """
+    step = _step(
+        chain=[
+            DreamHop(claim="sourced properly", checked=True, source="10-K, p.42"),
+            DreamHop(claim="claimed, no source", checked=True, source=""),
+            DreamHop(claim="claimed, blank source", checked=True, source="   "),
+            DreamHop(claim="honestly unchecked", checked=False, source=""),
+        ]
+    )
+    dreamer = Dreamer(_env(), rules, store, journal, client=_StubClient(step))
+
+    result = dreamer.run_once()
+    out = capsys.readouterr().out
+
+    assert result is not None
+    chain = result.dream.chain
+    # The rail is unchanged: both unsourced claims are still downgraded.
+    assert [h.checked for h in chain] == [True, False, False, False]
+    # And a blank source is no source, so it is not kept on a checked hop.
+    assert chain[0].source == "10-K, p.42"
+
+    # The new half: it is COUNTED and said out loud. Two of the four hops
+    # claimed a check they could not back, and the line says so.
+    assert "dream_hops_claimed_without_source" in out
+    assert "hops=2" in out
+
+
+def test_a_clean_chain_states_its_nought_rather_than_staying_silent(
+    rules, store, journal, capsys
+):
+    """A stated nought each run, because silence is also what an outage looks
+    like. Same reason the stop-breach count is on `cycle_complete`."""
+    step = _step(
+        chain=[DreamHop(claim="sourced", checked=True, source="10-K, p.42")]
+    )
+    dreamer = Dreamer(_env(), rules, store, journal, client=_StubClient(step))
+
+    result = dreamer.run_once()
+    out = capsys.readouterr().out
+
+    assert result is not None
+    # No warning on a clean chain...
+    assert "dream_hops_claimed_without_source" not in out
+    # ...but the figure is on the summary line regardless of being zero, so a
+    # clean run is a stated fact rather than the absence of a warning.
+    assert "dream_step" in out
+    assert "claimed_without_source=0" in out
