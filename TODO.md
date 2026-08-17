@@ -2248,10 +2248,34 @@ reader exists that CAN open a link.
 
 ### Still unverified on the box
 
-- **That `web` is the exact toolset key.** Unchanged. Confirm by asking the
-  agent to look something up, never by reading `/tools`.
-- **Whether `web_search` needs a Nous Portal subscription or its own
-  credential.** Unchanged.
+- ~~**That `web` is the exact toolset key.**~~ **SETTLED 17 Aug 2026: it is.**
+  The toolset is `web` and its tools are `web_search` and `web_extract`.
+- ~~**Whether `web_search` needs a subscription or its own credential.**~~
+  **SETTLED: it needs one, and this box has none.** The tools come through the
+  Nous Portal Tool Gateway — `hermes auth add nous`, OAuth, no static API key
+  — which is a paid subscription. Measured by asking the running instance:
+  with `agent.toolsets` alone it held clarify, memory, session_search,
+  skill_manage, skill_view, skills_list, todo; adding `platform_toolsets` cut
+  that to memory, skill_manage, skill_view, skills_list. The key is operative,
+  `web` is named in it, and there are no web tools — which rules out
+  configuration and leaves the credential.
+
+  **So the researcher is BUILT, VERIFIED and INERT.** Everything this
+  repository controls works: the grant, the sandbox drop-in, the quarantine,
+  the credential, the model, the probe. What is missing is a subscription,
+  which is a spending decision and an interactive OAuth login, so it joins
+  item 11 and the DigitalOcean tier question as work a session in a container
+  cannot finish.
+
+  Inert is a safe state and a truthful one: every look-up returns an error,
+  `research_dream` stores it as an error rather than a citation, and hops stay
+  unchecked. `enable-research.sh --off` withdraws the grant and re-tightens
+  the dream unit if the subscription is declined.
+
+  **Not to be worked around with an MCP web-search server** without deciding
+  to: `run-research.sh` refuses any `mcp_servers` block in that home, which is
+  the rail keeping `place_order` away from a web reader. Admitting a different
+  server is a redesign of that rail and belongs in its own commit.
 - **Whether relaxing the dream unit's sandbox is acceptable to the operator.**
   It is the same trade `mudhorn-web.service` already makes for the chat panel,
   bounded the same three ways — a root-owned wrapper with no arguments, the

@@ -110,22 +110,35 @@ agent:
   # it stays absent here too — thirteen tools that cannot succeed are thirteen
   # schemas in the context window every turn.
   #
-  # **Two things about this list are UNVERIFIED from a container and must be
-  # confirmed on the box before the instance is useful**, because a wrong
-  # toolset name is discarded in silence — the same trap `skills.disabled`
-  # sets with category names:
+  # **BOTH of the things this list used to call unverified are now MEASURED,
+  # on the droplet, 17 Aug 2026 — and the answer is that `web` yields nothing
+  # here.**
   #
-  #   1. That `web` is the exact key (the documentation names the toolset and
-  #      its two tools; nothing here has run the resolver against it).
-  #   2. Whether `web_search` needs a Nous Portal subscription or its own
-  #      provider credential. The documentation mentions a "Tool Gateway" for
-  #      subscribers as an alternative to individual API keys.
+  #   1. `web` IS the exact key. Confirmed against the Hermes tools
+  #      documentation: the toolset is `web`, its tools are `web_search` and
+  #      `web_extract`.
+  #   2. It DOES need a credential. The tools come through the Nous Portal
+  #      Tool Gateway, reached with `hermes auth add nous` — OAuth, no static
+  #      API key — which is a paid subscription. Without it the toolset
+  #      resolves to zero tools and the agent simply says it cannot search.
   #
-  # Confirm with `hermes` in this home and by ASKING THE AGENT to look
-  # something up — never by reading `/tools`, which renders the unfiltered
-  # catalogue and will mislead you in both directions. If `web` turns out to be
-  # named something else, the agent will say it cannot search, which is the
-  # failure direction an allowlist was chosen for.
+  # The measurement, because "it did not work" is not a finding on its own:
+  #
+  #   - With `agent.toolsets` alone the researcher held clarify, memory,
+  #     session_search, skill_manage, skill_view, skills_list, todo.
+  #   - Adding `platform_toolsets` cut that to memory, skill_manage,
+  #     skill_view, skills_list — clarify, session_search and todo were the
+  #     CLI platform's own defaults and the key removed them.
+  #
+  # So the key is operative and `web` is named in it and there are still no
+  # web tools. That is what rules out the configuration explanation and leaves
+  # the credential.
+  #
+  # **Do not reach for an MCP web-search server instead.** It would work, and
+  # `run-research.sh` refuses any `mcp_servers` block in this home — the rail
+  # that keeps `place_order` out of a web-reading process. Loosening it to
+  # admit a *different* server is a deliberate redesign of that rail, not a
+  # workaround, and it belongs in its own commit with its own argument.
   toolsets:
     - web
     # `memory` and `skills` are Hermes' own and carry no outward reach. Left in

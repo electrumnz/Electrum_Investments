@@ -779,6 +779,31 @@ Without it the feature fails SAFE rather than silently — `Researcher.enabled`
 reads `permitted`, never `available`, so an ungranted box answers every
 look-up with an error and every hop stays honestly unchecked.
 
+**And it IS inert on this droplet, for a reason nothing in this repository can
+fix.** Measured 17 Aug 2026: everything above works — the grant, the drop-in,
+the quarantine, the credential, the model — and the `web` toolset resolves to
+ZERO tools, because those tools come through the Nous Portal Tool Gateway
+(`hermes auth add nous`, OAuth, no static key) and that is a paid
+subscription.
+
+The measurement matters more than the conclusion, because "it did not work" is
+not a finding. With `agent.toolsets` alone the instance held clarify, memory,
+session_search, skill_manage, skill_view, skills_list and todo; adding
+`platform_toolsets` cut that to memory, skill_manage, skill_view, skills_list
+— so the key IS operative, `web` IS named in it, and there are still no web
+tools. That is what rules out the configuration explanation.
+
+`platform_toolsets` is a DIFFERENT key from `agent.toolsets`, which has misled
+this repository before (the old "Hermes cannot drop its terminal toolset"
+finding was about `platform_toolsets.acp`). Writing it nested under `agent:`
+parses cleanly and does nothing, which is worse than a syntax error because
+the config then looks configured; a test pins the placement.
+
+**Do not route around it with an MCP web-search server.** It would work, and
+`run-research.sh` refuses any `mcp_servers` block in this home — the rail that
+keeps `place_order` out of a web-reading process. Admitting a different server
+is a redesign of that rail, not a workaround.
+
 **The quarantine check had the same bug in THREE places, and the sentence
 "both places that check" is how the third one shipped.** The check greps the
 written config for `mcp_servers` and `run-mcp.sh`; the shipped config's own
