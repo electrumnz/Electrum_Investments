@@ -1092,7 +1092,28 @@ def build_prompt(
         out.append("")
 
     if open_dreams:
-        out.append("Dreams already in progress. Prefer advancing one of these:")
+        # **The valid ids, listed together and named as the only ones.**
+        # Observed live: the model asked to advance `id 45` on a box holding
+        # two dreams. `_apply` refused it and started a new dream instead —
+        # correct, and never overwriting an unrelated row — but the
+        # consequence is that every invented id ADDS to the workbench, so a
+        # model that cannot keep an id straight quietly stacks the shelf while
+        # appearing to iterate.
+        #
+        # The ids were already rendered per dream as `[id N]`. What was
+        # missing is the closed set, stated once, next to the instruction that
+        # uses it: a list to copy from is a far easier thing to get right than
+        # a number to remember from further up a long document. This does not
+        # replace the check in `_apply` and must not be read as making it
+        # unnecessary — a prompt is guidance and that is the rail.
+        ids = ", ".join(str(d.id) for d in open_dreams if d.id)
+        out.append(
+            "Dreams already in progress. Prefer advancing one of these, and "
+            f"put its id in `advance_id`. The ONLY valid ids are: {ids}. "
+            "Any other value is discarded and you will have started a new "
+            "dream instead of advancing this one, which leaves the chain you "
+            "meant to work on exactly where it was."
+        )
         for dream in open_dreams:
             age = (stamp - dream.updated_at).days
             out.append(
