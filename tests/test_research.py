@@ -17,6 +17,7 @@ edit on the box.
 from __future__ import annotations
 
 import ast
+import re
 from dataclasses import fields
 from datetime import UTC, datetime
 from pathlib import Path
@@ -1136,3 +1137,69 @@ def test_platform_toolsets_is_top_level_and_never_nested_under_agent() -> None:
     # This process reads untrusted pages; a shell in the same context is
     # prompt injection with a command line attached.
     assert "terminal" in config["agent"]["disabled_toolsets"]
+
+
+def test_every_enable_script_guards_its_success_block_on_its_own_probe() -> None:
+    """**The founding failure, enumerated rather than hand-listed.**
+
+    `enable-research.sh` was fixed for this and three other scripts were not,
+    which is exactly how the third instance of a bug ships: the lesson gets
+    written down beside one file instead of applied to the class. Observed live
+    17 Aug 2026, `enable-dream.sh`:
+
+        WARNING: POST /chat returned 401 rather than 200.
+        ...
+        Done. Open /dreaming; the banner should no longer say the dreamer
+        shares the account agent instance.
+
+    Every line was true. The reassuring one came last, so it is the one that
+    gets read — and the operator is told to go and use a feature that will not
+    answer.
+
+    So the rule is checked against the DIRECTORY, in the same shape as the
+    quarantine test above and for the same reason: a guarantee checked against
+    a hand-written list is a guarantee that lapses the moment somebody forgets
+    the list. Any `deploy/enable-*.sh` that both warns and then congratulates
+    must gate the congratulation on a recorded probe result, and must EXIT —
+    a guard that prints and falls through is the same bug with more output.
+    """
+    root = Path(__file__).resolve().parents[1]
+    scripts = sorted((root / "deploy").glob("enable-*.sh"))
+    assert scripts, "no enable scripts found — has deploy/ moved?"
+
+    checked = 0
+    for path in scripts:
+        script = path.read_text(encoding="utf-8")
+        if "WARNING" not in script:
+            # Nothing to guard: this one never reports a soft failure.
+            continue
+        # The FINAL success block, which is the one a reader reaches last.
+        marker = "printf '\\nDone."
+        if marker not in script:
+            continue
+        checked += 1
+        success = script.rindex(marker)
+        head = script[:success]
+
+        assert "probe_ok" in head, (
+            f"{path.name} warns but records no probe result, so its success "
+            "block cannot be guarded by one"
+        )
+        # Two spellings in the tree (`$probe_ok` and `${probe_ok:-0}`), and
+        # the test matches the INTENT rather than either literal — pinning one
+        # would fail the other script for a difference that means nothing.
+        found = list(re.finditer(r'if \[\[ "\$\{?probe_ok[^"]*" != "1" \]\]; then', head))
+        assert found, f"{path.name} never branches on its probe result"
+        guard = found[-1].start()
+        assert "exit 1" in head[guard:], (
+            f"{path.name} guards its success block but does not exit, so "
+            "execution falls straight through into it"
+        )
+        assert "NOT WORKING YET" in head[guard:], (
+            f"{path.name} exits without saying plainly that the feature is "
+            "not working — a bare exit code reaches nobody reading a terminal"
+        )
+
+    assert checked >= 4, (
+        f"expected the four probing enable scripts, guarded {checked}"
+    )

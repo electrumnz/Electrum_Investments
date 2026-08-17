@@ -177,11 +177,13 @@ code="$(curl -sS --max-time 200 -b "$jar" -o "$body" -w '%{http_code}' \
   -d "{\"token\":\"$chat_token\",\"message\":\"Reply with the single word: READY\"}" \
   http://127.0.0.1:8787/chat || echo 000)"
 
+probe_ok=0
 if [[ "$code" != "200" ]]; then
   say "WARNING: POST /chat returned $code rather than 200."
   say "         Check: journalctl -u mudhorn-web -n 30"
 elif grep -q '"ok": *true' "$body" || grep -q '"ok":true' "$body"; then
   say "Hermes answered. Chat is working end to end."
+  probe_ok=1
 else
   say "WARNING: the service reached Hermes and got an error back:"
   sed -n 's/.*"error": *"\([^"]*\)".*/           \1/p' "$body" | head -3
@@ -189,6 +191,28 @@ else
 fi
 
 systemctl is-active --quiet mudhorn-web || die "mudhorn-web is not running"
+
+# **The success block is GUARDED.** This script printed a WARNING and then a
+# `Done.` block three lines later, which is this repository's founding failure:
+# the reassuring text comes last, so it is the text that gets read.
+# `enable-research.sh` was fixed for this and the others were not — the lesson
+# had been written down beside one script rather than applied to every script
+# that probes itself. A non-zero exit as well as the words, because a guard
+# that prints and falls through is the same bug with more output.
+#
+# This check signs in first, so a non-200 can also mean it could not read
+# DASHBOARD_PASSWORD or DASHBOARD_CHAT_TOKEN rather than anything being wrong
+# with Hermes. That is said in the message rather than left to be guessed.
+if [[ "$probe_ok" != "1" ]]; then
+  printf '\nNOT WORKING YET. The grant is installed, but the running service could\n'
+  printf 'not get an answer out of Hermes, so the Chat panel will not reply.\n\n'
+  printf 'A 401 here can also mean this check could not read DASHBOARD_PASSWORD\n'
+  printf 'or DASHBOARD_CHAT_TOKEN out of %s/.env -- a duplicate key is enough.\n' "$APP_DIR"
+  printf 'Test the wrapper directly, which skips the web layer entirely:\n'
+  printf '    sudo -u hermes %s/deploy/run-chat.sh <<< "reply with just: ok"\n\n' "$APP_DIR"
+  printf 'Off again: sudo %s --off\n' "$0"
+  exit 1
+fi
 
 printf '\nDone. Open the Chat tab and ask it something.\n'
 printf 'Off again: sudo %s --off\n' "$0"
