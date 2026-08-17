@@ -381,11 +381,21 @@ any of them.
   fills with conclusions nobody committed to anything about. It also dead-ends:
   a dream with nothing settleable can never reach the VAULT either, so the
   conference still starves.
-- **Letting the model answer.** `settle_condition` refuses every actor but the
-  operator, and `dreamer.StepCondition` has no field that could carry an answer
-  — structural, and tested. A vaulted dream is what an adoption is taken from
-  and an adoption is a live symbol permission, so this route is *stricter* than
-  the graded one.
+- ~~**Letting the model answer.**~~ **ADOPTED 17 Aug 2026, on the operator's
+  instruction.** Kept here as a reversal rather than deleted, because the
+  argument against it was wrong in a specific way: it said a vaulted dream is
+  what an adoption is taken from and an adoption is a live symbol permission,
+  and skipped that **adoption is the TRADING agent's**, taken in the A2A
+  conference. The dreamer settling its own moves its dream onto the shelf where
+  the other agent can see it; the other agent still decides, and every gate in
+  `RiskGate.evaluate` still runs on anything traded under a grant.
+
+  What it cost while it stood: the Cisco dream sat under a card reading *"6
+  questions waiting on you"* with no way to answer any of them from the page.
+  See `CLAUDE.md`, "There are TWO shapes of pre-registration", for the three
+  properties that hold it in place — chiefly that `observed_by` records the
+  actual actor and `confer.render_dream` shows the trading agent when a claim
+  was self-answered. The **trading agent** still may not settle one.
 
 ### The operator surface, which is what made it reachable rather than one step longer
 
@@ -395,12 +405,12 @@ observation-only prophecy reached PROPHECY and stopped there for ever.
 - `electrum-bot observations` — the worklist, oldest review date first.
 - `electrum-bot settle <handle> --met|--ruled-out --note "..."` — the answer.
 
-Both are terminal commands **on the box**, not a control on the deck, for the
-reason above: an answer can end in a live symbol permission, and that write
-belongs behind the shell rather than behind one shared password on a surface
-that may be exposed. The Dreaming page carries a read-only **Waiting on you**
-card that shows the questions and names the command — the same shape as
-Settings showing the limits and naming the file that owns each.
+Both are terminal commands **on the box**. They are a **manual override** as of
+17 Aug 2026 rather than the expected path — the dreamer answers its own now, and
+nothing on any surface asks a person to run either. The Dreaming page's card is
+**Grogu's open questions**: the same list, addressed to nobody, and no longer
+naming the command. It was kept rather than deleted because it is the only
+surface that says which claim is holding a stuck dream.
 
 The handle is `dreaming.observation_handle`: six hex characters over the dream
 id and the claim's key, **derived and never stored**, so it changes when the
@@ -3020,8 +3030,10 @@ each is a bug that reached a user once:
   a dream. `.from-dream` is tested for surviving `prefers-reduced-motion`, for
   the same reason the treatment exists at all: a marking that cannot be traced
   back to a record is decoration pretending to be provenance.
-- **DONE — "Waiting on you".** The Dreaming page's read-only worklist of
-  operator-settled observations. See item 0b.
+- **DONE — "Grogu's open questions"** (was "Waiting on you"). The Dreaming
+  page's read-only list of unanswered observations. Reworded 17 Aug 2026 when
+  the dreamer took over answering them; it is a readout now, not a worklist.
+  See item 0b.
 
 ---
 
