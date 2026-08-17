@@ -94,7 +94,19 @@ if [[ ! -r "$HERMES_CONFIG" ]]; then
   echo "quarantine is not a quarantine. See deploy/hermes-research-config.yaml." >&2
   exit 78
 fi
-if grep -qE 'run-mcp\.sh|electrum-bot' "$HERMES_CONFIG"; then
+#
+# **COMMENTS ARE STRIPPED FIRST, and skipping that made this check refuse every
+# correct install.** Observed on the droplet: `hermes-research-config.yaml`
+# explains in its own header that this wrapper greps for `run-mcp.sh`, so the
+# sentence documenting the check matched the check and the researcher refused
+# to start over the comment saying it was safe.
+#
+# That is the third instance of one bug — the same shape as the `.gitignore`
+# depth trap and the two in `enable-research.sh`. The rule worth carrying: a
+# guard that reads a file's TEXT must read the file's MEANING, and in a config
+# format with comments those are different things. `sed` rather than a YAML
+# parser because this must not need Python or the venv, and must fail closed.
+if sed 's/#.*//' "$HERMES_CONFIG" | grep -qE 'run-mcp\.sh|electrum-bot'; then
   echo "$HERMES_CONFIG registers this repo's MCP server." >&2
   echo "The researcher reads the web, and a web-reading agent must not share a" >&2
   echo "process with place_order. Remove the mcp_servers entry from THIS home" >&2

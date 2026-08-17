@@ -967,13 +967,75 @@ def test_the_researcher_config_is_an_allowlist_with_no_mcp_server() -> None:
     assert "run-mcp.sh" not in live
     assert "toolsets:" in live
 
-    # And the script strips them too, or a correct config fails to install.
-    # Both places that check the quarantine — `--status` and the `on` path —
-    # so a fix applied to one of them does not leave the other broken.
-    script = (root / "deploy/enable-research.sh").read_text()
-    checks = script.count("run-mcp\\.sh|electrum-bot|mcp_servers")
-    assert checks == 2, checks
-    assert script.count("sed 's/#.*//'") == checks
+    # And EVERY place that checks the quarantine strips them too, or a correct
+    # config fails to install — or, worse, refuses to run.
+    #
+    # **Enumerated from the files rather than from a hand-written list of two,
+    # because a hand-written list of two is exactly how this shipped broken.**
+    # The first version of this test counted the checks in `enable-research.sh`
+    # and asserted there were two. There were three: `run-research.sh`, the
+    # WRAPPER — the one that actually runs on every look-up — has its own, and
+    # it was not in the list, so it was not fixed and it refused every correct
+    # install on the box. `tests/test_auth.py` learned the same lesson about
+    # routes: a guarantee checked against a list somebody maintains is a
+    # guarantee that lapses the moment somebody forgets the list.
+    scripts = sorted((root / "deploy").glob("*research*.sh"))
+    assert scripts, "no researcher scripts found — did they move?"
+
+    # Whole-line comments only. A cleverer strip breaks on the very expression
+    # being looked for — `sed 's/#.*//'` contains a `#`, so splitting on the
+    # first one truncates the fix and reports it missing. The bug's own shape,
+    # one level up, in the test written to catch it.
+    def is_comment(text: str) -> bool:
+        return text.lstrip().startswith("#")
+
+    guards = 0
+    for script in scripts:
+        lines = script.read_text().splitlines()
+        for line_no, code in enumerate(lines, 1):
+            if is_comment(code) or "grep" not in code or "run-mcp" not in code:
+                continue
+            guards += 1
+            # The strip may sit on this line or pipe in from the one above, so
+            # the statement is what counts rather than the line. A `grep`
+            # reading the config with no strip anywhere in its pipeline is the
+            # bug — the file's own comments describe the check and match it.
+            statement = code
+            if line_no >= 2 and not is_comment(lines[line_no - 2]):
+                statement = lines[line_no - 2] + " " + statement
+            assert "sed 's/#.*//'" in statement, (
+                f"{script.name}:{line_no} greps the config without stripping "
+                "comments first; the file's own header explains the check and "
+                "will match it"
+            )
+    assert guards >= 3, f"expected at least three quarantine checks, found {guards}"
+
+
+def test_the_shipped_config_defeats_a_naive_quarantine_grep() -> None:
+    """The reproduction, kept as a test so the trap cannot come back.
+
+    `hermes-research-config.yaml` explains in its own header that the wrapper
+    greps for `run-mcp.sh`. That sentence matches the grep. So a naive check
+    refuses the very config it was written to approve, and says the instance
+    registers an MCP server when the only occurrence is a comment saying it
+    does not.
+
+    This asserts the trap is REAL — the raw text does match — and that reading
+    the file's meaning rather than its text answers correctly.
+    """
+    import re
+
+    config = (
+        Path(__file__).resolve().parents[1] / "deploy/hermes-research-config.yaml"
+    ).read_text()
+    pattern = re.compile(r"run-mcp\.sh|electrum-bot")
+
+    assert pattern.search(config), (
+        "the trap is gone from the shipped config — if that was deliberate the "
+        "comment-stripping is still required, because a later edit brings it back"
+    )
+    live = "\n".join(line.split("#")[0] for line in config.splitlines())
+    assert not pattern.search(live)
 
 
 def test_an_index_pinned_weakest_hop_is_not_reported_as_unnamed() -> None:
@@ -1012,3 +1074,33 @@ def test_an_index_pinned_weakest_hop_is_not_reported_as_unnamed() -> None:
     # dream look attacked.
     bare = _dream(Dream(id=2, title="t", seed="s", chain=[Hop(claim="one")]))
     assert "Not named" in bare
+
+
+def test_a_failed_probe_does_not_print_a_success_block() -> None:
+    """The founding failure, in the enable script, observed live.
+
+    The wrapper refused, the WARNING scrolled past, and four lines of "Done.
+    The next `electrum-bot dream` will look up its unchecked hops" printed
+    after it — describing behaviour that was not going to happen. Every line
+    was true; the reassuring one came last, so it is the one that was read.
+
+    CLAUDE.md's rule is the fix: say plainly what should happen and what to
+    send back. A non-zero exit is the other half, so a caller cannot miss it
+    either.
+    """
+    script = (Path(__file__).resolve().parents[1] / "deploy/enable-research.sh").read_text()
+
+    assert 'probe_ok=1' in script
+    guard = script.index('if [[ "${probe_ok:-0}" != "1" ]]; then')
+    # The printf, not the phrase: the comment above the guard QUOTES the
+    # success line while explaining why it was wrong, so a plain search finds
+    # the explanation before the thing being explained.
+    success = script.index("printf '\\nDone. The next `electrum-bot dream`")
+    assert guard < success, "the success block is not guarded by the probe result"
+
+    # The guard has to EXIT, not merely print — otherwise execution falls
+    # through into the success text it was added to suppress.
+    assert "exit 1" in script[guard:success]
+    # And it must say the state plainly rather than only warning.
+    assert "NOT WORKING YET" in script[guard:success]
+    assert "--off" in script[guard:success]

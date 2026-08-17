@@ -779,11 +779,39 @@ Without it the feature fails SAFE rather than silently — `Researcher.enabled`
 reads `permitted`, never `available`, so an ungranted box answers every
 look-up with an error and every hop stays honestly unchecked.
 
-**The quarantine check had a bug the test found before the box did.** The
-script grepped the written config for `mcp_servers`, and the shipped config's
-own header explains that there is no such key — so a correct install would
-have died over the comment documenting that it is safe. Comments are stripped
-first, in both places that check.
+**The quarantine check had the same bug in THREE places, and the sentence
+"both places that check" is how the third one shipped.** The check greps the
+written config for `mcp_servers` and `run-mcp.sh`; the shipped config's own
+header explains that there is no such key and that the wrapper greps for that
+string — so the comment documenting the check matches the check, and a correct
+install is refused over the sentence saying it is safe.
+
+Two of the three were caught by a test before the box saw them. The third was
+`deploy/run-research.sh` — the WRAPPER, the one that actually runs on every
+look-up — and it was missed because the test counted the guards in
+`enable-research.sh` and asserted there were two. It refused the first real
+install on the droplet, exactly as designed and exactly wrongly.
+
+The test enumerates `deploy/*research*.sh` now and requires every `grep` for
+`run-mcp` to have a comment strip in its pipeline. **A guarantee checked
+against a hand-written list is a guarantee that lapses the moment somebody
+forgets the list** — `tests/test_auth.py` learned this about routes, and the
+`.gitignore` depth trap is the same failure again: where a rule is applied by
+matching TEXT, it must be applied to the text's MEANING.
+
+Worth carrying past this file: the comment-stripping in the test itself broke
+on `sed 's/#.*//'`, because splitting a line on its first `#` truncates the
+very expression being looked for. The bug's own shape, one level up, in the
+test written to catch it.
+
+**A failed probe printed a success block, and that is the founding failure.**
+The wrapper refused, the WARNING scrolled past, and four lines of "Done. The
+next `electrum-bot dream` will look up its unchecked hops" printed after it,
+describing behaviour that was not going to happen. Every line was true; the
+reassuring one came last, so it is the one that gets read. The guard exits
+non-zero and says NOT WORKING YET in words, and a test pins that the exit is
+there — a guard that prints and falls through is the same bug with more
+output.
 
 ### A feed's attribution is the cheapest source there is, and it was discarded
 

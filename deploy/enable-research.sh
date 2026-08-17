@@ -271,6 +271,7 @@ if systemd-run --quiet --pipe --wait --collect \
     >"$probe_out" 2>&1; then
   if grep -qi 'ready' "$probe_out"; then
     say "The researcher answered."
+    probe_ok=1
   else
     say "WARNING: it ran but did not answer as expected. First lines:"
     head -3 "$probe_out" | sed 's/^/           /'
@@ -279,6 +280,27 @@ else
   say "WARNING: the probe failed. First lines:"
   head -5 "$probe_out" | sed 's/^/           /'
   say "         Check: journalctl -u mudhorn-dream -n 30"
+fi
+
+# **A failed probe must not print a success block, and this printed one.**
+# Observed on the droplet: the wrapper refused, the WARNING scrolled past, and
+# four lines of "Done. The next `electrum-bot dream` will look up its unchecked
+# hops" followed it — describing behaviour that was not going to happen.
+#
+# That is this repository's founding failure exactly: every line of output was
+# true, the operator had no way to tell the deploy had not happened, and the
+# reassuring text came last so it is the text that gets read. The rule from
+# CLAUDE.md is the fix — say plainly what should happen and what to send back —
+# and a non-zero exit so a script calling this one cannot miss it either.
+if [[ "${probe_ok:-0}" != "1" ]]; then
+  printf '\nNOT WORKING YET. The grant and the drop-in are installed, but the\n'
+  printf 'researcher did not answer, so every look-up will come back as an error\n'
+  printf 'and every hop will stay honestly unchecked. Nothing is broken and\n'
+  printf 'nothing is unsafe -- the feature is simply inert.\n\n'
+  printf 'Send the WARNING above to whoever is helping, with:\n'
+  printf '    journalctl -u mudhorn-dream -n 30\n\n'
+  printf 'To undo the grant meanwhile: sudo %s --off\n' "$0"
+  exit 1
 fi
 
 printf '\nDone. The next `electrum-bot dream` will look up its unchecked hops.\n'
