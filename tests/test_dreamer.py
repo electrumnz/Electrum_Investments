@@ -295,19 +295,41 @@ def test_an_existing_dream_is_advanced_rather_than_duplicated(rules, journal, st
     assert [t.text for t in stored.thoughts] == ["hop three is weak"]
 
 
-def test_an_unknown_advance_id_starts_a_new_dream_rather_than_overwriting(
-    rules, journal, store
-):
-    """A model returning an id for a row it was never offered must not be able
-    to write over an unrelated dream."""
+def test_an_unknown_advance_id_writes_nothing_at_all(rules, journal, store):
+    """**The duplicate factory, closed.** This test used to assert the opposite.
+
+    The old rule was "a model returning an id for a row it was never offered
+    must not write over an unrelated dream", and the implementation was
+    `dream = target or Dream(...)` — refuse the overwrite, create a new dream
+    instead. The refusal half is right and is kept. The fallback half was
+    quietly wrong, and it took two live runs to see why.
+
+    A step that names an `advance_id` INTENDED to continue an existing chain,
+    so its title and seed describe that chain. Turning it into a new dream
+    therefore usually writes a DUPLICATE of the very row it was reaching for.
+    Observed on the droplet: it asked for id 1 (a dropped chain, so not
+    offered) and the run created dream 3 carrying the identical title to dream
+    2 — the same dream twice on one shelf, with the observation worklist
+    doubling behind it. That is the shelf-stacking the operator reported.
+
+    So nothing is written. An unusable step is recoverable on the next pass; a
+    polluted shelf is cleaned up by hand.
+
+    **What is still not done is picking a dream on the model's behalf**, even
+    when exactly one was offered and the intent looks obvious. That is code
+    choosing what to think about, and a step attributed to a chain nobody
+    selected is worse than a step discarded.
+    """
     store.save(Dream(title="Existing", seed="s"))
 
     client = _StubClient(_step(advance_id=9999, title="New one"))
     result = Dreamer(_env(), rules, store, journal, client=client).run_once()
 
-    assert result is not None
-    assert result.advanced is False
-    assert {d.title for d in store.recent()} == {"Existing", "New one"}
+    # A step that could not be applied is not recorded as one that decided
+    # nothing — same shape as a failed model call.
+    assert result is None
+    # And above all: no second row, and the existing one untouched.
+    assert {d.title for d in store.recent()} == {"Existing"}
 
 
 def test_a_source_is_dropped_when_the_hop_is_not_checked(rules, journal, store):
