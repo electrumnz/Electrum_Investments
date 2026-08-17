@@ -2473,6 +2473,42 @@ because these are read from disk at call time and could be edited on the box. A
 missing soul degrades to a voiceless prompt rather than raising — same failure
 direction as `HermesBridge.available`.
 
+### A provisioning banner that states a service's state must READ it
+
+`bootstrap.sh` printed `mudhorn-dream.timer installed, NOT started` on every
+provision, as a bare `echo`. It never asked systemd anything.
+
+Measured 17 Aug 2026: the timer had been enabled and firing daily for weeks —
+`systemctl list-timers` showed `LAST` earlier that same morning — while every
+deploy told the operator it was off and told them to run an `enable` that was
+already done.
+
+**The cost was a wrong diagnosis, not a wrong line.** A session read the banner
+instead of the system, concluded the dreamer had never run on a schedule, and
+went looking for the observation backlog's cause in the timer. The real cause
+was the operator-settled observation rule, one section up. The banner was
+believed because everything around it was true — which is the founding failure
+exactly, in the one script whose whole job is to describe the box.
+
+Three properties now:
+
+- **`is-enabled` and `is-active` are asked separately**, because they are
+  different questions and the interesting answer is the disagreement:
+  enabled-but-inactive is a timer that returns after a reboot and is not
+  counting down now, which neither "started" nor "NOT started" describes.
+- **The NEXT firing is printed when there is one.** A timer can be enabled,
+  active and never fire, because `OnCalendar=` did not parse — and the
+  `Pacific/Auckland` suffix needs systemd 252, so that is a live possibility
+  rather than a hypothetical.
+- **The "nothing was switched on" summary now says it did not switch anything
+  OFF either**, and points at `systemctl list-timers 'mudhorn-*'`. Read alone,
+  the old sentence invited the reading that nothing was running.
+
+The general rule, and it is the `enable-*.sh` finding in the provisioning
+script: **where output describes the state of something outside the script,
+the script has to go and look.** A constant that happens to be true on a fresh
+box is a constant that lies on every box afterwards.
+
 ### The dreamer has no order path, and that is structural
 
 `src/bot/dreaming.py` produces second-order hypotheses: the cicada brood that
