@@ -244,3 +244,12 @@ fi
 echo ""
 echo "    Nothing here switched on --execute, the dream timer or the confer"
 echo "    timer. Those are a person's decision, and a deploy is not it."
+# **It does not switch them OFF either, and that half was missing.** The
+# sentence above is about what this script DID; read alone it invites the
+# reading that nothing is running, which is how a session concluded the dream
+# timer had never fired while it had in fact run that morning. bootstrap.sh
+# reports each timer's real state; this points at the command that answers it
+# for somebody reading only this output.
+echo ""
+echo "    It did not switch anything OFF either. For what is actually running:"
+echo "        systemctl list-timers 'mudhorn-*'"

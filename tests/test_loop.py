@@ -2832,3 +2832,56 @@ def test_the_heartbeat_states_tight_and_unmeasured_stops_as_two_facts(
     beat = _heartbeat(logs)
     assert beat["tight_stops"] == []
     assert beat["stops_unmeasured"] == []
+
+
+def test_dream_steps_runs_the_whole_command_again_each_pass(monkeypatch):
+    """`--steps N` re-enters rather than looping inside the dreamer.
+
+    That is the point rather than laziness. Each pass re-reads the store, so a
+    citation the researcher fetched on one pass is in the prompt on the next —
+    which is exactly how the look-up is meant to work, and a loop reusing one
+    prompt would fetch evidence nobody then read.
+
+    The operator's reason for wanting it: *"how do we stop this stacking and
+    just allow grogu to clear multiple?"*. One step a day is right for a timer
+    and wrong for working off a backlog by hand.
+    """
+    calls: list[int] = []
+
+    real = main_mod.cmd_dream
+
+    def counting(env, rules, *, steps: int = 1):
+        calls.append(steps)
+        if steps > 1:
+            return real(env, rules, steps=steps)
+        return 0
+
+    monkeypatch.setattr(main_mod, "cmd_dream", counting)
+
+    assert counting(object(), object(), steps=4) == 0
+    # One outer call plus one per pass, each pass asking for a single step.
+    assert calls == [4, 1, 1, 1, 1]
+
+
+def test_a_failed_dream_pass_stops_the_run_and_keeps_its_exit_code(monkeypatch):
+    """A failed step STOPS the rest.
+
+    The usual cause is the provider refusing, and four more attempts would be
+    four more refusals and four more bills. The exit code is the first
+    failure's, so a partial run stays visibly a failure rather than being
+    averaged into a success.
+    """
+    calls: list[int] = []
+    real = main_mod.cmd_dream
+
+    def failing(env, rules, *, steps: int = 1):
+        calls.append(steps)
+        if steps > 1:
+            return real(env, rules, steps=steps)
+        return 0 if len(calls) <= 2 else 1
+
+    monkeypatch.setattr(main_mod, "cmd_dream", failing)
+
+    assert failing(object(), object(), steps=5) == 1
+    # Outer, then a pass that succeeded, then one that failed. No more.
+    assert calls == [5, 1, 1]

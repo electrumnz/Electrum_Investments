@@ -204,9 +204,56 @@ echo "    mudhorn-backup.timer started (hourly)"
 # and would post a failed unit every morning, which teaches an operator to
 # ignore systemctl --failed. Same reasoning as --execute and the chat token:
 # anything that spends or acts is switched on by a person who decided to.
-echo "    mudhorn-dream.timer installed, NOT started"
-echo "      enable with: systemctl enable --now mudhorn-dream.timer"
-echo "      costs roughly a few pounds a year."
+# **Report the timer's REAL state, never a constant.** These two lines used to
+# be bare `echo`s saying "installed, NOT started", printed on every provision
+# whether the timer was running or not. Observed 17 Aug 2026: the dream timer
+# had been firing daily for weeks — `systemctl list-timers` showed it had run
+# that very morning — while every deploy told the operator it was off, and told
+# them to run an `enable` that was already done.
+#
+# That is this repository's founding failure in the provisioning script: a true-
+# sounding line stating something nobody checked. It cost a real diagnosis —
+# a session read the banner instead of the system, concluded the dreamer had
+# never run on a schedule, and looked for the backlog's cause in the wrong
+# place entirely.
+#
+# `is-enabled` and `is-active` are different questions and both are asked:
+# enabled-but-inactive is a timer that will come back after a reboot and is not
+# counting down now, which neither "started" nor "NOT started" describes.
+timer_state() {
+  local unit="$1" enabled active
+  enabled="$(systemctl is-enabled --quiet "$unit" && echo yes || echo no)"
+  active="$(systemctl is-active --quiet "$unit" && echo yes || echo no)"
+  if [[ "$enabled" == yes && "$active" == yes ]]; then
+    echo "running"
+  elif [[ "$active" == yes ]]; then
+    echo "running, but not enabled at boot"
+  elif [[ "$enabled" == yes ]]; then
+    echo "enabled at boot, not currently active"
+  else
+    echo "installed, NOT started"
+  fi
+}
+
+report_timer() {
+  local unit="$1" state
+  state="$(timer_state "$unit")"
+  echo "    $unit $state"
+  if [[ "$state" == "installed, NOT started" ]]; then
+    echo "      enable with: systemctl enable --now $unit"
+    return 1
+  fi
+  # The next firing, which is the figure that actually answers "is this
+  # working". A timer can be enabled and active and still never fire if its
+  # calendar expression does not parse.
+  systemctl list-timers --all --no-legend "$unit" 2>/dev/null \
+    | awk '{print "      next: " $1 " " $2 " " $3}' | head -1
+  return 0
+}
+
+if ! report_timer mudhorn-dream.timer; then
+  echo "      costs roughly a few pounds a year."
+fi
 # Said here because this is the line somebody reads while wondering which key
 # this timer needs, and the answer changed. It used to be ANTHROPIC_API_KEY
 # unconditionally and the note here said the DigitalOcean switch did not reach
@@ -223,9 +270,9 @@ echo "      that is set, ANTHROPIC_API_KEY otherwise. The command says which."
 # no-op — so enabling it alone is the odd configuration rather than the useful
 # one. An accept grants a SYMBOL PERMISSION with an expiry; it places nothing,
 # and RiskGate still runs on anything traded under one.
-echo "    mudhorn-confer.timer installed, NOT started"
-echo "      enable with: systemctl enable --now mudhorn-confer.timer"
-echo "      enable the dream timer too, or it has nothing to confer about."
+if ! report_timer mudhorn-confer.timer; then
+  echo "      enable the dream timer too, or it has nothing to confer about."
+fi
 
 # Started for the same reason. Before Tailscale is installed this reports "not
 # logged in", which is correct rather than noisy: on a box whose dashboard is

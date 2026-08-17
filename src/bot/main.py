@@ -1682,8 +1682,8 @@ def _describe_fusion(fusion: FusionResult | None) -> str | None:
 PREFER_HERMES_RESEARCH = False
 
 
-def cmd_dream(env: Env, rules: Rules) -> int:
-    """One dream step.
+def cmd_dream(env: Env, rules: Rules, *, steps: int = 1) -> int:
+    """One dream step, or `steps` of them back to back.
 
     Its own command rather than a step inside `cmd_loop`, and deliberately so.
     The loop wakes every fifteen minutes because a price moves that fast; a
@@ -1697,7 +1697,34 @@ def cmd_dream(env: Env, rules: Rules) -> int:
     Returns 0 on a dream and 1 on a failed call. A non-zero exit is what a timer
     unit surfaces through `systemctl --failed`, and a model call that failed is
     worth noticing rather than logging into the void.
+
+    **`steps` runs the whole thing again rather than looping inside the
+    dreamer**, and that is the point rather than laziness. Each pass re-reads
+    the store, so a citation fetched on one pass is in the prompt on the next —
+    which is exactly how the researcher is meant to work, and a loop that
+    reused one prompt would fetch evidence nobody then read. It also means a
+    failure part-way leaves every completed step already saved.
+
+    The operator's reason for wanting it: *"how do we stop this stacking and
+    just allow grogu to clear multiple?"*. One step a day is the right cadence
+    for a timer and the wrong one for working off a backlog by hand.
+
+    **A failed step STOPS the run.** The usual cause is the provider refusing,
+    and four more attempts would be four more refusals and four more bills.
+    The exit code is the first failure's, so a partial run is still visibly a
+    failure rather than being averaged away.
     """
+    if steps > 1:
+        # Re-entered rather than looped inside, so each pass gets a fresh
+        # prompt built from what the last one wrote. See the docstring.
+        for number in range(1, steps + 1):
+            log.info("dream_pass", pass_number=number, of=steps)
+            code = cmd_dream(env, rules, steps=1)
+            if code != 0:
+                log.warning("dream_pass_failed", pass_number=number, of=steps)
+                return code
+        return 0
+
     from .dreamer import Dreamer, promote_dreams
     from .lookup import LocalResearcher, Sources
     from .research import Researcher
@@ -2876,7 +2903,30 @@ def main() -> int:
         action="store_true",
         help="Force the in-memory MockBroker, ignoring any Alpaca credentials.",
     )
+    # `dream` only. Deliberately NOT given to the timer unit, which stays at
+    # one step a day: this is for working off a backlog by hand, and a timer
+    # that spent several model calls every morning would be a different
+    # decision from the one the operator made when they enabled it.
+    parser.add_argument(
+        "--steps",
+        type=int,
+        default=1,
+        metavar="N",
+        help=(
+            "dream only: take N steps back to back, re-reading the store "
+            "between each so a citation fetched on one pass is read on the "
+            "next. Default 1. A failed step stops the run."
+        ),
+    )
     args = parser.parse_args()
+
+    # Refused rather than clamped. A zero or a negative is a typo, and the
+    # helpful readings of it disagree — 0 could mean "none" or "the default" —
+    # so there is no safe guess between them. Same rule as `settle` refusing to
+    # default an answer.
+    if args.steps < 1:
+        print("--steps must be 1 or more.")
+        return 2
 
     # Before the credential check, deliberately. Rebuilding an index over files
     # already on disk needs no broker and no keys, and refusing to run it
@@ -2947,7 +2997,7 @@ def main() -> int:
     if args.command == "smoketest":
         return cmd_smoketest(env, rules, force_mock=args.mock)
     if args.command == "dream":
-        return cmd_dream(env, rules)
+        return cmd_dream(env, rules, steps=args.steps)
     if args.command == "confer":
         return cmd_confer(env, rules)
     # Neither of these needs an `Env` at all — no broker, no key, no credential
