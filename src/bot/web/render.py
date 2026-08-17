@@ -8236,11 +8236,45 @@ def _verification_note(dream: Dream) -> str:
     """
     ceiling = dream.verification_ceiling
     if ceiling is None:
-        return ""
+        return _unchecked_note(dream)
     return (
         '<p class="note" style="margin-top:.75rem">Capped at the weakest parent: '
         f"no better than <b>{_e(str(ceiling))}</b>. Combining two arguments is "
         "not evidence for either of them.</p>"
+    ) + _unchecked_note(dream)
+
+
+def _unchecked_note(dream: Dream) -> str:
+    """What an unchecked hop MEANS, and what would change it.
+
+    The badge and the broken connectors already say a hop is unsourced. What
+    the card never said is what that costs and what would fix it, so a chain of
+    open links read as a defect in the dream — *"it says not checked"* — rather
+    than as work the dreamer has not done yet. The two are opposite readings of
+    the same honest state, and only one of them is true.
+
+    **It says nothing about how likely the chain is**, which is the line the
+    page already takes on the badge and the one that matters most here. An
+    unchecked hop is a statement about EVIDENCE. A reader who takes "not
+    checked" as "probably wrong" has been misled exactly as much as one who
+    takes it as "fine".
+
+    Absent when every hop is sourced, for `_open_questions`' reason: a note
+    congratulating a chain on being checked is furniture.
+    """
+    open_hops = len(dream.unverified_hops)
+    if not open_hops or not dream.chain:
+        return ""
+    return (
+        '<p class="note" style="margin-top:.75rem">'
+        f"{_count(open_hops, 'hop', 'hops')} of {len(dream.chain)} "
+        f"{_word(open_hops, 'is', 'are')} still unchecked — nobody has sourced "
+        f"{_word(open_hops, 'it', 'them')} yet. That is a statement about "
+        "evidence and not about how likely the chain is, and it is the ordinary "
+        "state of a new dream rather than a fault in this one. A hop becomes "
+        "checked when Grogu can name a source for it: a citation the researcher "
+        "brought back, or a headline in the feed carrying a publisher and a "
+        "link. Until then it stays open, which is the honest reading.</p>"
     )
 
 
@@ -8302,10 +8336,21 @@ def _conditions(dream: Dream, now: datetime) -> str:
                 if state is ConditionState.OVERDUE
                 else f"review by {due}"
             )
+            # WHO answered, once somebody has. An observation Grogu settled
+            # for itself and one a person went and looked at are different
+            # facts about how much this prophecy is worth, and the card that
+            # renders the claim is where that belongs — a reader comparing two
+            # met conditions has no other way to tell them apart.
+            who = (
+                f" Answered by {_e(cond.observed_by)}."
+                if cond.is_answered and cond.observed_by
+                else " Grogu answers this on one of its own runs."
+                if not cond.is_answered
+                else ""
+            )
             threshold = (
                 f'<span class="thr">Look at {_e(cond.subject)} — '
-                f"{_e(cond.observable)}; {when}. Only the operator settles "
-                f"this.</span>"
+                f"{_e(cond.observable)}; {when}.{who}</span>"
             )
         else:
             threshold = (
@@ -9400,28 +9445,39 @@ def _shelf_rail(summary: DreamSummary) -> str:
     return f'<div class="shelfrail">{tiles}</div>'
 
 
-def _awaiting_you(dreams: Sequence[Dream], now: datetime) -> str:
-    """The observations waiting on a PERSON, on the page a person actually opens.
+def _open_questions(dreams: Sequence[Dream], now: datetime) -> str:
+    """The observations nobody has answered yet — GROGU's list, not the operator's.
 
-    An observation is the half of a prophecy that fails silently. A threshold is
-    graded by code on every dream run whether or not anybody is watching; an
-    observation is graded by somebody looking at the world, and somebody who is
-    never asked never looks. Without this the prophecy shelf becomes a place
-    dreams wait for ever while every surface on the deck reports patience.
+    This card used to be headed "Waiting on you" and it was a demand: it
+    counted the observations on the prophecy shelf, told the operator each one
+    was theirs to settle, and named `electrum-bot settle` because the store
+    refused every actor but the operator. On a live deck it read *"6 questions
+    waiting on you"* over a list with no way to answer any of them, which is
+    how the operator found it: *"it should not be waiting on me for anything??
+    and there is no way to input an answer anyway"*.
 
-    **It shows and it does not settle**, exactly as the Settings page shows the
-    limits and offers no way to change them. A fulfilled condition can carry a
-    dream to the vault, a vaulted dream is what an adoption is taken from, and
-    an adoption is a live permission to trade a symbol that is not in
-    `config/rules.yaml` — so the write belongs at a terminal on the box, behind
-    the shell, rather than behind one shared password on a surface that may be
-    exposed. The card names the command instead, in the same way each limit
-    names the file that owns it.
+    **So the ownership moved and the card stayed.** The dreamer answers its own
+    observations now (`dreamer.settle_own_observations`), and the operator is
+    out of the loop by instruction — *"dreamer is supposed to just do his thing
+    without human input unless its deliberate through the chat"*. What is left
+    here is a reading rather than a request: these are the claims Grogu has
+    written down and not yet gone and looked at, which is the honest state of
+    its own homework.
 
-    **Nothing waiting is not nothing stuck**, and the card says so. A dream can
+    **Deleting it outright was the wrong repair**, and it is worth saying why,
+    because it is the cheaper one. A dream held below the vault by an
+    unanswered observation is stuck, and this is the only surface that says
+    which claim is holding it. Removing the card would have replaced a card
+    nobody could act on with a shelf whose stalling had no explanation at all —
+    the `PromotionRun` failure that `_shelf_grading` exists to fix, reproduced
+    one card up.
+
+    **Absent rather than empty**, unchanged. A panel announcing nought teaches
+    an operator to skip the panel.
+
+    **Nothing outstanding is not nothing stuck**, also unchanged. A dream can
     equally be held by a threshold the market has not reached, which no amount
-    of looking settles. Letting the first stand for the second is the confident
-    partial answer this repository exists to refuse.
+    of looking settles.
     """
     due = pending_observations(dreams, now=now)
     if not due:
@@ -9450,24 +9506,24 @@ def _awaiting_you(dreams: Sequence[Dream], now: datetime) -> str:
             f"{_e(condition.observable)}; {stamp}.</span></li>"
         )
 
-    head = f"{_count(len(due), 'question', 'questions')} waiting on you"
+    head = f"{_count(len(due), 'question', 'questions')} Grogu has not answered yet"
     if late:
         head += f", {late} past the review date"
 
     return (
-        '<section class="block" id="awaiting-you"><h2>Waiting on you</h2>'
+        '<section class="block" id="open-questions"><h2>Grogu\'s open questions</h2>'
         f'<p class="lede">{head}. These are the claims no figure the loop '
-        "records can settle — somebody has to go and look.</p>"
+        "records can settle, so the dreamer has to go and look — and it "
+        "answers them on its own runs.</p>"
         f'<ul class="conds">{rows}</ul>'
-        '<p class="note">Answer one at a terminal on the box. This page shows '
-        "them and cannot settle them: an answer can carry a dream to the vault, "
-        "and a vaulted dream is what a live symbol permission is taken from.</p>"
-        '<pre class="cmd">electrum-bot observations\n'
-        'electrum-bot settle &lt;handle&gt; --met --note "what you saw"\n'
-        'electrum-bot settle &lt;handle&gt; --ruled-out --note "what you saw"</pre>'
-        '<p class="note">Nothing waiting is not the same as nothing stuck. A '
-        "dream can equally be held by a threshold the market has not reached, "
-        "which no amount of looking settles.</p></section>"
+        '<p class="note">Nothing here is waiting on you. Grogu settles its own '
+        "observations, and each answer has to name what it saw. Until one is "
+        "answered its dream stays below the vault, where the trading agent "
+        "cannot see it — so an unanswered question costs the dream time and "
+        "nothing else.</p>"
+        '<p class="note">Nothing outstanding is not the same as nothing stuck. '
+        "A dream can equally be held by a threshold the market has not "
+        "reached, which no amount of looking settles.</p></section>"
     )
 
 
@@ -9486,7 +9542,7 @@ def _shelf_grading(dreams: Sequence[Dream], now: datetime) -> str:
     """Whether the prophecy shelf can move at all, and what is holding it.
 
     `PromotionRun` counts every one of these — `cycles_available`,
-    `conditions_fulfilled`, `awaiting_operator` — onto a log line, and not one
+    `conditions_fulfilled`, `awaiting_a_look` — onto a log line, and not one
     of them reached a page. So a shelf that CANNOT move looked exactly like a
     shelf being patient, which is the `can_grade_anything` question with nowhere
     to be asked: no condition fired because nothing was recorded, and no
@@ -9505,7 +9561,7 @@ def _shelf_grading(dreams: Sequence[Dream], now: datetime) -> str:
       stand in for it would be inventing the missing half of the answer. The
       card says which figure is missing and where it lives instead.
 
-    **Absent rather than empty**, following `_awaiting_you`. With nothing on the
+    **Absent rather than empty**, following `_open_questions`. With nothing on the
     prophecy shelf there is no grading state to report, and the shelf rail and
     the shelf's own section already state that nought in their own words. A
     panel announcing zero teaches an operator to skip the panel.
@@ -9533,9 +9589,9 @@ def _shelf_grading(dreams: Sequence[Dream], now: datetime) -> str:
     # `grade_conditions` settles a dual condition on its threshold, so the
     # buckets below put it there — and `pending_observations` does NOT apply
     # that precedence, so the same condition is on the operator's worklist, in
-    # `_awaiting_you` immediately above this card and in `electrum-bot
-    # observations`. Counting it once and then captioning the other tile
-    # "nothing here waits on you" made this card contradict the one above it
+    # `_open_questions` immediately above this card. Counting it once and
+    # then captioning the other tile "nothing here needs looking up" made
+    # this card contradict the one above it
     # about the same claim, which is worse than either answer on its own.
     #
     # So the bucket arithmetic is untouched — `total`, `stuck` and every note
@@ -9625,13 +9681,13 @@ def _shelf_grading(dreams: Sequence[Dream], now: datetime) -> str:
             if on_figure
             else "nothing here waits on the market",
         )
-        # The count is what the OPERATOR is being asked, which is
+        # The count is what `_open_questions` lists immediately above, which is
         # `pending_observations`' answer and not the bucket's — see `both`. A
-        # dual condition is on the worklist above whatever this card decides to
-        # file it under, so a tile reading nought beside a card listing it would
-        # be the page disagreeing with itself.
+        # dual condition is on that card whatever this one decides to file it
+        # under, so a tile reading nought beside a card listing it would be the
+        # page disagreeing with itself.
         + stat(
-            "On a person",
+            "On a look",
             str(on_person + both),
             f"{overdue} past the review date"
             if overdue
@@ -9639,9 +9695,9 @@ def _shelf_grading(dreams: Sequence[Dream], now: datetime) -> str:
                 f"{both} of them code can settle too"
                 if both
                 else (
-                    "only you settle these"
+                    "Grogu answers these on its own runs"
                     if on_person
-                    else "nothing here waits on you"
+                    else "nothing here needs looking up"
                 )
             ),
             "alert" if overdue else "",
@@ -9727,11 +9783,11 @@ def _shelf_grading(dreams: Sequence[Dream], now: datetime) -> str:
         notes += (
             f'<p class="note">{_count(both, "condition")} above '
             f"{_word(both, 'is', 'are')} counted under BOTH "
-            "<em>on a figure</em> and <em>on a person</em>: "
+            "<em>on a figure</em> and <em>on a look</em>: "
             f"{_word(both, 'it names', 'they name')} a threshold code can "
             "settle and an observation somebody has to go and look at, so "
             f"{_word(both, 'it is', 'they are')} on the "
-            '<a href="#awaiting-you">Waiting on you</a> card as well. Either '
+            '<a href="#open-questions">open questions</a> card as well. Either '
             f"answer settles {_word(both, 'it', 'them')}. The tiles count who "
             "COULD answer, which is not a partition when both could.</p>"
         )
@@ -9952,6 +10008,19 @@ def dreaming_page(
             "like nothing in particular.</div>"
         )
 
+    # The chat panel, ahead of every shelf. It is the only interactive control
+    # on this page and, since the operator worklist was withdrawn, the only way
+    # a person reaches the dreamer at all — so burying it under the ledger, the
+    # conference feed and five shelves put the thing being DONE several screens
+    # below the things being READ. The banners stay above it because each one
+    # qualifies this panel: what it is not, and which Hermes instance answers.
+    body += _dreaming_talk(
+        enabled=enabled,
+        token=token,
+        hermes_available=hermes_available,
+        isolated=isolated,
+    )
+
     body += _shelf_rail(summary)
 
     # The verdicts, kept as a line rather than four tiles. They describe how the
@@ -9980,12 +10049,7 @@ def dreaming_page(
             "as it works. Here is the shape one takes.</p>" + WORKED_EXAMPLE
             + "</section>"
         )
-        return body + _dreaming_talk(
-            enabled=enabled,
-            token=token,
-            hermes_available=hermes_available,
-            isolated=isolated,
-        )
+        return body + DREAM_FX_SCRIPT
 
     if summary.unverified:
         body += (
@@ -9995,14 +10059,13 @@ def dreaming_page(
             "statement about evidence rather than about how likely they are.</p>"
         )
 
-    # Ahead of both, because it is the only thing on this page addressed to the
-    # READER rather than describing what the agents did.
-    body += _awaiting_you(dreams, moment)
+    # Ahead of the shelves, because between them these two say why the prophecy
+    # shelf is not moving, which is the question a stalled deck provokes.
+    body += _open_questions(dreams, moment)
 
     # And immediately under it, because it answers the question the card above
-    # provokes: nothing waiting on you is not nothing stuck, and this is where
-    # the other kind of stuck is counted. Second rather than first — that one is
-    # addressed to the reader and this one describes the shelf.
+    # provokes: an unanswered observation is not the only way to be stuck, and
+    # this is where the other kind is counted.
     body += _shelf_grading(dreams, moment)
 
     # Above the shelves, because it answers a question about the two AGENTS and
@@ -10050,43 +10113,50 @@ def dreaming_page(
             cards = f'<div class="vaultdoor">{cards}</div>'
         body += heading + cards + "</section>"
 
-    return body + _dreaming_talk(
-        enabled=enabled,
-        token=token,
-        hermes_available=hermes_available,
-        isolated=isolated,
-    )
+    # Last in the document, after every card it animates. See `_dreaming_talk`.
+    return body + DREAM_FX_SCRIPT
 
 
 def _dreaming_talk(
     *, enabled: bool, token: str, hermes_available: bool, isolated: bool
 ) -> str:
-    """The panel at the foot of the page, and the two ways it can be off.
+    """The panel the operator actually came here to use, and the two ways it is off.
 
     Its own function because the page returns early on an empty store, and the
     conversation is worth having whether or not anything has been recorded —
     the first dream has to start somewhere.
 
-    **`DREAM_FX_SCRIPT` is emitted here, at the end of the document.** It plays
-    the joining on a fusion the server marked new and does nothing else; every
-    fused card is already fused in the markup above it, so a browser that never
-    runs this shows the same page without the animation.
+    **It renders near the TOP of the page, above the shelves.** It used to sit
+    at the foot, under every shelf, the ledger and the conference feed, which
+    on a deck with real dreams on it put the one interactive control several
+    screens below the fold: *"put chat at the top of page, its hidden all the
+    way down there"*. The shelves are a record and can be scrolled to; talking
+    to Grogu is the thing being done, and it is now the only way an operator
+    reaches the dreamer at all — see `_settled_by_grogu` for what left.
+
+    **`DREAM_FX_SCRIPT` is deliberately NOT emitted here any more**, and moving
+    the panel is exactly why. That script plays the joining animation on a
+    fusion the server marked new, so it has to run after the cards it animates
+    exist in the document; emitted from this panel it would now run before the
+    shelves were parsed and would silently animate nothing. `dreaming_page`
+    appends it at the end of the document, which is where it always needed to
+    be — it was only ever incidental that this panel was the last thing on the
+    page. A browser that never runs it shows the same page without the
+    animation, exactly as before.
     """
     out = '<section class="block"><h2>Talk to it</h2>'
     if not enabled:
         return out + (
             '<div class="banner warn"><b>Chat is off</b>'
             "Set <code>DASHBOARD_CHAT_TOKEN</code> in the environment to enable "
-            "it. The shelves above are rendered from "
+            "it. The shelves below are rendered from "
             "<code>data/dreams.db</code> and do not need it.</div></section>"
-            + DREAM_FX_SCRIPT
         )
     if not hermes_available:
         return out + (
             '<div class="banner crit"><b>Hermes not found</b>'
             "The token is set, but the Hermes binary is not installed where this "
             "process expects it. See <code>docs/HERMES_SETUP.md</code>.</div></section>"
-            + DREAM_FX_SCRIPT
         )
 
     return (
@@ -10118,7 +10188,6 @@ def _dreaming_talk(
             avatar=True,
         )
         + "</section>"
-        + DREAM_FX_SCRIPT
     )
 
 

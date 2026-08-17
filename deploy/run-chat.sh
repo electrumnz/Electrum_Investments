@@ -199,6 +199,38 @@ else
   # otherwise send the turn to DigitalOcean with an Anthropic key -- a claim of
   # "Anthropic direct" while the opposite happened.
   unset ANTHROPIC_BASE_URL
+
+  # ------------------------------------------------ is there a credential AT ALL
+  #
+  # The same check as `run-dream.sh`, and it is here because the hole was
+  # identical rather than because this instance was observed failing. The
+  # dreamer's was: it printed "inference: Anthropic direct" and hermes died on
+  # "No inference provider configured" the next line, which reads as a broken
+  # agent when it is an unfinished install. This branch asserted its own
+  # precondition and checked nothing, exactly as that one did, so the wrapper
+  # was strict about the configuration nobody uses and credulous about the
+  # default.
+  #
+  # Leaving one of the two unfixed would mean the account agent still has the
+  # trap, and it is the instance the operator would reach for to diagnose the
+  # other one.
+  HERMES_DOTENV="$HERMES_HOME/.hermes/.env"
+  if [[ -z "${ANTHROPIC_API_KEY:-}" ]] \
+     && [[ ! -s "$HERMES_DOTENV" ]]; then
+    echo "No inference credential in this home, so there is nothing to answer with." >&2
+    echo >&2
+    echo "  $INFERENCE_ENV has no DO_INFERENCE_KEY," >&2
+    echo "  ANTHROPIC_API_KEY is unset, and" >&2
+    echo "  $HERMES_DOTENV is missing or empty." >&2
+    echo >&2
+    echo "Refusing rather than saying 'Anthropic direct' and letting hermes fail" >&2
+    echo "with 'No inference provider configured' a line later." >&2
+    echo >&2
+    echo "Set DO_INFERENCE_KEY and DO_INFERENCE_MODEL in $INFERENCE_ENV -- see" >&2
+    echo "deploy/README.md, 'Pointing the souls at DigitalOcean'." >&2
+    exit 78
+  fi
+
   echo "inference: Anthropic direct (no DO_INFERENCE_KEY in $INFERENCE_ENV)" >&2
 fi
 

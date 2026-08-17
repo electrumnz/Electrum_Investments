@@ -727,7 +727,7 @@ def _observed(store: DreamStore, *, due_in_days: float = 20.0, **overrides) -> i
     return store.save(Dream(**fields))
 
 
-def test_observations_lists_what_is_waiting_on_a_person(monkeypatch, tmp_path, capsys):
+def test_observations_lists_what_grogu_has_not_answered(monkeypatch, tmp_path, capsys):
     """The command that exists because this half fails SILENTLY.
 
     A threshold is graded by code on every dream run whether or not anybody is
@@ -743,7 +743,7 @@ def test_observations_lists_what_is_waiting_on_a_person(monkeypatch, tmp_path, c
 
     out = capsys.readouterr().out
     assert "Kirby Corp's most recent 10-Q" in out
-    assert "1 awaiting, 0 overdue" in out
+    assert "1 unanswered, 0 past the review date" in out
     # The handle is what `settle` takes, so it has to be on screen.
     assert re.search(r"\[[0-9a-f]{6}\]", out)
 
@@ -753,7 +753,7 @@ def test_an_empty_worklist_does_not_read_as_nothing_being_stuck(
 ):
     """`has_cycles` and `can_grade_anything`, arriving at a terminal.
 
-    "Nothing is waiting on you" is true and is not "no dream is stuck": a dream
+    "Nothing is unanswered" is true and is not "no dream is stuck": a dream
     can equally be held by a threshold the market has not reached, which nobody
     can settle by looking at anything. Letting the first sentence stand for the
     second is the confident partial answer this repository refuses.
@@ -763,7 +763,7 @@ def test_an_empty_worklist_does_not_read_as_nothing_being_stuck(
     assert main_mod.cmd_observations() == 0
 
     out = capsys.readouterr().out
-    assert "Nothing is waiting on you" in out
+    assert "Nothing is unanswered" in out
     assert "not that no dream is stuck" in out
 
 
@@ -782,7 +782,7 @@ def test_an_overdue_observation_is_reported_as_late_not_as_refuted(
 
     out = capsys.readouterr().out
     assert "OVERDUE" in out
-    assert "1 awaiting, 1 overdue" in out
+    assert "1 unanswered, 1 past the review date" in out
     # Still awaiting. An elapsed date does not settle anything either way.
     assert "ruled out" not in out.lower()
 

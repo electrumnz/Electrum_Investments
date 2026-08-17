@@ -307,15 +307,33 @@ class StepCondition(BaseModel):
     SAY null rather than leave the key out, which is a wire format and not a
     change to what a condition may be.
 
-    **There is deliberately no field here that could carry an ANSWER**, and that
-    absence is the whole safety argument for the observation half. A dream whose
-    conditions are all met reaches the vault, a vaulted dream can be adopted,
-    and an adoption is a live permission to trade a symbol that is in no
-    allowlist — so a model able to say "this one is met" would be a model able
-    to write itself a permission. It can propose the question; only
-    `DreamStore.settle_condition` records the answer, and only the operator may
-    call it. Structural rather than asked for politely, exactly as `Dream`
-    carries no order fields. `tests/test_dreamer.py` pins the absence.
+    **There ARE now fields here that carry an answer**, and that reverses the
+    rule this docstring used to state. The old arrangement had no such field on
+    purpose: a dream whose conditions are all met reaches the vault, a vaulted
+    dream can be adopted, and an adoption is a live symbol permission, so a
+    model able to say "this one is met" looked like a model able to write
+    itself a permission.
+
+    What that reasoning skipped is WHICH step grants. Adoption does, and
+    adoption is the trading agent's, taken in the A2A conference in another
+    process. The dreamer answering its own observation moves its own dream onto
+    the shelf where the other agent can see it; the other agent still decides,
+    and everything traded under a grant still faces every gate in
+    `RiskGate.evaluate`. The operator's instruction was exactly that — *"grogu
+    is his own soul, his own agent, the only standard communication we have is
+    A2A"* — and the cost of the old rule was a dreamer that sat waiting on a
+    person who was never going to answer six questions a week.
+
+    Two rails survive it, and neither is a matter of the model's discretion:
+
+    - **The answer is not written from here.** `_apply` still constructs every
+      condition unanswered, and `settle_own_observations` calls
+      `DreamStore.settle_condition` afterwards, which stays the only writer of
+      an answer. So one code path stamps every settlement, records WHO, and
+      refuses one that is already answered.
+    - **A note is required**, enforced by that same store method. An answer
+      with no account of what was looked at is refused rather than recorded,
+      which is where an invention becomes visible.
     """
 
     model_config = EVERY_FIELD_REQUIRED
@@ -389,9 +407,32 @@ class StepCondition(BaseModel):
         description=(
             "OBSERVATION, part 3 of 3. The date by which that answer should "
             "exist, as YYYY-MM-DD. A review date and not a deadline — nothing "
-            "expires and nothing fails when it passes, it simply moves to the "
-            "operator's list as due. Required: 'someday' can never come due, so "
-            "nobody is ever asked and the dream waits forever."
+            "expires and nothing fails when it passes, it simply reads as due. "
+            "Required: 'someday' can never come due, so it is never looked at "
+            "and the dream waits forever."
+        ),
+    )
+    answer: str = Field(
+        default="",
+        description=(
+            "Your OWN answer to this observation, once you have gone and "
+            "looked: 'met' if the thing you named showed what you said it "
+            "would, 'ruled_out' if it showed the opposite. Empty until you "
+            "have actually checked — that is the normal state on the step "
+            "that first writes the condition, and an unanswered observation "
+            "costs nothing but time. Only answers an OBSERVATION; a threshold "
+            "is settled by code against recorded figures and is not yours to "
+            "answer."
+        ),
+    )
+    answer_note: str = Field(
+        default="",
+        description=(
+            "What you actually saw, in one sentence, and where. Required with "
+            "an answer and the answer is discarded without it. Name the source "
+            "— the release, the filing, the citation already on this dream. "
+            "'It seems likely' is not an observation of anything; if that is "
+            "all you have, leave the answer empty and say so in the thought."
         ),
     )
 
@@ -624,9 +665,10 @@ good chain gets stuck or a bad number gets invented.
   the figures the decision loop records. Use it when the claim really is about
   one of those figures.
 
-  **AN OBSERVATION** — `subject`, `observable`, `observe_by`. Settled by a
-  PERSON, who goes and looks. Use it when no figure measures your claim, which
-  is the normal case for the hop a supply-chain chain actually rests on.
+  **AN OBSERVATION** — `subject`, `observable`, `observe_by`. Settled by
+  SOMEBODY GOING AND LOOKING, which normally means you, on a later step. Use it
+  when no figure measures your claim, which is the normal case for the hop a
+  supply-chain chain actually rests on.
 
 **Every field the loop computes is a price or a technical figure**, and the hop
 that could kill a second-order chain almost never is. A smelter restarting, a
@@ -649,14 +691,41 @@ An observation needs all three parts and each one does a job:
   `observe_by` the date that answer should exist by, as YYYY-MM-DD.
 
 The date is a REVIEW date, not a deadline. Nothing expires when it passes and
-your dream does not fail; the question simply appears on the operator's list as
-due. Give the honest date the thing becomes knowable — when the report is
-published, when the quarter ends — and if it is already knowable, give a near
-one. What you may not do is leave it out: a question that can never be late is
-a question nobody is ever asked.
+your dream does not fail; the question simply reads as due. Give the honest
+date the thing becomes knowable — when the report is published, when the
+quarter ends — and if it is already knowable, give a near one. What you may not
+do is leave it out: a question that can never be late is a question nobody ever
+comes back to.
 
-**You do not answer your own observation, and there is no field here you could
-answer it with.** A person does, and their answer is what moves the dream.
+### answering your own observations
+
+**These are yours to answer, and nobody else is going to.** Fill `answer` with
+`met` or `ruled_out`, and `answer_note` with what you actually saw. You are not
+waiting on anybody: an observation nobody answers holds its dream below the
+vault for ever, where the trading agent never sees it.
+
+Four rules, and the first is the one that matters:
+
+- **Answer only what you have actually been shown.** A citation on this dream,
+  a headline in the feed above with a publisher and a link, a source you can
+  name. Reference knowledge you happen to carry is not an observation of
+  anything, and neither is a chain of reasoning that arrives at the same place.
+  If that is all you have, leave `answer` empty and say so in your thought —
+  an unanswered observation costs the dream time, and a fabricated one costs
+  the whole chain its meaning.
+- **`answer_note` is required and the answer is thrown away without it.** Name
+  the source in it. It is the only record of what settled the claim.
+- **`ruled_out` is a real answer and a valuable one.** You went and looked and
+  the thing showed the opposite. Say so — a chain you killed yourself is worth
+  more than one nobody could settle, and refuting your own hop is the single
+  most useful thing you can do on a review step.
+- **Answer on a LATER step, not the one that writes the condition.** Writing a
+  question and answering it in the same breath is not looking anything up. The
+  ordinary shape is: write it, let the researcher and the feeds run, come back
+  to it when the date is near or the evidence has arrived.
+
+Neither answer can be taken back, and a threshold is not yours to answer at all
+— code settles those against recorded figures.
 - **A prophecy is a claim about the WEAKEST LINK, and that is what the shelf is
   for: a dream parked awaiting the thing that would settle it.** So name the
   weakest hop, give its number in `weakest_hop_index`, and make sure at least
@@ -1418,6 +1487,14 @@ class DreamerResult:
     # and "nothing is published about this yet" must not render alike.
     research: list[ResearchAnswer] | None = None
 
+    # What this step answered about its OWN observations, including what the
+    # store refused. Empty is the ordinary state — most steps write conditions
+    # rather than answer them — and a refusal travels for the `scope` reason
+    # above: a dreamer whose answers keep being rejected for want of a note is
+    # a fact worth having, and a silent refusal looks like a model that simply
+    # stopped answering.
+    settled: SelfSettled = field(default_factory=lambda: SelfSettled())
+
 
 # ---------------------------------------------------------- asking the researcher
 #
@@ -1530,6 +1607,126 @@ def research_dream(
         empty=sum(1 for a in answers if a.found_nothing),
     )
     return answers
+
+
+# --------------------------------------------------- answering its own questions
+
+
+#: The two answers a step may give its own observation. Anything else — a
+#: shrug, a hedge, a model inventing a third value — leaves the condition
+#: unanswered, which is the direction to fail in: an unanswered observation
+#: costs a dream time, and a mis-parsed one costs it a shelf.
+_ANSWERS: dict[str, bool] = {"met": True, "ruled_out": False, "ruled out": False}
+
+
+@dataclass(frozen=True)
+class SelfSettled:
+    """What a step answered for itself, and what was refused.
+
+    Counted rather than summarised, and the refusals travel, for the reason
+    `SymbolScope.dropped` does: a dreamer whose answers are all being refused —
+    every one arriving with no note, say — is a fact worth having, and a silent
+    refusal is indistinguishable from a model that stopped answering.
+    """
+
+    met: tuple[str, ...] = ()
+    ruled_out: tuple[str, ...] = ()
+    refused: tuple[str, ...] = ()
+
+    @property
+    def answered(self) -> int:
+        return len(self.met) + len(self.ruled_out)
+
+    def __bool__(self) -> bool:
+        return bool(self.met or self.ruled_out or self.refused)
+
+
+def settle_own_observations(
+    step: DreamStep,
+    dream: Dream,
+    store: DreamStore,
+    *,
+    now: datetime | None = None,
+) -> SelfSettled:
+    """Record the dreamer's answers to its OWN observations.
+
+    The operator's instruction, and the reversal of an earlier rule: *"grogu is
+    his own soul, his own agent, the only standard communication we have is
+    A2A"*. The observation half of a condition used to be settled by a person
+    at a terminal, which meant a dreamer that wrote one was blocked until
+    somebody typed a command — and nobody did, so the questions piled up on a
+    card nobody could answer from. See `DreamStore.settle_condition` for why
+    letting the dreamer answer does not hand it a symbol permission: adoption
+    is the step that grants, and adoption is the trading agent's.
+
+    Four properties, and each is a rule already used elsewhere in this file:
+
+    - **It goes through `settle_condition`**, which stays the only writer of an
+      answer. So the actor is recorded, the note is enforced, an
+      already-answered condition is refused rather than overwritten, and a
+      store failure is a refusal instead of an exception. Writing the flags
+      here would be a second writer, and the two would drift.
+    - **It runs AFTER the save**, like `research_dream`, and cannot cost a
+      step. Everything below can fail without the dream being lost.
+    - **It matches on the CLAIM, never on position.** The key is taken from a
+      `DreamCondition` built the same way `_apply` builds one, so the identity
+      cannot drift from the identity `carry_forward_grading` uses. A step that
+      answers a claim it did not restate simply matches nothing.
+    - **An unparseable answer is no answer.** `_ANSWERS` is closed, and a value
+      outside it leaves the condition exactly as it was rather than guessing at
+      a meaning — the same reason `_observe_by` turns an unreadable date into
+      `None`.
+    """
+    if not dream.id:
+        return SelfSettled()
+
+    met: list[str] = []
+    ruled_out: list[str] = []
+    refused: list[str] = []
+
+    for candidate in step.conditions:
+        answer = _ANSWERS.get(candidate.answer.strip().lower())
+        if answer is None:
+            continue
+        # Built the way `_apply` builds one, so `key` is derived by the same
+        # code rather than reassembled here. A condition the model answered
+        # without filling all three observation parts is not an observation at
+        # all, and `settle_condition` refuses it by name.
+        shape = DreamCondition(
+            text=candidate.text,
+            symbol=candidate.symbol.strip().upper(),
+            field=candidate.field,
+            op=candidate.op,
+            value=candidate.value,
+            subject=candidate.subject.strip(),
+            observable=candidate.observable.strip(),
+            observe_by=_observe_by(candidate.observe_by),
+        )
+        result = store.settle_condition(
+            int(dream.id),
+            shape.key,
+            by=DREAMER,
+            met=answer,
+            note=candidate.answer_note,
+            at=now,
+        )
+        if not result.ok:
+            refused.append(f"{candidate.subject or candidate.text}: {result.detail}")
+            continue
+        (met if answer else ruled_out).append(candidate.subject or candidate.text)
+
+    settled = SelfSettled(
+        met=tuple(met), ruled_out=tuple(ruled_out), refused=tuple(refused)
+    )
+    if settled:
+        log.info(
+            "dream_self_settled",
+            dream_id=dream.id,
+            met=len(settled.met),
+            ruled_out=len(settled.ruled_out),
+            refused=len(settled.refused),
+        )
+    return settled
 
 
 # Where the timer unit lives once bootstrap has installed it, and the repo copy
@@ -1758,6 +1955,16 @@ class Dreamer:
         dream, advanced, scope = self._apply(step, existing, now=now)
         self._store.save(dream)
 
+        # AFTER the save, for `research_dream`'s reason: the step is the run's
+        # product and an answer must not be able to cost one. It runs BEFORE
+        # the look-up so a condition the dreamer has just answered is settled
+        # in the same run it was answered in — and the dream is re-read after,
+        # because `settle_condition` writes through the store and the copy in
+        # hand would otherwise report the conditions as they were a moment ago.
+        settled = settle_own_observations(step, dream, self._store, now=moment)
+        if settled.answered:
+            dream = self._store.get(int(dream.id or 0)) or dream
+
         # AFTER the save, and never before it. The step is the run's product;
         # a look-up is an extra that must not be able to cost one. If the
         # researcher hangs, exits non-zero or is not installed, the dream is
@@ -1794,12 +2001,14 @@ class Dreamer:
             unchecked=len(dream.unverified_hops),
             symbols=list(scope.kept),
             symbols_dropped=len(scope.dropped),
+            self_settled=settled.answered,
         )
         return DreamerResult(
             dream=dream,
             usage=usage,
             advanced=advanced,
             scope=scope,
+            settled=settled,
             # Only ever a refusal here: a fusion that succeeded returned above.
             fusion=refusal,
             considerations=considerations,

@@ -182,6 +182,55 @@ else
   # one: a leftover base URL would send the turn to DigitalOcean with an
   # Anthropic key while this line claimed otherwise.
   unset ANTHROPIC_BASE_URL
+
+  # ------------------------------------------------ is there a credential AT ALL
+  #
+  # **This branch used to announce a fallback it had not checked, and that is
+  # this repository's founding failure wearing a wrapper's clothes.** Observed
+  # live on the Dreaming page:
+  #
+  #   inference: Anthropic direct (no DO_INFERENCE_KEY in /home/hermes/dreamer/inference.env)
+  #   hermes -z: agent failed: No inference provider configured.
+  #
+  # Every word of the first line was true. `DO_INFERENCE_KEY` really was
+  # empty, and Anthropic direct really was the arrangement that would be used
+  # if one existed. What it did not say — because it never looked — is that
+  # this home has no Anthropic credential either, so "Anthropic direct" named
+  # a route to nowhere. The reassuring line came first and the failure came
+  # after it, which is precisely the shape that got a deploy signed off in
+  # August: a true statement doing the work of a check nobody ran.
+  #
+  # The DigitalOcean branch above refuses on every one of its preconditions.
+  # This branch asserted its own and verified nothing, so the wrapper was
+  # strict about the configuration nobody uses and credulous about the default.
+  #
+  # `HOME` is this instance's home, so `~/.hermes/.env` is the dreamer's own
+  # credential file and not the account agent's. That is the whole point of a
+  # second home and it is also why this failed: `enable-dream.sh` copies
+  # `inference.env` from `/home/hermes`, and a box where that copy never
+  # happened has a home with a soul, a config and no key.
+  HERMES_DOTENV="$HERMES_HOME/.hermes/.env"
+  if [[ -z "${ANTHROPIC_API_KEY:-}" ]] \
+     && [[ ! -s "$HERMES_DOTENV" ]]; then
+    echo "No inference credential in this home, so there is nothing to answer with." >&2
+    echo >&2
+    echo "  $INFERENCE_ENV has no DO_INFERENCE_KEY," >&2
+    echo "  ANTHROPIC_API_KEY is unset, and" >&2
+    echo "  $HERMES_DOTENV is missing or empty." >&2
+    echo >&2
+    echo "Refusing rather than saying 'Anthropic direct' and letting hermes fail" >&2
+    echo "with 'No inference provider configured' a line later -- that reads as a" >&2
+    echo "broken agent when it is an unfinished install." >&2
+    echo >&2
+    echo "Fix it as root with:" >&2
+    echo "  /opt/mudhorn/deploy/enable-dream.sh" >&2
+    echo >&2
+    echo "which copies the account agent's /home/hermes/inference.env into this" >&2
+    echo "home and writes the matching model into its config.yaml. If the account" >&2
+    echo "agent has no credential either, set that one up first." >&2
+    exit 78
+  fi
+
   echo "inference: Anthropic direct (no DO_INFERENCE_KEY in $INFERENCE_ENV)" >&2
 fi
 

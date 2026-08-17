@@ -1759,6 +1759,74 @@ def test_the_dreamer_is_not_credited_with_the_account_agent_tools(client):
     assert "insight.db" not in dreaming
     assert 'var SOUL = "grogu"' in dreaming
 
+def test_the_dreaming_chat_panel_sits_above_the_shelves():
+    """*"put chat at the top of page, its hidden all the way down there"*.
+
+    The panel used to render last, under the ledger, the conference feed and
+    five shelves. On a deck with real dreams on it that is several screens
+    below the fold — and since the operator worklist was withdrawn, this panel
+    is the ONLY way a person reaches the dreamer at all. The shelves are a
+    record and can be scrolled to; talking to it is the thing being done.
+    """
+    from datetime import UTC, datetime
+
+    from bot.dreaming import Dream, DreamSummary
+    from bot.web.render import dreaming_page
+
+    held = [Dream(id=1, title="a chain", seed="s")]
+    body = dreaming_page(
+        held,
+        DreamSummary.of(held),
+        enabled=True,
+        token="t",
+        hermes_available=True,
+        soul_found=True,
+        isolated=True,
+        now=datetime(2026, 8, 11, tzinfo=UTC),
+    )
+
+    assert body.index("Talk to it") < body.index("shelf-workbench")
+    # The banners still lead, because each one qualifies the panel: what this
+    # page is not, and which Hermes instance is answering.
+    assert body.index("Nothing here is a proposal") < body.index("Talk to it")
+    assert body.index("The dreamer runs on its own agent") < body.index("Talk to it")
+
+
+def test_the_fusion_animation_script_stays_at_the_end_of_the_document():
+    """Moving the chat panel up would otherwise have broken the animation.
+
+    `DREAM_FX_SCRIPT` used to be emitted by `_dreaming_talk`, which was
+    incidentally the last thing on the page. It plays the joining on a fusion
+    the server marked new, so it has to run after the cards it animates exist
+    in the document — emitted from the panel in its new position it would run
+    before the shelves were parsed and silently animate nothing.
+
+    A silent no-op is exactly the class of bug this repository keeps finding
+    only in a browser, so it is pinned here instead.
+    """
+    from datetime import UTC, datetime
+
+    from bot.dreaming import Dream, DreamSummary
+    from bot.web.render import dreaming_page
+
+    held = [Dream(id=1, title="a chain", seed="s")]
+    for dreams_on_shelf in (held, []):
+        body = dreaming_page(
+            dreams_on_shelf,
+            DreamSummary.of(dreams_on_shelf),
+            enabled=True,
+            token="t",
+            hermes_available=True,
+            soul_found=True,
+            now=datetime(2026, 8, 11, tzinfo=UTC),
+        )
+        # Present on both branches — the page returns early on an empty store,
+        # and that return used to carry the script along with the panel.
+        assert "MUDHORN_DREAM_FX" in body or "joining" in body
+        assert body.rstrip().endswith("</script>")
+        assert body.index("Talk to it") < body.rindex("<script>")
+
+
 def test_enter_sends_and_ctrl_enter_makes_a_new_line():
     """The composer's key handling, which is easy to regress into silence.
 
@@ -5620,14 +5688,19 @@ def _observing_dream(*, due_in_days: float = 30.0, now=None):
     )
 
 
-def test_the_dreaming_page_says_what_is_waiting_on_a_person(dreams):
-    """The half of a prophecy that fails SILENTLY, on the surface a person opens.
+def test_the_dreaming_page_says_which_questions_are_still_unanswered(dreams):
+    """The half of a prophecy that fails SILENTLY, and whose list it is now.
 
-    A threshold is graded by code on every dream run whether anybody is watching
-    or not. An observation is graded by somebody looking at the world, and
-    somebody who is never asked never looks — so without this card the prophecy
-    shelf becomes a place dreams wait for ever while every panel on the deck
-    reports patience.
+    A threshold is graded by code on every dream run whether anybody is
+    watching or not. An observation is settled by somebody going and looking —
+    which is the DREAMER, since the operator was taken out of this loop — so
+    without this card the prophecy shelf becomes a place dreams wait for ever
+    while every panel on the deck reports patience.
+
+    The card must not read as a demand on the operator. It said *"6 questions
+    waiting on you"* over a list with no input control, which is how this was
+    found: *"it should not be waiting on me for anything?? and there is no way
+    to input an answer anyway"*.
     """
     from datetime import UTC, datetime
 
@@ -5646,23 +5719,29 @@ def test_the_dreaming_page_says_what_is_waiting_on_a_person(dreams):
         now=now,
     )
 
-    assert "Waiting on you" in body
-    assert "1 question waiting on you" in body
+    assert "Grogu's open questions" in body
+    assert "1 question Grogu has not answered yet" in body
     assert "Kirby&#x27;s most recent 10-Q" in body
-    # It SHOWS and does not settle. The write belongs at a terminal on the box,
-    # because an answer can carry a dream to the vault and a vaulted dream is
-    # what a live symbol permission is taken from.
-    assert "electrum-bot settle" in body
-    assert "<form" not in body.split("Waiting on you")[1].split("</section>")[0]
-    # Nothing waiting is not nothing stuck.
+    # The whole point of the rename: it must not ask the operator for anything,
+    # and must not point them at a command as though it were their job.
+    card = body.split("Grogu's open questions")[1].split("</section>")[0]
+    # The only "waiting on you" left is the sentence DENYING it. The old
+    # heading and lede are gone, and so is the command that made the demand
+    # actionable-looking without being answerable from here.
+    assert "questions waiting on you" not in card
+    assert "electrum-bot settle" not in card
+    assert "Nothing here is waiting on you" in card
+    # It still SHOWS and still does not settle from the page.
+    assert "<form" not in card
+    # Nothing outstanding is not nothing stuck.
     assert "not the same as nothing stuck" in body
 
 
 def test_the_waiting_card_is_absent_rather_than_empty_when_nothing_is_due(dreams):
     """No card at all, rather than a card announcing zero.
 
-    An empty "waiting on you" panel is furniture that trains an operator to
-    stop reading the one thing on this page addressed to them.
+    An empty open-questions panel is furniture, and furniture is what trains an
+    operator to stop reading a panel.
     """
     from datetime import UTC, datetime
 
@@ -5680,7 +5759,7 @@ def test_the_waiting_card_is_absent_rather_than_empty_when_nothing_is_due(dreams
         now=datetime(2026, 8, 11, tzinfo=UTC),
     )
 
-    assert "Waiting on you" not in body
+    assert "open questions" not in body
 
 
 def test_an_observation_is_not_rendered_as_something_nothing_can_settle(dreams):
@@ -5718,7 +5797,12 @@ def test_an_observation_is_not_rendered_as_something_nothing_can_settle(dreams):
 
     assert "nothing can settle it" not in body
     assert "Kirby&#x27;s most recent 10-Q" in body or "Kirby's most recent 10-Q" in body
-    assert "Only the operator settles this." in body
+    # It names WHO settles it, and that is the dreamer now rather than a
+    # person. The old copy said "Only the operator settles this", which became
+    # false when Grogu started answering its own — and it was addressed to the
+    # reader, so a stale answer here is the worst kind.
+    assert "Grogu answers this on one of its own runs." in body
+    assert "operator" not in body
     assert 'data-state="awaiting"' in body
 
 
@@ -5945,12 +6029,12 @@ def test_a_shelf_with_nothing_gradeable_does_not_read_like_a_shelf_being_patient
     assert "cycles_available" not in card
 
 
-def test_a_shelf_waiting_only_on_a_person_is_a_third_state_of_its_own():
+def test_a_shelf_waiting_only_on_a_look_is_a_third_state_of_its_own():
     """Between "the market will settle this" and "nothing will".
 
     Every unsettled claim here is answerable — by somebody going and looking —
     so the shelf is not stuck, and saying it cannot be settled by anybody would
-    refute claims nobody has been asked yet. It is also not waiting on the
+    refute claims nobody has looked at yet. It is also not waiting on the
     market, so the `cycles_available` caveat has no business here either.
     """
     card = _grading_card([_prophecy([_observation()])])
@@ -5958,9 +6042,12 @@ def test_a_shelf_waiting_only_on_a_person_is_a_third_state_of_its_own():
     assert "Nothing on this shelf is waiting on the market" in card
     assert "Nothing on this shelf can be settled by anybody" not in card
     assert "cycles_available" not in card
-    # And the count sits under the person, not under the market.
-    assert ">1</b><small>only you settle these" in card
+    # The count sits under the look, not under the market — and the caption
+    # names GROGU. "only you settle these" was a demand on the operator, who is
+    # no longer in this loop at all.
+    assert ">1</b><small>Grogu answers these on its own runs" in card
     assert ">0</b><small>nothing here waits on the market" in card
+    assert "only you settle these" not in card
 
 
 def test_an_overdue_observation_colours_the_tile_without_refuting_the_claim():
@@ -6212,11 +6299,9 @@ def test_the_grading_card_does_not_contradict_the_worklist_above_it():
 
     `grade_conditions` settles a dual condition on its threshold, so the
     grading buckets file it under "on a figure". `pending_observations` applies
-    no such precedence, so the very same condition is on the operator's
-    worklist — rendered by `_awaiting_you` immediately ABOVE this card, and
-    listed by `electrum-bot observations`. The page therefore said "1 question
-    waiting on you" and, four inches lower, "nothing here waits on you" about
-    one claim.
+    no such precedence, so the very same condition is on the open-questions
+    card rendered immediately ABOVE this one. The page therefore counted the
+    claim in one place and, four inches lower, reported nought about it.
 
     The count is the worklist's, and the overlap is named rather than hidden.
     Reproduced against the rendered page, which is the only place the two are
@@ -6235,10 +6320,10 @@ def test_the_grading_card_does_not_contradict_the_worklist_above_it():
     body = _dreaming_body([_prophecy([dual])])
     card = _grading_card([_prophecy([dual])])
 
-    # The worklist above it is unambiguous about who is being asked.
-    assert "1 question waiting on you" in body
-    # So the card must not answer nought to the same question.
-    assert "nothing here waits on you" not in card
+    # The card above it counts the claim.
+    assert "1 question Grogu has not answered yet" in body
+    # So this one must not answer nought about the same claim.
+    assert "nothing here needs looking up" not in card
     # And the double-count is stated, or two tiles reading 1 over a single
     # condition is a page that appears to have lost one.
     assert "counted under BOTH" in card

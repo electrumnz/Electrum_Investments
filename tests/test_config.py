@@ -408,6 +408,30 @@ def _run_wrapper(script: str, home: Path, tmp_path: Path) -> Any:
 WRAPPERS = ["run-chat.sh", "run-dream.sh"]
 
 
+def _with_anthropic_credential(home: Path) -> Path:
+    """Make a home look like a working Anthropic deployment.
+
+    `HOME` is set to the instance's own home by both wrappers, so
+    `~/.hermes/.env` is the file Hermes actually reads its key out of.
+
+    **The tests below needed this and did not have it, and the gap was not
+    cosmetic.** They asserted that a home with no `inference.env` produced "a
+    working turn" — which was true of the STUB, because a stub answers whatever
+    it is handed, and false of Hermes, which refuses with "No inference
+    provider configured". So the suite pinned a healthy default that production
+    did not have, and the first real symptom was the Dreaming page printing
+    `inference: Anthropic direct` immediately above that refusal.
+
+    The test double failing differently from the thing it doubles, pinning a
+    path production never takes.
+    """
+    directory = home / ".hermes"
+    directory.mkdir(parents=True, exist_ok=True)
+    dotenv = directory / ".env"
+    dotenv.write_text("ANTHROPIC_API_KEY=sk-test\n", encoding="utf-8")
+    return dotenv
+
+
 def _hermes_config(home: Path) -> Path:
     """Where Hermes ACTUALLY keeps its config: `$HERMES_HOME/.hermes/config.yaml`.
 
@@ -429,8 +453,17 @@ def _hermes_config(home: Path) -> Path:
 
 @pytest.mark.parametrize("script", WRAPPERS)
 def test_no_inference_file_means_anthropic_and_a_working_turn(script, tmp_path):
-    """The default path, and the one every existing deployment is on."""
-    done = _run_wrapper(script, tmp_path / "home", tmp_path)
+    """The default path, for a deployment that HAS an Anthropic credential.
+
+    That qualifier is the fix. This test used to run against a home with no
+    credential at all and assert a working turn, which the stub happily gave
+    it — see `_with_anthropic_credential` for what that hid.
+    """
+    home = tmp_path / "home"
+    home.mkdir(parents=True, exist_ok=True)
+    _with_anthropic_credential(home)
+
+    done = _run_wrapper(script, home, tmp_path)
 
     assert done.returncode == 0, done.stderr
     assert "base=none" in done.stdout, "an endpoint leaked into a turn nobody configured"
@@ -623,6 +656,44 @@ def test_a_config_that_cannot_be_read_refuses_rather_than_skipping(script, tmp_p
 
 
 @pytest.mark.parametrize("script", WRAPPERS)
+def test_a_wrapper_with_no_credential_at_all_refuses_the_turn(script, tmp_path):
+    """**The founding failure, in a wrapper.** Observed live on the Dreaming page:
+
+        inference: Anthropic direct (no DO_INFERENCE_KEY in .../inference.env)
+        hermes -z: agent failed: No inference provider configured.
+
+    Every word of the first line was true. `DO_INFERENCE_KEY` really was empty,
+    and Anthropic direct really is the arrangement used when it is. What it did
+    not say, because it never looked, is that the home had no Anthropic
+    credential either — so the reassuring line named a route to nowhere and the
+    failure arrived after it. A true statement doing the work of a check nobody
+    ran, which is this repository's founding defect.
+
+    Note where the asymmetry was: the DigitalOcean branch refuses on every one
+    of its preconditions — no model, a router, a non-https URL, an unreadable
+    config, a model mismatch. The Anthropic branch asserted its own and
+    verified nothing. Each wrapper was strict about the configuration nobody
+    uses and credulous about the default.
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / "inference.env").write_text("", encoding="utf-8")
+
+    done = _run_wrapper(script, home, tmp_path)
+
+    assert done.returncode == 78, done.stderr
+    # A guard that prints and falls through is the same bug with more output.
+    assert done.stdout.strip() == "", "the turn ran anyway"
+    # It must not make the CLAIM that started this. Matched on the banner line
+    # rather than the phrase, because the refusal quotes the phrase while
+    # explaining what it is refusing to say.
+    assert "inference: Anthropic direct" not in done.stderr
+    # And it names the fix, because whoever reads this is already looking at an
+    # agent that appears broken.
+    assert "No inference credential in this home" in done.stderr
+
+
+@pytest.mark.parametrize("script", WRAPPERS)
 def test_blanking_the_key_leaves_no_endpoint_behind(script, tmp_path):
     """Rollback is one blank line, so it has to be a COMPLETE rollback.
 
@@ -635,6 +706,7 @@ def test_blanking_the_key_leaves_no_endpoint_behind(script, tmp_path):
         "DO_INFERENCE_KEY=\nDO_INFERENCE_BASE_URL=https://inference.do-ai.run\n",
         encoding="utf-8",
     )
+    _with_anthropic_credential(home)
 
     done = _run_wrapper(script, home, tmp_path)
 
