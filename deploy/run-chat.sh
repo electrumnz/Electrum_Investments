@@ -214,14 +214,30 @@ else
   # Leaving one of the two unfixed would mean the account agent still has the
   # trap, and it is the instance the operator would reach for to diagnose the
   # other one.
-  HERMES_DOTENV="$HERMES_HOME/.hermes/.env"
-  if [[ -z "${ANTHROPIC_API_KEY:-}" ]] \
-     && [[ ! -s "$HERMES_DOTENV" ]]; then
+  # What counts as "this home has a credential". Deliberately WIDE, because the
+  # cost of the two mistakes is not symmetric: refusing a home that can in fact
+  # answer takes a working agent off the deck, while admitting one that cannot
+  # only returns us to the old confusing failure. So anything that could
+  # plausibly hold a token counts, and only a home with none of them refuses.
+  #
+  # `HOME` is this instance's own home, so every path here is this instance's.
+  # `.env` is the file Hermes names in its own error message; the glob covers a
+  # credential written by `hermes auth` under another name, which is not
+  # something this repository can pin down from outside the box.
+  credentialed=0
+  [[ -n "${ANTHROPIC_API_KEY:-}" || -n "${ANTHROPIC_AUTH_TOKEN:-}" ]] && credentialed=1
+  [[ -s "$HERMES_HOME/.hermes/.env" ]] && credentialed=1
+  for candidate in "$HERMES_HOME"/.hermes/auth* "$HERMES_HOME"/.hermes/credential* \
+                   "$HERMES_HOME"/.hermes/token* "$HERMES_HOME"/.hermes/*.json; do
+    [[ -s "$candidate" ]] && credentialed=1
+  done
+
+  if [[ "$credentialed" -eq 0 ]]; then
     echo "No inference credential in this home, so there is nothing to answer with." >&2
     echo >&2
     echo "  $INFERENCE_ENV has no DO_INFERENCE_KEY," >&2
     echo "  ANTHROPIC_API_KEY is unset, and" >&2
-    echo "  $HERMES_DOTENV is missing or empty." >&2
+    echo "  no credential file under $HERMES_HOME/.hermes/." >&2
     echo >&2
     echo "Refusing rather than saying 'Anthropic direct' and letting hermes fail" >&2
     echo "with 'No inference provider configured' a line later." >&2

@@ -694,6 +694,36 @@ def test_a_wrapper_with_no_credential_at_all_refuses_the_turn(script, tmp_path):
 
 
 @pytest.mark.parametrize("script", WRAPPERS)
+@pytest.mark.parametrize("store", ["auth.json", "credentials", "token", "oauth-nous.json"])
+def test_a_credential_under_any_plausible_name_is_enough_to_run(script, store, tmp_path):
+    """The guard above is deliberately WIDE, because the two mistakes differ.
+
+    Refusing a home that can in fact answer takes a working agent off the deck;
+    admitting one that cannot only returns us to the old confusing failure. So
+    anything that could plausibly hold a token counts.
+
+    This matters because `hermes auth` may write a credential under a name this
+    repository cannot pin down from outside the box — the Nous Portal grant is
+    OAuth rather than a static key, and there may be others. A guard that knew
+    only about `.env` would have refused the ACCOUNT agent, whose chat panel
+    works today, the moment it shipped.
+
+    `config.yaml` is deliberately not enough: every dreamer home has one, so
+    counting it would make the guard unable to fire at all.
+    """
+    home = tmp_path / "home"
+    (home / ".hermes").mkdir(parents=True)
+    (home / "inference.env").write_text("", encoding="utf-8")
+    _hermes_config(home).write_text("model:\n  default: m\n", encoding="utf-8")
+    (home / ".hermes" / store).write_text('{"token": "x"}\n', encoding="utf-8")
+
+    done = _run_wrapper(script, home, tmp_path)
+
+    assert done.returncode == 0, done.stderr
+    assert "Anthropic direct" in done.stderr
+
+
+@pytest.mark.parametrize("script", WRAPPERS)
 def test_blanking_the_key_leaves_no_endpoint_behind(script, tmp_path):
     """Rollback is one blank line, so it has to be a COMPLETE rollback.
 
