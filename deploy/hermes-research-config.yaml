@@ -65,6 +65,25 @@ approvals:
     - "sudo su*"
     - "sudo -u root*"
 
+# **`platform_toolsets` is a DIFFERENT KEY from `toolsets`, and that
+# distinction has misled this repository once already** — the old "Hermes
+# cannot drop its terminal toolset" finding was about `platform_toolsets.acp`
+# and was wrong about `disabled_toolsets`. Measured here on 17 Aug 2026: with
+# `agent.toolsets` alone the researcher held clarify, memory, session_search,
+# skill_manage, skill_view, skills_list and todo — so the allowlist is being
+# applied and `web` resolved to NOTHING.
+#
+# Two causes remain and this is the free one to rule out: the CLI platform
+# may select its own set, in which case naming `web` there is what enables
+# it. The other is the Nous Portal Tool Gateway, which is a subscription.
+#
+# Mirrors the allowlist below exactly rather than naming the `hermes-cli`
+# bundle: that bundle measured 24 tools on the account instance, and a
+# web-reading process is the last place to accept a bundle's worth of
+# capability nobody chose.
+platform_toolsets:
+  cli: [web, memory, skills]
+
 agent:
   # ==========================================================================
   # AN ALLOWLIST, which is the OPPOSITE of deploy/hermes-config.yaml.

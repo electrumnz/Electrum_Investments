@@ -1104,3 +1104,35 @@ def test_a_failed_probe_does_not_print_a_success_block() -> None:
     # And it must say the state plainly rather than only warning.
     assert "NOT WORKING YET" in script[guard:success]
     assert "--off" in script[guard:success]
+
+
+def test_platform_toolsets_is_top_level_and_never_nested_under_agent() -> None:
+    """`platform_toolsets` and `agent.toolsets` are different keys.
+
+    That distinction has misled this repository once already: the old "Hermes
+    cannot drop its terminal toolset" finding was about `platform_toolsets.acp`
+    and was wrong about `agent.disabled_toolsets`.
+
+    Nesting it under `agent:` parses cleanly and does nothing — which is the
+    worst available outcome, because the config LOOKS configured. Caught by a
+    parse check while writing it, so it is pinned rather than remembered.
+
+    It mirrors the allowlist rather than naming the `hermes-cli` bundle: that
+    bundle measured 24 tools on the account instance, and a web-reading process
+    is the last place to accept a bundle's worth of capability nobody chose.
+    """
+    import yaml
+
+    config = yaml.safe_load(
+        (Path(__file__).resolve().parents[1] / "deploy/hermes-research-config.yaml").read_text()
+    )
+
+    assert "platform_toolsets" not in config["agent"], "nested under agent — silently inert"
+    assert config["platform_toolsets"]["cli"] == ["web", "memory", "skills"]
+    assert config["agent"]["toolsets"] == ["web", "memory", "skills"]
+    assert "hermes-cli" not in config["platform_toolsets"]["cli"]
+
+    # And the belt-and-braces subtraction still names the one that matters.
+    # This process reads untrusted pages; a shell in the same context is
+    # prompt injection with a command line attached.
+    assert "terminal" in config["agent"]["disabled_toolsets"]
