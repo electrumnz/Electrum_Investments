@@ -1327,10 +1327,14 @@ class PromotionRun:
     conditions_fulfilled: int = 0
     # Conditions no figure can settle, waiting on a PERSON to look. Its own
     # count because a still shelf has two very different explanations — the
-    # figures have not moved, or nobody has been asked — and a zero here says
+    # figures have not moved, or nobody has looked yet — and a zero here says
     # which. The same reason `cycles_available` is on the line: a shelf that
     # cannot move explains itself, rather than looking like patience.
-    awaiting_operator: int = 0
+    #
+    # `awaiting_a_look`, not `awaiting_operator`: the dreamer answers its own
+    # observations now, so the old name pointed at somebody who is not in this
+    # loop at all.
+    awaiting_a_look: int = 0
     # (dream_id, vault it landed on)
     promoted: tuple[tuple[int, str], ...] = ()
     # (dream_id, why it stayed). Includes the ordinary "still being worked on",
@@ -1374,7 +1378,7 @@ def promote_dreams(
     """
     stamp = at or datetime.now(UTC)
     fulfilled = 0
-    awaiting_operator = 0
+    awaiting_a_look = 0
     promoted: list[tuple[int, str]] = []
     held: list[tuple[int, str]] = []
 
@@ -1394,14 +1398,14 @@ def promote_dreams(
         if readings and dream.conditions:
             grading = store.grade(dream_id, readings, at=stamp)
             fulfilled += len(grading.newly_fulfilled)
-            awaiting_operator += grading.awaiting_operator
+            awaiting_a_look += grading.awaiting_a_look
         else:
             # Counted whether or not there were readings to grade against,
             # because an observation does not need any: it needs a person. With
             # no cycles recorded the grading step is skipped entirely, and a
             # count that skipped with it would report zero questions waiting on
             # the operator at exactly the moment nothing else could move either.
-            awaiting_operator += sum(
+            awaiting_a_look += sum(
                 1
                 for c in dream.conditions
                 if c.is_observable and not c.is_answered
@@ -1418,7 +1422,7 @@ def promote_dreams(
     run = PromotionRun(
         considered=len(candidates),
         conditions_fulfilled=fulfilled,
-        awaiting_operator=awaiting_operator,
+        awaiting_a_look=awaiting_a_look,
         promoted=tuple(promoted),
         held=tuple(held),
         cycles_available=len(readings),
@@ -1431,7 +1435,7 @@ def promote_dreams(
         # A prophecy waiting on a person looks, from here, exactly like one
         # whose figures have not moved. This is the difference, and without it
         # the shelf reports patience either way.
-        awaiting_operator=run.awaiting_operator,
+        awaiting_a_look=run.awaiting_a_look,
         # Named for the same reason `calendar_degraded` is: with no recorded
         # cycles nothing can fire, and that is a fact about the audit log rather
         # than about the prophecies. A zero here explains an unchanging shelf.

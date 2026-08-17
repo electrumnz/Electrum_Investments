@@ -2516,7 +2516,7 @@ def test_grading_never_settles_an_observation_in_either_direction():
     assert grading.newly_fulfilled == ()
     assert grading.conditions[0].fulfilled is False
     assert grading.conditions[0].ruled_out is False
-    assert grading.awaiting_operator == 1
+    assert grading.awaiting_a_look == 1
     # And NOT counted as ungradeable: "no reading can settle this" and
     # "somebody has to look at this" are opposite findings.
     assert grading.ungradeable == 0
@@ -2530,7 +2530,7 @@ def test_a_prose_only_condition_is_still_counted_as_ungradeable():
     grading = grade_conditions(dream, [CycleReadings(at=AFTER, readings={})])
 
     assert grading.ungradeable == 1
-    assert grading.awaiting_operator == 0
+    assert grading.awaiting_a_look == 0
 
 
 def test_an_unanswered_observation_never_reaches_the_vault_by_waiting():

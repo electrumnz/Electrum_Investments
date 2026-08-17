@@ -1708,12 +1708,12 @@ def test_promote_dreams_counts_the_questions_waiting_on_a_person(store):
         )
     )
 
-    assert promote_dreams(store).awaiting_operator == 1
+    assert promote_dreams(store).awaiting_a_look == 1
     assert (
         promote_dreams(
             store,
             readings=[CycleReadings(at=datetime(2026, 6, 2, tzinfo=UTC), readings={})],
-        ).awaiting_operator
+        ).awaiting_a_look
         == 1
     )
 

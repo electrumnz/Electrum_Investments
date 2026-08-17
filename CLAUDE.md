@@ -2295,6 +2295,56 @@ were rejected for failing. **The routes are enumerated from the application
 now**, and a new one must be classified as refused or as deliberately open
 before the suite passes.
 
+### Hermes is a CHAT runtime, and the trading system does not depend on Nous
+
+Raised by the operator 17 Aug 2026, and it is the right question: *"the repo
+from Nous for Hermes was ever only supposed to be for inspo, not to build a
+system reliant on them"*. `reference/` is a reading library, and a system
+quietly reliant on one of its entries would be a different thing from one that
+borrowed an idea.
+
+**The boundary, and it is checked rather than asserted.** Nothing that
+decides, sizes, vets, places, records or reasons about a trade imports Hermes:
+`risk`, `broker`, `journal`, `reconcile`, `model_client`, `confer`,
+`dreaming`, `grants`, `context`, `indicators`, `stop_watch`, `options`,
+`stand_down`. `tests/test_agent_behaviour.py` parses their ASTs and fails the
+build if one acquires the dependency — the same shape as the `TraderPowers`
+test, and for the same reason: a claim in this file is not a guarantee.
+
+**Every Python model call goes straight to the provider.** `propose`, `dream`
+and `confer` use `model_client.py` against DigitalOcean or Anthropic. The
+trading loop, `electrum-bot dream`, the conference and the risk gate would all
+run identically on a box with no Hermes installed at all.
+
+**What Hermes actually is here: the runtime for the three chat panels** —
+Yoda on `/chat`, Grogu on `/dreaming`, the Armorer on `/settings`. That is a
+real dependency and it is worth naming as one rather than pretending
+otherwise. It buys per-instance souls, memory, an approval layer and an MCP
+client, and it is reached through root-owned wrappers rather than linked
+against, so replacing it is a wrapper rewrite and not a refactor of this
+repository.
+
+**No Nous subscription is required and nothing is billed to them.** The one
+paid thing that ever came up is the Nous Portal Tool Gateway, which serves
+Hermes' `web` toolset — measured 17 Aug 2026 as resolving to ZERO tools on
+this account. That gap is now closed from the other direction:
+`lookup.LocalResearcher` reads EDGAR, RSS, Wikipedia and already-known URLs
+with no key, no grant and no subscription, and `cmd_dream` PREFERS it even
+where Hermes is permitted. Measured on the droplet: `researcher_selected`
+reported `LocalResearcher` with `hermes_permitted: true`.
+
+So the accurate sentence, and the one to use in place of any loose talk about
+"the researcher being inert": **the Hermes research path is inert and unused;
+the keyless one is what runs.** Earlier sessions wrote it the first way and it
+reads as a missing capability rather than a bypassed one.
+
+**Where the dependency genuinely bites is the Dreaming chat panel**, and it is
+recorded as `TODO.md` item 0c rather than fixed: Grogu's isolated instance has
+no `mcp_servers` block at all, so that panel can read nothing and record
+nothing. Yoda's can, because the account agent's instance registers this
+repo's MCP server. Closing that is a redesign of the quarantine rail, not a
+config change.
+
 ### Three agents, three souls, and Hermes only holds one
 
 `souls/yoda.md` answers about the account on `/chat`; `souls/grogu.md` dreams on
