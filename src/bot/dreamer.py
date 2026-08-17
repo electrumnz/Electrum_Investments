@@ -1977,8 +1977,40 @@ class Dreamer:
             fused.considerations = considerations
             return fused
 
+        # **Counted, because the downgrade is otherwise invisible.** `_hop`
+        # resolves `checked=True` with an empty `source` DOWNWARDS, which is
+        # right and is load-bearing — a flag with nothing behind it is exactly
+        # the generous self-rating the badge exists to refuse. What was missing
+        # is any trace that it happened, so "the model tried to mark this
+        # checked and named no source" and "the model honestly left it
+        # unchecked" produced identical logs.
+        #
+        # That matters more than it sounds. Measured on the droplet: five
+        # passes over one dream, ~31 citations fetched, `unchecked` stuck at 2
+        # every time and no way to tell whether the dreamer was failing to
+        # source its hops or failing to SAY where. The two need completely
+        # different fixes and the log could not distinguish them.
+        #
+        # Two counters, never one — the `stops_unchecked` / `stops_unmeasured`
+        # rule arriving at the chain.
+        claimed_without_source = sum(
+            1 for hop in step.chain if hop.checked and not hop.source.strip()
+        )
+
         dream, advanced, scope = self._apply(step, existing, now=now)
         self._store.save(dream)
+
+        if claimed_without_source:
+            # Its own line at WARNING, not a field on the summary. A dreamer
+            # marking hops checked with nothing behind them is a prompt or a
+            # model problem rather than a quiet property of the run, and it is
+            # the kind of thing that should be greppable on its own.
+            log.warning(
+                "dream_hops_claimed_without_source",
+                dream_id=dream.id,
+                hops=claimed_without_source,
+                of=len(step.chain),
+            )
 
         # AFTER the save, for `research_dream`'s reason: the step is the run's
         # product and an answer must not be able to cost one. It runs BEFORE
@@ -2027,6 +2059,10 @@ class Dreamer:
             symbols=list(scope.kept),
             symbols_dropped=len(scope.dropped),
             self_settled=settled.answered,
+            # A stated nought each run, so a clean step is a fact rather than
+            # the absence of a warning — which is also what an outage looks
+            # like. Same reason the breach count is on `cycle_complete`.
+            claimed_without_source=claimed_without_source,
         )
         return DreamerResult(
             dream=dream,
