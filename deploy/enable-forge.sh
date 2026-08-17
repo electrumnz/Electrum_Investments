@@ -147,12 +147,29 @@ fi
 # is the check above.
 say "checking the grant end to end"
 out="$(printf 'apply 0\n' | sudo -n -u "$APP_USER" -- sudo -n -u root -- "$WRAPPER" 2>&1 || true)"
+probe_ok=0
 if grep -q "No settings request 0" <<<"$out"; then
   say "the wrapper answered — the forge is live"
+  probe_ok=1
 else
   say "WARNING: the wrapper did not answer as expected:"
   printf '           %s\n' "$out" | head -5
   say "         The agent will report that it cannot write the file."
+fi
+
+# **The success block is GUARDED.** This script printed a WARNING and then a
+# `Done.` block three lines later, which is this repository's founding failure:
+# the reassuring text comes last, so it is the text that gets read.
+# `enable-research.sh` was fixed for this and the others were not — the lesson
+# had been written down beside one script rather than applied to every script
+# that probes itself. A non-zero exit as well as the words, because a guard
+# that prints and falls through is the same bug with more output.
+if [[ "$probe_ok" != "1" ]]; then
+  printf '\nNOT WORKING YET. The sudoers rule is installed, but the wrapper did not\n'
+  printf 'answer, so the Armorer will report that it cannot write the file.\n\n'
+  printf 'The WARNING above carries what it actually said.\n\n'
+  printf 'Off again: sudo %s --off\n' "$0"
+  exit 1
 fi
 
 printf '\nDone. The Armorer applies her own changes now.\n'

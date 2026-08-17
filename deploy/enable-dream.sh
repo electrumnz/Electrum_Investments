@@ -248,14 +248,31 @@ done
 say "asking the running service to reach the dreamer (may take a minute)"
 
 ENV_FILE="$APP_DIR/.env"
-password="$(grep -oP '^DASHBOARD_PASSWORD=\K.*' "$ENV_FILE" 2>/dev/null || true)"
-chat_token="$(grep -oP '^DASHBOARD_CHAT_TOKEN=\K.*' "$ENV_FILE" 2>/dev/null || true)"
+
+# **`tail -1`, and a duplicate key is why.** Observed live 17 Aug 2026:
+# `/opt/mudhorn/.env` carried DASHBOARD_PASSWORD on two lines, so this grep
+# returned BOTH, `$password` became a two-line string, the login POST below
+# sent nonsense, no cookie came back, and the probe reported `POST /chat
+# returned 401` about a dashboard that was working perfectly.
+#
+# Nothing raises on a duplicate key — the file simply means something other
+# than it looks like, which is already recorded in CLAUDE.md about a duplicate
+# `agent:` key in the Hermes config. The env-file loaders this deployment uses
+# take the LAST assignment, so `tail -1` reads what the application actually
+# reads. `head -1` would have fixed the 401 and could have read a DIFFERENT
+# value from the one in force, which is worse than the bug.
+password="$(grep -oP '^DASHBOARD_PASSWORD=\K.*' "$ENV_FILE" 2>/dev/null | tail -1 || true)"
+chat_token="$(grep -oP '^DASHBOARD_CHAT_TOKEN=\K.*' "$ENV_FILE" 2>/dev/null | tail -1 || true)"
 jar="$(mktemp)"; body="$(mktemp)"
 trap 'rm -f "$jar" "$body"' EXIT
 
 if [[ -n "$password" ]]; then
+  # `--data-urlencode`, never `-d`. A password containing `&`, `+`, `=`, `%`
+  # or a space is mangled by the raw form, and the symptom is a 401 on the
+  # NEXT request — a failure reported against the thing being installed rather
+  # than against the check installing it.
   curl -sS --max-time 20 -c "$jar" -o /dev/null \
-    -X POST -d "password=$password" http://127.0.0.1:8787/login || true
+    -X POST --data-urlencode "password=$password" http://127.0.0.1:8787/login || true
 fi
 
 code="$(curl -sS --max-time 200 -b "$jar" -o "$body" -w '%{http_code}' \
@@ -263,14 +280,40 @@ code="$(curl -sS --max-time 200 -b "$jar" -o "$body" -w '%{http_code}' \
   -d "{\"token\":\"$chat_token\",\"soul\":\"grogu\",\"message\":\"Reply with the single word: READY\"}" \
   http://127.0.0.1:8787/chat)" || code=000
 
+probe_ok=0
 if [[ "$code" != "200" ]]; then
   say "WARNING: POST /chat returned $code rather than 200."
   say "         Check: journalctl -u mudhorn-web -n 30"
 elif grep -q '"ok": *true' "$body" || grep -q '"ok":true' "$body"; then
   say "The dreamer answered."
+  probe_ok=1
 else
   say "WARNING: the service reached Hermes and got an error back:"
   sed -n 's/.*"error": *"\([^"]*\)".*/           \1/p' "$body" | head -3
+fi
+
+# **The success block is GUARDED, and it was not.** Observed live 17 Aug 2026:
+# this script printed `WARNING: POST /chat returned 401` and then, three lines
+# later, `Done. Open /dreaming;` — a failure followed by a reassuring block,
+# which is this repository's founding failure exactly. The reassuring text
+# comes last, so it is the text that gets read.
+#
+# `enable-research.sh` was already fixed for this and this one was not, which
+# is the shape worth noting: the lesson was written down beside one script
+# rather than applied to every script that probes itself.
+#
+# A non-zero exit as well as the words, because a guard that prints and falls
+# through is the same bug with more output.
+if [[ "$probe_ok" != "1" ]]; then
+  printf '\nNOT WORKING YET. The credential, the config and the sudoers rule are\n'
+  printf 'installed, but the running service could not get an answer out of the\n'
+  printf 'dreamer, so the panel on /dreaming will not reply.\n\n'
+  printf 'Note this check signs in first, so a 401 can also mean the check could\n'
+  printf 'not read DASHBOARD_PASSWORD or DASHBOARD_CHAT_TOKEN out of %s\n' "$ENV_FILE"
+  printf 'rather than anything being wrong with the dreamer. Test it directly:\n'
+  printf '    sudo -u hermes %s/deploy/run-dream.sh <<< "reply with just: ok"\n\n' "$APP_DIR"
+  printf 'Off again: sudo %s --off\n' "$0"
+  exit 1
 fi
 
 printf '\nDone. Open /dreaming; the banner should no longer say the dreamer\n'
