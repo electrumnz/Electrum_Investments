@@ -2031,6 +2031,15 @@ class Dreamer:
         )
 
         dream, advanced, scope = self._apply(step, existing, now=now)
+        if dream is None:
+            # `_apply` refused: the step named an `advance_id` that matched no
+            # open dream. Nothing is written, for the reason given there — the
+            # old fallback turned that into a duplicate of the chain the step
+            # was reaching for. Same shape as a failed model call: a step that
+            # could not be applied is not recorded as one that decided
+            # nothing.
+            return None
+
         self._store.save(dream)
 
         if claimed_without_source:
@@ -2325,7 +2334,7 @@ class Dreamer:
 
     def _apply(
         self, step: DreamStep, existing: list[Dream], *, now: datetime | None = None
-    ) -> tuple[Dream, bool, SymbolScope]:
+    ) -> tuple[Dream | None, bool, SymbolScope]:
         """Fold a step into a new or existing dream.
 
         The id is looked up in what we actually offered rather than trusted: a
@@ -2343,7 +2352,40 @@ class Dreamer:
         if step.advance_id is not None:
             target = next((d for d in existing if d.id == step.advance_id), None)
             if target is None:
-                log.warning("dream_advance_id_unknown", requested=step.advance_id)
+                # **REFUSED, rather than quietly becoming a new dream.**
+                #
+                # `dream = target or Dream(...)` was the duplicate factory. A
+                # step that named an `advance_id` intended to continue an
+                # existing chain; when the id did not match, the fallback
+                # created a fresh dream out of a step that had asked for
+                # nothing of the kind — and since the step's title and seed
+                # describe the chain it meant to advance, the new row is
+                # usually a DUPLICATE of the very dream it was reaching for.
+                #
+                # Observed twice on the droplet. The second time is the clear
+                # one: it asked for id 1 (a dropped chain, so not offered),
+                # and the run created dream 3 carrying the identical title to
+                # dream 2 — "Manheim decline hits JPM auto lease book" twice
+                # on one shelf, with the observation worklist doubling behind
+                # it.
+                #
+                # Refusing costs the run and writes nothing. That is the right
+                # direction: an unusable step is recoverable on the next pass,
+                # and a polluted shelf has to be cleaned up by hand. It also
+                # fails CLOSED, which is what the rest of this file does with
+                # a value it cannot resolve.
+                #
+                # Note what is NOT done here: picking a dream on the model's
+                # behalf, even when only one was offered. That is code
+                # choosing what to think about, and a step attributed to a
+                # chain nobody selected is worse than a step discarded.
+                log.warning(
+                    "dream_advance_id_unknown",
+                    requested=step.advance_id,
+                    offered=[d.id for d in existing if d.id],
+                    action="step discarded, nothing written",
+                )
+                return None, False, SymbolScope()
 
         advanced = target is not None
         dream = target or Dream(title=step.title, seed=step.seed, origin=step.origin)
