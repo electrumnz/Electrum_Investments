@@ -2664,3 +2664,49 @@ def test_a_clean_chain_states_its_nought_rather_than_staying_silent(
     # clean run is a stated fact rather than the absence of a warning.
     assert "dream_step" in out
     assert "claimed_without_source=0" in out
+
+
+def test_a_carried_dream_says_how_many_steps_it_has_already_had(rules, store, journal):
+    """**A chain you never finish reaches nobody.**
+
+    Measured on the droplet: dream 2 came back `stage: iterate, verdict: null`
+    on eight consecutive passes — sourcing hops, growing the chain, and never
+    concluding. `promotion_for` needs a `keep` verdict, so a dream that
+    iterates for ever can never reach the prophecy shelf however well sourced
+    it becomes. Nothing was broken; nothing could move either.
+
+    The prompt described the stage machine and never said how long this dream
+    had been in it. "Last touched N days ago" is about the CLOCK rather than
+    about effort — five passes in one afternoon all read `0 day(s) ago`, so a
+    model had no way to notice it was repeating itself.
+
+    Counted from `thoughts`, the append-only record of steps actually taken,
+    so the figure cannot drift from what happened.
+    """
+    dream = Dream(title="A long-running chain", seed="a spark")
+    dream.add_thought(DreamStage.SEED, "the spark", at=ENTRY)
+    dream.add_thought(DreamStage.EXPLORE, "the chain", at=ENTRY)
+    dream.add_thought(DreamStage.ITERATE, "attack one", at=ENTRY)
+    dream.add_thought(DreamStage.ITERATE, "attack two", at=ENTRY)
+    dream.id = store.save(dream)
+
+    prompt = build_prompt(rules, journal, [store.get(dream.id)])
+
+    assert "4 step(s) so far of which 2 were iterate" in prompt
+
+    # The instruction that makes the count actionable lives in the SYSTEM
+    # prompt, beside the stage machine it qualifies — a per-run context is
+    # rebuilt every call and the rule is a permanent property of the loop.
+    # Asserted here anyway, because a count with no instruction is trivia and
+    # an instruction with no count is unactionable: they only work as a pair,
+    # and nothing else would fail if one of them went.
+    from bot.dreamer import SYSTEM_PROMPT
+
+    assert "A chain you never finish reaches nobody" in SYSTEM_PROMPT
+    assert "the next step should be a `verdict`" in SYSTEM_PROMPT
+    # `drop` must read as a real outcome rather than a failure, or the nudge
+    # buys conclusions that are all `keep`.
+    # Matched without the leading article: the line wraps in the prompt text.
+    assert "chain you killed yourself is worth more" in SYSTEM_PROMPT
+    # And it must not read as "conclude early", which would buy shallow chains.
+    assert "NOT being asked to conclude before you have looked" in SYSTEM_PROMPT

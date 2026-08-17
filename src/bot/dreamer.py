@@ -564,6 +564,18 @@ stages and you say which one you are in:
   verdict  keep (chain holds, worth watching), park (interesting, not now), or
            drop (it broke, and say which hop broke)
 
+**A chain you never finish reaches nobody.** Only a `verdict` step carries a
+dream off the workbench, so iterating for ever is the same outcome as dropping
+it, minus the honesty. Each dream you are shown carries how many steps it has
+had and how many of those were attacks. Once you have attacked a chain two or three times,
+the next step should be a `verdict` — and `drop` is a perfectly good one. A
+chain you killed yourself is worth more than one nobody could settle.
+
+You are NOT being asked to conclude before you have looked. Attack it properly
+first. What you must not do is attack the same chain a ninth time because a
+verdict feels final: park it if you genuinely want to come back to it, which is
+what park is for.
+
 A good chain looks like this, and the shape matters more than the subject:
 
   Cicadas emerge on fixed multi-year broods, and the map is published.
@@ -1116,8 +1128,29 @@ def build_prompt(
         )
         for dream in open_dreams:
             age = (stamp - dream.updated_at).days
+            # **The step COUNT, not only the stage.** Measured on the
+            # droplet: dream 2 came back `stage: iterate, verdict: null` on
+            # eight consecutive passes, sourcing hops and growing the chain
+            # and never concluding. Promotion needs a `keep` verdict, so a
+            # dream that iterates for ever can never reach the prophecy shelf
+            # however well sourced it gets.
+            #
+            # Nothing in the prompt told it how long it had been going. The
+            # stage machine is described, and "last touched N days ago" is
+            # about the CLOCK rather than about effort — five passes in one
+            # afternoon all read "0 day(s) ago". A model with no sense of how
+            # many times it has already attacked a chain has no way to know
+            # that it is repeating itself.
+            #
+            # Counted from `thoughts`, which is the append-only record of the
+            # steps actually taken, so it cannot drift from what happened.
+            steps = len(dream.thoughts)
+            attacks = sum(
+                1 for t in dream.thoughts if t.stage is DreamStage.ITERATE
+            )
             out.append(
                 f"  [id {dream.id}] {dream.title} — stage {dream.stage}, "
+                f"{steps} step(s) so far of which {attacks} were iterate, "
                 f"last touched {age} day(s) ago"
             )
             out.append(f"      spark: {dream.seed}")
