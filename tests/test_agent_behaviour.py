@@ -46,6 +46,7 @@ one of the prompts fails too).
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import importlib.util
 import json
@@ -1687,3 +1688,60 @@ def test_the_capitulation_score_does_not_claim_to_grade_a_rail():
     assert not claimed, f"the capitulation recording claims to cover: {claimed}"
 
 
+
+
+def test_the_trading_path_does_not_depend_on_hermes() -> None:
+    """**Hermes is a chat runtime, not a dependency of the trading system.**
+
+    Raised by the operator 17 Aug 2026: the Nous repository is in `reference/`
+    for inspiration, and a system quietly reliant on it would be a different
+    thing from one that borrowed an idea. The honest answer needs a boundary
+    somebody can check rather than a paragraph asserting one, because a claim
+    in prose is exactly how a dependency creeps back in.
+
+    So the boundary is: **nothing that decides, sizes, vets, places, records or
+    reasons about a trade may import Hermes.** Those modules are listed below
+    and the check is an AST parse, in the same shape as the `TraderPowers` test
+    above.
+
+    `dreamer.py` is deliberately absent from the list and is the interesting
+    case. It imports `research`, which can talk to a Hermes instance — but
+    `cmd_dream` prefers `lookup.LocalResearcher`, which needs no Hermes, no
+    grant and no subscription, and `Researcher.enabled` answers False on a box
+    without the grant. So the dependency is a type import and an unused branch,
+    not a requirement. Measured live on the droplet: `researcher_selected`
+    reported `LocalResearcher` with `hermes_permitted: true`, i.e. it chose the
+    keyless path even where Hermes was available.
+    """
+    core = [
+        "risk.py",
+        "broker.py",
+        "journal.py",
+        "reconcile.py",
+        "model_client.py",
+        "confer.py",
+        "dreaming.py",
+        "grants.py",
+        "context.py",
+        "indicators.py",
+        "stop_watch.py",
+        "options.py",
+        "stand_down.py",
+    ]
+    root = REPO_ROOT / "src" / "bot"
+    for name in core:
+        path = root / name
+        assert path.exists(), f"{name} has moved — update this boundary"
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        imported: set[str] = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                imported |= {alias.name for alias in node.names}
+            elif isinstance(node, ast.ImportFrom):
+                imported.add(node.module or "")
+        offending = sorted(m for m in imported if "hermes" in m.lower())
+        assert not offending, (
+            f"{name} imports {offending}. Hermes is the runtime for the three "
+            "CHAT panels and nothing else; the trading path must not acquire a "
+            "dependency on a third-party agent runtime."
+        )

@@ -1944,9 +1944,16 @@ class ConditionGrading:
     # the whole reason observations were added: "no reading can settle this" and
     # "somebody has to look at this" are opposite findings that produced
     # identical numbers before. One says the prophecy is un-gradeable and should
-    # never have promoted; the other says it is waiting on a person, and the
-    # only thing wrong is that nobody has been asked.
-    awaiting_operator: int = 0
+    # never have promoted; the other says it is waiting on somebody going and
+    # LOOKING, and the only thing wrong is that nobody has yet.
+    #
+    # Named `awaiting_a_look` and not `awaiting_operator`, which is what it was
+    # called until the dreamer started settling its own observations. The old
+    # name was read off a live log line as `awaiting_operator: 0` on a run that
+    # waits on the operator for nothing by design — a field naming somebody who
+    # is not in the loop, which is a small version of the confident wrong
+    # answer this repository refuses.
+    awaiting_a_look: int = 0
     cycles_checked: int = 0
 
     @property
@@ -2000,7 +2007,7 @@ def grade_conditions(
     graded: list[DreamCondition] = []
     fired: list[str] = []
     ungradeable = 0
-    awaiting_operator = 0
+    awaiting_a_look = 0
 
     for condition in dream.conditions:
         if condition.is_answered:
@@ -2017,7 +2024,7 @@ def grade_conditions(
             # is counted so that the waiting is visible rather than reading as
             # patience.
             if condition.is_observable:
-                awaiting_operator += 1
+                awaiting_a_look += 1
             else:
                 ungradeable += 1
             graded.append(condition)
@@ -2055,7 +2062,7 @@ def grade_conditions(
         conditions=tuple(graded),
         newly_fulfilled=tuple(fired),
         ungradeable=ungradeable,
-        awaiting_operator=awaiting_operator,
+        awaiting_a_look=awaiting_a_look,
         cycles_checked=len(later),
     )
 
@@ -4083,7 +4090,7 @@ class DreamStore:
                 dream_id=dream_id,
                 conditions=tuple(dream.conditions),
                 ungradeable=grading.ungradeable,
-                awaiting_operator=grading.awaiting_operator,
+                awaiting_a_look=grading.awaiting_a_look,
                 cycles_checked=grading.cycles_checked,
             )
 
@@ -4096,7 +4103,7 @@ class DreamStore:
             # Named on the line for the same reason `calendar_degraded` is: a
             # prophecy sitting still because nobody has answered its observation
             # looks identical, from here, to one whose figures have not moved.
-            awaiting_operator=grading.awaiting_operator,
+            awaiting_a_look=grading.awaiting_a_look,
         )
         return grading
 

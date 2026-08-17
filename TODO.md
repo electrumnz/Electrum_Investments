@@ -471,6 +471,54 @@ number.
 
 ---
 
+## 0c. DEFERRED — the chat panels reach no agent state, and Grogu reaches nothing
+
+Raised by the operator 17 Aug 2026 after talking to Grogu on /dreaming and
+getting a genuinely good rice-supply chain back that then went nowhere:
+*"concerns me that chat doesnt integrate with Yoda or Grogu?? that should be
+fixed."*
+
+**It is worse for Grogu than for Yoda, and the asymmetry is the whole story.**
+
+- **Yoda** (`/chat`) runs on the account agent's Hermes, whose registry holds
+  this repo's MCP server. It has thirteen-odd tools — the journal, the audit
+  log, `query_history`, `list_dreams`, `get_dream`, `raise_consideration`. It
+  can look at the shelf and put a note up for the dreamer.
+- **Grogu** (`/dreaming`) runs on the isolated dreamer Hermes, which by design
+  has **no `mcp_servers` block at all**. So the panel is a soul file and a
+  model and nothing else. It cannot read its own dreams, cannot see which of
+  its hops are unchecked, cannot record a word of what it just said, and
+  cannot raise a consideration — the one mechanism built for exactly this.
+
+So a chain worked out in that panel is lost the moment the tab closes, and the
+dreamer that wrote it has no idea it ever existed.
+
+**Why this is not a small fix.** The quarantine IS the absence of the MCP
+server — that is what makes "the dreamer has no `place_order`" structural
+rather than a sentence in `souls/grogu.md`, and `run-dream.sh` refuses any
+config carrying one. `CLAUDE.md` already rejected admitting a different server
+for the researcher: *"Admitting a different server is a redesign of that rail,
+not a workaround."* The same sentence applies here.
+
+So the options are a redesign either way, and the choice is the deferred part:
+
+- **A second, broker-free MCP server** for the dreamer's home — dream reads,
+  `raise_consideration`, and nothing that touches the broker, the journal or
+  the risk gate. Structurally clean, and it means `run-dream.sh`'s guard stops
+  being "no `mcp_servers`" and becomes "no server that reaches the broker",
+  which is a weaker check against a stronger claim. That weakening is the cost
+  to weigh, and it is exactly the shape of guarantee this repo keeps finding
+  has quietly stopped being checked.
+- **Keep the panel toolless and give the OUTPUT somewhere to go.** The chat
+  route already POSTs through `web/chat.py`, which is our own code and does
+  reach the store — so a considered chain could be recorded as a
+  `consideration` without the model holding any tool at all. Much smaller, and
+  it keeps the quarantine exactly as it is. What it does not buy is Grogu
+  being able to *read* its own shelf mid-conversation.
+
+The second is probably the right first step, and it is worth noticing that it
+needs no grant, no new server and no change to the rail. Not built.
+
 ## 1. BUILT and shipped OFF — fill an entry OUT OF HOURS
 
 **Shipped in `40b25c4`.** `broker.plan_extended_hours_fill` decides from config
