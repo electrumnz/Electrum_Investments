@@ -475,6 +475,23 @@ DREAMER_VAULTS: frozenset[Vault] = frozenset(
     {Vault.WORKBENCH, Vault.PROPHECY, Vault.VAULT, Vault.ARCHIVE}
 )
 
+# Who may answer an observation. Closed, like the move rules and for the same
+# reason: an actor this store does not recognise must not get the benefit of
+# the doubt.
+#
+# `TRADER` is the deliberate absence and the only one that needs defending.
+# The dreamer answers its own — the operator's instruction, and the reason is
+# that the step which actually grants a symbol is ADOPTION, which belongs to
+# the trading agent in the A2A conference and not to the dreamer. That makes
+# the conference the check. It stops being a check the moment the agent doing
+# the adopting can also settle the claims that put the dream in front of it, so
+# the trader is refused here and nowhere else in this file cares.
+#
+# The operator keeps the power without being required to exercise it:
+# `electrum-bot settle` is a manual override now rather than the expected path,
+# and nothing on any surface asks a person to use it.
+_MAY_SETTLE: frozenset[str] = frozenset({DREAMER, OPERATOR})
+
 
 @dataclass(frozen=True)
 class Hop:
@@ -4093,20 +4110,41 @@ class DreamStore:
         note: str = "",
         at: datetime | None = None,
     ) -> SettleResult:
-        """Record a PERSON's answer to one observation. The only writer of one.
+        """Record an answer to one observation. The only writer of one.
 
-        This is where the operator-settled half of `DreamCondition` gets its
-        answer, and every property below is the guarantee rather than plumbing.
+        This is where the observation half of `DreamCondition` gets its answer,
+        and every property below is the guarantee rather than plumbing.
 
-        - **Only the operator may call it.** The dreamer and the trading agent
-          are refused by name, and so is anything this store does not recognise.
-          A model settling its own condition would be a prophecy marking its own
-          homework — and since a fulfilled condition can carry a dream to the
-          vault, and a vaulted dream can be adopted, and an adoption is a live
-          symbol permission, that is a model writing itself a permission. The
-          refusal is structural: `dreamer.StepCondition` has no field that could
-          carry an answer, so there is nothing for a model to say even before
-          this check runs.
+        - **The DREAMER and the operator may both call it; the trading agent
+          may not.** This reverses an earlier rule, at the operator's
+          instruction, and the reversal is worth stating rather than quietly
+          discovering: *"grogu is his own soul, his own agent, the only
+          standard communication we have is A2A"*, and *"Grogu answers its
+          own"*.
+
+          What the old rule was protecting against was a model writing itself a
+          symbol permission — condition met, dream promotes to the vault, a
+          vaulted dream can be adopted, an adoption is a live grant. **The step
+          that actually grants is adoption, and that is not the dreamer's.**
+          It belongs to the trading agent, in the A2A conference, in another
+          process, through a `TraderPowers` that reaches no broker; and
+          everything traded under a grant still faces every gate in
+          `RiskGate.evaluate` under its resolved class's own limits. So what
+          the dreamer can now do on its own is move its own dream onto the
+          shelf where the *other* agent can see it. The conference is the
+          check, which is exactly what the operator said it was.
+
+          The trading agent stays refused, and that is the half worth keeping:
+          it is the one that adopts, so letting it settle a claim on a dream it
+          is about to take would collapse the two agents into one. `TRADER` is
+          refused by name, as is anything this store does not recognise.
+
+          **Who answered is recorded rather than assumed.** `observed_by` gets
+          the actual actor, so a condition Grogu settled for itself is
+          distinguishable afterwards from one a person looked at — a fact the
+          trading agent is shown in conference, and one a single stored boolean
+          could not carry. Same rule as `has_cycles`: two different findings
+          must not render as one.
         - **Identified by KEY, never by index.** A dream run between the
           operator reading the list and answering may restate and reorder the
           conditions, and an index would land the answer on a different claim.
@@ -4119,24 +4157,27 @@ class DreamStore:
         - **Neither answer is reversible here.** A fulfilled condition is never
           un-fulfilled and a ruled-out one is not quietly reopened; both come
           back `ALREADY_ANSWERED` with who said it and when.
-        - **A reason is required, in the operator's own words.** The note is the
+        - **A reason is required, in the answerer's own words.** The note is the
           only record of WHAT was seen, and an answer with nothing behind it is
           indistinguishable afterwards from a mis-click that granted a symbol.
+          It binds the dreamer exactly as it bound the operator: an unsourced
+          "met" with no account of what was looked at is the invention this
+          repository refuses, and the note is where that becomes visible.
 
         Nothing raises. A store error is a refusal like any other, because this
         will be called from a page.
         """
-        if by != OPERATOR:
+        if by not in _MAY_SETTLE:
             return SettleResult(
                 ok=False,
                 dream_id=dream_id,
                 refusals=(SettleRefusal.FORBIDDEN_ACTOR,),
                 detail=(
-                    f"'{by or 'unnamed'}' may not settle an observation. Only "
-                    "the operator can: this is the half of a prophecy that no "
-                    "figure the loop records can answer, and an agent settling "
-                    "its own condition would be marking its own homework on the "
-                    "route that ends in a symbol permission."
+                    f"'{by or 'unnamed'}' may not settle an observation. The "
+                    "dreamer answers its own and the operator may answer any; "
+                    "the trading agent may answer none, because it is the one "
+                    "that adopts, and settling a claim on a dream it is about "
+                    "to take would make one agent out of two."
                 ),
             )
 
@@ -4215,7 +4256,11 @@ class DreamStore:
             # — an undated fact cannot say when.
             fulfilled_at=stamp,
             ruled_out=not met,
-            observed_by=OPERATOR,
+            # The ACTOR, never a constant. A condition Grogu answered for
+            # itself and one a person went and looked at are different facts
+            # about how much a prophecy is worth, and the trading agent is
+            # shown which it is before it decides whether to adopt.
+            observed_by=by,
             note=_trim(note),
         )
         conditions = list(dream.conditions)
@@ -4252,7 +4297,7 @@ class DreamStore:
             dream_id=dream_id,
             met=met,
             subject=settled.subject,
-            by=OPERATOR,
+            by=by,
         )
         return SettleResult(ok=True, dream_id=dream_id, condition=settled)
 

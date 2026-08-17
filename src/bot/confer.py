@@ -1104,18 +1104,29 @@ def render_dream(dream: Dream) -> str:
         for condition in dream.conditions:
             # Three shapes, not two. "Prose only" was true of everything
             # without a number until an OBSERVATION — a subject, a claim and a
-            # review date, settled by the operator — became the other way onto
-            # the prophecy shelf, and calling one of those prose would tell the
-            # trading agent that a claim somebody deliberately answered was
-            # never checkable at all.
+            # review date — became the other way onto the prophecy shelf, and
+            # calling one of those prose would tell the trading agent that a
+            # claim somebody deliberately answered was never checkable at all.
             #
-            # Harmless today, because a dream only reaches a conference once
-            # every condition is answered. Recorded here rather than left for
-            # the day that stops being true.
+            # **An observation names WHO answered it, and that is the load-
+            # bearing half now.** The dreamer settles its own observations, so
+            # a claim on this dream may have been answered by the very agent
+            # offering it. That is allowed — adoption is this agent's decision
+            # and this conference is the check on it — but the check only works
+            # if the trading agent can SEE which claims were self-answered and
+            # weigh them accordingly. A shape that said only "observed" would
+            # hide the one fact that makes the offer worth interrogating.
             if condition.is_checkable:
                 shape = "checkable"
             elif condition.is_observable:
-                shape = "observed, settled by the operator"
+                who = condition.observed_by
+                shape = (
+                    "observed, answered by the dreamer itself"
+                    if who == DREAMER
+                    else f"observed, answered by the {who}"
+                    if who
+                    else "observed, nobody has looked yet"
+                )
             else:
                 shape = "prose only"
             # `ruled_out` is its own answer. Folding it into "not met" would

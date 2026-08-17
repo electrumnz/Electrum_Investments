@@ -2585,19 +2585,61 @@ def test_the_operator_settles_an_observation_and_the_dream_reaches_the_vault(sto
     assert moved.ok and moved.moved_to is Vault.VAULT
 
 
-def test_the_dreamer_may_not_settle_its_own_observation(store):
-    """**The refusal that keeps this from being a model writing itself a grant.**
+def test_the_dreamer_settles_its_own_observation_and_is_recorded_as_the_answerer(store):
+    """**Grogu answers its own, and the answer says it was Grogu.**
 
-    A fulfilled condition can carry a dream to the vault, a vaulted dream can be
-    adopted, and an adoption is a live permission to trade a symbol in no
-    allowlist. An agent answering its own question would be marking its own
-    homework on that route.
+    The operator's instruction, reversing an earlier rule: *"grogu is his own
+    soul, his own agent, the only standard communication we have is A2A"*. The
+    old refusal was aimed at a model writing itself a symbol permission — but
+    the step that GRANTS is adoption, which is the trading agent's, taken in
+    the conference. What the dreamer can do alone is put its dream where the
+    other agent can see it.
+
+    `observed_by` is the half that must not be lost. A claim Grogu answered for
+    itself and one a person went and looked at are different facts about how
+    much a prophecy is worth, and the trading agent is shown which it is before
+    it decides.
     """
     dream_id = _shelved(store)
     shelved = store.get(dream_id)
     assert shelved is not None
 
-    for actor in (DREAMER, TRADER, "", "operator "):
+    result = store.settle_condition(
+        dream_id,
+        shelved.conditions[0].key,
+        by=DREAMER,
+        met=True,
+        note="Century Aluminum's Q4 release names potline 2 restarting.",
+        at=AFTER,
+    )
+
+    assert result.ok
+    assert result.condition is not None
+    assert result.condition.fulfilled is True
+    # Never OPERATOR. Stamping the actor as a constant would erase the one
+    # distinction the trading agent is shown.
+    assert result.condition.observed_by == DREAMER
+    assert result.condition.state(AFTER) is ConditionState.MET
+
+    # And it moves the dream, which is the point of allowing it at all.
+    assert store.promote(dream_id, at=AFTER).moved_to is Vault.VAULT
+
+
+def test_the_trading_agent_may_not_settle_a_claim_on_a_dream_it_could_adopt(store):
+    """**The refusal that survives, and the only one that has to.**
+
+    Adoption is what grants a symbol, and adoption is the trading agent's. If
+    the agent doing the adopting could also settle the claims that put a dream
+    in front of it, the A2A conference would stop being a check and the two
+    agents would collapse into one. An actor the store does not recognise is
+    refused for the same reason the move rules are closed: no benefit of the
+    doubt.
+    """
+    dream_id = _shelved(store)
+    shelved = store.get(dream_id)
+    assert shelved is not None
+
+    for actor in (TRADER, "", "operator ", "researcher"):
         refused = store.settle_condition(
             dream_id, shelved.conditions[0].key, by=actor, met=True, note="it happened"
         )

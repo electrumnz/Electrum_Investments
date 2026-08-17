@@ -2699,7 +2699,7 @@ grading that reset on every step would make the vault unreachable — but a MOVE
 threshold is a new claim and starts ungraded, because inheriting the old
 verdict would be back-dating a prediction.
 
-### There are TWO shapes of pre-registration, and a person settles the second
+### There are TWO shapes of pre-registration, and the DREAMER settles the second
 
 **An honest dreamer could not reach the prophecy shelf at all**, and that was a
 conflict between two rules rather than a bug. Promotion needed a condition with
@@ -2716,16 +2716,27 @@ the **union**:
   figures the loop records. Unchanged.
 - **AN OBSERVATION** — `subject` (the findable thing to look at) / `observable`
   (what it must show) / `observe_by` (the date the answer should exist by),
-  settled by the **operator**. All three are required, in the same
-  all-or-nothing shape as the triple: a subject with no claim is a thing to
-  look at with no question, and a claim with no date never comes due and so
-  never reaches anybody's list.
+  settled by **the dreamer, on one of its own runs**. All three are required,
+  in the same all-or-nothing shape as the triple: a subject with no claim is a
+  thing to look at with no question, and a claim with no date never comes due
+  and so is never returned to.
 
 A threshold and an observation are pre-registrations of the same kind — a
 falsifiable claim, written before the fact, with the means of settling it named.
 What differs is who settles it, and that is not a difference the promotion rule
 has any business caring about. **Prose with neither is still not pre-registered
 and is still unpromotable.**
+
+**The observation was settled by the OPERATOR until 17 Aug 2026, and that was
+the wrong half of the arrangement to automate away.** It made every
+observation-carrying dream wait on a person who was never going to answer: the
+Dreaming page read *"6 questions waiting on you"* over a list with no input
+control, and the operator's answer was that this was never the plan — *"grogu
+is his own soul, his own agent, the only standard communication we have is
+A2A"*, and *"dreamer is supposed to just do his thing without human input
+unless its deliberate through the chat"*. See the section below for what
+replaced it, and note that `electrum-bot settle` still works as a manual
+override — it is simply not what anything asks for.
 
 `ConditionState` is five-valued because a boolean cannot hold it: `MET`,
 `RULED_OUT`, `AWAITING`, `OVERDUE`, `UNSETTLEABLE`. **`OVERDUE` is a fact about
@@ -2748,12 +2759,42 @@ has got to yet. Same rule as `has_cycles`, `can_grade_anything` and first-visit.
   shelf fills with conclusions nobody committed to anything about. It also
   dead-ends: a dream with nothing settleable can never reach the VAULT either,
   so the conference still starves.
-- **Letting the model answer its own condition.** `settle_condition` refuses
-  every actor but the operator, and `dreamer.StepCondition` has no field that
-  could carry an answer, so there is nothing for a model to say even before the
-  check runs. A vaulted dream is what an adoption is taken from and an adoption
-  is a live symbol permission, so a model settling its own condition would be
-  writing itself a permission.
+- **Letting the model answer its own condition.** ~~Rejected~~ — **and this
+  one was ADOPTED on 17 Aug 2026**, so it is kept here as a reversal rather
+  than deleted, because the argument against it was wrong in a specific and
+  instructive way.
+
+  The argument ran: a vaulted dream is what an adoption is taken from, an
+  adoption is a live symbol permission, so a model settling its own condition
+  is a model writing itself a permission. **What it skipped is WHICH STEP
+  GRANTS.** Adoption does, and adoption is the *trading* agent's, taken in the
+  A2A conference, in another process, through a `TraderPowers` that reaches no
+  broker — and everything traded under a grant still faces every gate in
+  `RiskGate.evaluate` under its resolved class's own limits. What the dreamer
+  can do alone is move its own dream onto the shelf where the other agent can
+  see it. The conference is the check, which is exactly what the operator
+  meant by "the only standard communication we have is A2A".
+
+  Three things hold it in place, and the third is the one to defend:
+
+  - **`DreamStore.settle_condition` is still the only writer of an answer.**
+    `dreamer.settle_own_observations` calls it after the save, so one code
+    path stamps every settlement, enforces the note and refuses an
+    already-answered claim.
+  - **A note is required**, so an answer with no account of what was looked at
+    is refused rather than recorded. That is where an invention becomes
+    visible.
+  - **`observed_by` records the ACTOR, never a constant, and the trading agent
+    is SHOWN it.** `confer.render_dream` renders a self-answered observation as
+    *"answered by the dreamer itself"*. A conference that could not tell a
+    self-answered claim from one a person looked at would be a rubber stamp,
+    and that — not the settling — is what would actually have made this a model
+    writing itself a permission.
+
+  **The TRADING agent still may not settle one.** It is the one that adopts, so
+  letting it answer the claims that put a dream in front of it would collapse
+  two agents into one. `_MAY_SETTLE` is closed and `tests/test_dreaming.py`
+  pins both halves.
 
 **No schema migration was needed and that is a fact rather than an oversight.**
 Conditions are JSON in a TEXT column, so there is no column to add, and
@@ -2768,50 +2809,68 @@ claim back on the worklist as though nobody had looked. A moved `subject` or
 of moving a threshold — while a moved review date is not, because the date says
 when to look and not what is claimed.
 
-### The answer is typed at a terminal, and that is where it belongs
+### The dreamer answers its own questions, and nothing waits on a person
 
-`settle_condition` is the only writer of an operator's answer, and it shipped
-with no caller — so an observation-only prophecy reached PROPHECY and stopped
-there for ever. `electrum-bot observations` is the worklist and `electrum-bot
-settle` is the answer.
+**This section used to be headed "The answer is typed at a terminal, and that
+is where it belongs", and the operator overruled it on 17 Aug 2026.** The
+reasoning is kept because the reversal is more instructive than either state.
 
-**Both are commands on the box rather than a control on the deck**, and the
-reason is the chain they sit on: a fulfilled condition can carry a dream to the
-VAULT, a vaulted dream is what an adoption is taken from, and an adoption is a
-live permission to trade a symbol that is not in `config/rules.yaml`. That write
-belongs behind the shell, not behind one shared password on a surface that may
-be exposed. Every gate still runs on anything traded under a grant; what this
-changes is the allowlist, not the limits.
+The old arrangement: `settle_condition` refused every actor but the operator,
+`electrum-bot observations` was the worklist and `electrum-bot settle` the
+answer, both commands on the box rather than controls on the deck, because a
+fulfilled condition can carry a dream to the VAULT and a vaulted dream is what
+an adoption is taken from.
 
-The Dreaming page carries a read-only **Waiting on you** card, which shows the
-questions and names the command that answers them — the same shape as Settings
-showing the limits and naming the file that owns each. It is **absent rather
-than empty** when nothing is due: a panel announcing zero trains an operator to
-stop reading the one thing on that page addressed to them.
+**What that produced was a dreamer blocked on somebody who was never going to
+answer.** Observed on the live deck: a Cisco dream with six unanswered
+observations, under a card reading *"6 questions waiting on you"*, with no way
+to answer any of them from the page — *"it should not be waiting on me for
+anything?? and there is no way to input an answer anyway"*. Every one of those
+questions was one the dreamer had written for itself.
 
-Three properties of the surface:
+So the dreamer settles its own now (`dreamer.settle_own_observations`), and the
+argument for why that does not hand a model a symbol permission is in the
+section above: **adoption is what grants, and adoption is the trading agent's,
+in the A2A conference.** The conference is the check, and it works because
+`confer.render_dream` names who answered each observation — a self-answered
+claim arrives visibly self-answered.
 
+What survives from the old arrangement:
+
+- **`electrum-bot observations` and `electrum-bot settle` still work**, as a
+  manual override for an operator who has genuinely gone and looked. Nothing
+  asks them to, and the Dreaming page no longer names the command. Taking a
+  working command away from the person who owns the box would be a strange way
+  to give them less work.
 - **The handle is derived, never stored.** `observation_handle` is six hex
-  characters over the dream id and the claim's key. The important property is
-  the one that looks like a drawback: **it changes when the claim changes**, so
-  a dreamer that restates its conditions between the operator reading the list
-  and answering it produces a different handle and the answer lands nowhere,
-  rather than landing on a claim nobody was shown.
+  characters over the dream id and the claim's key, so **it changes when the
+  claim changes**: an answer for a claim the dreamer has since restated lands
+  nowhere rather than landing on a claim nobody was shown.
 - **There is no default answer.** A default of `--met` manufactures
   confirmations; a default of `--ruled-out` refutes claims nobody meant to.
-  There is no safe guess between them, so the command refuses and says so.
-- **"Nothing waiting on you" is not "nothing stuck"**, and the empty worklist
-  says both. A dream can equally be held by a threshold the market has not
-  reached, which no amount of looking settles.
+  There is no safe guess, so the command refuses and says so. **The same rule
+  binds the dreamer**: `_ANSWERS` is closed, and a value outside it leaves the
+  condition exactly as it was rather than being guessed at.
+- **A note is required, whoever is answering.** It is the only record of WHAT
+  was looked at, and it is where a fabricated answer becomes visible. The
+  dreamer's prompt says to name the source and to leave the answer empty when
+  it has none — an unanswered observation costs a dream time, a fabricated one
+  costs the chain its meaning.
+
+The Dreaming page's card is now **Grogu's open questions** — the same list,
+addressed to nobody. **Deleting it outright was the wrong repair**, and it is
+the cheaper one: a dream held below the vault by an unanswered observation is
+stuck, and this is the only surface that says which claim is holding it. It is
+still **absent rather than empty**, and **"nothing outstanding" is still not
+"nothing stuck"** — a dream can equally be held by a threshold the market has
+not reached, which no amount of looking settles.
 
 **An observation is settleable, so nothing may describe one as prose.** That
 was wrong in three places at once — `render._conditions` said *"No number in
-this one, so nothing can settle it"*, which is the worst place for it because
-the claim is addressed to the person reading; `confer.render_dream` labelled it
-"prose only" to the trading agent; and the MCP dream payload exposed
-`is_checkable` and nothing else. All three report the shape now, and the
-sentence about nothing being able to settle it is kept only where it is still
-true.
+this one, so nothing can settle it"*; `confer.render_dream` labelled it "prose
+only" to the trading agent; and the MCP dream payload exposed `is_checkable`
+and nothing else. All three report the shape now, and the sentence about
+nothing being able to settle it is kept only where it is still true.
 
 ### The two agents may talk, once a day, and the fifth cap is the one that works
 
@@ -3414,6 +3473,10 @@ src/bot/
                         whole reason it may sit beside an order path.
   dreamer.py            The thing that fills it. One Claude call per run,
                         driven by `electrum-bot dream`, never by the loop.
+                        Settles its OWN observations -- nothing on any surface
+                        waits on the operator -- through the store's single
+                        writer, which records WHO answered so the trading
+                        agent sees a self-answered claim as one.
                         Shown headlines, posts and what CLOSED; never shown
                         profit and loss. Also asks the researcher about its
                         UNCHECKED hops, weakest first — and stores what comes

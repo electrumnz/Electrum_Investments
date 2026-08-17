@@ -31,6 +31,7 @@ from bot.dreamer import (
     scope_symbols,
 )
 from bot.dreaming import (
+    DREAMER,
     OPERATOR,
     Dream,
     DreamCondition,
@@ -1095,6 +1096,181 @@ def test_an_advancing_step_is_shown_the_conditions_already_on_the_dream(
 
     assert "condition (MET): Alcoa clears 100" in prompt
     assert "symbols claimed: AA" in prompt
+
+
+# ------------------------------------------------- answering its own questions
+
+
+def _observing_step(**kw: object) -> DreamStep:
+    """A step carrying one observation, with whatever answer the test wants."""
+    condition: dict[str, object] = {
+        "text": "Century Aluminum restarts the idled potline",
+        "subject": "Century Aluminum's quarterly production release",
+        "observable": "Mt. Holly named as restarting",
+        "observe_by": "2027-03-01",
+        "settles_hops": [1],
+    }
+    condition.update(kw)
+    return _step(
+        chain=[DreamHop(claim="the potline comes back")],
+        weakest_hop="the restart",
+        weakest_hop_index=1,
+        conditions=[StepCondition(**condition)],  # type: ignore[arg-type]
+    )
+
+
+def test_the_dreamer_answers_its_own_observation(rules, store, journal):
+    """**Grogu settles its own, and nothing waits on a person.**
+
+    The operator's instruction — *"grogu is his own soul, his own agent, the
+    only standard communication we have is A2A"* — reversing a rule that left
+    six questions on a dashboard card with no way to answer any of them.
+
+    End to end through `run_once`, because the interesting part is the wiring:
+    the step is saved with the condition unanswered, and `settle_own_observations`
+    settles it afterwards through the store's own writer.
+    """
+    step = _observing_step(answer="met", answer_note="Q4 release names Mt. Holly.")
+    dreamer = Dreamer(_env(), rules, store, journal, client=_StubClient(step))
+
+    result = dreamer.run_once()
+
+    assert result is not None
+    condition = result.dream.conditions[0]
+    assert condition.fulfilled is True
+    # The ACTOR, never a constant. A claim Grogu answered for itself and one a
+    # person looked at are different facts, and the trading agent is shown
+    # which it is before it decides whether to adopt.
+    assert condition.observed_by == DREAMER
+    assert condition.note == "Q4 release names Mt. Holly."
+    assert result.settled.met == ("Century Aluminum's quarterly production release",)
+
+    # And the dream it is returned on is the SAVED one, not the stale copy the
+    # run was holding before the settlement was written.
+    stored = store.get(int(result.dream.id or 0))
+    assert stored is not None
+    assert stored.conditions[0].fulfilled is True
+
+
+def test_the_dreamer_can_rule_out_its_own_observation(rules, store, journal):
+    """`ruled_out` is a real answer and the more valuable one.
+
+    A mechanism that can only record a yes is a mechanism that manufactures
+    confirmations — and a dreamer refuting its own hop is the most useful thing
+    it can do on a review step.
+    """
+    step = _observing_step(
+        answer="ruled_out", answer_note="Q4 release: potline stays idle."
+    )
+    dreamer = Dreamer(_env(), rules, store, journal, client=_StubClient(step))
+
+    result = dreamer.run_once()
+
+    assert result is not None
+    condition = result.dream.conditions[0]
+    assert condition.ruled_out is True
+    assert condition.fulfilled is False
+    assert condition.is_answered is True
+    assert result.settled.ruled_out == (
+        "Century Aluminum's quarterly production release",
+    )
+
+
+def test_an_answer_with_no_note_is_refused_and_leaves_the_claim_open(
+    rules, store, journal
+):
+    """The note is the rail that survived, and it binds the dreamer.
+
+    It is the only record of WHAT was looked at, so an answer without one is
+    indistinguishable afterwards from an invention. `settle_condition` refuses
+    it — this is not enforced in the dreamer, which is the point: one writer,
+    one rule, whoever is answering.
+    """
+    step = _observing_step(answer="met", answer_note="   ")
+    dreamer = Dreamer(_env(), rules, store, journal, client=_StubClient(step))
+
+    result = dreamer.run_once()
+
+    assert result is not None
+    assert result.dream.conditions[0].is_answered is False
+    # Refused rather than swallowed. A dreamer whose answers are all being
+    # rejected is a fact worth having.
+    assert len(result.settled.refused) == 1
+    assert result.settled.answered == 0
+
+
+def test_an_unparseable_answer_leaves_the_condition_exactly_as_it_was(
+    rules, store, journal
+):
+    """`_ANSWERS` is closed, and a value outside it is not guessed at.
+
+    An unanswered observation costs a dream time; a mis-parsed one costs it a
+    shelf. Same direction as `_observe_by` turning an unreadable date into
+    `None` rather than into today.
+    """
+    step = _observing_step(answer="probably", answer_note="it seems likely")
+    dreamer = Dreamer(_env(), rules, store, journal, client=_StubClient(step))
+
+    result = dreamer.run_once()
+
+    assert result is not None
+    assert result.dream.conditions[0].is_answered is False
+    # Not even recorded as a refusal: nothing was ever put to the store.
+    assert not result.settled
+
+
+def test_a_threshold_is_not_the_dreamers_to_answer(rules, store, journal):
+    """Code settles those against recorded figures.
+
+    A model answering one by hand would be a reading nobody can check, which is
+    the `indicators.py` rule arriving through the condition list.
+    """
+    step = _step(
+        chain=[DreamHop(claim="one")],
+        conditions=[
+            StepCondition(
+                text="Alcoa clears 100",
+                symbol="AA",
+                field=TriggerField.CLOSE,
+                op=TriggerOp.ABOVE,
+                value=100.0,
+                answer="met",
+                answer_note="it went above",
+            )
+        ],
+    )
+    dreamer = Dreamer(_env(), rules, store, journal, client=_StubClient(step))
+
+    result = dreamer.run_once()
+
+    assert result is not None
+    assert result.dream.conditions[0].is_answered is False
+    assert len(result.settled.refused) == 1
+
+
+def test_a_self_answered_observation_carries_the_dream_to_the_vault(
+    rules, store, journal
+):
+    """The consequence, stated: this is what allowing it BUYS.
+
+    An observation nobody answers holds its dream below the vault for ever,
+    where the trading agent never sees it. That was the live state — the
+    prophecy shelf filling while every surface reported patience.
+    """
+    step = _observing_step(answer="met", answer_note="Q4 release names Mt. Holly.")
+    step.verdict = DreamVerdict.KEEP
+    step.stage = DreamStage.VERDICT
+    dreamer = Dreamer(_env(), rules, store, journal, client=_StubClient(step))
+
+    result = dreamer.run_once()
+    assert result is not None
+    dream_id = int(result.dream.id or 0)
+
+    promote_dreams(store)
+
+    moved = store.get(dream_id)
+    assert moved is not None
+    assert moved.vault is Vault.VAULT
 
 
 # ------------------------------------------------------ folding them in safely

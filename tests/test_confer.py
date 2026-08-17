@@ -1184,7 +1184,7 @@ def test_an_observation_is_not_described_to_the_trader_as_prose():
     )
 
     assert "prose only" not in rendered
-    assert "settled by the operator" in rendered
+    assert "answered by the operator" in rendered
     assert "[ruled out," in rendered
 
 

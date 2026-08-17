@@ -2204,13 +2204,17 @@ def _answered_observation(
 
 
 def cmd_observations() -> int:
-    """What is waiting on a PERSON, and nothing else in this repository asks it.
+    """Which observations are still unanswered. GROGU's list, not the operator's.
 
-    An observation is the half of a prophecy that fails silently. A threshold is
-    graded by code on every dream run whether or not anybody is watching; an
-    observation is graded by somebody looking at the world, and somebody who is
-    never asked never looks. Without this command the prophecy shelf becomes a
-    place dreams go to wait forever while every surface reports patience.
+    An observation is the half of a prophecy no recorded figure can settle:
+    somebody has to go and look. That somebody is the DREAMER now, which
+    reverses what this command was written for — it used to be the operator's
+    worklist, and the operator is out of this loop by instruction.
+
+    So it is a READOUT rather than a to-do list. It answers "why is the
+    prophecy shelf not moving", which is worth being able to ask from a shell,
+    and `settle` remains available for an operator who has genuinely gone and
+    looked. Nothing asks them to.
 
     **Read-only, and needs no credential of any kind.** A local SQLite read that
     demanded Alpaca keys would be a check protecting nothing.
@@ -2226,13 +2230,16 @@ def cmd_observations() -> int:
     store = DreamStore()
     due = _observation_worklist(store, now)
 
-    print(f"Observations awaiting an answer, as at {now.isoformat(timespec='minutes')}")
+    print(
+        f"Observations Grogu has not answered yet, as at "
+        f"{now.isoformat(timespec='minutes')}"
+    )
     print()
     if not due:
         # Said out loud. An empty worklist is an ordinary state and an
         # unreadable store is not, and the two look identical if nothing at all
         # is printed.
-        print("  Nothing is waiting on you.")
+        print("  Nothing is unanswered.")
         print()
         print(
             "  That means no dream carries an unanswered observation — not "
@@ -2257,9 +2264,14 @@ def cmd_observations() -> int:
         print(f"      {flag}" + (f" (review date {when})" if item.is_overdue else ""))
         print()
 
-    print(f"  {len(due)} awaiting, {len(overdue)} overdue.")
+    print(f"  {len(due)} unanswered, {len(overdue)} past the review date.")
     print()
-    print("  Answer one with:")
+    print(
+        "  Grogu answers these on its own runs — `electrum-bot dream` — and "
+        "each answer has to name what it saw. None of them is waiting on you."
+    )
+    print()
+    print("  If you HAVE looked at one yourself, you can override:")
     print('    electrum-bot settle <handle> --met --note "what you saw"')
     print('    electrum-bot settle <handle> --ruled-out --note "what you saw"')
     print()
@@ -2273,15 +2285,27 @@ def cmd_observations() -> int:
 
 
 def cmd_settle(handle: str | None, *, met: bool | None, note: str) -> int:
-    """Record the operator's answer to one observation. The only writer of one.
+    """Record the operator's answer to one observation. A manual OVERRIDE now.
 
-    **This is a write with teeth, and the chain it sits on is worth stating.** A
-    fulfilled condition can carry a dream to the VAULT; a vaulted dream is what
-    an adoption is taken from; an adoption is a live permission to trade a
-    symbol that is not in `config/rules.yaml`. So this command is one link in
-    the route that widens what may be traded — which is why it is a command a
-    person types on the box rather than a control on a password-gated web page,
-    and why `DreamStore.settle_condition` refuses every actor but the operator.
+    **This used to be the only way an observation was ever answered, and it is
+    not any more.** The dreamer settles its own — see
+    `dreamer.settle_own_observations` — because waiting on a person meant
+    waiting for ever: the questions piled up on a card with no way to answer
+    them, and the operator's instruction was that Grogu should *"just do his
+    thing without human input unless its deliberate through the chat"*.
+
+    So nothing asks anybody to run this. It is kept because an operator who
+    HAS gone and looked should be able to say so, and because taking a working
+    command away from the person who owns the box would be a strange way to
+    give them less work. The Dreaming page no longer names it.
+
+    **The chain it sits on is worth stating all the same.** A fulfilled
+    condition can carry a dream to the VAULT; a vaulted dream is what an
+    adoption is taken from; an adoption is a live permission to trade a symbol
+    that is not in `config/rules.yaml`. What keeps that honest is that adoption
+    belongs to the TRADING agent, in the A2A conference, and the conference is
+    shown who answered each observation — so a self-answered claim is
+    interrogable rather than invisible.
 
     Every gate still runs on anything traded under a grant. What this changes is
     the allowlist, not the limits.
