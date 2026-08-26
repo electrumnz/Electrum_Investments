@@ -2885,3 +2885,88 @@ def test_a_failed_dream_pass_stops_the_run_and_keeps_its_exit_code(monkeypatch):
     assert failing(object(), object(), steps=5) == 1
     # Outer, then a pass that succeeded, then one that failed. No more.
     assert calls == [5, 1, 1]
+
+
+# ---------------------------------------------------------------------------
+# `broker.connect()` was the one network call at loop startup with nothing
+# around it, and on 22 Aug 2026 an Alpaca 503 killed the process through it.
+# ---------------------------------------------------------------------------
+
+
+class _FlakyBroker:
+    """Fails `fail_times` times with `error`, then connects."""
+
+    def __init__(self, *, fail_times: int, error: Exception) -> None:
+        self._fail_times = fail_times
+        self._error = error
+        self.attempts = 0
+        self.connected = False
+
+    def connect(self) -> None:
+        self.attempts += 1
+        if self.attempts <= self._fail_times:
+            raise self._error
+        self.connected = True
+
+
+def test_a_transient_broker_outage_is_ridden_out() -> None:
+    """The common case costs part of a cycle instead of a process restart."""
+    slept: list[float] = []
+    # An OSError rather than a RuntimeError: that one is the account-status
+    # check and is deliberately NOT retried. See the next test.
+    broker = _FlakyBroker(fail_times=2, error=OSError("503 service temporary unavailable"))
+
+    refused = main_mod.connect_with_retry(
+        broker,  # type: ignore[arg-type]
+        backoff_seconds=0.5,
+        sleep=slept.append,
+    )
+
+    assert refused is None
+    assert broker.connected
+    assert broker.attempts == 3
+    # Doubling, so the second wait is twice the first rather than a flat delay.
+    assert slept == [0.5, 1.0]
+
+
+def test_a_refusal_is_not_retried() -> None:
+    """A non-ACTIVE account is a fact about the account, not about the network.
+
+    Retrying it would spend the whole backoff discovering the same thing five
+    times, and would delay the honest answer by exactly that long.
+    """
+    slept: list[float] = []
+    broker = _FlakyBroker(
+        fail_times=99,
+        error=RuntimeError("Alpaca account is not ACTIVE (status=ACCOUNT_CLOSED)"),
+    )
+
+    refused = main_mod.connect_with_retry(
+        broker,  # type: ignore[arg-type]
+        backoff_seconds=0.5,
+        sleep=slept.append,
+    )
+
+    assert refused is not None
+    assert "waiting will not help" in refused
+    assert broker.attempts == 1
+    assert slept == []
+
+
+def test_it_gives_up_and_hands_the_problem_to_systemd() -> None:
+    """Bounded on purpose: seconds here, hours in the unit's own backoff."""
+    slept: list[float] = []
+    broker = _FlakyBroker(fail_times=99, error=OSError("still down"))
+
+    refused = main_mod.connect_with_retry(
+        broker,  # type: ignore[arg-type]
+        attempts=3,
+        backoff_seconds=0.5,
+        sleep=slept.append,
+    )
+
+    assert refused is not None
+    assert "still down" in refused
+    assert broker.attempts == 3
+    # Two waits for three attempts: it does not sleep after the last failure.
+    assert slept == [0.5, 1.0]

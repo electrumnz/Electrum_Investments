@@ -10,7 +10,7 @@ from __future__ import annotations
 import argparse
 import sys
 import time
-from collections.abc import Collection
+from collections.abc import Callable, Collection
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -582,6 +582,82 @@ def split_assessments_by_what_was_shown(
     return sorted(answered), sorted(strays)
 
 
+#: How many times `broker.connect()` is retried, and the first gap between tries.
+#:
+#: Doubling from ten seconds gives 10 + 20 + 40 + 80 = about two and a half
+#: minutes of patience inside the process. That is deliberately sized against
+#: the outage this was written for: Alpaca answered 503 for longer than three
+#: minutes on 22 Aug 2026, so this alone would NOT have ridden it out — the
+#: unit's own backoff is what covers a long outage. What this buys is that a
+#: blip measured in seconds never reaches systemd at all, so the common case
+#: costs part of one cycle instead of a process restart.
+BROKER_CONNECT_ATTEMPTS = 5
+BROKER_CONNECT_BACKOFF_SECONDS = 10.0
+
+
+def connect_with_retry(
+    broker: Broker,
+    *,
+    attempts: int = BROKER_CONNECT_ATTEMPTS,
+    backoff_seconds: float = BROKER_CONNECT_BACKOFF_SECONDS,
+    sleep: Callable[[float], None] = time.sleep,
+) -> str | None:
+    """Prove the broker credentials work, surviving a transient outage.
+
+    Returns `None` on success, or the sentence explaining why it gave up.
+
+    **This is the one network call at loop startup that had nothing around it.**
+    `fetch_market_ticks` and `fetch_indicators` both catch broadly so a feed
+    failure degrades a cycle rather than ending the loop; `broker.connect()` sat
+    outside that guarantee, so a 503 from Alpaca killed the process. That was
+    survivable while the limiter in `mudhorn-bot.service` was not also
+    guaranteed to give up — together they cost four days.
+
+    **A refusal and an outage are told apart, and only one is retried.** A
+    `RuntimeError` is this repository's own check that the account is ACTIVE,
+    which is a fact about the account rather than about the network: retrying it
+    would spend two and a half minutes discovering the same thing five times.
+    Everything else — `APIError`, an `httpx` timeout, a JSON decode failure —
+    is retried, on the same reasoning as `fetch_market_ticks` catching broadly:
+    the SDK raises several unrelated types for one condition, and enumerating
+    them is how a narrow catch lets the fatal one through.
+
+    It does NOT catch forever. Giving up is what hands the problem to systemd,
+    which now backs off properly and retries for as long as the fault lasts, so
+    the honest division of labour is seconds here and hours there.
+    """
+    last = ""
+    for attempt in range(1, max(1, attempts) + 1):
+        try:
+            broker.connect()
+        except RuntimeError as exc:
+            # Not retried. See the docstring: this is the account status check,
+            # and no amount of waiting changes a non-ACTIVE account.
+            return f"The broker refused the connection and waiting will not help: {exc}"
+        except Exception as exc:
+            last = f"{type(exc).__name__}: {exc}"
+            if attempt >= max(1, attempts):
+                break
+            pause = backoff_seconds * (2 ** (attempt - 1))
+            log.warning(
+                "broker_connect_retrying",
+                attempt=attempt,
+                of=attempts,
+                retrying_in_seconds=pause,
+                error=last,
+            )
+            sleep(pause)
+        else:
+            if attempt > 1:
+                log.info("broker_connect_recovered", attempts=attempt)
+            return None
+    return (
+        f"Could not reach the broker after {attempts} attempts over "
+        f"{sum(backoff_seconds * 2**i for i in range(max(0, attempts - 1))):.0f}s. "
+        f"Last error was {last}. Leaving it to systemd, which will keep trying."
+    )
+
+
 def cmd_loop(
     env: Env, rules: Rules, *, execute: bool = False, force_mock: bool = False
 ) -> int:
@@ -604,7 +680,10 @@ def cmd_loop(
 
     audit = AuditLog()
     broker = build_broker(env, force_mock=force_mock)
-    broker.connect()
+    refused = connect_with_retry(broker)
+    if refused:
+        log.error("loop_broker_unreachable", detail=refused)
+        return 1
     claude = ModelClient(env, build_system_prompt(rules))
     news = build_news_feed(env)
     calendar = build_calendar_feed(env, rules)
