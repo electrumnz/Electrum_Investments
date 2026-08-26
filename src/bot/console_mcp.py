@@ -75,13 +75,38 @@ APP_DIR = Path(os.environ.get("MUDHORN_APP_DIR", "/opt/mudhorn"))
 # Only these may be named to `service_status` and `journal_tail`. An allowlist
 # rather than a pattern, because `systemctl status` takes globs and a caller who
 # could pass one could enumerate every unit on the box.
+#
+# **Every unit `deploy/systemd/` ships is here, timers AND the services they
+# trigger, and the omission of the second group was a live blind spot.** It used
+# to hold the four timers and neither of the two long-running services' oneshot
+# counterparts, so `mudhorn-dream.service` — where a dream run actually logs —
+# could not be read at all. Measured 26 Aug 2026: a session asked whether the
+# dreamer was healthy, could see only that its TIMER was armed, and had to
+# report the answer as unknown. An armed timer says nothing about whether its
+# runs succeed, which is the same trap `bootstrap.sh` learned about printing a
+# constant instead of reading systemd.
+#
+# `tests/test_console_mcp.py` enumerates `deploy/systemd/` and fails if a unit
+# ships without a line here, because a guarantee checked against a
+# hand-maintained list is one that lapses the moment somebody forgets the list —
+# the lesson `tests/test_auth.py` already records about routes.
+#
+# Widening this grants no new power: both tools are read-only, `run_command` is
+# absent unless separately switched on, and nothing here reaches the broker.
 UNITS = (
     "mudhorn-bot",
     "mudhorn-web",
+    "mudhorn-backup.service",
     "mudhorn-backup.timer",
-    "mudhorn-dream.timer",
+    "mudhorn-confer.service",
     "mudhorn-confer.timer",
+    "mudhorn-console.service",
+    "mudhorn-dream.service",
+    "mudhorn-dream.timer",
+    "mudhorn-tailnet.service",
     "mudhorn-tailnet.timer",
+    "mudhorn-watchdog.service",
+    "mudhorn-watchdog.timer",
 )
 
 # A command's whole output goes into a model's context, so it is bounded here

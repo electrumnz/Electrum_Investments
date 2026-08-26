@@ -112,6 +112,56 @@ def test_only_known_units_can_be_named():
     assert "unknown unit" in console_mcp.journal_tail("mudhorn-*")
 
 
+def test_every_shipped_unit_can_be_read():
+    """A unit that ships without a line in `UNITS` is a unit nobody can check.
+
+    Enumerated from `deploy/systemd/` rather than compared against a second
+    hand-written tuple, because a guarantee checked against a hand-maintained
+    list lapses the moment somebody forgets the list -- which is exactly how
+    this regressed. `tests/test_auth.py` records the same lesson about routes.
+
+    The omission that prompted this was not hypothetical: the allowlist held
+    the four timers and none of the oneshot services they trigger, so
+    `mudhorn-dream.service` -- the only place a dream run logs -- could not be
+    read. A session asked whether the dreamer was healthy on 26 Aug 2026, could
+    see only that the TIMER was armed, and had to report the answer as unknown.
+    """
+    units_dir = Path(__file__).resolve().parents[1] / "deploy" / "systemd"
+    shipped = {
+        path.name
+        for path in units_dir.iterdir()
+        if path.suffix in {".service", ".timer"}
+    }
+    assert shipped, "deploy/systemd has moved -- update this boundary"
+
+    # `mudhorn-bot` and `mudhorn-web` are named without their suffix in UNITS,
+    # which systemctl accepts; normalise both sides before comparing.
+    allowed = {u if "." in u else f"{u}.service" for u in console_mcp.UNITS}
+    missing = sorted(shipped - allowed)
+    assert not missing, (
+        f"{missing} ship in deploy/systemd but cannot be named to "
+        "service_status or journal_tail, so nothing can read their state. "
+        "Add them to console_mcp.UNITS -- both tools are read-only."
+    )
+
+
+def test_the_allowlist_names_nothing_that_does_not_ship():
+    """The other direction, so a rename leaves no dead entry behind.
+
+    A stale name is not dangerous -- systemctl simply reports no such unit --
+    but it is a line that reads as coverage while providing none.
+    """
+    units_dir = Path(__file__).resolve().parents[1] / "deploy" / "systemd"
+    shipped = {
+        path.name
+        for path in units_dir.iterdir()
+        if path.suffix in {".service", ".timer"}
+    }
+    named = {u if "." in u else f"{u}.service" for u in console_mcp.UNITS}
+    stale = sorted(named - shipped)
+    assert not stale, f"{stale} are in UNITS but ship nowhere in deploy/systemd"
+
+
 def test_output_is_clipped_from_the_start_not_the_end():
     """An error is at the END of a build log.
 
