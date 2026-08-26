@@ -6,8 +6,29 @@ Wants=network-online.target
 
 # Rate limiting lives in [Unit], not [Service]. systemd ignores these keys
 # silently if they are put next to Restart=, which looks like it works.
-StartLimitIntervalSec=300
-StartLimitBurst=5
+#
+# ## The limiter is OFF, and this is the fix for a four-day outage
+#
+# It used to read `StartLimitIntervalSec=300` with `StartLimitBurst=5` against
+# `RestartSec=30s`. Five restarts thirty seconds apart is 165 seconds, which
+# fits inside a 300-second window every single time — so the limiter was
+# guaranteed to trip on ANY outage lasting more than about three minutes, and
+# once tripped systemd never tries again.
+#
+# That is not hypothetical. On 22 Aug 2026 Alpaca's paper API answered `503
+# service temporary unavailable` to `broker.connect()`; the loop exited 1, was
+# restarted five times, hit the limit at 12:04:21 with "Start request repeated
+# too quickly", and was still dead when somebody looked on 26 Aug. Alpaca had
+# recovered within the hour. The journal went unreconciled and open positions
+# went unwatched for four days, which is exactly what the comment below the
+# Restart= line says must not happen.
+#
+# Zero disables the limiter, so the unit retries for as long as it takes. The
+# thing that stops this becoming a hot loop is the backoff in [Service], not a
+# cap on attempts — a cap answers "how many times" when the useful question is
+# "how fast", and only one of those two can be got wrong in a way that ends
+# with a dead trading loop nobody is told about.
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
@@ -24,8 +45,31 @@ ExecStart=/opt/mudhorn/.venv/bin/electrum-bot loop
 # journal stops being reconciled and open positions stop being watched, with
 # nothing on screen to say so. Restart, but back off rather than hot-loop on a
 # bad credential.
+#
+# The backoff is real now rather than a flat delay plus a cap that gave up.
+# `RestartSec` is the FIRST delay and `RestartSteps` spreads the ramp up to
+# `RestartMaxDelaySec`, so this goes 15s, then roughly doubling, to ten minutes,
+# and then retries every ten minutes for as long as the fault lasts. A
+# three-minute Alpaca blip costs one cycle; a six-hour outage self-heals the
+# moment Alpaca answers, with nobody typing anything.
+#
+# Ten minutes rather than an hour because the cost of a retry is one API call
+# and a log line, while the cost of being slow is a trading loop that is down
+# after the fault has cleared.
+#
+# `on-failure` rather than `always`, deliberately unchanged: a clean exit is
+# `cmd_loop` returning 0, and the two ways that happens — KeyboardInterrupt, and
+# `systemctl stop` — are both somebody deciding the loop should not be running.
+#
+# RestartSteps and RestartMaxDelaySec need systemd 254 or newer. Ubuntu 24.04
+# ships 255. On anything older systemd logs an "Unknown key" warning and starts
+# the unit anyway, so the ramp silently degrades to a flat RestartSec — which is
+# still the old behaviour MINUS the limiter that caused the outage, and so is
+# still strictly better than what this replaces.
 Restart=on-failure
-RestartSec=30s
+RestartSec=15s
+RestartSteps=8
+RestartMaxDelaySec=10min
 
 # The process needs the broker over HTTPS and two paths on disk. Nothing else.
 NoNewPrivileges=true
