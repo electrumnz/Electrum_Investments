@@ -1,0 +1,55 @@
+[Unit]
+Description=Restart the decision loop if it has stopped doing work
+Documentation=https://github.com/electrumnz/Electrum_Investments/blob/main/deploy/README.md
+
+# No ConditionPathExists, and the same reasoning as mudhorn-tailnet.service:
+# this check is meaningful from the first boot. A box where the loop has never
+# recorded a pass is a state worth a verdict, and src/bot/watchdog.py answers it
+# with the startup grace rather than with a restart.
+
+# Deliberately NOT Requires=/After=mudhorn-bot.service. A dependency on the unit
+# being watched would make this timer's own run conditional on the health of the
+# thing it exists to check, which is the shape of a check that goes quiet
+# exactly when it is needed.
+After=network-online.target
+
+[Service]
+Type=oneshot
+
+# Root, not the `mudhorn` service account. Restarting a system unit needs
+# privileges the account deliberately does not have, and granting them to the
+# account that holds the broker credentials to save writing this unit would
+# widen the wrong thing. Note this is the opposite direction from the chat
+# wrapper's sudo, which runs DOWNWARD into a less privileged account.
+User=root
+
+WorkingDirectory=/opt/mudhorn
+ExecStart=/opt/mudhorn/deploy/check-loop.sh
+
+# Exits non-zero only when a person should act — never merely because a restart
+# happened. A watchdog that left `systemctl --failed` dirty after every
+# self-healed blip would train the reader to ignore it, which is the same
+# reasoning that put RECHECK_COMMAND on the tailnet banner.
+
+# Sandboxing is lighter here than on mudhorn-bot.service, and the difference is
+# the job: this has to reach the system manager over dbus to restart a unit.
+# ProtectSystem=strict and ProtectHome are kept because neither is in the way;
+# ProtectKernelTunables and ProtectControlGroups are deliberately absent rather
+# than forgotten, since PID 1 does the actual work and this only needs to ask.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+RestrictSUIDSGID=true
+
+# Writes one file: the restart ledger, beside the tailnet reading. The audit log
+# is READ, never written, so this is not on the list.
+ReadWritePaths=/opt/mudhorn/data
+
+# A watchdog that can hang is a watchdog that stops watching. The whole run is
+# two systemctl queries, one audit read and at most one restart.
+TimeoutStartSec=120
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=mudhorn-watchdog
