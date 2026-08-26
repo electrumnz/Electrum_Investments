@@ -1492,6 +1492,100 @@ and six symbols every fifteen minutes is nowhere near it. A TTL here would be an
 optimisation dressed as a rate-limit control, and it would make the indicators
 lag the quote inside the same context block for no benefit.
 
+### The loop restarts itself now, and the limiter was the thing killing it
+
+**Measured, not theorised: the decision loop was dead for four days and every
+other surface was green.** On 22 Aug 2026 Alpaca's paper API answered `503
+service temporary unavailable` to `broker.connect()` at loop startup. The
+process exited 1, systemd restarted it five times, and at 12:04:21 logged
+`Start request repeated too quickly` and stopped. Alpaca recovered within the
+hour. Nobody found out until 26 Aug.
+
+**The unit was configured so that ANY outage over about three minutes was
+fatal.** `StartLimitIntervalSec=300` with `StartLimitBurst=5` against
+`RestartSec=30s` is five attempts across 165 seconds — always inside the
+window, so the limiter was guaranteed to trip and then never try again. The
+intent written beside it was "back off rather than hot-loop on a bad
+credential", which is right; the numbers turned a transient fault into a
+permanent one.
+
+Three layers now, and they cover three different failures. Do not collapse
+them into one:
+
+- **`StartLimitIntervalSec=0` plus real backoff** (`RestartSteps`,
+  `RestartMaxDelaySec`) in `mudhorn-bot.service`. It ramps 15s to ten minutes
+  and then retries forever. This is the actual repair — it alone would have
+  made the four days a non-event. `Restart=on-failure` is deliberately
+  unchanged: a clean exit is somebody deciding the loop should stop.
+- **`connect_with_retry` in `main.py`.** `broker.connect()` was the one network
+  call at loop startup with nothing around it, while `fetch_market_ticks` and
+  `fetch_indicators` both catch broadly so a feed failure degrades a cycle
+  rather than ending the loop. It retries for about two and a half minutes, so
+  a blip never reaches systemd at all. **A `RuntimeError` is NOT retried** —
+  that is this repo's own account-is-ACTIVE check, a fact about the account
+  rather than the network, and waiting cannot change it.
+- **`src/bot/watchdog.py` plus `mudhorn-watchdog.timer`**, for what a restart
+  policy structurally cannot see: a loop that is `active (running)` and doing
+  nothing. systemd watches the process; only the audit log knows whether the
+  process did any work.
+
+**The watchdog needs no market calendar, and that is why it is trustworthy.**
+`cmd_loop` records a job every pass — including `record_skipped` when no class
+is in session — so a pass is written every fifteen minutes through the night,
+over a weekend and on Christmas Day. There is no hour in which silence is
+expected, so silence never has to be interpreted. A watchdog carrying a second
+copy of `market_clock` would have a copy that could be wrong, and the wrong one
+would be deciding whether to restart a trading loop.
+
+**Four refusals, each with a test that proves it REFUSES.** Restarting is an
+action, so the bar is evidence rather than suspicion:
+
+- **`UNKNOWN` is not `FAILED`.** A watchdog that reads its own broken
+  `systemctl` as a fault restarts a healthy loop, which is worse than the
+  outage it shortens. `activating` and `deactivating` read as UNKNOWN too — a
+  unit mid-transition has not arrived anywhere, and guessing is how a restart
+  lands on top of a start that was already working.
+- **`INACTIVE` means a person ran `systemctl stop`**, and this does not
+  overrule them. Note it is deliberately NOT read from the audit log's
+  `loop_end`: that sits in a `finally:`, so it appears on a crash too, and
+  SIGTERM does not run it at all. **systemd's own unit state is the only thing
+  that distinguishes "stopped" from "died"**, so it is what is asked.
+- **A degraded read refuses.** `JobHistory.is_degraded` covers truncation,
+  unreadable files and unparseable records. An absent pass in a short read says
+  the READ stopped — the `seen.reaches_past_marker` trap again.
+- **Three restarts in six hours is the cap.** Without one, a permanently broken
+  box becomes a quietly thrashing one, which looks healthier from a distance
+  than it is.
+
+**A successful restart exits 0.** Self-healing is the feature, and exiting
+non-zero every time one happened would leave `systemctl --failed` permanently
+dirty and train the reader to disregard it — the reasoning that put
+`RECHECK_COMMAND` on the tailnet banner. Non-zero is reserved for the four
+refusals and for a restart that failed.
+
+**The Python decides and never restarts anything.** `deploy/check-loop.sh`
+holds the privileged action as one visible line, the same split as
+`check-tailscale.sh` keeping its logic in `src/bot/tailnet.py`. The ledger is
+written BEFORE the restart is carried out, so a restart the shell then fails to
+perform is still counted — over-counting reaches the cap sooner and hands the
+problem to a person, which is the safe direction.
+
+**`reset-failed` runs before `restart`, and skipping it would make the whole
+thing useless in its own founding case**: a unit that has exhausted its start
+limit refuses a plain `start`.
+
+**The `__main__` guard was missing and only running it found that.** `python -m
+bot.watchdog` imported the module, ran nothing, printed nothing and exited 0 —
+a watchdog that was silently a no-op, which is the exact failure shape this
+repository keeps rediscovering. The suite was green at the time.
+
+**Making the dashboard louder is NOT the fix, and that is measured too.**
+`jobs.py` shipped 11 Aug and the droplet ran `bce991a` throughout, so
+`render.loop_activity` was rendering *"No pass of the loop is on file for the
+last 24h... this is NOT a report that it ran and found nothing to do"* in rust
+for all four days. Correct, honest, and read by nobody. A surface that only
+speaks when somebody opens it cannot be the answer to a loop going away.
+
 ### The journal is backed up with `.backup`, and the busy timeout is the point
 
 `data/journal.db` is the only irreplaceable file on the droplet.
@@ -3539,6 +3633,15 @@ src/bot/
   tailnet.py            Is the Tailscale link still going to be there next week.
                         Warns at ten days, and says "unknown" rather than "fine"
                         when the check itself has stopped.
+  watchdog.py           Is the decision loop still doing work, and may anything
+                        be done about it. Restarts it when systemd has given up
+                        or the process is up and recording nothing; REFUSES on
+                        an unreadable unit state, on an operator's own
+                        `systemctl stop`, on a degraded audit read, and past
+                        three restarts in six hours. Needs no market calendar,
+                        because the loop records a pass every cycle even with
+                        every market shut. Reaches no broker, and a test parses
+                        the imports to keep it that way.
   souls.py              Loads the character files in souls/. Degrades to a
                         voiceless prompt rather than taking a page down.
   hermes.py             Running one Hermes turn as another user, and asking
@@ -3611,6 +3714,11 @@ deploy/                 VPS provisioning: bootstrap.sh + systemd units. The unit
                         check-tailscale.sh + mudhorn-tailnet.timer watch the key
                         expiry that would otherwise take the dashboard away
                         silently.
+                        check-loop.sh + mudhorn-watchdog.timer restart the
+                        decision loop when it has stopped doing work -- and
+                        refuse to when it was stopped deliberately, when the
+                        unit state could not be read, when the audit read is
+                        incomplete, or past three restarts in six hours.
                         enable-research.sh turns the researcher on, and has to
                         install a systemd drop-in as well as a sudoers rule:
                         mudhorn-dream.service blocks sudo three ways, so the
