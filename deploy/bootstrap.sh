@@ -155,6 +155,8 @@ install -m 644 "$APP_DIR/deploy/systemd/mudhorn-backup.service" /etc/systemd/sys
 install -m 644 "$APP_DIR/deploy/systemd/mudhorn-backup.timer" /etc/systemd/system/
 install -m 644 "$APP_DIR/deploy/systemd/mudhorn-tailnet.service" /etc/systemd/system/
 install -m 644 "$APP_DIR/deploy/systemd/mudhorn-tailnet.timer" /etc/systemd/system/
+install -m 644 "$APP_DIR/deploy/systemd/mudhorn-watchdog.service" /etc/systemd/system/
+install -m 644 "$APP_DIR/deploy/systemd/mudhorn-watchdog.timer" /etc/systemd/system/
 install -m 644 "$APP_DIR/deploy/systemd/mudhorn-dream.service" /etc/systemd/system/
 install -m 644 "$APP_DIR/deploy/systemd/mudhorn-dream.timer" /etc/systemd/system/
 install -m 644 "$APP_DIR/deploy/systemd/mudhorn-confer.service" /etc/systemd/system/
@@ -181,6 +183,7 @@ install -m 644 "$APP_DIR/deploy/systemd/mudhorn-console.service" /etc/systemd/sy
 # that it cannot write the file, and the change stays a recorded request a
 # person applies. `deploy/enable-forge.sh` is the deliberate act that grants it.
 chmod 755 "$APP_DIR/deploy/backup-journal.sh" "$APP_DIR/deploy/check-tailscale.sh" \
+           "$APP_DIR/deploy/check-loop.sh" \
           "$APP_DIR/deploy/run-mcp.sh" "$APP_DIR/deploy/run-chat.sh" \
           "$APP_DIR/deploy/run-dream.sh" "$APP_DIR/deploy/apply-settings.sh" \
           "$APP_DIR/deploy/enable-forge.sh" "$APP_DIR/deploy/update.sh" \
@@ -279,6 +282,18 @@ fi
 # only reachable over Tailscale, not having it is a real finding on day one.
 systemctl enable --now --quiet mudhorn-tailnet.timer
 echo "    mudhorn-tailnet.timer started (every 6 hours)"
+
+# The watchdog timer IS started here, on the same footing as the backup timer
+# and for the same reason: it costs nothing while everything is well, and the
+# failure it prevents is one nobody finds out about on their own.
+#
+# It restarts `mudhorn-bot` when that unit has stopped doing work, and it
+# REFUSES to when the loop was stopped deliberately, when its own reading of
+# systemd failed, when the audit read is incomplete, or when it has already
+# restarted three times in six hours. See src/bot/watchdog.py for why each of
+# those four is a refusal rather than a restart.
+systemctl enable --now --quiet mudhorn-watchdog.timer
+echo "    mudhorn-watchdog.timer started (every 10 minutes)"
 
 cat <<EOF
 

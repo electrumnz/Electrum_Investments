@@ -1,0 +1,28 @@
+[Unit]
+Description=Ten-minutely check that the decision loop is still doing work
+Documentation=https://github.com/electrumnz/Electrum_Investments/blob/main/deploy/README.md
+
+[Timer]
+# Every ten minutes. The arithmetic that makes this the right cadence:
+# `watchdog.assess` will not call the loop stopped until the newest pass is past
+# `Job.overdue_after` plus MISSED_PASSES_BEFORE_RESTART more intervals — about
+# 46 minutes on the shipped 900s cycle. Checking every ten minutes puts worst-
+# case recovery near an hour, against the four days this was written after.
+#
+# Faster would not help and would cost: the margin, not the polling rate, is
+# what bounds detection, and each run reads the audit log.
+OnCalendar=*:0/10
+
+# Fire on boot if a run was missed while the box was down. A droplet that
+# rebooted into a loop that will not start should get its first verdict at once
+# rather than up to ten minutes later.
+Persistent=true
+
+# Small, unlike the tailnet timer's ten minutes. That one is spreading six-hourly
+# load; this one is trying to be prompt, and a large jitter would undo the
+# cadence chosen above.
+RandomizedDelaySec=30s
+AccuracySec=10s
+
+[Install]
+WantedBy=timers.target
