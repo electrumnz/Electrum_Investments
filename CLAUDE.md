@@ -3052,6 +3052,76 @@ only" to the trading agent; and the MCP dream payload exposed `is_checkable`
 and nothing else. All three report the shape now, and the sentence about
 nothing being able to settle it is kept only where it is still true.
 
+### Only a KEEP moves a dream, and the prompt used to say otherwise
+
+**Measured 27 Aug 2026: the whole speculative half of this repository was inert,
+and every part of it was working correctly.** `electrum-bot vault` showed
+workbench 4/24, prophecy 0/12, vault 0/12, adopted 0/3 — with three chains sat
+at the `verdict` stage for between 9.5 and 13.5 days. `confer` had reported
+`considered: 0` on every day it had ever run, which was the honest downstream
+consequence of an empty vault rather than a fault of its own.
+
+`promotion_for` refuses at its FIRST clause: `if dream.verdict is not
+DreamVerdict.KEEP`. There are three verdicts and only one of them moves
+anything.
+
+**The prompt told the model the opposite.** It read *"Only a `verdict` step
+carries a dream off the workbench"* — false, a `park` carries it nowhere — and
+offered park as *"come back to it later, which is what park is for"*. Nothing
+comes back to it. There is no sweep, no schedule, and no later step unless the
+dreamer picks that same dream again itself. So the model was parking in the
+belief it was deferring, and deferral was not on the menu.
+
+**The fix is a correction and must never become a thumb on the scale.** A prompt
+that pushed towards `keep` would manufacture promotions, and a keep is precisely
+what goes in front of the agent that trades — the Alpha Arena failure arriving
+through the one door this half of the repo was built to keep shut. So the truth
+about park is stated, the pressure is explicitly disclaimed (*"You are NOT being
+asked to keep more"*), and `drop` stays a first-class outcome. Both halves are
+pinned by `tests/test_dreamer.py`.
+
+**The lesson is the one this file keeps relearning, one level out: a prompt is a
+document making claims about the code, and nothing checks that they are true.**
+
+**A draft of the fix walked into the neighbouring trap and was caught by reading
+the rendered text**, which is the only way these are ever caught. It said *"on
+the live shelf right now three chains have sat parked for between nine and
+fourteen days"* — true when written, and the system prompt is built ONCE at loop
+start and cached for an hour, so it would have gone on asserting a stale count
+long after the shelf cleared. Interpolated state belongs in the per-cycle
+context and never in the cached half; that is the grant block's own rule
+arriving in a new place. The prompt states the MECHANISM instead, and a test
+pins the numbers out.
+The schema is validated, the transport is validated, the figures are computed
+rather than asserted — and the paragraph explaining what the machine does with
+an answer was wrong for as long as anyone had been reading it. Where the prompt
+describes a mechanism, there must be a test that fails when the mechanism moves.
+
+### A fusion of two duplicates combines nothing, and is refused
+
+Same investigation, one shelf across. Dreams 2 and 3 were the SAME dream —
+identical title, both five hops, both JPM, written about two hours apart just
+before `bce991a` closed the duplicate-write hole. On 26 Aug the dreamer fused
+them: `shared_hops` came back **5 of 5**.
+
+A fusion inherits every condition of every parent, deliberately, so that fusing
+makes a dream harder to promote rather than easier. Fusing a dream with its own
+duplicate therefore produces the least promotable dream on the shelf out of two
+copies of one thought, over ground neither parent broke — and it spent a run
+doing it.
+
+`Fusion.adds_no_new_claim` is the fact and `MoveRefusal.PARENTS_ADD_NOTHING` is
+the refusal. **The asymmetry against `has_overlap` is the point and is not an
+inconsistency:** NO overlap stays permitted because whether two different
+arguments belong together is a judgement, and this module holds no view on
+whether an idea is any good. TOTAL overlap is arithmetic — the child contains no
+claim its parents did not both already make.
+
+Split the usual way: `plan_fusion` computes and states, `DreamStore.fuse`
+refuses, the same division as `promotion_for` against `promote`. An empty plan
+answers False, because a fusion with no chain has not established that its
+parents agree on everything — only that there is nothing to compare.
+
 ### The two agents may talk, once a day, and the fifth cap is the one that works
 
 `src/bot/confer.py` runs a bounded exchange: the dreamer offers a dream from
