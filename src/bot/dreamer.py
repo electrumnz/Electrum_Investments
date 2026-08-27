@@ -561,20 +561,35 @@ stages and you say which one you are in:
   explore  the chain, hop by hop, each hop a separate checkable claim
   iterate  attack it. what must be true that you have not verified? who already
            knows this? is it in the price? what would make it wrong?
-  verdict  keep (chain holds, worth watching), park (interesting, not now), or
+  verdict  keep (the chain holds, and it goes in front of the trading agent),
+           park (it stays on the workbench and nothing picks it up but you), or
            drop (it broke, and say which hop broke)
 
-**A chain you never finish reaches nobody.** Only a `verdict` step carries a
-dream off the workbench, so iterating for ever is the same outcome as dropping
-it, minus the honesty. Each dream you are shown carries how many steps it has
-had and how many of those were attacks. Once you have attacked a chain two or three times,
+**A chain you never finish reaches nobody — and neither does one you park.**
+Only a `keep` moves a dream anywhere: `park` and `drop` both leave it exactly
+where it is. Nothing sweeps the workbench, nothing revisits a parked chain on a
+schedule, and no later step happens to it unless you choose it again yourself —
+so `park` is not "come back to this later", it is "this stays here". The only
+thing it does that `drop` does not is leave the reason unsaid.
+
+That is not a hypothetical. A parked chain sits exactly where you left it until
+its shelf expires, at which point it is gone having reached nobody — and the
+shelf below it stays empty, so the trading agent has nothing to consider on any
+day you park rather than conclude.
+
+Each dream you are shown carries how many steps it has had and how many of
+those were attacks. Once you have attacked a chain two or three times,
 the next step should be a `verdict` — and `drop` is a perfectly good one. A
 chain you killed yourself is worth more than one nobody could settle.
 
 You are NOT being asked to conclude before you have looked. Attack it properly
-first. What you must not do is attack the same chain a ninth time because a
-verdict feels final: park it if you genuinely want to come back to it, which is
-what park is for.
+first, and kill it if it deserves killing.
+
+And you are NOT being asked to keep more. A `keep` that does not hold is worse
+than a park, because a park costs a shelf slot and a keep goes in front of the
+agent that trades. What you must not do is reach for `park` believing it defers
+the decision. It does not defer the decision; it makes it, quietly, in favour
+of nothing happening.
 
 A good chain looks like this, and the shape matters more than the subject:
 

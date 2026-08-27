@@ -30,6 +30,7 @@ from bot.dreaming import (
     DreamStore,
     DreamSummary,
     DreamVerdict,
+    Fusion,
     Hop,
     MoveRefusal,
     NoDecision,
@@ -3170,6 +3171,62 @@ def test_a_condition_already_fulfilled_on_a_parent_arrives_fulfilled(store):
     assert child is not None
     assert child.conditions_met == 1
     assert child.all_conditions_met is False
+
+
+def test_fusing_a_dream_with_its_own_DUPLICATE_is_refused(store):
+    """The fusion that combines nothing, observed live on 26 Aug 2026.
+
+    Dreams 2 and 3 on the droplet were the same dream — identical title, both
+    five hops, both JPM, written about two hours apart before `bce991a` closed
+    the duplicate-write hole. The dreamer fused them; `shared_hops` came back
+    5 of 5 and the child carried BOTH parents' conditions over ground neither
+    had broken. Since a fusion inherits every condition of every parent, that
+    produced the least promotable dream on the shelf out of two copies of one
+    thought, and spent a run doing it.
+
+    Refused rather than merely reported, unlike `has_overlap`: no overlap is a
+    judgement about whether two arguments belong together, which this module has
+    no view on, while TOTAL overlap is arithmetic.
+    """
+    a, b = store.save(_hydro()), store.save(_hydro())
+
+    result = store.fuse([a, b], by=DREAMER)
+
+    assert result.refused
+    assert MoveRefusal.PARENTS_ADD_NOTHING in result.refusals
+    assert result.dream_id is None
+    # And nothing was written: the workbench still holds only the two parents.
+    assert len(store.in_vault(Vault.WORKBENCH)) == 2
+
+
+def test_a_fusion_that_breaks_new_ground_is_still_allowed(store):
+    """The guard must not catch an ordinary fusion — the two dreams that share
+    ONE hop of two are exactly what symbiosis is for."""
+    a, b = store.save(_hydro()), store.save(_smelters())
+
+    result = store.fuse([a, b], by=DREAMER)
+
+    assert not result.refused
+    assert MoveRefusal.PARENTS_ADD_NOTHING not in result.refusals
+
+
+def test_total_overlap_is_arithmetic_and_no_overlap_is_not(store):
+    """The asymmetry stated as a property, so it cannot drift.
+
+    `has_overlap` False is permitted and `adds_no_new_claim` True is not, and
+    the two are opposite ends of the same measurement.
+    """
+    twins = plan_fusion([_hydro(), _hydro()])
+    assert twins.adds_no_new_claim is True
+    assert twins.has_overlap is True
+
+    meeting = plan_fusion([_hydro(), _smelters()])
+    assert meeting.adds_no_new_claim is False
+    assert meeting.has_overlap is True
+
+    # An empty plan has not established that its parents agree on everything,
+    # only that there is nothing to compare. That is `has_overlap`'s answer.
+    assert Fusion().adds_no_new_claim is False
 
 
 def test_a_hop_pin_is_RENUMBERED_onto_the_fused_chain(store):

@@ -20,6 +20,7 @@ from bot.data.news import Sourced
 from bot.dreamer import (
     CARRY_FORWARD,
     SCOPE,
+    SYSTEM_PROMPT,
     Dreamer,
     DreamHop,
     DreamStep,
@@ -143,6 +144,51 @@ def _closed(journal: Journal, symbol: str, pnl: float) -> None:
 
 
 # ------------------------------------------- the property that must not break
+
+
+def test_the_prompt_tells_the_truth_about_what_a_verdict_DOES() -> None:
+    """It used to say something false, and the shelf stalled for a fortnight.
+
+    The old text read *"Only a `verdict` step carries a dream off the
+    workbench"* and offered park as *"come back to it later"*. Both are wrong:
+    `promotion_for` refuses anything but a KEEP at its first clause, and nothing
+    in this repository revisits a parked chain — no sweep, no schedule, no
+    later step unless the dreamer picks that dream again itself.
+
+    Measured on the live shelf 27 Aug 2026: three chains parked at `verdict`
+    for between 9.5 and 13.5 days, prophecy 0/12, vault 0/12, and `confer`
+    reporting `considered: 0` on every day it had ever run. The machinery was
+    correct throughout; the model had been told a falsehood about it.
+    """
+    assert "Only a `keep` moves a dream anywhere" in SYSTEM_PROMPT
+
+    # The two false claims, pinned so neither can come back.
+    assert "Only a `verdict` step carries a dream off the workbench" not in SYSTEM_PROMPT
+    assert "park it if you genuinely want to come back to it" not in SYSTEM_PROMPT
+
+
+def test_the_prompt_does_not_ask_the_dreamer_to_keep_MORE() -> None:
+    """The fix is a correction, never a thumb on the scale.
+
+    A prompt that pushed towards `keep` would manufacture promotions, which is
+    the failure this whole repository is built to refuse — a keep is what goes
+    in front of the agent that trades. So the truth about park is stated AND
+    the pressure is explicitly disclaimed.
+    """
+    assert "NOT being asked to keep more" in SYSTEM_PROMPT
+
+    # And it states the MECHANISM rather than a dated snapshot of the shelf. A
+    # draft of this said "three chains have sat parked for nine to fourteen
+    # days" — true when written, and the system prompt is built once at loop
+    # start and cached for an hour, so it would have gone on asserting a stale
+    # count long after the shelf cleared. Interpolated state does not belong in
+    # the cached half; that is the grant block's rule arriving somewhere new.
+    assert "nine and fourteen days" not in SYSTEM_PROMPT
+    assert "three chains" not in SYSTEM_PROMPT
+    assert "A `keep` that does not hold is worse" in SYSTEM_PROMPT
+    # `drop` must stay a first-class outcome rather than becoming the loser's
+    # option beside a newly-encouraged keep.
+    assert "`drop` is a perfectly good one" in SYSTEM_PROMPT
 
 
 def test_the_prompt_never_shows_profit_and_loss(rules, journal):

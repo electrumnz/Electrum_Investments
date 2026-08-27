@@ -2248,6 +2248,33 @@ class Fusion:
         """
         return bool(self.shared_hops)
 
+    @property
+    def adds_no_new_claim(self) -> bool:
+        """Whether EVERY hop in the child was already made by more than one parent.
+
+        The opposite end of `has_overlap`, and unlike that one this is worth
+        refusing on — see `MoveRefusal.PARENTS_ADD_NOTHING`. The distinction is
+        the reason the asymmetry is not inconsistent: *no* overlap is a
+        judgement about whether two different arguments belong together, which
+        this module has no view on. *Total* overlap is arithmetic — the child
+        contains no claim its parents did not both already make, so the fusion
+        is a copy rather than a combination.
+
+        **Observed live on 26 Aug 2026, which is why it exists.** Dreams 2 and 3
+        were the same dream — identical title, both five hops, both JPM, written
+        about two hours apart before `bce991a` closed the duplicate-write hole.
+        The dreamer fused them, `shared_hops` came back 5 of 5, and the result
+        was a child carrying BOTH parents' conditions and no new ground. Since a
+        fusion inherits every condition of every parent, that made the least
+        promotable dream on the shelf out of two copies of one thought, and cost
+        a run to do it.
+
+        `bool(self.chain)` guards the empty case: a fusion with no chain at all
+        has not established that its parents agree on everything, only that
+        there is nothing to compare. That is `has_overlap`'s answer to give.
+        """
+        return bool(self.chain) and len(self.shared_hops) == len(self.chain)
+
 
 def plan_fusion(parents: Sequence[Dream]) -> Fusion:
     """Merge two or three dreams into the child they would produce.
@@ -2970,6 +2997,12 @@ class MoveRefusal(StrEnum):
     # trading agent is holding it, which is the same reason the dreamer may not
     # move or delete one.
     PARENT_ADOPTED = "parent_adopted"
+    # Every hop in the child was already made by more than one parent, so the
+    # fusion combines nothing — see `Fusion.adds_no_new_claim`. Refused here and
+    # not in `plan_fusion`, which computes and holds no opinions: the arithmetic
+    # is the plan's to state and the refusal is the store's to make, the same
+    # split as `promotion_for` against `promote`.
+    PARENTS_ADD_NOTHING = "parents_add_nothing"
     # `promote` looked at the dream and the rule said it stays where it is. The
     # commonest answer by far — most dreams on most steps are still being worked
     # on — and an ordinary outcome rather than a fault, which is why `promote`
@@ -3899,6 +3932,24 @@ class DreamStore:
             )
 
         plan = plan_fusion(parents) if parents else Fusion()
+
+        # A fusion whose every hop came from more than one parent is a copy, not
+        # a combination. Refused rather than reported, because the child would
+        # carry BOTH parents' conditions over ground neither of them broke —
+        # strictly harder to promote than either parent, for nothing. Measured
+        # on the droplet: dreams 2 and 3 were duplicates of one another and the
+        # dreamer fused them into 4 at 5 shared hops out of 5.
+        if plan.adds_no_new_claim:
+            refusals.append(MoveRefusal.PARENTS_ADD_NOTHING)
+            details.append(
+                f"All {len(plan.chain)} hop(s) of the child were already made "
+                "by more than one parent, so this combines nothing — the "
+                "parents are the same argument. A fusion inherits every "
+                "parent's conditions, so the result would be harder to promote "
+                "than either parent and carry no new ground. Attack one of them "
+                "instead, or fuse it with a chain that meets it somewhere new."
+            )
+
         granted = tuple(_symbols(list(symbols))) if symbols is not None else plan.symbols
         overreach = [s for s in granted if s not in plan.symbols]
         if overreach:
