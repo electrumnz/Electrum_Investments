@@ -10,11 +10,16 @@ before touching orders, risk, or config.
 > live account state. Read it before picking anything up — this file describes
 > how the system behaves, that one describes what is unfinished and why.
 >
-> **There is a live position right now:** short 21 SPY at 773.324285, stop 820,
-> $980.19 of open risk. Placed by hand as an operator test, journalled as row 1,
-> tagged `manual`. Its stop leg is resting at the broker and its trigger price
-> has never been read back — `WorkingOrder` carries no `stop_price`. Details in
-> `TODO.md` under CURRENT STATE.
+> **There are live positions right now, and one of them is unprotected.** As at
+> 30 Aug 2026 the account holds three, equity about $101,850, open risk $1,766
+> against the 2% cap. **AAPL is 107 shares at the broker against 78 in the
+> journal with NO resting stop**, reported every cycle as
+> `unexplained_position_moves` and `positions_without_a_resting_stop` — and
+> there is no tool in this repository that can place a stop on a position that
+> already exists, which is the thing to read before reaching for
+> `tighten_stop`. **`stand_down_stage` is 1**: three qualifying losses fired the
+> consecutive-loss breaker, so live execution is suspended while paper trading
+> continues. Details in `TODO.md` under CURRENT STATE.
 
 **Scope:** single operator, personal trading, paper money. Not a product, not
 multi-user. That assumption is why the dashboard has one shared password rather
