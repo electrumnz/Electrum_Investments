@@ -1550,9 +1550,27 @@ action, so the bar is evidence rather than suspicion:
   `loop_end`: that sits in a `finally:`, so it appears on a crash too, and
   SIGTERM does not run it at all. **systemd's own unit state is the only thing
   that distinguishes "stopped" from "died"**, so it is what is asked.
-- **A degraded read refuses.** `JobHistory.is_degraded` covers truncation,
-  unreadable files and unparseable records. An absent pass in a short read says
-  the READ stopped — the `seen.reaches_past_marker` trap again.
+- **A DAMAGED read refuses** — unreadable files, or records that would not
+  parse, since one of those could be the newest pass.
+
+  **Truncation is deliberately not in that list, and putting it there made the
+  watchdog inert for its first three days.** `AuditLog.read` walks newest-first
+  and stops when its cap is full, so a truncated read drops the OLDEST records
+  and keeps the newest — the only one the watchdog asks about. Measured 30 Aug
+  2026: `view.events` is capped at `jobs.DEFAULT_LIMIT` (200) and the loop
+  writes several events per cycle at 96 cycles a day, so `truncated` went true
+  within hours of shipping and never came back. Every ten-minute run answered
+  *"the audit read is incomplete"*, refused, and exited non-zero — leaving
+  `systemctl --failed` permanently dirty, which is the exact thing the exit-code
+  rule below exists to prevent. It is still a refusal in the one branch where it
+  is real: with NO pass on file, a read that filled with other events cannot
+  tell absence from overflow. `AUDIT_READ_LIMIT` is raised to 2,000 so
+  truncation becomes a signal rather than the normal state of every read.
+
+  **The general lesson is this file's own, one level in: a guard whose refusing
+  condition is always true is a guard that has been removed.** Nothing failed,
+  the suite was green, and the unit reported failure every ten minutes for three
+  days while protecting nothing.
 - **Three restarts in six hours is the cap.** Without one, a permanently broken
   box becomes a quietly thrashing one, which looks healthier from a distance
   than it is.

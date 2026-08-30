@@ -40,10 +40,23 @@ establish that a restart is warranted", and in all four this reports instead:
   too, and SIGTERM does not run it at all. systemd's own unit state is the only
   thing that actually distinguishes "stopped" from "died", so it is what is
   asked.
-- **The read is known to be incomplete.** `JobHistory.is_degraded` covers a
-  truncated read, unreadable files and unparseable records. An absent pass in a
-  short read says the read stopped, not that the loop did — the same trap
-  `seen.reaches_past_marker` and `jobs.truncated` already exist for.
+- **The read is DAMAGED**, meaning unreadable files or records that would not
+  parse. One of those could be the newest pass, so its absence is unaccounted
+  for and nothing can be established from the silence.
+
+  **Truncation is deliberately NOT in that list, and putting it there made this
+  module inert for its first three days.** `AuditLog.read` walks newest-first
+  and stops when its cap is full, so a truncated read has dropped the OLDEST
+  records and still holds the newest — which is the only one this asks about.
+  Measured on the droplet 30 Aug 2026: `view.events` is capped at
+  `jobs.DEFAULT_LIMIT` (200) and the loop writes several events per cycle at 96
+  cycles a day, so `truncated` went true within hours of shipping and never
+  came back. Every ten-minute run answered *"the audit read is incomplete"*,
+  refused, and exited non-zero — leaving `systemctl --failed` permanently
+  dirty, which is precisely what `needs_a_person` exists to prevent. It is
+  still a refusal in the one branch where it is real: with NO pass on file, a
+  read that filled up with other events cannot tell "nothing was recorded" from
+  "the records fell outside the cap".
 - **It has been restarted too often already.** A watchdog with no cap turns a
   permanently broken box into a quietly thrashing one, which looks healthier
   from a distance than it is. After `MAX_RESTARTS_IN_WINDOW` the answer becomes
@@ -103,6 +116,22 @@ MAX_RESTARTS_IN_WINDOW = 3
 #: restart count, which fails in the safe direction — a fresh ledger permits a
 #: restart, and the cap is a brake on thrashing rather than a safety interlock.
 DEFAULT_STATE_PATH = Path("data/watchdog-state.json")
+
+#: How many audit entries to pull when asking whether the loop is keeping up.
+#:
+#: `jobs.DEFAULT_LIMIT` is 200 and caps `AuditView.events`, which the loop fills
+#: several times per cycle at 96 cycles a day — so the default read is truncated
+#: within hours and stays that way. That is harmless for the newest pass, which
+#: a newest-first read always keeps, but it makes the no-jobs branch above
+#: permanently unable to conclude anything. Asking for enough to cover the whole
+#: window means truncation is a real signal when it does appear, rather than the
+#: normal state of every read.
+#:
+#: 2,000 is roughly five days of passes at the shipped fifteen-minute cadence,
+#: against a 24-hour window. Generous on purpose: this runs every ten minutes
+#: and reads a file, and being wrong in the cheap direction costs some I/O while
+#: being wrong in the other direction cost the whole feature.
+AUDIT_READ_LIMIT = 2000
 
 
 class UnitState(StrEnum):
@@ -218,14 +247,18 @@ def assess(
             keeping_up=False,
         )
 
-    if history.is_degraded:
+    # A record that would not PARSE could be the newest one, so its absence is
+    # unaccounted for and nothing here can be established. Truncation is handled
+    # separately below, because it is a different fault with a different shape.
+    if history.unreadable_records or history.malformed_lines or history.unreadable_files:
         return Verdict(
             Action.REPORT,
-            "The audit read is incomplete "
-            f"(truncated={history.truncated}, "
-            f"unreadable_records={history.unreadable_records}, "
-            f"malformed_lines={history.malformed_lines}), so a missing pass "
-            "would say the read stopped rather than the loop did.",
+            "The audit read is damaged "
+            f"(unreadable_records={history.unreadable_records}, "
+            f"malformed_lines={history.malformed_lines}, "
+            f"unreadable_files={len(history.unreadable_files)}), so a record "
+            "that could not be read might be the newest one and a missing pass "
+            "would say the read failed rather than the loop did.",
             keeping_up=None,
         )
 
@@ -251,6 +284,35 @@ def assess(
     # question left is whether it is doing any work.
     latest = history.latest
     if latest is None:
+        # **Truncation only matters when there is nothing on file**, and getting
+        # that wrong made this whole module inert for its first three days.
+        #
+        # `AuditLog.read` walks newest-first and stops once its cap is full, so
+        # a truncated read has dropped the OLDEST records and still holds the
+        # newest. The question here is whether the NEWEST pass is overdue, and
+        # that pass is exactly what survives. Refusing on `is_degraded` for
+        # every read therefore refused on every run: `view.events` is capped at
+        # `jobs.DEFAULT_LIMIT` (200) and the loop writes several events per
+        # cycle at 96 cycles a day, so `truncated` was true within hours of any
+        # start and never false again. Measured on the droplet 30 Aug 2026 —
+        # `REPORT: The audit read is incomplete (truncated=True ...)` on every
+        # ten-minute run since the day it shipped, each one exiting non-zero and
+        # leaving `systemctl --failed` dirty, which is the exact thing
+        # `needs_a_person` was written to avoid.
+        #
+        # With NO jobs it is a real refusal: a read that filled up entirely with
+        # other events cannot distinguish "no pass was recorded" from "the pass
+        # records were pushed out of the window", and restarting on that would
+        # be acting on an artefact of the cap.
+        if history.truncated:
+            return Verdict(
+                Action.REPORT,
+                "No pass is on file and the audit read hit its limit, so the "
+                "records may have been pushed out of the window rather than "
+                "never written. That is a fault in the reading, not evidence "
+                "about the loop.",
+                keeping_up=None,
+            )
         if active_for_seconds is None:
             return Verdict(
                 Action.REPORT,
@@ -414,7 +476,9 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     now = datetime.now(UTC)
-    history = read_jobs(AuditLog(), hours=args.window_hours, now=now)
+    history = read_jobs(
+        AuditLog(), hours=args.window_hours, limit=AUDIT_READ_LIMIT, now=now
+    )
     state = read_state(args.state)
 
     verdict = assess(

@@ -85,8 +85,8 @@ def test_an_unreadable_unit_state_is_never_restarted() -> None:
     assert verdict.keeping_up is None
 
 
-def test_a_truncated_read_is_never_restarted() -> None:
-    """An absent pass in a short read says the READ stopped, not the loop."""
+def test_a_truncated_read_with_NO_pass_on_file_is_never_restarted() -> None:
+    """With nothing recorded, a full read cannot tell absence from overflow."""
     verdict = assess(
         unit=UnitState.ACTIVE,
         history=_history(truncated=True),
@@ -95,7 +95,56 @@ def test_a_truncated_read_is_never_restarted() -> None:
     )
     assert verdict.action is Action.REPORT
     assert verdict.keeping_up is None
-    assert "incomplete" in verdict.reason
+    assert "hit its limit" in verdict.reason
+
+
+def test_truncation_alone_does_NOT_block_a_verdict_when_a_pass_is_on_file() -> None:
+    """The bug that made this module inert for its first three days.
+
+    `AuditLog.read` walks newest-first and stops when its cap is full, so a
+    truncated read has dropped the OLDEST records and still holds the newest —
+    the only one this asks about. Refusing on `is_degraded` for every read meant
+    refusing on every run: `view.events` is capped at `jobs.DEFAULT_LIMIT` (200)
+    and the loop writes several events per cycle at 96 cycles a day, so
+    `truncated` went true within hours of shipping and never came back.
+
+    Measured on the droplet 30 Aug 2026 — every ten-minute run answered "the
+    audit read is incomplete", refused, and exited non-zero, leaving
+    `systemctl --failed` permanently dirty. Both halves are pinned here: a
+    healthy loop still reads healthy, and a stopped one is still caught.
+    """
+    keeping_up = assess(
+        unit=UnitState.ACTIVE,
+        history=_history(_job(started=NOW - timedelta(minutes=5)), truncated=True),
+        now=NOW,
+        active_for_seconds=99999.0,
+    )
+    assert keeping_up.action is Action.NONE
+    assert keeping_up.keeping_up is True
+
+    stopped = assess(
+        unit=UnitState.ACTIVE,
+        history=_history(_job(started=NOW - timedelta(hours=3)), truncated=True),
+        now=NOW,
+        active_for_seconds=99999.0,
+    )
+    assert stopped.action is Action.RESTART
+
+
+def test_a_damaged_read_is_still_never_restarted() -> None:
+    """A record that would not parse could be the newest one."""
+    for history in (
+        _history(_job(started=NOW - timedelta(hours=3)), unreadable=2),
+        JobHistory(window_hours=24.0, jobs=[], malformed_lines=5),
+    ):
+        verdict = assess(
+            unit=UnitState.ACTIVE,
+            history=history,
+            now=NOW,
+            active_for_seconds=99999.0,
+        )
+        assert verdict.action is Action.REPORT
+        assert "damaged" in verdict.reason
 
 
 def test_unreadable_records_also_refuse() -> None:
@@ -107,6 +156,7 @@ def test_unreadable_records_also_refuse() -> None:
         active_for_seconds=99999.0,
     )
     assert verdict.action is Action.REPORT
+    assert "damaged" in verdict.reason
 
 
 def test_the_restart_cap_refuses_rather_than_thrashing() -> None:
