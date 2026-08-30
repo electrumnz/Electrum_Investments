@@ -52,6 +52,9 @@ from .position_actions import (
     detect_unexplained_moves,
     loop_execution_state,
 )
+from .position_actions import (
+    place_protective_stop as place_protective_stop_action,
+)
 from .position_actions import tighten_stop as tighten_stop_action
 from .reconcile import apply_journal_state, record_fill
 from .risk import RiskGate
@@ -656,6 +659,73 @@ def tighten_stop(symbol: str, new_stop_price: float, reason: str) -> dict[str, A
             "new_stop_price": new_stop_price,
             "reason": reason,
             "reasons": outcome.reasons,
+            "reached_broker": outcome.reached_broker,
+            "broker_order_id": outcome.broker_order_id,
+        },
+    )
+    return _action_payload(outcome)
+
+
+@server.tool()
+def place_protective_stop(symbol: str, stop_price: float, reason: str) -> dict[str, Any]:
+    """Rest a stop at the broker on a held position that has NONE, and record why.
+
+    **Use this, not tighten_stop, when nothing is resting.** `tighten_stop`
+    replaces a leg that already exists; with none it writes a journal figure and
+    places nothing, returning `reached_broker: false`. That is worse than the
+    gap it appears to close, because the risk caps then count protection that
+    does not exist. This one submits a real GTC stop order and only writes the
+    journal after the broker confirms it.
+
+    Check `get_risk_status` first: `positions_without_a_resting_stop` is the
+    list this tool is for.
+
+    **The quantity is taken from the BROKER, not from you and not from the
+    journal.** The broker is authoritative about what exists; the journal only
+    knows what was intended, and where the two differ a stop sized off the
+    intention leaves the difference naked. You do not pass a quantity for that
+    reason.
+
+    Ungated, like closing and tightening, because it can only REDUCE what is at
+    risk — a position with no stop loses whatever the market takes, one with a
+    stop loses at most the distance to it.
+
+    Refused when the reason is blank, when the stop is not positive, when the
+    resting orders could not be read (a leg that could not be listed is not a
+    leg that is absent), when a stop leg is ALREADY resting (that is
+    `tighten_stop`'s job), when the broker holds no position in the symbol, and
+    when the stop sits on the wrong side of the market — below the price on a
+    short or above it on a long would trigger on submission and become a market
+    order, which is a close wearing a stop's clothes. If that is what you meant,
+    say `close_position_with_reason`.
+
+    A symbol with no open journal row is still protected, and the response says
+    so: the stop reaches the broker, but `open_risk_usd` still cannot count the
+    position until it is journalled.
+
+    Args:
+        symbol: Ticker of the held, unprotected position.
+        stop_price: The trigger, as a number. Below the market for a long,
+            above it for a short.
+        reason: Why this level. One sentence, and it cannot be blank.
+    """
+    outcome = place_protective_stop_action(
+        _session.journal,
+        _session.broker,
+        symbol=symbol,
+        stop_price=stop_price,
+        reason=reason,
+        actor="trader",
+    )
+    _session.audit.record_event(
+        "mcp_place_protective_stop",
+        {
+            "symbol": outcome.symbol,
+            "ok": outcome.ok,
+            "stop_price": stop_price,
+            "reason": reason,
+            "reasons": outcome.reasons,
+            "warnings": outcome.warnings,
             "reached_broker": outcome.reached_broker,
             "broker_order_id": outcome.broker_order_id,
         },
