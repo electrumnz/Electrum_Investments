@@ -14,12 +14,18 @@ before touching orders, risk, or config.
 > 30 Aug 2026 the account holds three, equity about $101,850, open risk $1,766
 > against the 2% cap. **AAPL is 107 shares at the broker against 78 in the
 > journal with NO resting stop**, reported every cycle as
-> `unexplained_position_moves` and `positions_without_a_resting_stop` — and
-> there is no tool in this repository that can place a stop on a position that
-> already exists, which is the thing to read before reaching for
-> `tighten_stop`. **`stand_down_stage` is 1**: three qualifying losses fired the
-> consecutive-loss breaker, so live execution is suspended while paper trading
-> continues. Details in `TODO.md` under CURRENT STATE.
+> `unexplained_position_moves` and `positions_without_a_resting_stop`.
+> **`place_protective_stop` is the tool for that**, and it is the thing to reach
+> for instead of `tighten_stop` — which replaces a leg that already exists, so
+> with none resting it writes a journal figure, places nothing, and leaves the
+> caps counting protection that is not there.
+>
+> **`stand_down_stage` is 1**, and the streak that fired it was measured by the
+> OLD counter — three losses that closed around trades which had not. See "A run
+> of losses is measured over DECISIONS" below. **The stage stands until it
+> expires**: an active stand-down runs its course by design, so correcting the
+> measurement does not lift a suspension already in force. Details in `TODO.md`
+> under CURRENT STATE.
 
 **Scope:** single operator, personal trading, paper money. Not a product, not
 multi-user. That assumption is why the dashboard has one shared password rather
@@ -180,6 +186,66 @@ losing streak that caused it.
 
 State lives in SQLite, not in memory, so restarting the process does not clear
 it. That is the point.
+
+### A run of losses is measured over DECISIONS, not over what happened to close
+
+**The counter walked CLOSED trades in EXIT order, and that made the breaker fire
+on a book that was working.** A stop guarantees a loser closes; nothing
+guarantees a winner does. So the closed-trade sequence is not a sample of
+decisions — it is the sub-sample the stops created, biased toward losses by
+construction, and "consecutive" over it claims a run that never happened.
+
+Measured on the droplet 30 Aug 2026: a stage 1 stand-down in force, live
+trading suspended, with **three positions still open** and equity above its
+start. The losses were real and they were not consecutive; the trades between
+them simply had not closed. Every figure on the surface was correct.
+
+`Journal.loss_streak` counts in **entry order, over open trades as well as
+closed ones**, and returns a `LossStreak` rather than a bare integer.
+`consecutive_losses` is now a thin wrapper over it.
+
+- **Entry order is what lets an open trade be seen at all.** It has no exit
+  time, so the old ordering could not place it — it was structurally invisible
+  to the counter. Entry order is also the order the decisions were made in,
+  which is what a behavioural breaker is about.
+- **An open trade breaks the streak only once its stop is resting IN PROFIT.**
+  The operator's rule, and the clause that keeps this honest. A position merely
+  trading up has secured nothing — the price can come back, and netting a paper
+  gain against a realised loss would make the breaker loosest exactly when a run
+  was worst, which is the same reasoning that stops unrealised profit offsetting
+  open risk. A stop moved past entry is a different kind of fact: it is a **live
+  order**, so if it fills the trade is a win. `Trade.secured_pnl_usd` is the
+  exact mirror of `current_risk_usd` — both floor at zero, and one of the two is
+  always zero, because a stop cannot sit on both sides of entry.
+- **Judged by the SAME `scratch_threshold_r` a closed trade is.** An open trade
+  breaks the run exactly when what it has already locked in would classify as a
+  `WIN` had it filled. One number, one meaning; a threshold of its own would be
+  an opinion about stop placement arriving through the back door. Breakeven
+  secures nothing and is pinned by a test.
+- **An open trade with nothing secured is SKIPPED, never a break.** Making it
+  break would let one held position switch the operator's fourth rule off, which
+  is failing open on the thing the breaker exists for.
+
+**Nothing here can disable the breaker, and that is a property of the ordering
+rather than a backstop bolted on.** Every new loss is a newer entry than the
+locked-in trade that broke the last run, so the count rebuilds behind it — three
+losses after a secured winner still trip stage 1, and a test proves it. The only
+way to hold the count at zero is to keep securing winners among the losses, which
+is the case the breaker is meant to leave alone. **Do not add a rolling-window
+backstop**; it would re-introduce the false positive this removed.
+
+`LossStreak` carries `broken_by`, `open_skipped` and `scratches_skipped`, and
+`StreakBreaker.NOTHING` is not "every decision was bad" — on a young journal it
+is "no good decision on file yet". Same rule as `has_cycles` and
+`can_grade_anything`. The trigger logs `stand_down_triggered` with all of it,
+because suspending live trading is the most consequential thing this repository
+does unattended and `3` is not an account of why.
+
+**No schema migration was needed.** `StandDownState.consecutive_losses` is still
+one integer and still the streak as of the last close; the richness is computed,
+not stored. `get_risk_status` recomputes it live and reports `streak_now`
+alongside — the two agree except where a stop has been moved into profit since,
+which is precisely the case worth seeing.
 
 ### Each instrument class carries its own rules
 
@@ -3220,6 +3286,41 @@ pinned by `tests/test_dreamer.py`.
 
 **The lesson is the one this file keeps relearning, one level out: a prompt is a
 document making claims about the code, and nothing checks that they are true.**
+
+**And it was relearned immediately, because that fix left a SECOND false claim
+about the same verdict, and that one was the actual deadlock.** The prompt
+described `keep` as *"the chain holds, and it goes in front of the trading
+agent"*. `promotion_for` does no such thing: a keep whose conditions are unmet
+goes to the PROPHECY shelf, which the trading agent cannot see, and only
+`all_conditions_met` reaches `Vault.VAULT`.
+
+So the model was being asked to certify something no honest dreamer would
+certify. A chain whose weakest hop rests on an unanswered observation does NOT
+"go in front of the trading agent", the model knew it, and it parked — every
+time. Measured on the droplet 25–29 Aug 2026: dream 3 parked, dream 4 parked,
+`promoted: []` on every run since the shelf existed, and `confer` reporting
+`considered: 0` every day it had run. The prompt fix of 27 Aug was deployed and
+the next verdict parked anyway, which is what ruled out the first explanation.
+
+The correction states where a keep actually goes: **a keep is a claim that the
+chain is worth SETTLING, not that it has been PROVED**, the proving happens
+afterwards on the prophecy shelf, and an unsettled weakest hop is the normal
+condition of a fresh keep rather than a reason to park. Park is redirected to
+what it is really for — a chain not worth settling at all.
+
+**The other half of the deadlock is that nothing ever settled those
+observations.** `self_settled` read 0 on all five consecutive runs while
+`awaiting_a_look` sat at 3. No `dream_self_settled` line was logged at all —
+not even a refusal — which is how the two candidate causes were told apart: a
+key mismatch would have produced refusals, so the `answer` field was simply
+never filled. The dreamer had been told it may answer its own observations and
+never told that a kept dream waits on that and on nothing else. It says so now,
+and both halves are pinned by `tests/test_dreamer.py`.
+
+**Neither correction is a thumb on the scale**, and the existing test forbidding
+one still passes. Saying where a verdict LANDS is not encouragement to reach it;
+the false claim was making the honest answer unreachable, which is the opposite
+failure and a worse one.
 
 **A draft of the fix walked into the neighbouring trap and was caught by reading
 the rendered text**, which is the only way these are ever caught. It said *"on

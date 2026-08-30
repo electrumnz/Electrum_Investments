@@ -1488,6 +1488,62 @@ class Trade(BaseModel):
         return max(0.0, self.effective_stop - self.entry_price) * self.qty
 
     @property
+    def secured_pnl_usd(self) -> float:
+        """What this position makes if its stop fills. The mirror of `current_risk_usd`.
+
+        Both floor at zero and between them they say the whole truth about a
+        resting stop: one of the two is always zero, because a stop sits either
+        side of entry and cannot sit on both. Below entry on a long it is risk;
+        above entry it is a profit that has already been secured at the broker.
+
+        **This is a GUARANTEED figure, not a mark-to-market one, and that
+        distinction is the entire reason it may be counted where an unrealised
+        gain may not.** The stop is a live order: if it fills, this is what the
+        trade makes. A position merely trading in profit has secured nothing —
+        the price can come back — which is why `max_class_total_risk_pct`
+        refuses to net unrealised profit against open risk, and why nothing
+        here reads a quote.
+
+        Gross of the exit fee, which is unknowable until the stop actually
+        fills. So this slightly overstates, by a commission on a paper account
+        that charges none. Immaterial against the scratch threshold it is
+        compared to, and stated rather than silently absorbed.
+        """
+        if self.direction == Direction.BUY:
+            return max(0.0, self.effective_stop - self.entry_price) * self.qty
+        return max(0.0, self.entry_price - self.effective_stop) * self.qty
+
+    @property
+    def secured_r(self) -> float | None:
+        """`secured_pnl_usd` as a multiple of the risk this trade was sized against.
+
+        `None` when the trade was sized against nothing, which is the same
+        answer `r_multiple` gives and for the same reason: a zero denominator
+        has no multiple, and a large number there would be a plausible wrong
+        figure on the arithmetic that decides whether a breaker fires.
+        """
+        risk = self.planned_risk_usd
+        if risk <= 0:
+            return None
+        return self.secured_pnl_usd / risk
+
+    def secures_a_win(self, scratch_threshold_r: float) -> bool:
+        """Has this trade already locked in an outcome a CLOSED trade would call a win?
+
+        The same `scratch_threshold_r` a closed trade is judged by, deliberately
+        rather than a threshold of its own: an open trade breaks the loss streak
+        exactly when the outcome it has already guaranteed would classify as a
+        `WIN` had it filled. One number, one meaning, and no new opinion about
+        placement smuggled in beside it.
+
+        A stop that has never moved answers False — `effective_stop` is then the
+        planned stop, which is on the losing side by construction, so the whole
+        question only opens once somebody has tightened past entry.
+        """
+        secured = self.secured_r
+        return secured is not None and secured > scratch_threshold_r
+
+    @property
     def is_open(self) -> bool:
         return self.exit_time is None
 
@@ -1553,6 +1609,57 @@ class Trade(BaseModel):
         if r < -scratch_threshold_r:
             return TradeOutcome.LOSS
         return TradeOutcome.SCRATCH
+
+
+class StreakBreaker(StrEnum):
+    """What ended the loss streak, or that nothing did.
+
+    Reported rather than inferred, because the three endings are three different
+    facts about the book and only one of them is reassuring. `NOTHING` means the
+    walk ran out of trades — on a young journal that is "no good decision on
+    file yet", not "every decision was bad", and a reader handed a bare count
+    reaches for the wrong one of those every time.
+    """
+
+    CLOSED_WIN = "closed_win"
+    SECURED_OPEN = "secured_open"
+    NOTHING = "nothing"
+
+
+class LossStreak(BaseModel):
+    """The consecutive-loss count, and what the count actually looked at.
+
+    A bare integer was the whole defect. `count` alone cannot distinguish three
+    losses that were the last three decisions from three losses interleaved with
+    open positions already locked into profit, and the breaker was firing on the
+    second while the operator was looking at a book that was working.
+    """
+
+    count: int = Field(default=0, ge=0)
+    broken_by: StreakBreaker = StreakBreaker.NOTHING
+    open_skipped: int = Field(
+        default=0,
+        ge=0,
+        description="Open trades passed over: live, with nothing yet secured",
+    )
+    scratches_skipped: int = Field(default=0, ge=0)
+
+    def describe(self) -> str:
+        """One line for a log, a banner or an MCP payload."""
+        if not self.count:
+            return "No losses on the current run."
+        losses = f"{self.count} consecutive loss(es)"
+        ending = {
+            StreakBreaker.CLOSED_WIN: "counted back to a winning close",
+            StreakBreaker.SECURED_OPEN: (
+                "counted back to an open position whose stop is already in profit"
+            ),
+            StreakBreaker.NOTHING: "counted back through every trade on file",
+        }[self.broken_by]
+        detail = f"{losses}, {ending}"
+        if self.open_skipped:
+            detail += f"; {self.open_skipped} open trade(s) still unresolved"
+        return detail
 
 
 class StandDownState(BaseModel):
