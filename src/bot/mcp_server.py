@@ -439,7 +439,7 @@ def place_order(
         execution_mode=_session.env.execution_mode,
     )
 
-    _session.audit.record_event(
+    audit_failure = _record_event(
         "mcp_place_order",
         {
             "proposal": proposal.model_dump(mode="json"),
@@ -451,6 +451,7 @@ def place_order(
     )
     return {
         "placed": result.accepted,
+        "audit_not_recorded": audit_failure,
         "order_id": result.order_id,
         "filled_price": result.filled_price,
         "filled_qty": result.filled_qty,
@@ -484,12 +485,13 @@ def close_position(symbol: str) -> dict[str, Any]:
         symbol: Ticker of the position to close.
     """
     result = _session.broker.close_position(symbol.upper())
-    _session.audit.record_event(
+    audit_failure = _record_event(
         "mcp_close_position",
         {"symbol": symbol.upper(), "accepted": result.accepted, "error": result.error},
     )
     return {
         "closed": result.accepted,
+        "audit_not_recorded": audit_failure,
         "order_id": result.order_id,
         "error": result.error,
         "reason_recorded": False,
@@ -501,7 +503,54 @@ def close_position(symbol: str) -> dict[str, Any]:
     }
 
 
-def _action_payload(outcome: ActionOutcome) -> dict[str, Any]:
+def _record_event(name: str, payload: dict[str, Any]) -> str | None:
+    """Write one audit line, and never let that write destroy the outcome.
+
+    Every order tool records its event LAST — after the broker has answered and
+    after the journal has been written. So an exception here undoes nothing. It
+    replaces a completed action's result with a traceback, which is the exact
+    failure this repository is most careful about: **a live order the caller has
+    been told did not happen.**
+
+    Measured on the droplet 30 Aug 2026. `mudhorn-web.service` was missing
+    `/opt/mudhorn/audit` from its `ReadWritePaths`, so the first real use of
+    `place_protective_stop` came back as
+    `OSError: [Errno 30] Read-only file system: 'audit/2026-08-30.jsonl'`. The
+    sandbox is fixed, and the masking is a second defect: the tool had already
+    finished and its answer — in that instance a REFUSAL, with the reasons that
+    explained it — was thrown away and replaced by the traceback. Had it been a
+    placement instead, the order would have been resting at Alpaca under an
+    error message.
+
+    So this returns a sentence instead of raising: `None` when the line was
+    written, and a description when it was not. The caller carries that into its
+    response beside the real outcome, because "the action happened and the audit
+    log does not know" is a fact worth reporting loudly and is never a reason to
+    hide the action itself.
+
+    It catches broadly on purpose, the same reasoning as `fetch_market_ticks`
+    and `data/_http.fetch_json`: there is no failure of a log write worth
+    destroying an order result over, and an unanticipated one is exactly the
+    case where destroying it would be worst.
+    """
+    try:
+        _session.audit.record_event(name, payload)
+    except Exception as exc:  # broad on purpose — see the docstring
+        return (
+            "THE RESULT BESIDE THIS IS REAL AND THE AUDIT LOG DOES NOT KNOW IT. "
+            f"Writing the {name!r} event failed: {type(exc).__name__}: {exc}. "
+            "Nothing was undone and nothing extra happened — read the outcome "
+            "next to this rather than inferring one from the error, which "
+            "describes the logging and not the trade. The audit log is the only "
+            "record of a REFUSAL, so if this was refused the reasons are now "
+            "missing from the Decisions page and from every history query."
+        )
+    return None
+
+
+def _action_payload(
+    outcome: ActionOutcome, audit_failure: str | None = None
+) -> dict[str, Any]:
     """One shape for both moves, so a caller reads them the same way.
 
     A refusal is an ANSWER rather than an error, exactly as `_move_payload`
@@ -512,6 +561,10 @@ def _action_payload(outcome: ActionOutcome) -> dict[str, Any]:
     record = outcome.record
     return {
         "ok": outcome.ok,
+        # First, and never folded into `note`. A caller skimming for the
+        # outcome must not have to read past it to find out the record of this
+        # action is missing. `None` is the ordinary case.
+        "audit_not_recorded": audit_failure,
         "symbol": outcome.symbol,
         "action": str(outcome.action),
         "reasons": outcome.reasons,
@@ -584,7 +637,7 @@ def close_position_with_reason(symbol: str, reason: str) -> dict[str, Any]:
         reason=reason,
         actor="trader",
     )
-    _session.audit.record_event(
+    audit_failure = _record_event(
         "mcp_close_position_with_reason",
         {
             "symbol": outcome.symbol,
@@ -594,7 +647,7 @@ def close_position_with_reason(symbol: str, reason: str) -> dict[str, Any]:
             "order_id": outcome.broker_order_id,
         },
     )
-    return _action_payload(outcome)
+    return _action_payload(outcome, audit_failure)
 
 
 @server.tool()
@@ -651,7 +704,7 @@ def tighten_stop(symbol: str, new_stop_price: float, reason: str) -> dict[str, A
         reason=reason,
         actor="trader",
     )
-    _session.audit.record_event(
+    audit_failure = _record_event(
         "mcp_tighten_stop",
         {
             "symbol": outcome.symbol,
@@ -663,7 +716,7 @@ def tighten_stop(symbol: str, new_stop_price: float, reason: str) -> dict[str, A
             "broker_order_id": outcome.broker_order_id,
         },
     )
-    return _action_payload(outcome)
+    return _action_payload(outcome, audit_failure)
 
 
 @server.tool()
@@ -717,7 +770,7 @@ def place_protective_stop(symbol: str, stop_price: float, reason: str) -> dict[s
         reason=reason,
         actor="trader",
     )
-    _session.audit.record_event(
+    audit_failure = _record_event(
         "mcp_place_protective_stop",
         {
             "symbol": outcome.symbol,
@@ -730,7 +783,7 @@ def place_protective_stop(symbol: str, stop_price: float, reason: str) -> dict[s
             "broker_order_id": outcome.broker_order_id,
         },
     )
-    return _action_payload(outcome)
+    return _action_payload(outcome, audit_failure)
 
 
 @server.tool()
@@ -2365,7 +2418,7 @@ def adopt_dream(
     # Recorded for the same reason `mcp_place_order` is: a permission that
     # leaves no trace is a permission nobody can audit afterwards, and a
     # refusal is as worth having on the record as a grant.
-    _session.audit.record_event(
+    audit_failure = _record_event(
         "mcp_adopt_dream",
         {
             "dream_id": dream_id,
@@ -2375,6 +2428,7 @@ def adopt_dream(
             "asset_class": asset_class,
         },
     )
+    payload["audit_not_recorded"] = audit_failure
     return payload
 
 
@@ -2409,7 +2463,7 @@ def return_dream(dream_id: int, reason: str) -> dict[str, Any]:
             "its symbols is untouched and remains yours to manage; there are "
             "simply no new entries permitted in it."
         )
-    _session.audit.record_event(
+    payload["audit_not_recorded"] = _record_event(
         "mcp_return_dream",
         {"dream_id": dream_id, "ok": result.ok, "reason": reason},
     )
@@ -2587,7 +2641,7 @@ def raise_consideration(
         # `mcp_adopt_dream` records its refusals: how often this surface tries
         # and how often it is prompted is a fact about the surface, and a log
         # that only kept the successes could not answer it.
-        _session.audit.record_event(
+        payload["audit_not_recorded"] = _record_event(
             "chat_consideration_refused",
             {"speaker": who, "origin": origin, "refusals": payload["refusals"]},
         )
@@ -2597,7 +2651,7 @@ def raise_consideration(
     # `CONSIDERATION_FIELDS` and the block comment above: no symbols, no
     # instrument class, no chain. Written to the audit log rather than to
     # `data/dreams.db`, so nothing in `dreaming.py` can read it as a shelf row.
-    _session.audit.record_event(
+    audit_failure = _record_event(
         CONSIDERATION_EVENT,
         {
             "origin": origin,
@@ -2608,6 +2662,19 @@ def raise_consideration(
             "prompt_echo": echo,
         },
     )
+    # Unlike every other caller of `_record_event`, this one is not reporting a
+    # completed action whose record went missing. The audit line IS the
+    # consideration — nothing else is written anywhere — so a failed write means
+    # nothing was raised, and `recorded` must go back to False rather than
+    # claiming a note the dreamer will never read.
+    if audit_failure is not None:
+        payload["recorded"] = False
+        payload["audit_not_recorded"] = audit_failure
+        payload["note"] = (
+            "NOTHING WAS RAISED. The consideration is written to the audit log "
+            "and nowhere else, and that write failed: " + audit_failure
+        )
+        return payload
 
     payload.update(
         {

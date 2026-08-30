@@ -147,8 +147,31 @@ be attributed to a single row, and why `reconcile` correctly refuses to guess.
 is closed: there is now a tool that rests a real GTC stop at the broker on a
 held position that has none, sized off the BROKER's quantity rather than the
 journal's. See CLAUDE.md, *"A held position with no stop can be protected now"*.
-AAPL itself is still unprotected until somebody runs it — the tool exists, the
-position has not been acted on.
+
+**AAPL IS STILL UNPROTECTED, and the first attempt failed for a reason that had
+nothing to do with the trade.** The operator put it to the chat agent the same
+day and got
+
+    OSError: [Errno 30] Read-only file system: 'audit/2026-08-30.jsonl'
+
+`mudhorn-web.service` could not write `audit/`, so the audit event — the LAST
+thing the tool does — threw and replaced the tool's own answer. Both halves are
+fixed and deployed (`cd203c6` and the follow-up): the unit's `ReadWritePaths`
+now covers `audit`, and `_record_event` no longer lets a logging failure
+destroy an outcome.
+
+**Nothing was placed.** That is measured rather than assumed: a successful
+placement writes `current_stop` through `record_stop_move`, which `open_risk_usd`
+sums — and that figure read 1,766.49 on every cycle spanning all five chat
+turns, including one 26 seconds after the last. So the tool REFUSED and the
+reasons were lost with the traceback.
+
+**The next attempt will say WHY, in words.** The likely refusal is the
+wrong-side check: AAPL was bidding ~300.93 in the pre-market and the level
+being asked for was 313.56, which on a long is a stop ABOVE the market — it
+would trigger on submission and become a market order, so the tool refuses it
+as *"a close wearing a stop's clothes"*. If that is what comes back, the real
+choice is a stop BELOW the current price or an exit, and it is the operator's.
 
 **The original finding, kept because the trap is still live for anyone reaching
 for the wrong tool:**
