@@ -584,6 +584,45 @@ Three things the bracket structurally cannot cover, which is why
 - a position adopted from the broker, or one whose bracket was cancelled by
   hand: a journalled stop with no order behind it
 
+### The chat panel is an order path, and the SANDBOX is what lets it record
+
+**Measured 30 Aug 2026, on the first real use of `place_protective_stop`.** The
+operator asked the chat agent to put a stop on AAPL and got
+
+    OSError: [Errno 30] Read-only file system: 'audit/2026-08-30.jsonl'
+
+`mudhorn-web.service` listed only `/opt/mudhorn/data` in `ReadWritePaths`, while
+`mudhorn-bot.service` listed `data` AND `audit`. Nothing about the web unit
+looks like an order path, which is exactly why it was missed: `mudhorn-web`
+sudos to `hermes` to run one Hermes turn, Hermes sudos back to `mudhorn` for
+`run-mcp.sh`, and THAT server holds `place_order`,
+`close_position_with_reason`, `tighten_stop` and `place_protective_stop`.
+**systemd sandboxing is a mount namespace and every descendant inherits it,
+sudo included** — the same fact that already forced `ProtectHome=false` on this
+unit — so every order tool writes through the WEB unit's `ReadWritePaths`,
+never the bot's.
+
+**The failure shape is the dangerous one, and the agent reported it
+backwards.** `audit.record_event` runs AFTER the broker call and after the
+journal write, and `data/` was already writable. So the order reached Alpaca
+and the journal recorded it, while the chat agent — seeing only the exception it
+caught — told the operator the stop *"likely did not reach the broker"*. That is
+`14b88c8` arriving through the chat panel: a live order the operator has been
+told does not exist.
+
+Two things follow, and the second is the general one:
+
+- **A tool that writes the audit log LAST cannot report its own success
+  honestly.** The event is the record of what happened, so a failure there is
+  invisible to everything except the caller's exception — which describes the
+  logging, not the trade. Anything reading that exception has to check the
+  broker before concluding anything about the order.
+- **A sandbox is part of the order path.** `tests/test_chat.py` now pins both
+  units: any unit under `ProtectSystem=strict` that can reach an order tool must
+  be able to write `data` AND `audit`. It was verified by reintroducing the bug
+  and watching the test go red, because a test written after a fix that has
+  never failed is a test nobody has checked.
+
 ### A held position with no stop can be protected now, and the SIZE comes from the broker
 
 There was no tool for this at all, and the nearest one made it worse.

@@ -151,3 +151,54 @@ def test_the_chat_page_renders_when_hermes_cannot_be_seen(tmp_path: Path, monkey
     )
 
     assert "Chat" in body
+
+
+def test_the_web_unit_can_write_the_AUDIT_log_not_just_the_journal() -> None:
+    """The chat panel is an order path, and the sandbox is what lets it record.
+
+    Measured on the droplet 30 Aug 2026. The operator asked the chat agent to
+    place a protective stop on AAPL and got
+
+        OSError: [Errno 30] Read-only file system: 'audit/2026-08-30.jsonl'
+
+    because `mudhorn-web.service` listed only `/opt/mudhorn/data` in
+    `ReadWritePaths`. Nothing about that unit looks like an order path, which is
+    exactly why it was missed: mudhorn-web sudos to `hermes` to run one Hermes
+    turn, Hermes sudos back to `mudhorn` for `run-mcp.sh`, and THAT server holds
+    place_order, close_position_with_reason, tighten_stop and
+    place_protective_stop. systemd sandboxing is a mount namespace and every
+    descendant inherits it, sudo included -- the same fact that forced
+    ProtectHome=false on the same unit -- so those tools write through this
+    unit's ReadWritePaths.
+
+    The failure shape is the dangerous one and is why this is pinned rather than
+    fixed and forgotten: `audit.record_event` runs AFTER the broker call and
+    after the journal write, and `data/` was already writable, so the order
+    reached Alpaca and the journal recorded it while the agent reported an
+    error. A live order the operator had been told did not exist.
+    """
+    units = Path(__file__).resolve().parents[1] / "deploy" / "systemd"
+    for name in ("mudhorn-web.service", "mudhorn-bot.service"):
+        unit = units / name
+        assert unit.exists(), f"{name} has moved -- update this boundary"
+        text = unit.read_text(encoding="utf-8")
+
+        # Only meaningful while the filesystem is actually protected; a unit
+        # without ProtectSystem writes anywhere and needs no allowance.
+        if "ProtectSystem=strict" not in text:
+            continue
+
+        paths = " ".join(
+            line.split("=", 1)[1]
+            for line in text.splitlines()
+            if line.startswith("ReadWritePaths=")
+        )
+        assert "/opt/mudhorn/audit" in paths, (
+            f"{name} runs under ProtectSystem=strict and cannot write "
+            "/opt/mudhorn/audit. Every order tool records an audit event AFTER "
+            "the broker call, so the order lands and the record does not."
+        )
+        assert "/opt/mudhorn/data" in paths, (
+            f"{name} cannot write /opt/mudhorn/data, so the journal is "
+            "unwritable and open_risk_usd counts nothing."
+        )
