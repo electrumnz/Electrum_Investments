@@ -1834,7 +1834,7 @@ def test_an_unwritable_audit_log_does_not_hide_a_placed_order(wired_session):
     assert len(wired_session.broker.get_account().open_positions) == 1
     # And the caller is told loudly that the record is missing.
     assert "Read-only file system" in result["audit_not_recorded"]
-    assert "THE ACTION ABOVE IS REAL" in result["audit_not_recorded"]
+    assert "THE RESULT BESIDE THIS IS REAL" in result["audit_not_recorded"]
 
 
 def test_an_unwritable_audit_log_does_not_hide_a_refusal(wired_session):

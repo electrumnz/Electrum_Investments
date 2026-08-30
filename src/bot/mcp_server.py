@@ -537,11 +537,13 @@ def _record_event(name: str, payload: dict[str, Any]) -> str | None:
         _session.audit.record_event(name, payload)
     except Exception as exc:  # broad on purpose — see the docstring
         return (
-            f"THE ACTION ABOVE IS REAL AND THE AUDIT LOG DOES NOT KNOW. Writing "
-            f"the {name!r} event failed: {type(exc).__name__}: {exc}. Nothing was "
-            "undone — read the result beside this, not around it. The audit log "
-            "is the only record of a refusal, so this decision is missing from "
-            "the Decisions page and from every history query."
+            "THE RESULT BESIDE THIS IS REAL AND THE AUDIT LOG DOES NOT KNOW IT. "
+            f"Writing the {name!r} event failed: {type(exc).__name__}: {exc}. "
+            "Nothing was undone and nothing extra happened — read the outcome "
+            "next to this rather than inferring one from the error, which "
+            "describes the logging and not the trade. The audit log is the only "
+            "record of a REFUSAL, so if this was refused the reasons are now "
+            "missing from the Decisions page and from every history query."
         )
     return None
 
