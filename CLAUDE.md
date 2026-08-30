@@ -602,26 +602,43 @@ sudo included** — the same fact that already forced `ProtectHome=false` on thi
 unit — so every order tool writes through the WEB unit's `ReadWritePaths`,
 never the bot's.
 
-**The failure shape is the dangerous one, and the agent reported it
-backwards.** `audit.record_event` runs AFTER the broker call and after the
-journal write, and `data/` was already writable. So the order reached Alpaca
-and the journal recorded it, while the chat agent — seeing only the exception it
-caught — told the operator the stop *"likely did not reach the broker"*. That is
-`14b88c8` arriving through the chat panel: a live order the operator has been
-told does not exist.
+**The failure shape is the dangerous one, and it took EVIDENCE rather than
+reasoning to settle which way round it went.** `audit.record_event` runs after
+the broker call and after the journal write — but it runs on a REFUSAL too, so
+the exception establishes only that the tool FINISHED, never which of the two
+things it did. The chat agent guessed one way, telling the operator the stop
+*"likely did not reach the broker"*. The first reading here guessed the other,
+and this section asserted it.
 
-Two things follow, and the second is the general one:
+What settled it was `open_risk_usd`. `record_stop_move` writes `current_stop`,
+`effective_stop` prefers it over the plan, and `Journal.open_risk_usd` sums
+`current_risk_usd` across open trades — so a placement would have moved the
+figure. It read **1,766.49 on every cycle spanning all five chat turns**,
+including the cycle 26 seconds after the last one closed. Nothing was placed.
+The tool REFUSED, and the reasons explaining that refusal were destroyed and
+replaced by a traceback about a file.
 
-- **A tool that writes the audit log LAST cannot report its own success
-  honestly.** The event is the record of what happened, so a failure there is
-  invisible to everything except the caller's exception — which describes the
-  logging, not the trade. Anything reading that exception has to check the
-  broker before concluding anything about the order.
-- **A sandbox is part of the order path.** `tests/test_chat.py` now pins both
-  units: any unit under `ProtectSystem=strict` that can reach an order tool must
-  be able to write `data` AND `audit`. It was verified by reintroducing the bug
+Three things follow, and the third is the general one:
+
+- **A sandbox is part of the order path.** `tests/test_chat.py` pins both
+  units: any unit under `ProtectSystem=strict` that can reach an order tool
+  must be able to write `data` AND `audit`. Verified by reintroducing the bug
   and watching the test go red, because a test written after a fix that has
   never failed is a test nobody has checked.
+- **The masking is its own defect, and it is fixed separately.**
+  `mcp_server._record_event` wraps every audit write, returns a sentence
+  instead of raising, and every order tool carries it back as
+  `audit_not_recorded` beside the real outcome. Losing the record of an action
+  is bad; losing the ACTION's own result to protect the record is worse, and it
+  would outlive any one misconfiguration. `raise_consideration` is the single
+  exception and it inverts: the audit line IS the consideration, written
+  nowhere else by design, so a failed write there means nothing was raised and
+  `recorded` goes back to False rather than promising the dreamer a note it
+  will never read.
+- **An error raised AFTER the work is done describes the logging, not the
+  work.** Nothing in the exception distinguishes a refusal from a placement, so
+  neither an agent nor a reader may conclude anything about the broker from it.
+  Go and look at the broker, or at a figure that would have moved.
 
 ### A held position with no stop can be protected now, and the SIZE comes from the broker
 

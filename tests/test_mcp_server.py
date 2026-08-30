@@ -1786,3 +1786,105 @@ def test_a_condition_on_the_wrong_hop_does_not_read_as_pinned() -> None:
     )
 
     assert _brief(on_the_weak_link)["weakest_hop_pinned"] is True
+
+
+# --- An audit write that fails must not destroy the outcome -----------------
+#
+# Every order tool records its event LAST, after the broker has answered and
+# after the journal has been written, so an exception there undoes nothing --
+# it replaces a completed action's result with a traceback.
+#
+# Measured on the droplet 30 Aug 2026: `mudhorn-web.service` was missing
+# `/opt/mudhorn/audit` from its `ReadWritePaths`, so the first real use of
+# `place_protective_stop` came back as `OSError: [Errno 30] Read-only file
+# system`. The sandbox is fixed in that unit; this is the second half, because
+# the masking is its own defect and would outlive any one misconfiguration.
+
+
+class _UnwritableAudit:
+    """An audit log whose writes fail and whose reads work.
+
+    That asymmetry is the point rather than convenience: a read-only mount
+    serves every read perfectly and refuses every write, so a stub that also
+    broke reads would exercise a failure the box cannot produce -- and would
+    hide that `raise_consideration` reads the log for its daily cap before it
+    ever writes.
+    """
+
+    def __init__(self, readable: AuditLog) -> None:
+        self._readable = readable
+        self.attempts: list[str] = []
+
+    def record_event(self, name: str, payload: dict[str, Any]) -> None:
+        self.attempts.append(name)
+        raise OSError(30, "Read-only file system", "audit/2026-08-30.jsonl")
+
+    def read(self, *args: Any, **kwargs: Any) -> Any:
+        return self._readable.read(*args, **kwargs)
+
+
+def test_an_unwritable_audit_log_does_not_hide_a_placed_order(wired_session):
+    """The order is at the broker. Saying otherwise is the `14b88c8` failure."""
+    wired_session._audit = _UnwritableAudit(wired_session.audit)
+
+    result = mcp_server.place_order(**_good_args())
+
+    # The half that matters: it actually happened, and it is reported.
+    assert result["placed"] is True
+    assert len(wired_session.broker.get_account().open_positions) == 1
+    # And the caller is told loudly that the record is missing.
+    assert "Read-only file system" in result["audit_not_recorded"]
+    assert "THE ACTION ABOVE IS REAL" in result["audit_not_recorded"]
+
+
+def test_an_unwritable_audit_log_does_not_hide_a_refusal(wired_session):
+    """The refusal reasons are the whole value of a refusal.
+
+    This is the exact shape the operator hit: the tool had already decided, and
+    the reasons explaining that decision were thrown away and replaced by a
+    traceback about a file.
+    """
+    wired_session._audit = _UnwritableAudit(wired_session.audit)
+
+    result = mcp_server.place_protective_stop(
+        symbol="SPY", stop_price=575.0, reason="   "
+    )
+
+    assert result["ok"] is False
+    assert result["reasons"], "the refusal reasons must survive the audit failure"
+    assert "Read-only file system" in result["audit_not_recorded"]
+
+
+def test_a_clean_audit_write_reports_no_failure(wired_session):
+    """`audit_not_recorded` is None in the ordinary case, not absent.
+
+    A key that appears only on failure is a key every caller forgets to check.
+    """
+    result = mcp_server.place_order(**_good_args())
+
+    assert result["placed"] is True
+    assert result["audit_not_recorded"] is None
+
+
+def test_a_consideration_that_could_not_be_written_is_not_reported_as_raised(
+    wired_session,
+):
+    """The one caller where a failed write means nothing happened at all.
+
+    A consideration is written to the audit log and nowhere else -- that is the
+    containment rail, so it must never be relaxed to a second store. The
+    consequence is that here a failed write is not a masked success, and
+    `recorded` has to go back to False rather than promising the dreamer a note
+    it will never read.
+    """
+    wired_session._audit = _UnwritableAudit(wired_session.audit)
+
+    result = mcp_server.raise_consideration(
+        speaker="yoda",
+        spark="Port congestion at Long Beach is showing up in rail car dwell times.",
+        why_now="Two carriers rerouted this week.",
+    )
+
+    assert result["recorded"] is False
+    assert "NOTHING WAS RAISED" in result["note"]
+    assert "Read-only file system" in result["audit_not_recorded"]
