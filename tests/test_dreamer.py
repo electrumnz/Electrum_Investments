@@ -191,6 +191,51 @@ def test_the_prompt_does_not_ask_the_dreamer_to_keep_MORE() -> None:
     assert "`drop` is a perfectly good one" in SYSTEM_PROMPT
 
 
+def test_the_prompt_tells_the_truth_about_where_a_KEEP_GOES() -> None:
+    """The second false claim about the verdict, and the one that deadlocked it.
+
+    The prompt described `keep` as *"the chain holds, and it goes in front of
+    the trading agent"*. `promotion_for` does not do that. A keep whose
+    conditions are unmet goes to the PROPHECY shelf, which the trading agent
+    cannot see; only `all_conditions_met` reaches `Vault.VAULT`.
+
+    So a model holding unanswered observations on its own weakest hop was being
+    asked to certify something it correctly would not certify, and parked
+    instead — every time. Measured on the droplet 25-29 Aug 2026: dream 3 and
+    dream 4 both parked at `verdict`, `promoted: []` on every run since the
+    shelf existed, and `confer` reporting `considered: 0` every day.
+
+    The correction is a statement about the MECHANISM, not encouragement:
+    `test_the_prompt_does_not_ask_the_dreamer_to_keep_MORE` still has to pass.
+    """
+    assert "does NOT go straight to the trading agent" in SYSTEM_PROMPT
+    assert "PROPHECY shelf" in SYSTEM_PROMPT
+    # A keep is a claim about worth-settling, never about having proved it.
+    assert "not a claim that the chain has been proved" in SYSTEM_PROMPT
+    # And the normal state of a fresh keep is named, so an unsettled weakest
+    # hop stops reading as a reason to park.
+    assert "not a reason to park" in SYSTEM_PROMPT
+
+    # The false claim itself, pinned so it cannot come back in either place.
+    assert "it goes in front of the trading agent" not in SYSTEM_PROMPT
+    assert "a keep goes in front of the agent that trades" not in SYSTEM_PROMPT
+
+
+def test_the_prompt_says_answering_an_observation_is_what_frees_a_KEPT_dream() -> None:
+    """`self_settled: 0` on every run while `awaiting_a_look` sat at 3.
+
+    The other half of the same deadlock. `settle_own_observations` reads the
+    `answer` field off a restated condition, and across five consecutive live
+    runs no `dream_self_settled` line was ever logged -- not even a refusal,
+    which is how we know the field was never filled rather than mis-matched.
+
+    A kept dream with an open observation waits on the dreamer and on nothing
+    else, so the prompt has to say that plainly.
+    """
+    assert "no person is coming" in SYSTEM_PROMPT
+    assert "AWAITING" in SYSTEM_PROMPT and "OVERDUE" in SYSTEM_PROMPT
+
+
 def test_the_prompt_never_shows_profit_and_loss(rules, journal):
     """The Alpha Arena rule, enforced here rather than requested in the soul.
 

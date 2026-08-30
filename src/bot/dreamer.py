@@ -561,9 +561,9 @@ stages and you say which one you are in:
   explore  the chain, hop by hop, each hop a separate checkable claim
   iterate  attack it. what must be true that you have not verified? who already
            knows this? is it in the price? what would make it wrong?
-  verdict  keep (the chain holds, and it goes in front of the trading agent),
-           park (it stays on the workbench and nothing picks it up but you), or
-           drop (it broke, and say which hop broke)
+  verdict  keep (the chain holds and is worth settling), park (it stays on the
+           workbench and nothing picks it up but you), or drop (it broke, and
+           say which hop broke)
 
 **A chain you never finish reaches nobody — and neither does one you park.**
 Only a `keep` moves a dream anywhere: `park` and `drop` both leave it exactly
@@ -586,10 +586,27 @@ You are NOT being asked to conclude before you have looked. Attack it properly
 first, and kill it if it deserves killing.
 
 And you are NOT being asked to keep more. A `keep` that does not hold is worse
-than a park, because a park costs a shelf slot and a keep goes in front of the
+than a park, because a park costs a shelf slot and a keep is on the road to the
 agent that trades. What you must not do is reach for `park` believing it defers
 the decision. It does not defer the decision; it makes it, quietly, in favour
 of nothing happening.
+
+**A `keep` does NOT go straight to the trading agent, and knowing where it
+actually goes should make the verdict easier rather than harder.** A keep whose
+conditions are still open moves to the PROPHECY shelf — the shelf for a dream
+parked awaiting the thing that would settle it. The trading agent cannot see
+that shelf. Only once every condition on the dream is settled does it reach the
+vault, which is the one shelf the agent reads.
+
+So `keep` is not a claim that the chain has been proved. It is a claim that the
+chain is worth settling and that you have written down what would settle it.
+The proving happens AFTERWARDS, on the shelf, when you answer your own
+observations. An unsettled weakest hop is the normal condition of a fresh keep;
+it is what the prophecy shelf is for, and it is not a reason to park.
+
+Park instead when the chain itself is not worth settling — when you cannot say
+what would settle it, or the idea is too thin to be worth a slot. That is a
+judgement about the chain, not about how much evidence you have gathered yet.
 
 A good chain looks like this, and the shape matters more than the subject:
 
@@ -730,6 +747,15 @@ comes back to.
 `met` or `ruled_out`, and `answer_note` with what you actually saw. You are not
 waiting on anybody: an observation nobody answers holds its dream below the
 vault for ever, where the trading agent never sees it.
+
+**This is the step that finishes a kept dream, and it is the one most easily
+skipped.** A keep with open conditions is sitting on the prophecy shelf waiting
+for exactly this and for nothing else — no sweep settles it, no researcher
+settles it, and no person is coming. Every dream you are shown lists its
+conditions with their state; an `AWAITING` or `OVERDUE` observation on a dream
+you have already kept is work in front of you right now, not a note about
+something pending elsewhere. Answering one is often worth more than another
+attack on a chain you have already attacked twice.
 
 Four rules, and the first is the one that matters:
 

@@ -3287,6 +3287,41 @@ pinned by `tests/test_dreamer.py`.
 **The lesson is the one this file keeps relearning, one level out: a prompt is a
 document making claims about the code, and nothing checks that they are true.**
 
+**And it was relearned immediately, because that fix left a SECOND false claim
+about the same verdict, and that one was the actual deadlock.** The prompt
+described `keep` as *"the chain holds, and it goes in front of the trading
+agent"*. `promotion_for` does no such thing: a keep whose conditions are unmet
+goes to the PROPHECY shelf, which the trading agent cannot see, and only
+`all_conditions_met` reaches `Vault.VAULT`.
+
+So the model was being asked to certify something no honest dreamer would
+certify. A chain whose weakest hop rests on an unanswered observation does NOT
+"go in front of the trading agent", the model knew it, and it parked — every
+time. Measured on the droplet 25–29 Aug 2026: dream 3 parked, dream 4 parked,
+`promoted: []` on every run since the shelf existed, and `confer` reporting
+`considered: 0` every day it had run. The prompt fix of 27 Aug was deployed and
+the next verdict parked anyway, which is what ruled out the first explanation.
+
+The correction states where a keep actually goes: **a keep is a claim that the
+chain is worth SETTLING, not that it has been PROVED**, the proving happens
+afterwards on the prophecy shelf, and an unsettled weakest hop is the normal
+condition of a fresh keep rather than a reason to park. Park is redirected to
+what it is really for — a chain not worth settling at all.
+
+**The other half of the deadlock is that nothing ever settled those
+observations.** `self_settled` read 0 on all five consecutive runs while
+`awaiting_a_look` sat at 3. No `dream_self_settled` line was logged at all —
+not even a refusal — which is how the two candidate causes were told apart: a
+key mismatch would have produced refusals, so the `answer` field was simply
+never filled. The dreamer had been told it may answer its own observations and
+never told that a kept dream waits on that and on nothing else. It says so now,
+and both halves are pinned by `tests/test_dreamer.py`.
+
+**Neither correction is a thumb on the scale**, and the existing test forbidding
+one still passes. Saying where a verdict LANDS is not encouragement to reach it;
+the false claim was making the honest answer unreachable, which is the opposite
+failure and a worse one.
+
 **A draft of the fix walked into the neighbouring trap and was caught by reading
 the rendered text**, which is the only way these are ever caught. It said *"on
 the live shelf right now three chains have sat parked for between nine and
