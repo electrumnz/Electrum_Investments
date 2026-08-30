@@ -3868,6 +3868,12 @@ src/bot/
   reconcile.py          Squares journal against broker each cycle. Populates open risk.
   journal.py            SQLite trade store + persistent stand-down state.
   stand_down.py         Consecutive-loss breaker: when to trigger, when to escalate.
+                        The streak is measured over DECISIONS in entry order,
+                        open trades included -- a stop guarantees a loser
+                        closes and nothing guarantees a winner does, so exit
+                        order is the sub-sample the stops created. An open
+                        trade breaks the run only once its stop rests IN
+                        PROFIT, which is a live order rather than a paper gain.
   options.py            OCC parsing and expiry safety. Protective only.
   broker.py             Broker Protocol + AlpacaBroker + MockBroker. Daily bars and
                         resting orders live here.
