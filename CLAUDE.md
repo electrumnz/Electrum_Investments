@@ -10,11 +10,16 @@ before touching orders, risk, or config.
 > live account state. Read it before picking anything up — this file describes
 > how the system behaves, that one describes what is unfinished and why.
 >
-> **There is a live position right now:** short 21 SPY at 773.324285, stop 820,
-> $980.19 of open risk. Placed by hand as an operator test, journalled as row 1,
-> tagged `manual`. Its stop leg is resting at the broker and its trigger price
-> has never been read back — `WorkingOrder` carries no `stop_price`. Details in
-> `TODO.md` under CURRENT STATE.
+> **There are live positions right now, and one of them is unprotected.** As at
+> 30 Aug 2026 the account holds three, equity about $101,850, open risk $1,766
+> against the 2% cap. **AAPL is 107 shares at the broker against 78 in the
+> journal with NO resting stop**, reported every cycle as
+> `unexplained_position_moves` and `positions_without_a_resting_stop` — and
+> there is no tool in this repository that can place a stop on a position that
+> already exists, which is the thing to read before reaching for
+> `tighten_stop`. **`stand_down_stage` is 1**: three qualifying losses fired the
+> consecutive-loss breaker, so live execution is suspended while paper trading
+> continues. Details in `TODO.md` under CURRENT STATE.
 
 **Scope:** single operator, personal trading, paper money. Not a product, not
 multi-user. That assumption is why the dashboard has one shared password rather
@@ -638,6 +643,121 @@ Three things the bracket structurally cannot cover, which is why
 - **crypto, which Alpaca does not accept brackets on at all**
 - a position adopted from the broker, or one whose bracket was cancelled by
   hand: a journalled stop with no order behind it
+
+### The chat panel is an order path, and the SANDBOX is what lets it record
+
+**Measured 30 Aug 2026, on the first real use of `place_protective_stop`.** The
+operator asked the chat agent to put a stop on AAPL and got
+
+    OSError: [Errno 30] Read-only file system: 'audit/2026-08-30.jsonl'
+
+`mudhorn-web.service` listed only `/opt/mudhorn/data` in `ReadWritePaths`, while
+`mudhorn-bot.service` listed `data` AND `audit`. Nothing about the web unit
+looks like an order path, which is exactly why it was missed: `mudhorn-web`
+sudos to `hermes` to run one Hermes turn, Hermes sudos back to `mudhorn` for
+`run-mcp.sh`, and THAT server holds `place_order`,
+`close_position_with_reason`, `tighten_stop` and `place_protective_stop`.
+**systemd sandboxing is a mount namespace and every descendant inherits it,
+sudo included** — the same fact that already forced `ProtectHome=false` on this
+unit — so every order tool writes through the WEB unit's `ReadWritePaths`,
+never the bot's.
+
+**The failure shape is the dangerous one, and it took EVIDENCE rather than
+reasoning to settle which way round it went.** `audit.record_event` runs after
+the broker call and after the journal write — but it runs on a REFUSAL too, so
+the exception establishes only that the tool FINISHED, never which of the two
+things it did. The chat agent guessed one way, telling the operator the stop
+*"likely did not reach the broker"*. The first reading here guessed the other,
+and this section asserted it.
+
+What settled it was `open_risk_usd`. `record_stop_move` writes `current_stop`,
+`effective_stop` prefers it over the plan, and `Journal.open_risk_usd` sums
+`current_risk_usd` across open trades — so a placement would have moved the
+figure. It read **1,766.49 on every cycle spanning all five chat turns**,
+including the cycle 26 seconds after the last one closed. Nothing was placed.
+The tool REFUSED, and the reasons explaining that refusal were destroyed and
+replaced by a traceback about a file.
+
+Three things follow, and the third is the general one:
+
+- **A sandbox is part of the order path.** `tests/test_chat.py` pins both
+  units: any unit under `ProtectSystem=strict` that can reach an order tool
+  must be able to write `data` AND `audit`. Verified by reintroducing the bug
+  and watching the test go red, because a test written after a fix that has
+  never failed is a test nobody has checked.
+- **The masking is its own defect, and it is fixed separately.**
+  `mcp_server._record_event` wraps every audit write, returns a sentence
+  instead of raising, and every order tool carries it back as
+  `audit_not_recorded` beside the real outcome. Losing the record of an action
+  is bad; losing the ACTION's own result to protect the record is worse, and it
+  would outlive any one misconfiguration. `raise_consideration` is the single
+  exception and it inverts: the audit line IS the consideration, written
+  nowhere else by design, so a failed write there means nothing was raised and
+  `recorded` goes back to False rather than promising the dreamer a note it
+  will never read.
+- **An error raised AFTER the work is done describes the logging, not the
+  work.** Nothing in the exception distinguishes a refusal from a placement, so
+  neither an agent nor a reader may conclude anything about the broker from it.
+  Go and look at the broker, or at a figure that would have moved.
+
+### A held position with no stop can be protected now, and the SIZE comes from the broker
+
+There was no tool for this at all, and the nearest one made it worse.
+`place_order` brackets a NEW entry, `tighten_stop` REPLACES a leg that is
+already resting, `close_position` exits — so a position whose bracket never
+arrived, was cancelled by hand, or was written off by `reconcile` and then
+refilled could not be protected by anything here. Measured on the droplet: AAPL
+held 107 shares with `positions_without_a_resting_stop` naming it on every
+cycle for days.
+
+**Reaching for `tighten_stop` would have been worse than the gap.** With no
+resting leg it takes its `else` branch, records a JOURNAL FIGURE ONLY and leaves
+`reached_broker` False — so the caps would count protection that does not exist,
+where the gap at least reports itself every cycle.
+
+`Broker.place_protective_stop` is the missing primitive and
+`position_actions.place_protective_stop` is the guarded path to it.
+
+**The quantity comes from the BROKER and never from the journal**, which is the
+load-bearing decision. The broker is authoritative about what EXISTS; the
+journal knows only what was INTENDED. On the position that prompted this the two
+differed by 29 shares out of 107, and a stop sized off the intention would have
+left the difference naked while reporting the position protected.
+
+**The parameter names the POSITION's direction, not the order's side.** A long
+is protected by a SELL stop and a short by a BUY stop, and the inversion happens
+once, inside the broker method. A caller passing a side could rest a stop that
+ADDS to the position — the one mistake here that increases exposure — so the
+type makes it unsayable.
+
+Ungated like closing and tightening, for the reason in `PositionAction`: every
+member of that vocabulary either leaves exposure alone or reduces it, and a
+position with no stop loses whatever the market takes while one with a stop
+loses at most the distance to it. Six refusals keep it that way, each with a
+test that proves it REFUSES:
+
+- a blank reason, and a non-positive stop;
+- **a degraded order read.** `get_open_orders` returns `[]` on its own failure,
+  so "nothing is resting" and "could not ask" are the same shape — the
+  `orders_degraded` rule in a new place;
+- **a leg already resting.** That is `tighten_stop`'s job, and two tools writing
+  stops for one position is two answers to where the stop is;
+- **no position at the broker.** A stop resting against nothing becomes an
+  OPENING order the moment price touches it;
+- **a stop on the wrong side of the market**, which triggers on submission and
+  becomes a MARKET order — a close wearing a stop's clothes.
+
+**A missing quote is a warning, not a refusal.** The side check needs a price;
+refusing for want of one would withhold the stop exactly when the book is thin,
+which is when it is most wanted. The broker's own entry price is used instead
+and the outcome says so. Same posture as `close_with_reason` protecting a
+position with no journal row: refusing to reduce exposure because the paperwork
+is incomplete is the wrong way round.
+
+**The journal is written only after the broker confirms**, through
+`record_stop_move` so the trade's stop and the record land in one transaction.
+A recorded stop with no order behind it is precisely the failure this exists to
+avoid.
 
 ### The exit is the agent's, and a trail is ONE number
 
@@ -1610,9 +1730,27 @@ action, so the bar is evidence rather than suspicion:
   `loop_end`: that sits in a `finally:`, so it appears on a crash too, and
   SIGTERM does not run it at all. **systemd's own unit state is the only thing
   that distinguishes "stopped" from "died"**, so it is what is asked.
-- **A degraded read refuses.** `JobHistory.is_degraded` covers truncation,
-  unreadable files and unparseable records. An absent pass in a short read says
-  the READ stopped — the `seen.reaches_past_marker` trap again.
+- **A DAMAGED read refuses** — unreadable files, or records that would not
+  parse, since one of those could be the newest pass.
+
+  **Truncation is deliberately not in that list, and putting it there made the
+  watchdog inert for its first three days.** `AuditLog.read` walks newest-first
+  and stops when its cap is full, so a truncated read drops the OLDEST records
+  and keeps the newest — the only one the watchdog asks about. Measured 30 Aug
+  2026: `view.events` is capped at `jobs.DEFAULT_LIMIT` (200) and the loop
+  writes several events per cycle at 96 cycles a day, so `truncated` went true
+  within hours of shipping and never came back. Every ten-minute run answered
+  *"the audit read is incomplete"*, refused, and exited non-zero — leaving
+  `systemctl --failed` permanently dirty, which is the exact thing the exit-code
+  rule below exists to prevent. It is still a refusal in the one branch where it
+  is real: with NO pass on file, a read that filled with other events cannot
+  tell absence from overflow. `AUDIT_READ_LIMIT` is raised to 2,000 so
+  truncation becomes a signal rather than the normal state of every read.
+
+  **The general lesson is this file's own, one level in: a guard whose refusing
+  condition is always true is a guard that has been removed.** Nothing failed,
+  the suite was green, and the unit reported failure every ten minutes for three
+  days while protecting nothing.
 - **Three restarts in six hours is the cap.** Without one, a permanently broken
   box becomes a quietly thrashing one, which looks healthier from a distance
   than it is.

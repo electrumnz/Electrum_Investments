@@ -1034,6 +1034,14 @@ class PositionAction(StrEnum):
     HOLD = "hold"
     CLOSE = "close"
     TIGHTEN_STOP = "tighten_stop"
+    # Rest a stop against a position that has none at the broker. It belongs in
+    # this vocabulary for the reason the others do: it can only REDUCE what is
+    # at risk. A position with no stop loses whatever the market takes; one with
+    # a stop loses at most the distance to it. There is no arrangement of this
+    # action that increases exposure, which is what makes the gate exemption
+    # sound. `PROTECT` rather than `PLACE_STOP` because the model is asked what
+    # to DO about a position, not which order type to send.
+    PROTECT = "protect"
 
 
 class PositionPlan(BaseModel):

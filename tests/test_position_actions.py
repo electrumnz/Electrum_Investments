@@ -43,6 +43,7 @@ from bot.position_actions import (
     detect_unexplained_moves,
     execute_position_plan,
     loop_execution_state,
+    place_protective_stop,
     resting_stop_legs,
     tighten_stop,
 )
@@ -965,3 +966,172 @@ def test_a_held_position_the_journal_never_saw_is_not_an_unexplained_move(tmp_pa
     )
     assert report.moves == []
     assert report.positions_without_a_resting_stop == []
+
+
+# ------------------------------------------------- protecting an unprotected position
+#
+# The gap this closes was live on the droplet for days: AAPL held 107 shares
+# with `positions_without_a_resting_stop` reporting it every cycle, and no tool
+# in the repository could place one. Reaching for `tighten_stop` would have made
+# it worse -- with no resting leg it writes a journal figure and places nothing,
+# so the caps would count protection that does not exist.
+
+
+def _unprotected(broker: MockBroker, direction: Direction = Direction.SELL) -> None:
+    """A held position with NO stop leg resting behind it."""
+    broker.set_open_orders([])
+    broker._positions["SPY"] = Position(
+        symbol="SPY",
+        direction=direction,
+        qty=21.0,
+        entry_price=773.324285,
+        opened_at=ENTRY_TIME,
+        current_price=774.09,
+    )
+
+
+def test_a_protective_stop_reaches_the_broker_and_is_sized_off_it(journal, broker):
+    """The whole point: a REAL order, and the journal only after it confirms."""
+    _unprotected(broker)
+    # The broker holds 21 while the journal row says something else entirely --
+    # the shape of the live AAPL discrepancy, and the stop must follow the
+    # broker because that is what actually exists.
+    broker._positions["SPY"].qty = 107.0
+
+    outcome = place_protective_stop(
+        journal, broker, symbol="SPY", stop_price=820.0,
+        reason="unprotected short, capping the loss", actor="trader",
+    )
+
+    assert outcome.ok
+    assert outcome.reached_broker
+    assert outcome.broker_order_id
+    legs = resting_stop_legs(broker.get_open_orders(), "SPY")
+    assert len(legs) == 1
+    assert legs[0].stop_price == 820.0
+    # Sized off the BROKER's 107, never the journal's figure.
+    assert legs[0].qty == 107.0
+    # And a short is protected by a BUY stop, not another sell.
+    assert legs[0].direction is Direction.BUY
+
+
+def test_a_degraded_order_read_refuses_rather_than_double_protecting(journal, broker):
+    """A leg that could not be LISTED is not a leg that is absent.
+
+    `get_open_orders` returns [] on its own failure, so "nothing is resting" and
+    "could not ask" are the same shape. Placing a second stop on a position that
+    already has one leaves it over-protected and, on a partial fill, short.
+    """
+    _unprotected(broker)
+    broker.set_orders_degraded(True)
+
+    outcome = place_protective_stop(
+        journal, broker, symbol="SPY", stop_price=820.0,
+        reason="protect it", actor="trader",
+    )
+
+    assert not outcome.ok
+    assert any("could not be read" in r for r in outcome.reasons)
+    assert not outcome.reached_broker
+
+
+def test_a_position_that_ALREADY_has_a_stop_is_refused(journal, broker):
+    """That is tighten_stop's job. Two tools writing stops is two answers to
+    "where is the stop", and the one on screen is the one nobody re-checks."""
+    outcome = place_protective_stop(
+        journal, broker, symbol="SPY", stop_price=815.0,
+        reason="another one", actor="trader",
+    )
+
+    assert not outcome.ok
+    assert any("already rest" in r for r in outcome.reasons)
+    # Still exactly one leg, at its original level.
+    legs = resting_stop_legs(broker.get_open_orders(), "SPY")
+    assert len(legs) == 1
+
+
+def test_a_stop_on_the_WRONG_SIDE_is_refused(journal, broker):
+    """Below the market on a short triggers on submission and becomes a MARKET
+    order -- a close wearing a stop's clothes, not protection."""
+    _unprotected(broker)
+
+    outcome = place_protective_stop(
+        journal, broker, symbol="SPY", stop_price=700.0,
+        reason="wrong side", actor="trader",
+    )
+
+    assert not outcome.ok
+    assert any("ABOVE the market" in r for r in outcome.reasons)
+    assert resting_stop_legs(broker.get_open_orders(), "SPY") == []
+
+
+def test_a_long_is_refused_a_stop_above_the_market(journal, broker):
+    """The mirror, so the side check cannot be right in one direction only."""
+    _unprotected(broker, direction=Direction.BUY)
+
+    outcome = place_protective_stop(
+        journal, broker, symbol="SPY", stop_price=900.0,
+        reason="wrong side", actor="trader",
+    )
+
+    assert not outcome.ok
+    assert any("BELOW the market" in r for r in outcome.reasons)
+
+
+def test_no_position_at_the_broker_is_refused(journal, broker):
+    """A stop resting against nothing becomes an OPENING order the moment the
+    price touches it -- the one way this action could ADD exposure."""
+    broker.set_open_orders([])
+    broker._positions.clear()
+
+    outcome = place_protective_stop(
+        journal, broker, symbol="SPY", stop_price=820.0,
+        reason="protect nothing", actor="trader",
+    )
+
+    assert not outcome.ok
+    assert any("nothing to" in r for r in outcome.reasons)
+
+
+@pytest.mark.parametrize("reason", ["", "   "])
+def test_a_protective_stop_with_no_reason_is_refused(journal, broker, reason):
+    _unprotected(broker)
+    outcome = place_protective_stop(
+        journal, broker, symbol="SPY", stop_price=820.0,
+        reason=reason, actor="trader",
+    )
+    assert not outcome.ok
+    assert resting_stop_legs(broker.get_open_orders(), "SPY") == []
+
+
+def test_a_broker_refusal_writes_NOTHING_to_the_journal(journal, broker):
+    """The failure this whole function exists to avoid, in its own shape: a
+    recorded stop with no order behind it."""
+    _unprotected(broker)
+    broker.set_protective_stop_refused("insufficient buying power")
+
+    outcome = place_protective_stop(
+        journal, broker, symbol="SPY", stop_price=820.0,
+        reason="protect it", actor="trader",
+    )
+
+    assert not outcome.ok
+    assert not outcome.reached_broker
+    assert journal.position_actions(symbol="SPY") == []
+
+
+def test_a_symbol_with_no_journal_row_is_still_protected(tmp_path, broker):
+    """Refusing would withhold a real stop because the paperwork is incomplete,
+    which is the wrong way round -- the same posture as close_with_reason. The
+    warning says open_risk_usd still cannot count it."""
+    empty = Journal(tmp_path / "empty.db")
+    _unprotected(broker)
+
+    outcome = place_protective_stop(
+        empty, broker, symbol="SPY", stop_price=820.0,
+        reason="held but never journalled", actor="trader",
+    )
+
+    assert outcome.ok
+    assert outcome.reached_broker
+    assert any("no open journal row" in w for w in outcome.warnings)

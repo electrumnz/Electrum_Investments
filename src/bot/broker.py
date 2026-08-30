@@ -507,6 +507,50 @@ class Broker(Protocol):
         """
         ...
 
+    def place_protective_stop(
+        self,
+        symbol: str,
+        *,
+        qty: float,
+        stop_price: float,
+        position_direction: Direction,
+    ) -> OrderResult:
+        """Rest a stop against a position that ALREADY EXISTS and has none.
+
+        The gap this closes was live for weeks and had no tool at all.
+        `place_order` brackets a NEW entry, `replace_stop` moves a leg that is
+        already resting, and `close_position` exits — so a held position whose
+        bracket never arrived, or was cancelled, or was written off by
+        `reconcile` and refilled, could not be protected by anything in this
+        repository. Measured on the droplet: AAPL held 107 shares with
+        `positions_without_a_resting_stop` reporting it on every cycle for days.
+
+        **`qty` is the caller's and must come from the BROKER**, not the
+        journal. The journal is the only thing that knows what was intended and
+        the broker is authoritative about what exists; a stop sized off an
+        intention leaves the difference naked, which on the position that
+        prompted this would have been 29 of 107 shares.
+
+        **`position_direction` is the direction of the POSITION, and the order
+        goes the other way.** Passing the order side instead would rest a stop
+        that adds to the position rather than closing it — the one mistake here
+        that increases exposure — so the parameter names what the caller
+        actually knows and the inversion happens once, in here.
+
+        Ungated, like `close_position` and `replace_stop`, and for the same
+        reason: `RiskGate.evaluate` vets proposals that OPEN exposure and never
+        sees this. That exemption is sound because a protective stop can only
+        reduce what is at risk. The refusals that keep it that way —
+        a stop on the wrong side of the market, a leg already resting, a
+        degraded order read — live in `position_actions.place_protective_stop`
+        and are not repeated here.
+
+        GTC, matching the bracket legs `place_order` rests: a DAY stop would
+        expire with the session and leave the position unprotected overnight,
+        which is the failure this exists to fix arriving one day later.
+        """
+        ...
+
 
 class MockBroker:
     """In-memory broker for tests and for local development without credentials."""
@@ -526,6 +570,7 @@ class MockBroker:
         # that SUCCEEDS differently.
         self._rules = rules
         self._entry_moment_override: datetime | None = None
+        self._protective_refused: str | None = None
         self._equity = starting_equity
         self._cash = starting_cash if starting_cash is not None else starting_equity
         self._positions: dict[str, Position] = {}
@@ -729,6 +774,54 @@ class MockBroker:
             return OrderResult(accepted=True, order_id=new_id)
         return OrderResult(
             accepted=False, error=f"no working order {order_id} to replace"
+        )
+
+    def set_protective_stop_refused(self, error: str | None) -> None:
+        """Make the next protective stop fail, so the refusal path is testable."""
+        self._protective_refused = error
+
+    def place_protective_stop(
+        self,
+        symbol: str,
+        *,
+        qty: float,
+        stop_price: float,
+        position_direction: Direction,
+    ) -> OrderResult:
+        """Rest a standalone stop, and record it as a leg `get_open_orders` returns.
+
+        The double has to ADD the leg, not merely answer accepted. A caller
+        placing a stop and then reading the orders back is the whole point of
+        the feature, and a mock that reported success while listing nothing
+        would pin a path production never takes -- the `orders_degraded` trap
+        applied to a double that succeeds differently.
+        """
+        if getattr(self, "_protective_refused", None) is not None:
+            return OrderResult(accepted=False, error=self._protective_refused)
+        held = self._positions.get(symbol.strip().upper())
+        if held is None:
+            return OrderResult(
+                accepted=False, error=f"no position in {symbol} to protect"
+            )
+        self._order_seq += 1
+        order_id = f"mock-{self._order_seq:06d}"
+        closing = (
+            Direction.SELL if position_direction is Direction.BUY else Direction.BUY
+        )
+        self._open_orders.append(
+            WorkingOrder(
+                order_id=order_id,
+                symbol=symbol.strip().upper(),
+                direction=closing,
+                qty=qty,
+                order_type="stop",
+                stop_price=stop_price,
+                status=OrderStatus.NEW,
+                submitted_at=self._entry_moment(),
+            )
+        )
+        return OrderResult(
+            accepted=True, order_id=order_id, stop_at_broker=StopAtBroker.FIXED
         )
 
     def get_account(self) -> AccountSnapshot:
@@ -1618,6 +1711,57 @@ class AlpacaBroker:
             # off a mid-flight poll. The trigger price the leg now carries is
             # confirmed by the next `get_open_orders` read, which is the only
             # place it is a fact rather than a request.
+        )
+
+
+    def place_protective_stop(
+        self,
+        symbol: str,
+        *,
+        qty: float,
+        stop_price: float,
+        position_direction: Direction,
+    ) -> OrderResult:
+        """Submit a standalone GTC stop against a position that has none.
+
+        `StopOrderRequest` rather than a bracket leg, because there is no entry
+        to bracket -- the position is already on. That is the whole reason this
+        method has to exist: `place_order` attaches a stop to an ENTRY, and a
+        position whose bracket never arrived has no entry left to attach to.
+
+        **The side is inverted from the position here, once.** A long is
+        protected by a SELL stop and a short by a BUY stop, and the parameter
+        names the position so a caller cannot pass a side that would ADD to it.
+
+        GTC for the reason `place_order`'s legs are GTC: a DAY stop expires with
+        the session and leaves the position unprotected overnight.
+
+        `reduce_only` is deliberately NOT set. Alpaca rejects it outright on
+        equities -- it is a margin/crypto flag -- so sending it would fail every
+        equity call, which is the case this was written for. The protection
+        against a stop that could flip the position into a short is the
+        quantity, which the caller takes from the broker's own position.
+
+        Failure is reported rather than raised, like every other order path
+        here, and the direction is the honest one: nothing is resting, the
+        caller is told, and `positions_without_a_resting_stop` goes on saying so
+        every cycle.
+        """
+        from alpaca.trading.enums import OrderSide, TimeInForce
+        from alpaca.trading.requests import StopOrderRequest
+
+        side = (
+            OrderSide.SELL if position_direction == Direction.BUY else OrderSide.BUY
+        )
+        return self._submit(
+            StopOrderRequest(
+                symbol=symbol.strip().upper(),
+                qty=qty,
+                side=side,
+                time_in_force=TimeInForce.GTC,
+                stop_price=stop_price,
+            ),
+            stop_at_broker=StopAtBroker.FIXED,
         )
 
     def close_position(self, symbol: str) -> OrderResult:

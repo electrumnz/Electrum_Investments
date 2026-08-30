@@ -67,7 +67,27 @@ ProtectKernelTunables=true
 ProtectControlGroups=true
 # The dashboard only reads, but SQLite still needs to write its journal and
 # temp files alongside the database.
-ReadWritePaths=/opt/mudhorn/data
+#
+# **`audit/` is here because the CHAT PANEL writes it, and leaving it out broke
+# every order tool this unit can reach.** Measured 30 Aug 2026: the operator
+# asked the chat agent to place a protective stop on AAPL and got
+# `OSError: [Errno 30] Read-only file system: 'audit/2026-08-30.jsonl'`.
+#
+# The path is not obvious and is worth spelling out, because nothing about this
+# unit looks like an order path: `mudhorn-web` sudos to `hermes` to run one
+# Hermes turn, Hermes sudos back to `mudhorn` to run `run-mcp.sh`, and that MCP
+# server is what holds `place_order`, `close_position_with_reason`,
+# `tighten_stop` and `place_protective_stop`. **systemd sandboxing is a mount
+# namespace and every descendant inherits it, sudo included** — the same fact
+# that forced `ProtectHome=false` above — so the MCP server writes through THIS
+# unit's `ReadWritePaths`, not `mudhorn-bot`'s.
+#
+# The failure shape is the dangerous one. `audit.record_event` runs AFTER the
+# broker call and after the journal write, and `data/` was already writable, so
+# the order reached Alpaca and the journal recorded it while the agent reported
+# an error — a live order the operator had been told did not exist, which is
+# `14b88c8` arriving through the chat panel.
+ReadWritePaths=/opt/mudhorn/data /opt/mudhorn/audit
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 
 StandardOutput=journal
