@@ -8,6 +8,94 @@ Ordered by what is actually blocking, not by size.
 
 ---
 
+## DEPLOYED 30 Aug 2026 — the loop stays up now, and three guards were fiction
+
+The droplet is on `main` at `0bb87af`, clean tree, no stashes. Four merges this
+session (#33, #34, #35, #36), each deployed and verified against the running
+box rather than against the suite.
+
+**The founding event: the decision loop was dead for four days and every other
+surface was green.** On 22 Aug Alpaca's paper API answered `503` to
+`broker.connect()` at loop startup; the process exited 1, systemd restarted it
+five times across 165 seconds, tripped `StartLimitBurst=5` inside
+`StartLimitIntervalSec=300`, and never tried again. Alpaca recovered within the
+hour. Nobody found out until 26 Aug.
+
+The arithmetic made it inevitable: five attempts thirty seconds apart always
+fits inside a five-minute window, so **any outage over about three minutes was
+permanently fatal.** Fixed three ways in #33 — the limiter off with real
+exponential backoff, `connect_with_retry` around the one unguarded startup
+network call, and `src/bot/watchdog.py` for the case a restart policy cannot
+see.
+
+### Three things were installed, believed, and doing nothing
+
+Worth keeping together, because they are one failure wearing three costumes and
+all three were invisible to a green suite.
+
+- **The watchdog refused on every run for three days** (#36). `AuditView.events`
+  is capped at 200 and the loop writes several per cycle at 96 cycles a day, so
+  `truncated` went true within hours and never came back — and `assess` refused
+  on `is_degraded`, which includes it. **A guard whose refusing condition is
+  always true is a guard that has been removed.** It also exited non-zero each
+  time, leaving `systemctl --failed` permanently dirty. The insight it missed:
+  `AuditLog.read` walks newest-first, so truncation drops the OLDEST records and
+  keeps the newest — the only pass the watchdog asks about.
+- **`python -m bot.watchdog` had no `__main__` guard** (#33). It imported the
+  module, printed nothing and exited 0. Found by running it.
+- **The dreamer's prompt asserted something false about the code** (#35). It
+  said *"Only a `verdict` step carries a dream off the workbench"* and offered
+  park as *"come back to it later"*. `promotion_for` refuses anything but a
+  `KEEP` at its first clause, and nothing revisits a parked chain. The model was
+  parking believing it deferred. That one sentence is why prophecy, vault and
+  adopted have been empty for their entire existence.
+
+**The general rule this session earned: where a document — prompt, banner,
+docstring or this file — describes a mechanism, there must be a test that fails
+when the mechanism moves.** The schema is validated, the transport is
+validated, the figures are computed rather than asserted, and the prose
+describing what the machine does with them was wrong for as long as anyone had
+been reading it.
+
+### Still open after it
+
+- **AAPL has no protective stop and no tool can place one.** See CURRENT STATE
+  below. This is the one live risk item.
+- **`update.sh` restarts only `mudhorn-bot` and `mudhorn-web`**, so
+  `mudhorn-console.service` keeps serving pre-deploy code. It cost a round trip
+  this session: #34 widened the ops allowlist and the new units stayed
+  unreadable until the console was restarted by hand. A deploy that reports
+  success while a component runs old code is this file's own founding failure
+  in the deploy script.
+- **The dreamer still parks.** Three runs on the corrected prompt (27, 28, 29
+  Aug) went explore → iterate → iterate → verdict → `park`. The pacing is now
+  what the prompt asks for and the verdict has not changed. Note what it parked:
+  dream 4, the fusion of two duplicates, with 3 of 5 hops unchecked and one hop
+  claiming a source it could not back — parking that may well be correct. **Do
+  not respond by pushing the prompt harder toward `keep`**; that manufactures
+  the promotion the fix explicitly disclaims. #35 added a guard so a duplicate
+  fusion cannot be made again, but dream 4 already exists and monopolises every
+  run.
+- **`self_settled: 0` on every run, `awaiting_a_look` stuck at 3.** The dreamer
+  never answers its own observations. That does not block the prophecy shelf,
+  which needs only a keep plus a pre-registered condition, but it does block the
+  VAULT, which needs all conditions met — so even a keep would not reach the
+  conference. Mechanical rather than a judgement, and the more tractable of the
+  two.
+- **`nemotron-3-ultra-550b` has no `config.MODEL_SPECS` entry**, so every cycle
+  records `cost_usd: null`. Blind on spend, which matters more than usual right
+  after running out of credits.
+
+### What the DigitalOcean outage actually cost
+
+The 402s hit the DREAMER, not the loop. `dream_call_failed` with
+`402 Payment Required` on 22, 23 and 24 Aug; the first good run was 25 Aug.
+Two unrelated faults overlapping is why the picture read as one confusing
+outage. The trading loop's death was Alpaca's 503 and had nothing to do with
+billing.
+
+---
+
 ## DEPLOYED 13 Aug 2026, and the deploy answered two open questions
 
 The droplet is on `main` at `774ebbd`, clean tree, no stashes. `update.sh` ran
@@ -18,6 +106,12 @@ done, and the wrapper that used to announce a model it had not checked is gone.
 `DO_INFERENCE_KEY` is NOT set on the box, so the Python model path still goes to
 Anthropic. The startup banner says so in as many words. The move is shipped and
 dormant; throwing the switch is Josh's on transfer.
+
+> **No longer true as of 30 Aug 2026.** The switch was thrown. Every startup
+> banner now reads *"Inference provider: DigitalOcean serverless at
+> https://inference.do-ai.run (DO_INFERENCE_KEY is set)"*, the loop is served by
+> `nemotron-3-ultra-550b`, and `served_as_requested` reads true. Kept rather
+> than edited, because the paragraph is what the box looked like on 13 Aug.
 
 **`stash@{0}` is dropped**, recoverable at `eb35020fa9707ea8c48ceb188f3d1a42ccfece6a`
 until git collects it. It held 233 insertions and no deletions across
@@ -35,7 +129,48 @@ observed cycle had `proposals: 0`. **The loop can place orders.**
 
 ---
 
-## CURRENT STATE — a 107-share AAPL position the system believes does not exist
+## CURRENT STATE — AAPL, and there is no tool that can protect it
+
+**Updated 30 Aug 2026. The figures below moved, and the shape did not.** The
+broker now holds **107** AAPL against the journal's open **78**, and every cycle
+still reports `entry_cannot_be_attributed` and `unexplained_position_moves`.
+
+**The likely reading, from the journal dump recorded below rather than from a
+fresh query** — flagged as inference because a container session cannot open
+`data/journal.db`. Row 2 (107 shares, wrongly written off on 11 Aug) is what the
+broker actually holds; row 3 (78, still journal-open) describes a position that
+has since gone. So the book is wrong in BOTH directions at once: a held position
+with no open row, and an open row with no position. That is why the entry cannot
+be attributed to a single row, and why `reconcile` correctly refuses to guess.
+
+**The blocking discovery: no tool in this repository can put a protective stop
+on a position that already exists.**
+
+| Tool | What it does | AAPL |
+|---|---|---|
+| `place_order` | brackets a NEW entry | no — already held |
+| `tighten_stop` | REPLACES an existing leg | no — journal-only when none rests |
+| `close_position_with_reason` | exits | yes, but that is an exit not a stop |
+
+`position_actions.tighten_stop` with no resting leg takes its `else` branch and
+warns that the move is *"a JOURNAL FIGURE ONLY and nothing at the broker will
+act on it"*, leaving `reached_broker` False. **Using it here would be worse than
+the current state**: the caps would then count protection that does not exist,
+where today the gap at least reports itself on every cycle.
+
+So the options are close it, place the stop by hand at Alpaca, or build a
+`place_protective_stop` action — a standalone stop sized off the BROKER
+quantity, ungated like `tighten_stop` and `close` since `RiskGate` only sees
+proposals that OPEN exposure. The operator's instruction on 29 Aug was to put it
+to the chat agent, with the `tighten_stop` trap named so the agent does not
+report a stop it did not place.
+
+**Also live: `stand_down_stage: 1`.** Three qualifying losses fired the
+consecutive-loss breaker, so live execution is suspended for three days while
+paper trading continues. Rule 4 working as designed, recorded so it is not
+mistaken for a fault.
+
+### The original 185-share finding, kept for the journal dump and the arithmetic
 
 **Found in the first cycle after the deploy, by the reporting this branch
 added.** `unexplained_moves: 1` — *"AAPL: quantity is 185.0000 at the broker and
