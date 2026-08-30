@@ -416,6 +416,203 @@ def tighten_stop(
     )
 
 
+def place_protective_stop(
+    journal: Journal,
+    broker: Broker,
+    *,
+    symbol: str,
+    stop_price: float,
+    reason: str,
+    actor: str,
+    now: datetime | None = None,
+) -> ActionOutcome:
+    """Rest a stop against a held position that has none. Sized off the BROKER.
+
+    **The gap this closes had no tool at all, and reaching for the nearest one
+    made things worse.** `place_order` brackets a NEW entry; `tighten_stop`
+    REPLACES a leg that is already resting and, with none, records a journal
+    figure while placing nothing at the broker; `close_with_reason` exits. So a
+    position whose bracket never arrived, was cancelled by hand, or was written
+    off by `reconcile` and then refilled could not be protected — and using
+    `tighten_stop` on it would leave the caps counting protection that does not
+    exist, which is strictly worse than the visible gap.
+
+    **The quantity comes from the broker, never the journal**, and that is the
+    load-bearing decision. The broker is authoritative about what EXISTS and the
+    journal only knows what was INTENDED; on the position that prompted this the
+    two differed by 29 shares out of 107, and a stop sized off the journal would
+    have left that difference naked while reporting the position protected.
+
+    Ungated, like closing and tightening, because `RiskGate.evaluate` vets
+    proposals that OPEN exposure and never sees this — and that exemption is
+    sound here because there is no arrangement of this action that increases
+    what is at risk.
+
+    Refused, with every reason collected at once:
+
+    - a blank reason, the same rule as every other recorded move;
+    - a non-positive stop;
+    - **a degraded order read.** `get_open_orders` returns `[]` on its own
+      failure, so "nothing is resting" and "could not ask" are the same shape.
+      Placing a second stop on a position that already has one is how a
+      position ends up over-protected and, on a partial fill, accidentally
+      short. `orders_degraded` is the same guard `reconcile` uses and it exists
+      for exactly this;
+    - **a stop leg already resting.** That is `tighten_stop`'s job. Two tools
+      writing stops for one position is two answers to "where is the stop", and
+      the one on screen would be the one nobody re-checked;
+    - **no position at the broker.** There is nothing to protect, and a stop
+      resting against nothing becomes an OPENING order the moment the price
+      touches it — the one way this action could add exposure, refused here
+      rather than left to the broker;
+    - **a stop on the wrong side of the market.** Below the price on a short, or
+      above it on a long, triggers on submission and becomes a market order.
+      That is not protection, it is a disguised close at whatever the book
+      offers, and the caller should say `close_position_with_reason` if that is
+      what they meant.
+
+    A symbol whose quote cannot be read is NOT refused. The side check needs a
+    price and the absence of one is reported as a warning, because refusing to
+    protect a position for want of a quote would withhold the stop exactly when
+    the book is thin — which is when it is most wanted. The entry price from the
+    broker's own position is used instead, and the outcome says so.
+    """
+    moment = now or datetime.now(UTC)
+    clean = symbol.strip().upper()
+    reasons: list[str] = []
+    warnings: list[str] = []
+
+    blank = _reason_refusal(reason)
+    if blank is not None:
+        reasons.append(blank)
+
+    if stop_price <= 0:
+        reasons.append(f"{stop_price} is not a price; a stop has to be positive.")
+
+    account = broker.get_account()
+    held = next(
+        (p for p in account.open_positions if p.symbol.strip().upper() == clean), None
+    )
+    if held is None:
+        reasons.append(
+            f"no position in {clean} at the broker, so there is nothing to "
+            "protect. A stop resting against nothing is an OPENING order the "
+            "moment the price touches it."
+        )
+
+    if broker.orders_degraded:
+        reasons.append(
+            "the resting orders could not be read, so whether a stop is already "
+            "there is unknown. A stop leg that could not be listed is not a "
+            "stop leg that is absent, and placing a second one would leave the "
+            "position over-protected."
+        )
+    else:
+        legs = resting_stop_legs(broker.get_open_orders(), clean)
+        if legs:
+            at = ", ".join(
+                f"{leg.order_id}"
+                + (f" at {leg.stop_price:,.4f}" if leg.stop_price is not None else "")
+                for leg in legs
+            )
+            reasons.append(
+                f"{len(legs)} stop leg(s) already rest on {clean} ({at}). Moving "
+                "one is tighten_stop's job; placing another would be a second "
+                "answer to where the stop is."
+            )
+
+    if held is not None and stop_price > 0:
+        mark = held.current_price or held.entry_price
+        if held.current_price is None:
+            warnings.append(
+                f"no live quote for {clean}, so the side of the stop was checked "
+                f"against the position's entry price {held.entry_price:,.4f} "
+                "rather than the market."
+            )
+        if held.direction is Direction.BUY and stop_price >= mark:
+            reasons.append(
+                f"a long is protected by a stop BELOW the market, and "
+                f"{stop_price:,.4f} is at or above {mark:,.4f}. It would trigger "
+                "on submission and become a market order, which is a close "
+                "wearing a stop's clothes."
+            )
+        if held.direction is Direction.SELL and stop_price <= mark:
+            reasons.append(
+                f"a short is protected by a stop ABOVE the market, and "
+                f"{stop_price:,.4f} is at or below {mark:,.4f}. It would trigger "
+                "on submission and become a market order."
+            )
+
+    if reasons:
+        return ActionOutcome(
+            ok=False, action=PositionAction.PROTECT, symbol=clean, reasons=reasons
+        )
+
+    assert held is not None  # every branch that leaves it None appended a reason
+
+    result = broker.place_protective_stop(
+        clean,
+        qty=held.qty,
+        stop_price=stop_price,
+        position_direction=held.direction,
+    )
+    if not result.accepted:
+        return ActionOutcome.refused(
+            PositionAction.PROTECT,
+            clean,
+            f"the broker refused the stop: {result.error}. Nothing is resting "
+            "and the position is still unprotected.",
+        )
+
+    # The journal follows a CONFIRMED placement, never precedes it. A recorded
+    # stop with no order behind it is the `tighten_stop` failure this whole
+    # function exists to avoid.
+    trade = journal.open_trade_for(clean)
+    record = PositionActionRecord(
+        trade_id=trade.id if trade is not None else None,
+        symbol=clean,
+        action=PositionAction.PROTECT,
+        reason=reason.strip(),
+        actor=actor,
+        at=moment,
+        before_stop=trade.effective_stop if trade is not None else None,
+        after_stop=stop_price,
+        before_qty=trade.qty if trade is not None else None,
+        after_qty=held.qty,
+        broker_order_id=result.order_id,
+        reached_broker=True,
+    )
+    # `record_stop_move` rather than `record_position_action`: it writes the
+    # trade's stop and the record in ONE transaction. Writing them apart is how
+    # the caps come to count a stop the journal no longer agrees with, and it
+    # already handles a move on a symbol the journal has never seen.
+    journal.record_stop_move(record)
+    if trade is None:
+        warnings.append(
+            f"{clean} has no open journal row, so the stop is at the broker but "
+            "open_risk_usd still cannot count this position. Journal it, or the "
+            "2% cap goes on being blind to what it protects."
+        )
+
+    return ActionOutcome(
+        ok=True,
+        action=PositionAction.PROTECT,
+        symbol=clean,
+        warnings=warnings,
+        record=record,
+        broker_order_id=result.order_id,
+        reached_broker=True,
+        risk_before_usd=None,
+        risk_after_usd=(
+            risk_at(trade, stop_price) if trade is not None else None
+        ),
+        detail=(
+            f"{held.qty:g} {clean} protected at {stop_price:,.4f}, sized off the "
+            "broker's own position."
+        ),
+    )
+
+
 def close_with_reason(
     journal: Journal,
     broker: Broker,

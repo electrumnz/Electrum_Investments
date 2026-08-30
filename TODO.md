@@ -143,8 +143,15 @@ has since gone. So the book is wrong in BOTH directions at once: a held position
 with no open row, and an open row with no position. That is why the entry cannot
 be attributed to a single row, and why `reconcile` correctly refuses to guess.
 
-**The blocking discovery: no tool in this repository can put a protective stop
-on a position that already exists.**
+**BUILT 30 Aug 2026 — `place_protective_stop`.** The blocking discovery below
+is closed: there is now a tool that rests a real GTC stop at the broker on a
+held position that has none, sized off the BROKER's quantity rather than the
+journal's. See CLAUDE.md, *"A held position with no stop can be protected now"*.
+AAPL itself is still unprotected until somebody runs it — the tool exists, the
+position has not been acted on.
+
+**The original finding, kept because the trap is still live for anyone reaching
+for the wrong tool:**
 
 | Tool | What it does | AAPL |
 |---|---|---|

@@ -584,6 +584,65 @@ Three things the bracket structurally cannot cover, which is why
 - a position adopted from the broker, or one whose bracket was cancelled by
   hand: a journalled stop with no order behind it
 
+### A held position with no stop can be protected now, and the SIZE comes from the broker
+
+There was no tool for this at all, and the nearest one made it worse.
+`place_order` brackets a NEW entry, `tighten_stop` REPLACES a leg that is
+already resting, `close_position` exits — so a position whose bracket never
+arrived, was cancelled by hand, or was written off by `reconcile` and then
+refilled could not be protected by anything here. Measured on the droplet: AAPL
+held 107 shares with `positions_without_a_resting_stop` naming it on every
+cycle for days.
+
+**Reaching for `tighten_stop` would have been worse than the gap.** With no
+resting leg it takes its `else` branch, records a JOURNAL FIGURE ONLY and leaves
+`reached_broker` False — so the caps would count protection that does not exist,
+where the gap at least reports itself every cycle.
+
+`Broker.place_protective_stop` is the missing primitive and
+`position_actions.place_protective_stop` is the guarded path to it.
+
+**The quantity comes from the BROKER and never from the journal**, which is the
+load-bearing decision. The broker is authoritative about what EXISTS; the
+journal knows only what was INTENDED. On the position that prompted this the two
+differed by 29 shares out of 107, and a stop sized off the intention would have
+left the difference naked while reporting the position protected.
+
+**The parameter names the POSITION's direction, not the order's side.** A long
+is protected by a SELL stop and a short by a BUY stop, and the inversion happens
+once, inside the broker method. A caller passing a side could rest a stop that
+ADDS to the position — the one mistake here that increases exposure — so the
+type makes it unsayable.
+
+Ungated like closing and tightening, for the reason in `PositionAction`: every
+member of that vocabulary either leaves exposure alone or reduces it, and a
+position with no stop loses whatever the market takes while one with a stop
+loses at most the distance to it. Six refusals keep it that way, each with a
+test that proves it REFUSES:
+
+- a blank reason, and a non-positive stop;
+- **a degraded order read.** `get_open_orders` returns `[]` on its own failure,
+  so "nothing is resting" and "could not ask" are the same shape — the
+  `orders_degraded` rule in a new place;
+- **a leg already resting.** That is `tighten_stop`'s job, and two tools writing
+  stops for one position is two answers to where the stop is;
+- **no position at the broker.** A stop resting against nothing becomes an
+  OPENING order the moment price touches it;
+- **a stop on the wrong side of the market**, which triggers on submission and
+  becomes a MARKET order — a close wearing a stop's clothes.
+
+**A missing quote is a warning, not a refusal.** The side check needs a price;
+refusing for want of one would withhold the stop exactly when the book is thin,
+which is when it is most wanted. The broker's own entry price is used instead
+and the outcome says so. Same posture as `close_with_reason` protecting a
+position with no journal row: refusing to reduce exposure because the paperwork
+is incomplete is the wrong way round.
+
+**The journal is written only after the broker confirms**, through
+`record_stop_move` so the trade's stop and the record land in one transaction.
+A recorded stop with no order behind it is precisely the failure this exists to
+avoid.
+
 ### The exit is the agent's, and a trail is ONE number
 
 `OrderProposal.take_profit_price` is optional — `None` sends an OTO (entry plus
