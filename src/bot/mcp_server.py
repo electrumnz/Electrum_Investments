@@ -1014,15 +1014,23 @@ def get_stand_down_status() -> dict[str, Any]:
     state = _session.journal.get_stand_down()
     now = datetime.now(UTC)
     rules = _session.rules.stand_down
+    # Recomputed rather than read off the row, because the persisted count is
+    # the streak as of the last close and this is a live question. The two agree
+    # except where a stop has been moved into profit since — which is precisely
+    # the case worth seeing.
+    streak = _session.journal.loss_streak(rules.loss_threshold_r)
     return {
         "active": state.is_active(now),
         "stage": state.stage,
         "consecutive_losses": state.consecutive_losses,
+        "streak_now": streak.count,
+        "streak_broken_by": streak.broken_by.value,
+        "open_trades_unresolved": streak.open_skipped,
         "trigger_at": rules.consecutive_losses_trigger,
         "loss_threshold_r": rules.loss_threshold_r,
         "ends_at": state.ends_at.isoformat() if state.ends_at else None,
         "days_remaining": round(state.days_remaining(now), 2),
-        "summary": describe(state, now),
+        "summary": describe(state, now, streak),
     }
 
 

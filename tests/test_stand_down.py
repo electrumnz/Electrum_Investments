@@ -18,7 +18,10 @@ from bot.models import (
     AccountSnapshot,
     Direction,
     ExecutionMode,
+    PositionAction,
+    PositionActionRecord,
     StandDownState,
+    StreakBreaker,
     Trade,
 )
 from bot.risk import RiskGate
@@ -317,3 +320,163 @@ def test_describe_reads_clearly_when_active():
 
 def test_describe_reads_clearly_when_clear():
     assert describe(StandDownState(), datetime.now(UTC)) == "No stand-down."
+
+
+# ------------------------------------------------- open trades and the streak
+#
+# The counter used to walk CLOSED trades in EXIT order, which made the breaker
+# fire on a book that was working. A stop guarantees a loser closes; nothing
+# guarantees a winner does, so the closed-trade sequence is the sub-sample the
+# stops created rather than a sample of decisions. Observed live: a stage 1
+# stand-down in force with three positions open.
+#
+# The rule now: entry order, over open trades as well as closed ones, and an
+# open trade breaks the streak only once its stop is resting in profit.
+
+
+def _open_trade(
+    journal: Journal,
+    *,
+    minutes: int,
+    stop: float | None = None,
+    direction: Direction = Direction.BUY,
+) -> int:
+    """Open a trade and leave it open. `stop` moves it after entry."""
+    when = INSIDE_SESSION + timedelta(minutes=minutes)
+    entry, planned = (580.0, 575.0) if direction is Direction.BUY else (580.0, 585.0)
+    trade_id = journal.record_entry(
+        Trade(
+            symbol="QQQ",
+            direction=direction,
+            qty=10,
+            entry_time=when,
+            entry_price=entry,
+            planned_stop=planned,
+            planned_target=None,
+            rationale="Test trade, left open.",
+        )
+    )
+    if stop is not None:
+        journal.record_stop_move(
+            PositionActionRecord(
+                trade_id=trade_id,
+                symbol="QQQ",
+                action=PositionAction.TIGHTEN_STOP,
+                actor="operator",
+                at=when + timedelta(minutes=5),
+                reason="Locking the trade in for the test.",
+                before_stop=planned,
+                after_stop=stop,
+                reached_broker=True,
+            )
+        )
+    return trade_id
+
+
+def test_an_open_trade_with_its_stop_in_profit_breaks_the_streak(journal):
+    """The operator's rule: a stop past entry is a decision that already went right.
+
+    Not a mark-to-market reading — the stop is a live order, so if it fills the
+    trade is a win. That is what makes it countable where an unrealised gain is
+    not.
+    """
+    _close_trade(journal, -100.0, minutes=0)
+    _open_trade(journal, minutes=60, stop=585.0)  # +$50 secured = +1.0R
+    _close_trade(journal, -100.0, minutes=120)
+    _close_trade(journal, -100.0, minutes=180)
+
+    streak = journal.loss_streak(RULES.loss_threshold_r)
+    assert streak.count == 2
+    assert streak.broken_by is StreakBreaker.SECURED_OPEN
+
+    state = evaluate_stand_down(journal, RULES, now=INSIDE_SESSION + timedelta(hours=4))
+    assert state.stage == 0
+
+
+def test_a_short_whose_stop_is_below_entry_breaks_it_too(journal):
+    """The secured side is direction-dependent, and both sides must agree."""
+    _close_trade(journal, -100.0, minutes=0)
+    _open_trade(journal, minutes=60, stop=575.0, direction=Direction.SELL)
+    _close_trade(journal, -100.0, minutes=120)
+    _close_trade(journal, -100.0, minutes=180)
+
+    streak = journal.loss_streak(RULES.loss_threshold_r)
+    assert streak.count == 2
+    assert streak.broken_by is StreakBreaker.SECURED_OPEN
+
+
+def test_an_open_trade_that_has_secured_nothing_still_triggers(journal):
+    """The one that proves this REJECTS.
+
+    An open position whose stop has never moved is live risk, not a good
+    outcome. If it broke the streak, one held position would switch the
+    operator's fourth rule off — failing open on the thing the breaker exists
+    for. It is skipped, and the three losses around it still trip.
+    """
+    _close_trade(journal, -100.0, minutes=0)
+    _open_trade(journal, minutes=60)  # stop untouched, at the planned level
+    _close_trade(journal, -100.0, minutes=120)
+    _close_trade(journal, -100.0, minutes=180)
+
+    streak = journal.loss_streak(RULES.loss_threshold_r)
+    assert streak.count == 3
+    assert streak.open_skipped == 1
+    assert streak.broken_by is StreakBreaker.NOTHING
+
+    now = INSIDE_SESSION + timedelta(hours=4)
+    state = evaluate_stand_down(journal, RULES, now=now)
+    assert state.stage == 1
+    assert state.is_active(now)
+
+
+def test_a_stop_moved_to_breakeven_secures_nothing(journal):
+    """Breakeven is a scratch, not a win, judged by the same threshold.
+
+    A stop exactly at entry guarantees getting the money back and nothing more.
+    Letting that break a run would make "stopped scratching" read as "trading
+    well".
+    """
+    _close_trade(journal, -100.0, minutes=0)
+    _open_trade(journal, minutes=60, stop=580.0)  # entry exactly: 0.0R secured
+    _close_trade(journal, -100.0, minutes=120)
+    _close_trade(journal, -100.0, minutes=180)
+
+    assert journal.loss_streak(RULES.loss_threshold_r).count == 3
+
+
+def test_the_breaker_still_trips_on_losses_after_a_secured_winner(journal):
+    """The counter cannot be switched off by holding one locked-in position.
+
+    Every new loss is a newer ENTRY than the trade that broke the last run, so
+    the count rebuilds behind it. This is why no separate backstop is needed.
+    """
+    _open_trade(journal, minutes=0, stop=585.0)
+    for i in range(3):
+        _close_trade(journal, -100.0, minutes=60 + i * 60)
+
+    streak = journal.loss_streak(RULES.loss_threshold_r)
+    assert streak.count == 3
+    assert streak.broken_by is StreakBreaker.SECURED_OPEN
+
+    now = INSIDE_SESSION + timedelta(hours=5)
+    assert evaluate_stand_down(journal, RULES, now=now).stage == 1
+
+
+def test_the_streak_reports_what_it_walked(journal):
+    """A bare integer was the defect. The count has to carry its own context."""
+    _close_trade(journal, -5.0, minutes=0)  # scratch
+    _open_trade(journal, minutes=60)
+    _close_trade(journal, -100.0, minutes=120)
+
+    streak = journal.loss_streak(RULES.loss_threshold_r)
+    assert streak.count == 1
+    assert streak.open_skipped == 1
+    assert streak.scratches_skipped == 1
+    assert "1 open trade(s) still unresolved" in streak.describe()
+
+
+def test_describe_without_a_streak_claims_nothing_about_one(journal):
+    """`None` is 'not supplied', never 'nothing was skipped'."""
+    plain = describe(StandDownState(), datetime.now(UTC))
+    assert plain == "No stand-down."
+    assert "open trade" not in plain

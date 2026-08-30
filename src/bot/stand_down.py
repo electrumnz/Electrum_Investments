@@ -15,9 +15,13 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
+import structlog
+
 from .config import StandDownRules
 from .journal import Journal
-from .models import StandDownState
+from .models import LossStreak, StandDownState
+
+log = structlog.get_logger()
 
 
 def evaluate_stand_down(
@@ -32,7 +36,11 @@ def evaluate_stand_down(
     """
     moment = now or datetime.now(UTC)
     state = journal.get_stand_down()
-    streak = journal.consecutive_losses(rules.loss_threshold_r)
+    # The full result rather than the bare count, so a trigger can say what it
+    # counted. Suspending live trading is the most consequential thing this
+    # repository does on its own, and "3" is not an account of why.
+    detail = journal.loss_streak(rules.loss_threshold_r)
+    streak = detail.count
 
     # An active stand-down runs its course. Results during it — paper or
     # otherwise — do not extend or shorten it: an end date that moves with
@@ -106,20 +114,43 @@ def evaluate_stand_down(
         last_triggered_at=moment,
     )
     journal.save_stand_down(triggered)
+    log.warning(
+        "stand_down_triggered",
+        stage=stage,
+        days=days,
+        consecutive_losses=streak,
+        broken_by=detail.broken_by.value,
+        open_skipped=detail.open_skipped,
+        scratches_skipped=detail.scratches_skipped,
+        detail=detail.describe(),
+    )
     return triggered
 
 
-def describe(state: StandDownState, now: datetime | None = None) -> str:
-    """One-line human summary, for logs, the dashboard banner and MCP output."""
+def describe(
+    state: StandDownState,
+    now: datetime | None = None,
+    streak: LossStreak | None = None,
+) -> str:
+    """One-line human summary, for logs, the dashboard banner and MCP output.
+
+    `streak` is optional and appends what the count actually walked. `None` is
+    "not supplied" and adds nothing — never a claim that nothing was skipped,
+    which is the difference a caller reading a bare count cannot see.
+    """
     moment = now or datetime.now(UTC)
+    context = f" {streak.describe()}" if streak is not None else ""
     if not state.is_active(moment):
         if state.consecutive_losses:
-            return f"No stand-down. {state.consecutive_losses} consecutive losses on record."
-        return "No stand-down."
+            return (
+                f"No stand-down. {state.consecutive_losses} consecutive "
+                f"losses on record.{context}"
+            )
+        return f"No stand-down.{context}"
     ends = state.ends_at.date().isoformat() if state.ends_at else "unknown"
     return (
         f"Stage {state.stage} stand-down until {ends} "
         f"({state.days_remaining(moment):.1f} days left) after "
         f"{state.consecutive_losses} consecutive losses. "
-        "Live trading suspended; paper trading continues."
+        f"Live trading suspended; paper trading continues.{context}"
     )

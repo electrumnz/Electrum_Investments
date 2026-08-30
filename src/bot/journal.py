@@ -27,9 +27,11 @@ from .models import (
     ExecutionMode,
     ExitReason,
     FillState,
+    LossStreak,
     PositionAction,
     PositionActionRecord,
     StandDownState,
+    StreakBreaker,
     Trade,
     TradeOutcome,
 )
@@ -661,20 +663,85 @@ class Journal:
         )
         return list(reversed(rows))
 
-    def consecutive_losses(self, scratch_threshold_r: float) -> int:
-        """Count losses back from the most recent close until a non-loss.
+    def recent_by_entry(self, count: int) -> list[Trade]:
+        """Most recent trades by ENTRY, newest first — open ones included.
 
-        Scratches neither count nor reset — they are simply skipped, so a run of
-        real losses separated by a scratch still reads as a streak.
+        The order a streak reads in, and the fix for the counter's founding
+        defect. See `loss_streak`.
         """
-        streak = 0
-        for trade in reversed(self.recent_closed(50)):
+        return self._query(
+            "SELECT * FROM trades ORDER BY entry_time DESC, id DESC LIMIT ?",
+            (count,),
+        )
+
+    def loss_streak(self, scratch_threshold_r: float) -> LossStreak:
+        """Losses back from the most recent DECISION until something went right.
+
+        **It used to walk closed trades in EXIT order, and that made the breaker
+        fire on a book that was working.** A stop guarantees a loser closes;
+        nothing guarantees a winner does. So the closed-trade sequence is not a
+        sample of decisions — it is the sub-sample the stops created, biased
+        toward losses by construction, and "consecutive" over it claims a run
+        that never happened. Observed live: a stage 1 stand-down in force with
+        three positions open, suspending live trading over losses that had
+        closed around winners that had not.
+
+        Two changes, and the first is what lets the second exist:
+
+        - **Entry order, over open trades as well as closed ones.** An open
+          trade has no exit time and so cannot be placed in the old ordering at
+          all — it was structurally invisible. Entry order is also the order the
+          decisions were actually made in, which is what a behavioural breaker
+          is about.
+        - **An open trade breaks the streak only once its stop is in profit.**
+          `secures_a_win` is the test: the stop has been moved past entry and
+          the outcome it has already locked in would classify as a `WIN` under
+          the very same `scratch_threshold_r` a closed trade is judged by.
+
+        That second clause is the operator's, and it is the one that keeps this
+        honest. **A position merely trading up has secured nothing** — the price
+        can come back, and netting a paper gain against a realised loss would
+        make the breaker loosest exactly when a run was worst, which is the same
+        reasoning that stops unrealised profit offsetting open risk. A stop
+        resting above entry is a different kind of fact: it is a live order, and
+        if it fills the trade is a win. That is a decision that has already gone
+        right, so it ends the run.
+
+        An open trade with nothing secured is **skipped, never a break**. Making
+        it break would let one live position switch the breaker off, which is
+        failing open on the operator's fourth rule.
+
+        Scratches are skipped as before, so a run of real losses separated by a
+        scratch still reads as a streak.
+
+        **Nothing here can disable the breaker, and that is a property of the
+        ordering rather than a backstop bolted on.** Every new loss is a newer
+        entry than the locked-in trade that broke the last run, so the count
+        rebuilds behind it: three losses after a secured winner still trip. The
+        only way to hold the count at zero is to keep securing winners among the
+        losses, which is the case the breaker is meant to leave alone.
+        """
+        streak = LossStreak()
+        for trade in self.recent_by_entry(50):
+            if trade.is_open:
+                if trade.secures_a_win(scratch_threshold_r):
+                    streak.broken_by = StreakBreaker.SECURED_OPEN
+                    return streak
+                streak.open_skipped += 1
+                continue
             outcome = trade.outcome(scratch_threshold_r)
             if outcome == TradeOutcome.LOSS:
-                streak += 1
+                streak.count += 1
             elif outcome == TradeOutcome.WIN:
-                break
+                streak.broken_by = StreakBreaker.CLOSED_WIN
+                return streak
+            elif outcome == TradeOutcome.SCRATCH:
+                streak.scratches_skipped += 1
         return streak
+
+    def consecutive_losses(self, scratch_threshold_r: float) -> int:
+        """The streak as a bare count. `loss_streak` carries what it looked at."""
+        return self.loss_streak(scratch_threshold_r).count
 
     def _query(self, sql: str, params: tuple[Any, ...] = ()) -> list[Trade]:
         with self._connect() as conn:
