@@ -8,6 +8,63 @@ Ordered by what is actually blocking, not by size.
 
 ---
 
+## DEPLOYED 30 Aug 2026 — two deadlocks, both measured rather than reasoned about
+
+Merged as `#37`. Neither was a broken mechanism: in both cases the machinery
+was correct, every figure on every surface was correct, and the thing being
+measured or described was the wrong thing.
+
+**The loss streak was measured over the wrong sample.** The breaker walked
+CLOSED trades in EXIT order. A stop guarantees a loser closes and nothing
+guarantees a winner does, so that sequence is the sub-sample the stops created
+rather than a sample of decisions — and "consecutive" over it claims a run that
+never happened. Live proof: stage 1 in force, live trading suspended, three
+positions open, equity above its start. `Journal.loss_streak` counts in ENTRY
+order over open trades too, and an open trade breaks the streak **only once its
+stop rests in profit** — the operator's rule, and the one that sidesteps
+mark-to-market entirely, because a stop past entry is a live order rather than a
+paper gain. Full reasoning in `CLAUDE.md`, *"A run of losses is measured over
+DECISIONS"*.
+
+**The dreamer parked because `keep` was described as something it is not.** The
+prompt said a keep *"goes in front of the trading agent"*. `promotion_for` sends
+a keep with unmet conditions to the PROPHECY shelf, which the agent cannot see.
+So a chain whose weakest hop rests on an unanswered observation genuinely does
+not go in front of the trader, the model knew it, and parked — every time. The
+27 Aug prompt fix was deployed and the next verdict parked anyway, which is what
+ruled out the first explanation. The correction states where a keep lands: worth
+**settling**, not **proved**.
+
+**The second half of that deadlock was the unanswered observations.** The
+dreamer is now told that a kept dream waits on its own answers and on nothing
+else. How the two candidate causes were separated is worth keeping: no
+`dream_self_settled` line was logged at all across five runs — not even a
+refusal — and a key mismatch would have produced refusals, so the `answer` field
+was simply never filled.
+
+Neither prompt change pushes toward `keep`, and the test forbidding that still
+passes. **Do not "improve" either one into encouragement** — the false claim was
+making the honest answer unreachable, which is the opposite failure.
+
+### What this does NOT do, and both are worth stating
+
+- **It does not lift the stand-down in force.** `evaluate_stand_down` returns
+  early while one is active, by design — results during it neither extend nor
+  shorten it. Stage 1 expires on its own; the new measurement governs after.
+- **It does not prove the dreamer will now keep.** That is one prompt correction
+  against a model that has parked five times. The next runs are the evidence,
+  and if it still parks that is a finding rather than a reason to push harder.
+
+### Still open after it
+
+- **AAPL is still unprotected.** `place_protective_stop` exists now (#39) and
+  the audit-write bug that swallowed its first refusal is fixed (#40, #41), but
+  no stop has been placed. Unchanged by this work.
+- **The vault is still empty, so A2A has still never happened.** A keep reaches
+  the PROPHECY shelf; only settled conditions reach the VAULT, which is the one
+  shelf `confer` reads. Both halves were fixed here, but they have to actually
+  run — one dream step per day.
+
 ## DEPLOYED 30 Aug 2026 — the loop stays up now, and three guards were fiction
 
 The droplet is on `main` at `0bb87af`, clean tree, no stashes. Four merges this
@@ -59,29 +116,33 @@ been reading it.
 
 ### Still open after it
 
-- **AAPL has no protective stop and no tool can place one.** See CURRENT STATE
-  below. This is the one live risk item.
+- **AAPL has no protective stop.** `place_protective_stop` exists now (#39),
+  so the tool half is closed; nothing has been placed. See CURRENT STATE below.
+  This is the one live risk item.
 - **`update.sh` restarts only `mudhorn-bot` and `mudhorn-web`**, so
   `mudhorn-console.service` keeps serving pre-deploy code. It cost a round trip
   this session: #34 widened the ops allowlist and the new units stayed
   unreadable until the console was restarted by hand. A deploy that reports
   success while a component runs old code is this file's own founding failure
   in the deploy script.
-- **The dreamer still parks.** Three runs on the corrected prompt (27, 28, 29
-  Aug) went explore → iterate → iterate → verdict → `park`. The pacing is now
-  what the prompt asks for and the verdict has not changed. Note what it parked:
-  dream 4, the fusion of two duplicates, with 3 of 5 hops unchecked and one hop
-  claiming a source it could not back — parking that may well be correct. **Do
-  not respond by pushing the prompt harder toward `keep`**; that manufactures
-  the promotion the fix explicitly disclaims. #35 added a guard so a duplicate
-  fusion cannot be made again, but dream 4 already exists and monopolises every
-  run.
-- **`self_settled: 0` on every run, `awaiting_a_look` stuck at 3.** The dreamer
-  never answers its own observations. That does not block the prophecy shelf,
-  which needs only a keep plus a pre-registered condition, but it does block the
-  VAULT, which needs all conditions met — so even a keep would not reach the
-  conference. Mechanical rather than a judgement, and the more tractable of the
-  two.
+- **The dreamer still parks — CAUSE FOUND AND FIXED in #37, not yet
+  observed.** The corrected prompt of 27 Aug still left a second false claim:
+  `keep` was described as going "in front of the trading agent", which
+  `promotion_for` does not do for a keep with unmet conditions. So the model was
+  asked to certify something no honest dreamer would certify, and parked. **Do
+  not respond to a further park by pushing the prompt toward `keep`**; that
+  manufactures the promotion the fix explicitly disclaims. Note dream 4, the
+  fusion of two duplicates, has 3 of 5 hops unchecked and one hop claiming a
+  source it could not back — parking THAT may well be correct, and it
+  monopolises every run, so the first honest test may need a different chain.
+- **`self_settled: 0` on every run, `awaiting_a_look` stuck at 3 — ADDRESSED
+  in #37, not yet observed.** The dreamer never answered its own observations.
+  That does not block the prophecy shelf, which needs only a keep plus a
+  pre-registered condition, but it does block the VAULT, which needs all
+  conditions met — so even a keep would not reach the conference. The prompt now
+  says a kept dream waits on those answers and on nothing else. What separated
+  the two candidate causes: no `dream_self_settled` line was logged at all, not
+  even a refusal, and a key mismatch would have produced refusals.
 - **`nemotron-3-ultra-550b` has no `config.MODEL_SPECS` entry**, so every cycle
   records `cost_usd: null`. Blind on spend, which matters more than usual right
   after running out of credits.
@@ -129,7 +190,7 @@ observed cycle had `proposals: 0`. **The loop can place orders.**
 
 ---
 
-## CURRENT STATE — AAPL, and there is no tool that can protect it
+## CURRENT STATE — AAPL is held, unprotected, and the tool now exists
 
 **Updated 30 Aug 2026. The figures below moved, and the shape did not.** The
 broker now holds **107** AAPL against the journal's open **78**, and every cycle
@@ -195,10 +256,14 @@ proposals that OPEN exposure. The operator's instruction on 29 Aug was to put it
 to the chat agent, with the `tighten_stop` trap named so the agent does not
 report a stop it did not place.
 
-**Also live: `stand_down_stage: 1`.** Three qualifying losses fired the
-consecutive-loss breaker, so live execution is suspended for three days while
-paper trading continues. Rule 4 working as designed, recorded so it is not
-mistaken for a fault.
+**Also live: `stand_down_stage: 1`, and it was NOT rule 4 working as
+designed.** This file previously recorded it that way. The three losses were
+real and they were not consecutive: the counter walked closed trades in exit
+order, which is the sub-sample the stops created, so trades entered among them
+that had not closed were structurally invisible. Fixed in #37 — see the section
+at the top. **The stage still stands until it expires**, because an active
+stand-down runs its course by design and correcting the measurement does not
+lift a suspension already in force.
 
 ### The original 185-share finding, kept for the journal dump and the arithmetic
 
